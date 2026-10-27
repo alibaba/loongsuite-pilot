@@ -172,13 +172,13 @@ export function doubaoDigest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-/** A reserved root AGENT identity lets late native fragments link after export. */
+/** A reserved root AGENT identity lets late local observations link after export. */
 export function doubaoRootAgentSpanId(traceId: string): string {
   return doubaoDigest(`doubao-work:root-agent:${traceId}`).slice(0, 16);
 }
 
-/** Local tools and an optional first model-output observation. Missing native
- * model boundaries never become inferred subsequent React rounds. */
+/** Local tool events and a client first-output observation are source facts,
+ * not evidence of model requests, ReAct boundaries or whole task success. */
 export function buildDoubaoTaskEvents(
   scope: string, pending: DoubaoPendingTurn, terminal: DoubaoLogEvent, observedMs: number,
   tools: DoubaoToolPair[] = [],
@@ -249,7 +249,7 @@ export function buildDoubaoTaskEvents(
       },
     ];
   });
-  const modelEvents: AgentActivityEntry[] = [];
+  const observationEvents: AgentActivityEntry[] = [];
   const mark = !pending.firstOutputConflict && pending.firstOutput;
   if (mark && mark.turnId === pending.turnId && mark.firstOutput) {
     const output = mark.firstOutput;
@@ -259,20 +259,18 @@ export function buildDoubaoTaskEvents(
     if (response <= BigInt(mark.timeNano) && response <= end) {
       const stepId = doubaoDigest(`${identity}:first-output:${output.eventId}`);
       const attributes = {
-        ...common, span_id: stepId.slice(0, 16), 'gen_ai.step.id': stepId,
+        ...common,
         'loongsuite.doubao_work.observation_scope': 'native_first_model_output',
-        'loongsuite.doubao_work.llm_boundary': 'client_submit_to_first_cot_receipt',
+        'loongsuite.doubao_work.observation_boundary': 'client_submit_to_first_cot_receipt',
         'loongsuite.doubao_work.timing_basis': 'native_query_send_plus_sse_duration',
-        'loongsuite.doubao_work.llm_completeness': 'first_output_only',
+        'loongsuite.doubao_work.observation_completeness': 'first_output_only',
         'loongsuite.doubao_work.native_event_instance_id': output.eventId,
         'loongsuite.doubao_work.native_answer_id': output.answerId,
         'loongsuite.doubao_work.native_query_message_id': output.messageId,
         'loongsuite.doubao_work.client_time_to_first_cot_ms': output.durationMs,
       };
-      modelEvents.push(
-        { ...attributes, 'event.name': 'llm.request', 'event.id': doubaoDigest(`${stepId}:request`) },
-        { ...attributes, 'event.name': 'llm.response', 'event.id': doubaoDigest(`${stepId}:response`), time_unix_nano: response.toString() },
-      );
+      observationEvents.push({ ...attributes, 'event.name': 'other',
+        'event.id': doubaoDigest(`${stepId}:observation`), time_unix_nano: response.toString() });
     }
   }
   return [
@@ -282,7 +280,7 @@ export function buildDoubaoTaskEvents(
       // Existing converter contract: a content-free input boundary, not a prompt.
       'gen_ai.input.messages_delta': [],
     },
-    ...[...modelEvents, ...toolEvents].sort((a, b) => BigInt(a.time_unix_nano) < BigInt(b.time_unix_nano) ? -1 : 1),
+    ...[...observationEvents, ...toolEvents].sort((a, b) => BigInt(a.time_unix_nano) < BigInt(b.time_unix_nano) ? -1 : 1),
     {
       ...common, time_unix_nano: end.toString(),
       'event.id': doubaoDigest(`${identity}:end`), 'gen_ai.turn.end': true,

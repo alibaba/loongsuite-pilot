@@ -1,80 +1,47 @@
-# Doubao Work task, tool and subagent observations (experimental)
+# Doubao Work client and local execution observations (experimental)
 
-The `doubao-work` adapter passively reads Doubao Work client logs on macOS and Windows. It installs no host hooks, plugins or connectors and does not change authentication or client settings. The observed protocol baselines are macOS 2.33.10 and Windows 2.25.18. Ordinary Doubao and cloud-internal execution are outside this scope. Advanced native capabilities depend on the evidence exposed by the installed client version.
+The passive adapter reads the official macOS / Windows client's logs and native files for freshly identified conversations. It installs no hooks and changes neither authentication nor the app. Observed baselines are macOS 2.33.10 and Windows 2.25.18. This is partial telemetry with explicit coverage gaps.
 
-## Observed behavior
+## Evidence and projection
 
-Pilot associates client request submission with the corresponding client message-session end, producing two `other` boundary events and an ENTRY → AGENT trace. Source submission and client log timestamps define the boundaries. Submission retains source millisecond precision; log boundaries retain microseconds on macOS and milliseconds on Windows. This observes a client request, not completion of every cloud task or internal step.
-
-The adapter does not extract prompts, replies, reasoning or tool arguments/results. An evidenced first-output observation can produce STEP → LLM spans as described below. Model identifiers, tokens, cost and model TTFT remain unavailable. The automatic model selector is not a model identifier.
-
-## First model-output observation
-
-Only the first synchronous, non-recovery `flow_message_time` mark with `metric_scene=sse`, `ev_name=cot_first_token` and `ev_type=query_duration` is eligible. Its native task ID must uniquely match an observed new request submission. Start is the native `query_send_timestamp`; end is that timestamp plus native `duration`, defined by the installed producer as SSE receive time minus query submission time. The logger timestamp is only an upper bound. Polling time, render time and file mtime supply no model boundary.
-
-The span is named `chat (first reasoning output only)` and carries `observation_scope=native_first_model_output`, `llm_boundary=client_submit_to_first_cot_receipt` and `llm_completeness=first_output_only`. It includes queueing, context processing and network time. It measures neither a complete model invocation nor model TTFT. Subsequent React rounds, full streaming output and child-agent LLMs remain unobserved. Missing, recovery, asynchronous, conflicting, loading/answer/finish-only or unassociated marks produce no LLM. Marks arriving after request export are not backfilled.
-
-No model name, model response ID, finish reason, usage or reasoning text is inferred. Native answer IDs remain message metadata; native event IDs identify observations rather than model calls. Later task cancellation does not fail the already observed first output. The STEP covers only this observation; subsequent local tools remain children of their evidenced AGENT.
-
-A capacity or subscription notice can coexist with `session_success=1`. Business outcome therefore remains `unknown`. Received/ended requests use UNSET root status; explicit client errors/cancellation use ERROR. This does not infer business success.
-
-Events and OTLP resources carry three bounded attributes:
-
-| Attribute | Values |
+| Native evidence | Output |
 |---|---|
-| `loongsuite.doubao_work.observation_scope` | `client_message` |
-| `loongsuite.doubao_work.business_outcome` | `unknown` |
-| `loongsuite.doubao_work.client_outcome` | `received`, `ended`, `error`, `cancelled` |
+| Exactly correlated client submit/end | One ENTRY → AGENT pair with source precision, representing the client request |
+| Local received/settled callbacks | Exact-ID `tool.call` / `tool.result` logs; timestamped Span events on the evidenced owner |
+| Unique current assignment | AGENT `gen_ai.input.messages` or TASK `input.value` |
+| Final assistant row after current exact call results | AGENT `gen_ai.output.messages` or TASK `output.value` |
+| Exact native tool IDs, arguments and results | Tool log / Span event content and native decision batch IDs |
+| Complete persisted local sandbox execution UUID and times | One `run_task` TASK per local execution |
+| Selected Skill / partner IDs | Request context only, never proof of runtime loading |
 
-Agent type/framework is `doubao-work`, system is `doubao`, and provider is `bytedance.doubao`. Native conversation and per-request session IDs identify the session and turn. User attribution uses Pilot's configured identity/hostname fallback, not device IDs or cache-directory hashes.
+Model identity, usage and individual model/ReAct boundaries are unavailable. No STEP, LLM or TOOL spans are fabricated from gaps between tools, file timestamps, assignments, resumed UI sessions or first output. Native parallel calls share a decision ID, not an invented timed STEP. First reasoning-output receipt contributes only the custom client duration `client_time_to_first_cot_ms`, not model TTFT.
 
-## Tools, skills and delegated Agents
+Client success can accompany quota notices, so business outcome remains unknown. Received requests use UNSET status; explicit client failures/cancellation use ERROR. Local settlement and resource release do not prove business success.
 
-| Capability | Observed scope |
+## Local TASK relationships
+
+Only complete native `execution` metadata under `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json` supplies local start/end times. Those boundaries cover local sandbox acquisition through release/file capture, not the cloud Agent invocation. Query message ID, conversation, sandbox actors and successful native creation ancestry must all agree.
+
+A unique enclosing execution in the same query and sandbox provides a TASK → TASK parent. Otherwise the local root TASK has a Span Link to the origin AGENT; it neither invents a delegation TOOL/AGENT nor stretches the ended client request. The trace may therefore contain an ENTRY root and local TASK roots. Creator identity is metadata, not invocation-parent evidence. Tools attach only to their exact actor/sandbox within the observed execution; ancestors never duplicate descendant tools.
+
+Late parent records receive a grace period; successful parent Write/Edit evidence retains the wait within existing state limits. Missing/ambiguous parents retain source identity and resolution metadata without synthetic spans. The client persists executions with tracked file mutations only: read-only or cloud-only child work may have logs but no TASK.
+
+## Content and reliability
+
+Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. No history enumeration, authentication stores, cookies or snapshot file bodies are read. Assignments must uniquely match the current request window. Old tails, future/different assignments and unprovable reuse omit I/O rather than carry content across requests. Each content field is limited to 64 KiB. Exact native tool names are retained separately from callback executor names (for example native PowerShell versus callback Bash).
+
+All content passes through InputManager's regular recursive masking before conversion. Each Span contains at most 64 tool pairs; `tool_observations_not_in_span` reports omitted observations, while collected canonical facts remain in JSONL. Partial, conflicting or nonpositive callback intervals are not completed observations.
+
+Native scans are bounded to one known conversation, 64 Agents, 2 MiB per file, 8 MiB total, ancestry depth 8. Snapshot scans separately cap 8 account directories, 128 executions/files and 8 MiB. Symlinks and directory escapes are rejected. Incremental logs retain complete-line offsets and fingerprints across restart, rotation, truncation and transient read failures. First start skips history. Per read/cycle limits are 1/8 MiB and 128 log files. Request/sandbox state is bounded to 512 records / 24 hours, pending tools to 4096 / 24 hours, completed IDs to 4096 / 7 days. Native scans run at most once per 10 seconds. End-to-end exactly-once is not promised.
+
+## Configuration and acceptance
+
+| Platform | Source log |
 |---|---|
-| Local tools | Match native frontend `toolcall` receipt and execution settlement by call ID and sandbox; emit paired events and TOOL children of AGENT, including parallel calls and collector restart recovery |
-| Selected skills/partners | Bounded native `mention_skill_list` / `mention_partner_list` identifiers appear as `loongsuite.doubao_work.selected_skills` / `selected_partners`; request context only |
-| Runtime Skill loading | No verified independent load boundaries; selection does not produce `skill.use` or a skill TOOL span |
-| Subagent local execution fragments | Native sandbox actors identify the root request; matching `create_agent` calls/results prove ancestry. Each settled local tool produces independent child/ancestor AGENT observations, including nesting, reuse, late arrival and checkpoint recovery |
-| Full cloud subagent lifecycle | Complete execution boundaries remain unavailable for all Agents. Cloud-only work and Agents without paired local tool callbacks do not produce lifecycle spans |
-| Separate workmate page | The aily cloud task surface has a separate lifecycle not covered by these client-message logs |
+| macOS | `~/Library/Application Support/DoubaoWork/sdk_storage/log/saman_frontend_YYYY.MMDD.N.log` |
+| Windows | `%LOCALAPPDATA%/DoubaoWork/User Data/sdk_storage/log/saman_YYYY.MMDD.N.log` |
 
-Local TOOL duration spans client dispatch receipt to execution settlement, including dispatch/approval waiting. It is not cloud invocation latency. Native tool name, call ID, bounded status and positive duration in milliseconds are retained. Commands, arguments, results and raw errors are never read into events. Native `success` describes execution settlement, not business success or a Bash exit code.
-
-`loongsuite.doubao_work.tool_boundary=client_received_to_execution_settled` identifies this contract. Without subsequent model-round boundaries, the tool branch remains ENTRY → AGENT → TOOL. The candidate validator accepts this exact boundary only for Doubao TOOL children of a Doubao AGENT. Other Agents retain their model/step checks. This source also excludes arguments, which are explicitly reported as not applicable. Older validators requiring STEP → TOOL or unconditional arguments report contract incompatibility; retain their failed result alongside this candidate's documented contract. Ordinary tool argument checks remain strict.
-
-Unpaired, conflicting or ambiguous calls are omitted. Background child tools export independently only with unique native sandbox and creation-graph evidence. Cloud-only `calculator`, `web.fetch` and `create_agent` records without times do not become timed tools. Ordinary request traces do not certify subagent reuse, nesting, late completion or restart.
-
-## Native child fragments
-
-Read-only trajectories are resolved under `<profile>/.doubaowork/agent_mode/workspace/.sessions/<conversation>/agents/*/system/trajectory.jsonl` relative to the client data root. Up to 16 `Default` or `Profile N` folders are checked for the exact conversation identified by a fresh frontend request, including after account switches. Duplicate conversations across profiles remain ambiguous; history and login stores are not read. Matching successful native `create_agent` calls/results must name the caller as parent and form an unambiguous path to one main Agent. Sandbox actors must identify exactly one captured root request and each observed child/ancestor actor.
-
-Each settled local tool is an immutable fragment: ENTRY → root AGENT → organizer AGENT → child AGENT → TOOL. Its exact native receipt/settlement times define the observation. Ancestors cover the same descendant tool interval (`timing_basis=descendant_local_tool`), while the leaf uses `own_local_tool`. A timed dispatch TOOL is not fabricated. This is a partial local execution observation, not the full cloud invocation duration; an Agent can have multiple fragments and ancestor windows must not be summed as extra tool time.
-
-`observation_scope=native_local_tool_fragment`, `agent_boundary=native_local_tool_interval`, `fragment_id` and native Agent/parent/thread/creation-call IDs expose the evidence. `relation_basis=native_create_agent_ancestry` denotes native creation ancestry, not an inferred per-invocation cloud dispatch. Root Span IDs and fragment event/Span IDs are deterministic; late children link after root export without changing its times. Selected root skills are not inherited. Assignment timestamps, board-wide update times, file mtime and historical panel reception are not used as execution boundaries.
-
-Native scans are limited to one known conversation per cycle, 64 Agents, 2 MiB per file, 8 MiB total and depth 8. Transient/incomplete graph reads retain pending tools. Root/sandbox contexts retain up to 512 items/24 hours and fragment deduplication 4096 items/7 days. The validator permits asynchronous direct AGENT ancestry only for this explicit native fragment contract; ordinary topology/timing checks remain strict.
-
-## Native sandbox executions
-
-The native `entry-moa` execution manager generates an execution UUID and persists metadata under `coding/snapshot/<account>/<conversation>/<executionKey>/<agentId>.json`. Its `execution.startedAtMs` is recorded after the native `getOrCreateSandbox` callback; `endedAtMs` is recorded during release after modified-file capture. These exact millisecond fields produce one independent AGENT with `observation_scope=native_sandbox_execution`, `agent_boundary=native_sandbox_get_or_create_to_release`, and `timing_basis=native_execution_startedAtMs_endedAtMs`. Polling time, mtime and tool intervals do not supply these boundaries.
-
-The native query message ID must match a newly observed root local message ID, with consistent native sandbox actors. Creation trajectories establish native Agent ancestry. A parent execution is selected only when exactly one enclosing execution has the native parent Agent identity, the same query and the same sandbox. A successful native parent Write/Edit is retained as checkpointed evidence that its execution snapshot may still arrive; children wait within the existing 24-hour/4096-entry association and root-context bounds, rather than irreversibly falling back at 30 seconds. Without parent mutation evidence a 30-second grace period applies. A missing, ambiguous or non-enclosing parent then links to the observed root request with `parent_resolution=root_request_ancestor`; native parent identity and ancestry remain explicit, without invented intermediate spans. Already exported edges are immutable.
-
-The client persists these snapshots only for executions with tracked file mutations. Pure Read/Bash, cloud-only Agents and missing snapshots have no complete execution coverage. This is a local sandbox lifetime, including release-time capture, not a full cloud inference lifetime or proof of each cloud dispatch. Tool fragments remain a separate observation scope and must not be counted as additional complete invocations.
-
-Only a known fresh conversation is read, with limits of eight account directories, 128 execution files, 2 MiB per file and 8 MiB per cycle. Symlinks are not followed. Account identity, file paths and file contents are never projected into events. Partial/transient reads defer completion; execution deduplication retains 4096 IDs for seven days. Checkpoints acknowledge the InputManager queue boundary, not end-to-end output delivery.
-
-## Configuration
-
-Default sources:
-
-| Platform | Log directory | File and header |
-|---|---|---|
-| macOS | `~/Library/Application Support/DoubaoWork/sdk_storage/log` | `saman_frontend_YYYY.MMDD.N.log`, `FRONTEND(0)`, six fractional digits |
-| Windows | `%LOCALAPPDATA%\\DoubaoWork\\User Data\\sdk_storage\\log` | `saman_YYYY.MMDD.N.log`, `CONSOLE(0)`, three fractional digits |
-
-Windows falls back to `~/AppData/Local` when `LOCALAPPDATA` is absent. The client must already produce these logs; Pilot does not enable debug logging. On first activation, existing logs are baselined; only subsequently observed request boundaries are collected.
+Windows falls back to `~/AppData/Local`; macOS retains microsecond and Windows millisecond source precision. Optional `listeners.doubao-work.logDir` overrides the read-only source, independently of output `dataDir`.
 
 ```json
 {
@@ -83,10 +50,6 @@ Windows falls back to `~/AppData/Local` when `LOCALAPPDATA` is absent. The clien
 }
 ```
 
-Optional `listeners.doubao-work.logDir` overrides the read-only source directory and supports `~`. It is independent of Pilot's output `dataDir`. The Agent definition uses `detection-only`; disabling the Agent/listener stops collection without any host hook to uninstall.
+The Agent definition is detection-only. Disabling the Agent/listener stops collection. Runtime Skill loading, the separate cloud partner page and complete cloud invocation lifecycles remain uncovered.
 
-File notifications coalesce to at most one log wakeup per second, with polling fallback. Native graph/snapshot scans have an independent ten-second minimum interval. First-output capture reuses incremental log reads and adds no client callback or new data source. Unrelated SDK events are filtered before JSON parsing. Checkpoints retain complete-line offsets, boundary fingerprints, pending requests and completed identities. Half-lines, restart, rotation, truncate-and-regrow and temporary read failures preserve incremental state. A response alone does not reconstruct an unobserved historical start. Reads are bounded to 1 MiB each, 8 MiB per cycle and the latest 128 log files. Oversized lines are skipped through their newline. Pending requests are limited to 512/24 hours; tool pairing to 4096/24 hours; completed deduplication to 4096/7 days. These limits do not provide complete capture or end-to-end exactly-once.
-
-Missing logs, changed protocols or missing identity/timing evidence do not generate guessed traces. Only bounded identity/status/creation-graph metadata is extracted. Cookies, credentials and message databases are not read; native trajectory prose, commands, results and raw errors are not exported. Unified identity and masking still apply.
-
-Validate fresh GUI interactions with `E2E_JSONL_STRICT=1` and `E2E_JSONL_AGENT_FILTER=doubao-work`. Passing task/local-tool checks does not establish cloud LLM, runtime Skill or full subagent lifecycle support. Record source, events, spans, receiver and cloud readback separately.
+Fresh native acceptance separately verifies source, canonical JSONL, OTLP and CMS, including I/O isolation, tool ID/time/ownership, unique TASKs and asynchronous links. The generic Trace validator retains strict ENTRY → AGENT, AGENT → STEP and STEP → LLM / TOOL rules, with no Doubao exemptions. Structural validity of the observed subset does not imply full ReAct coverage.

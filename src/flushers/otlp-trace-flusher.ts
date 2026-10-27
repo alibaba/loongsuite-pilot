@@ -18,7 +18,7 @@ import {
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertCodexTurn } from './codex-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
-import { convertDoubaoWorkTurn, enrichDoubaoWorkTools, enrichDoubaoNativeFragments, enrichDoubaoFirstOutput } from './doubao-work-converter.js';
+import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
@@ -742,7 +742,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (isAgentAuditEvent(entry)) return;
     // Session summaries are log events, never an extra or reopened trace.
     if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
-
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -781,7 +781,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex') break;
+      if (agentType === 'codex' || agentType === 'doubao-work') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1077,6 +1077,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     value: string;
     key: string;
   } {
+    const localExecution = entry['loongsuite.doubao_work.native_execution_id'];
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
+      && typeof localExecution === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(localExecution)) {
+      return { source: 'turn_id', value: localExecution, key: `doubao-local-execution:${localExecution}` };
+    }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
       if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -1280,7 +1285,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
             : convertEventLogToTrace;
           result = convert(
             sanitized as unknown as EventLogRecord[],
-            { handler, strict: false, passthroughKeys, idGenerator },
+            { handler, strict: false, passthroughKeys, idGenerator,
+              ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
           );
           succeeded = true;
         } finally {
@@ -1329,9 +1335,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
       if (agentType === 'doubao-work') {
         this.enrichDoubaoWorkSpans(records, spans);
-        enrichDoubaoWorkTools(records, spans);
-        enrichDoubaoNativeFragments(records, spans);
-        enrichDoubaoFirstOutput(records, spans);
+        enrichDoubaoClientRequest(records, spans);
       }
 
       spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });

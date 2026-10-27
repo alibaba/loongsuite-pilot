@@ -43,9 +43,9 @@ describe('native persisted sandbox execution evidence', () => {
     const events = buildNativeExecutionEvents('scope', root, graph, execution, [execution], DOUBAO_EPOCH + 50000);
     expect(events).toHaveLength(2);
     expect(events.map(e => e.time_unix_nano)).toEqual([execution.startedAtMs, execution.endedAtMs].map(t => (BigInt(t) * 1_000_000n).toString()));
-    expect(events[0]['loongsuite.doubao_work.agent_span_id']).toBe(nativeExecutionSpanId('scope', execution.executionKey));
-    expect(events[0].parent_span_id).toBe(doubaoRootAgentSpanId(events[0].trace_id!));
-    expect(events[0]['gen_ai.agent.parent.id']).toBe('o_nativeOrg');
+    expect(events[0]['loongsuite.doubao_work.local_execution_span_id']).toBe(nativeExecutionSpanId('scope', execution.executionKey));
+    expect(events[0].parent_span_id).toBeUndefined();
+    expect(events[0]['loongsuite.doubao_work.native_creator_agent_id']).toBe('o_nativeOrg');
     expect(events[0]['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
     expect(events[0]['loongsuite.doubao_work.native_ancestor_ids']).toEqual(['o_nativeOrg', 'm_nativeMain']);
     expect(events.map(e => e['event.id'])).toEqual(buildNativeExecutionEvents('scope', root, graph, execution, [execution], DOUBAO_EPOCH + 70000).map(e => e['event.id']));
@@ -68,7 +68,7 @@ describe('native persisted sandbox execution evidence', () => {
   it('keeps reuse executions distinct and rejects cycle or pre-request timing evidence', () => {
     const first = buildNativeExecutionEvents('scope', root, graph, execution, [], Date.now());
     const second = buildNativeExecutionEvents('scope', root, graph, { ...execution, executionKey: '00000000-0000-4000-8000-000000000006' }, [], Date.now());
-    expect(second[0]['loongsuite.doubao_work.agent_span_id']).not.toBe(first[0]['loongsuite.doubao_work.agent_span_id']);
+    expect(second[0]['loongsuite.doubao_work.local_execution_span_id']).not.toBe(first[0]['loongsuite.doubao_work.local_execution_span_id']);
     expect(buildNativeExecutionEvents('scope', root, graph, { ...execution, startedAtMs: root.queryMs - 1 }, [], Date.now())).toEqual([]);
     const cyclic = { ...graph, edges: { ...graph.edges, o_nativeOrg: { ...graph.edges.o_nativeOrg, parent: 's_nativeLeaf' } } };
     expect(buildNativeExecutionEvents('scope', root, cyclic, execution, [], Date.now())).toEqual([]);

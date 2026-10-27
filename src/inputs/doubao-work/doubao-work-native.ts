@@ -1,10 +1,11 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { buildDoubaoTaskEvents, doubaoDigest, doubaoRootAgentSpanId, type DoubaoPendingTurn, type DoubaoLogEvent, type DoubaoToolPair } from './doubao-work-log.js';
+import { buildDoubaoTaskEvents, doubaoDigest, type DoubaoPendingTurn, type DoubaoLogEvent, type DoubaoToolPair } from './doubao-work-log.js';
+import { parseNativeContent, type NativeContent } from './doubao-work-content.js';
 
 interface Edge { child: string; parent: string; callId: string; threadId: string }
-export interface NativeGraph { main: string; edges: Record<string, Edge> }
+export interface NativeGraph { main: string; edges: Record<string, Edge>; content?: NativeContent }
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const MAX_AGENTS = 64;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -14,7 +15,7 @@ const MAX_PROFILES = 16;
 /** Account switches use Chromium Profile N folders on Windows. Resolve only
  * the exact fresh conversation; never select an account by mtime or read its
  * login store. Duplicate conversations remain ambiguous and are not linked. */
-export async function readNativeProfileGraph(userDataRoot: string, conversationId: string): Promise<NativeGraph | undefined> {
+export async function readNativeProfileGraph(userDataRoot: string, conversationId: string, captureContent = false): Promise<NativeGraph | undefined> {
   if (!ID.test(conversationId)) return undefined;
   const canonical = await fs.realpath(userDataRoot);
   const profiles = (await fs.readdir(userDataRoot, { withFileTypes: true }))
@@ -34,7 +35,7 @@ export async function readNativeProfileGraph(userDataRoot: string, conversationI
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-  return matches.length === 1 ? readNativeGraph(matches[0], conversationId) : undefined;
+  return matches.length === 1 ? readNativeGraph(matches[0], conversationId, captureContent) : undefined;
 }
 
 /** Only native create_agent call/result identities are retained. Neither agent
@@ -70,7 +71,7 @@ export function parseNativeGraph(files: Record<string, string>): NativeGraph | u
 
 /** Read only the conversation already identified in fresh frontend records.
  * No SQLite locks, login stores, history scans, app patches or source writes. */
-export async function readNativeGraph(sessionsRoot: string, conversationId: string): Promise<NativeGraph | undefined> {
+export async function readNativeGraph(sessionsRoot: string, conversationId: string, captureContent = false): Promise<NativeGraph | undefined> {
   if (!ID.test(conversationId)) return undefined;
   const root = path.join(sessionsRoot, conversationId, 'agents');
   const canonical = await fs.realpath(root);
@@ -79,6 +80,7 @@ export async function readNativeGraph(sessionsRoot: string, conversationId: stri
   const names = (await fs.readdir(root, { withFileTypes: true })).filter(item => item.isDirectory() && ID.test(item.name));
   if (names.length > MAX_AGENTS) return undefined;
   const files: Record<string, string> = {};
+  const assignments: Record<string, string> = {};
   let bytes = 0;
   for (const entry of names) {
     const file = path.join(root, entry.name, 'system', 'trajectory.jsonl');
@@ -100,74 +102,67 @@ export async function readNativeGraph(sessionsRoot: string, conversationId: stri
       if (content && !content.endsWith('\n')) return undefined;
       files[entry.name] = content;
     } finally { await handle.close(); }
+    if (captureContent) {
+      const assignment = path.join(root, entry.name, 'system', 'assignment.md');
+      try {
+        const assignmentStat = await fs.lstat(assignment);
+        if (!assignmentStat.isFile() || assignmentStat.isSymbolicLink() || assignmentStat.size > MAX_FILE_BYTES
+          || !(await fs.realpath(assignment)).startsWith(`${canonical}${path.sep}`)) return undefined;
+        bytes += assignmentStat.size;
+        if (bytes > MAX_SCAN_BYTES) return undefined;
+        const input = await fs.open(assignment, 'r');
+        try {
+          const buffer = Buffer.alloc(assignmentStat.size);
+          const { bytesRead } = await input.read(buffer, 0, buffer.length, 0);
+          if (bytesRead !== buffer.length || (await input.stat()).size !== assignmentStat.size) return undefined;
+          assignments[entry.name] = buffer.toString('utf8');
+        } finally { await input.close(); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
   }
-  return parseNativeGraph(files);
+  const graph = parseNativeGraph(files);
+  if (!graph || !captureContent) return graph;
+  const content = parseNativeContent(files, assignments);
+  return content ? { ...graph, content } : undefined;
 }
 
-/** One immutable fragment per settled native tool. It describes only the
- * observed tool interval, never an inferred whole cloud Agent invocation.
- * Ancestors cover that same observed descendant interval and carry explicit
- * native creation edges; no fictional create_agent TOOL span is inserted. */
-export function buildNativeToolFragment(
+/** Timed local tool facts are logs, not synthetic Agent invocations. */
+export function buildNativeToolEvents(
   scope: string, root: DoubaoPendingTurn & { terminal: DoubaoLogEvent }, graph: NativeGraph,
   pair: DoubaoToolPair, observedMs: number,
 ): AgentActivityEntry[] {
-  const actor = pair.start.turnId;
-  const call = pair.start.tool;
-  if (!actor || !call || !pair.end.tool || actor === graph.main || !graph.edges[actor]) return [];
-  const chain: Edge[] = [];
+  const actor = pair.start.turnId, call = pair.start.tool, end = pair.end.tool;
+  if (!actor || !call || !end || !graph.edges[actor]
+    || call.id !== end.id || call.name !== end.name || call.sandboxId !== end.sandboxId
+    || call.phase !== 'received' || end.phase !== 'settled' || !end.status
+    || BigInt(pair.start.timeNano) < BigInt(root.queryMs) * 1_000_000n
+    || BigInt(pair.end.timeNano) <= BigInt(pair.start.timeNano)) return [];
   const seen = new Set<string>();
   let current = actor;
   while (current !== graph.main) {
-    const edge = graph.edges[current];
-    if (!edge || seen.has(current) || chain.length >= 8) return [];
-    chain.push(edge); seen.add(current); current = edge.parent;
+    if (seen.has(current) || seen.size >= 8 || !graph.edges[current]) return [];
+    seen.add(current); current = graph.edges[current].parent;
   }
-  const rootEvents = buildDoubaoTaskEvents(scope, root, root.terminal, observedMs);
-  if (!rootEvents.length || BigInt(pair.start.timeNano) < BigInt(root.queryMs) * 1_000_000n) return [];
-  const traceId = rootEvents[0].trace_id!;
-  const fragment = doubaoDigest(JSON.stringify([scope, traceId, call.sandboxId, actor, call.id]));
-  const fragmentPending = { ...root, firstOutput: undefined, selectedSkills: undefined, selectedPartners: undefined,
-    turnId: actor, queryMs: Number(BigInt(pair.start.timeNano) / 1_000_000n) };
-  const terminal = { ...root.terminal, queryMs: fragmentPending.queryMs, timeNano: pair.end.timeNano, clientOutcome: 'ended' as const };
-  // The shared builder's millisecond guard cannot represent a sub-ms fragment;
-  // validate the native pair here and preserve its full precision below.
-  if (call.id !== pair.end.tool.id || call.name !== pair.end.tool.name || call.sandboxId !== pair.end.tool.sandboxId
-    || call.phase !== 'received' || pair.end.tool.phase !== 'settled'
-    || !pair.end.tool.status || BigInt(pair.end.timeNano) <= BigInt(pair.start.timeNano)) return [];
-  const events = buildDoubaoTaskEvents(scope, fragmentPending, terminal, observedMs, [pair]);
-  if (events.length !== 4) return [];
-  const nativeIds = chain.map(edge => edge.child);
-  const agentSpanId = doubaoDigest(`${fragment}:agent:${actor}`).slice(0, 16);
-  return events.map((event, index) => ({
-    ...event,
-    time_unix_nano: index === 0 ? pair.start.timeNano : event.time_unix_nano,
-    trace_id: traceId,
-    'event.id': doubaoDigest(`${fragment}:event:${index}`),
-    'gen_ai.turn.id': `native-tool-fragment:${fragment}`,
-    'gen_ai.agent.id': actor,
-    'gen_ai.agent.name': actor,
-    'gen_ai.agent.scope': 'subagent',
-    parent_span_id: chain.length > 1
-      ? doubaoDigest(`${fragment}:agent:${chain[1].child}`).slice(0, 16) : doubaoRootAgentSpanId(traceId),
-    ...(event['event.name'] === 'tool.call' || event['event.name'] === 'tool.result'
-      ? { span_id: doubaoDigest(`${fragment}:tool`).slice(0, 16) } : {}),
-    'loongsuite.doubao_work.observation_scope': 'native_local_tool_fragment',
-    'loongsuite.doubao_work.agent_boundary': 'native_local_tool_interval',
-    'loongsuite.doubao_work.agent_span_id': agentSpanId,
-    'loongsuite.doubao_work.fragment_id': fragment,
-    'loongsuite.doubao_work.root_turn_id': root.turnId,
-    'loongsuite.doubao_work.root_agent_id': graph.main,
-    'loongsuite.doubao_work.native_agent_ids': nativeIds,
-    'loongsuite.doubao_work.native_parent_ids': chain.map(edge => edge.parent),
-    'loongsuite.doubao_work.native_creation_call_ids': chain.map(edge => edge.callId),
-    'loongsuite.doubao_work.native_thread_ids': chain.map(edge => edge.threadId),
-    'gen_ai.agent.parent.id': chain[0].parent,
-    'agent.pilot.parent.turn.id': root.turnId,
-    'loongsuite.doubao_work.relation_basis': 'native_create_agent_ancestry',
-    resourceAttributes: {
-      ...event.resourceAttributes,
-      'loongsuite.doubao_work.observation_scope': 'native_local_tool_fragment',
-    },
-  }));
+  const common = buildDoubaoTaskEvents(scope, root, root.terminal, observedMs)[0];
+  if (!common) return [];
+  const { 'gen_ai.turn.start': _start, 'gen_ai.input.messages_delta': _input, ...base } = common;
+  const identity = doubaoDigest(JSON.stringify([scope, common.trace_id, call.sandboxId, actor, call.id]));
+  const metadata = {
+    ...base, 'gen_ai.agent.id': actor, 'gen_ai.agent.name': actor,
+    'gen_ai.tool.name': call.name, 'gen_ai.tool.call.id': call.id, 'gen_ai.tool.type': 'function',
+    'loongsuite.doubao_work.observation_scope': 'native_local_tool',
+    'loongsuite.doubao_work.trace_role': 'log_only',
+    'loongsuite.doubao_work.tool_boundary': 'client_received_to_execution_settled',
+    'loongsuite.doubao_work.native_creator_agent_id': graph.edges[actor].parent,
+    'loongsuite.doubao_work.native_thread_id': graph.edges[actor].threadId,
+  };
+  return [
+    { ...metadata, 'event.name': 'tool.call', 'event.id': doubaoDigest(`${identity}:call`), time_unix_nano: pair.start.timeNano },
+    { ...metadata, 'event.name': 'tool.result', 'event.id': doubaoDigest(`${identity}:result`), time_unix_nano: pair.end.timeNano,
+      'tool.result.status': end.status,
+      'gen_ai.tool.call.duration': Number(BigInt(pair.end.timeNano) - BigInt(pair.start.timeNano)) / 1_000_000,
+      ...(end.status === 'success' ? {} : { 'error.type': end.status === 'cancelled' ? 'doubao.local_tool_cancelled' : 'doubao.local_tool_failed' }) },
+  ];
 }

@@ -1,50 +1,53 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
-import { buildDoubaoTaskEvents, parseDoubaoLogLine } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
-import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../../helpers/doubao-work-fixture.js';
-import { DOUBAO_NATIVE_FILES } from '../../../helpers/doubao-work-fixture.js';
-import { buildNativeToolFragment, parseNativeGraph } from '../../../../src/inputs/doubao-work/doubao-work-native.js';
-import { doubaoRootAgentSpanId } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
+import { buildDoubaoTaskEvents, doubaoRootAgentSpanId, parseDoubaoLogLine } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
 import { buildNativeExecutionEvents, nativeExecutionSpanId, type NativeExecution } from '../../../../src/inputs/doubao-work/doubao-work-execution.js';
+import { parseNativeGraph } from '../../../../src/inputs/doubao-work/doubao-work-native.js';
+import { nativeToolObservations } from '../../../../src/inputs/doubao-work/doubao-work-content.js';
+import { createReadableSpanToOtlpSpanJsonArray } from '../../../../src/flushers/otlp-json-serializer.js';
+import { maskAgentActivityEntry } from '../../../../src/mask/entry-masker.js';
+import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../../helpers/doubao-work-fixture.js';
 
-describe('Doubao Work task-level OTLP', () => {
-  it.each([false, true])('exports only the evidenced first LLM interval while later tools retain native parents (cancelled=%s)', async cancelled => {
-    const terminal = parseDoubaoLogLine(doubaoLine('on_message_session_end', cancelled ? { cancel_source: 'stop_button' } : {}), DOUBAO_FILE)!;
+const nano = (t: number[]) => BigInt(t[0]) * 1_000_000_000n + BigInt(t[1]);
+function collector(spans: ReadableSpan[]) {
+  return new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-semantics' }, undefined, () => ({
+    export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
+  }));
+}
+function localPair(actor = 'synthetic-turn', call = 'synthetic-call', start = 1000, end = 1100) {
+  return {
+    start: parseDoubaoLogLine(doubaoToolLine({ agent_id: actor, tcid: call }, start, 111).trimEnd(), DOUBAO_FILE)!,
+    end: parseDoubaoLogLine(doubaoToolLine({ toolCallID: call, status: 'success', phase: 'execution_settled' }, end, 777).trimEnd(), DOUBAO_FILE)!,
+  };
+}
+
+describe('Doubao Work truthful partial OTLP', () => {
+  it('keeps local tool facts on the real request without fabricating LLM or ReAct spans', async () => {
+    const pair = localPair();
     const firstOutput = parseDoubaoLogLine(doubaoFirstOutputLine(), DOUBAO_FILE)!;
-    const pair = {
-      start: parseDoubaoLogLine(doubaoToolLine({}, 2000).trimEnd(), DOUBAO_FILE)!,
-      end: parseDoubaoLogLine(doubaoToolLine({ toolCallID: 'synthetic-call', phase: 'execution_settled', status: 'success' }, 2100).trimEnd(), DOUBAO_FILE)!,
-    };
-    const events = buildDoubaoTaskEvents('test', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
-      conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH, firstOutput }, terminal, Date.now(), [pair])
-      .map(e => ({ ...e, 'user.id': 'synthetic-user' }));
-    const spans: ReadableSpan[] = [];
-    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-first-output' }, undefined, () => ({
-      export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
-    }));
+    const records = buildDoubaoTaskEvents('scope', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
+      conversationId: '12345678', updatedMs: DOUBAO_EPOCH, firstOutput },
+      parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, Date.now(), [pair]);
+    records[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: 'synthetic user input' }] }];
+    records.at(-1)!['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: 'synthetic final answer' }] }];
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
-      await flusher.sendBatch(events); await vi.waitFor(() => expect(spans).toHaveLength(5));
-      const get = (kind: string) => spans.find(s => s.attributes['gen_ai.span.kind'] === kind)!;
-      expect(get('STEP').parentSpanId).toBe(get('AGENT').spanContext().spanId);
-      expect(get('LLM').parentSpanId).toBe(get('STEP').spanContext().spanId);
-      expect(get('TOOL').parentSpanId).toBe(get('AGENT').spanContext().spanId);
-      for (const span of [get('STEP'), get('LLM')]) {
-        expect(span.startTime).toEqual([DOUBAO_EPOCH / 1000, 0]);
-        expect(span.endTime).toEqual([DOUBAO_EPOCH / 1000 + 1, 0]);
-        expect(span.duration).toEqual([1, 0]);
-        expect(span.status.code).toBe(0);
-        expect(span.attributes['loongsuite.doubao_work.llm_completeness']).toBe('first_output_only');
-        expect(span.attributes['gen_ai.user.id']).toBe('synthetic-user');
-      }
-      expect(get('AGENT').status.code).toBe(cancelled ? 2 : 0);
-      expect(get('LLM').spanContext().spanId).toBe(events.find(e => e['event.name'] === 'llm.request')!.span_id);
-      expect(get('LLM').name).toBe('chat (first reasoning output only)');
-      expect(JSON.stringify([get('LLM').attributes, get('STEP').attributes])).not.toMatch(/gen_ai\.(usage|request\.model|response\.(model|id)|react\.finish_reason)|time_to_first_token/);
-      await flusher.flush(); expect(spans).toHaveLength(5);
+      await flusher.sendBatch(records); await vi.waitFor(() => expect(spans).toHaveLength(2));
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+      expect(agent.events.map(event => event.name)).toEqual(['gen_ai.tool.call', 'gen_ai.tool.result']);
+      expect(agent.events.map(event => nano(event.time).toString())).toEqual([pair.start.timeNano, pair.end.timeNano]);
+      expect(agent.attributes['gen_ai.input.messages']).toContain('synthetic user input');
+      expect(agent.attributes['gen_ai.output.messages']).toContain('synthetic final answer');
+      expect(agent.attributes['loongsuite.doubao_work.trace_completeness']).toBe('client_request_and_local_events');
+      expect(agent.attributes['loongsuite.doubao_work.client_time_to_first_cot_ms']).toBe(1000);
+      expect(spans.some(span => ['LLM', 'STEP', 'TOOL'].includes(String(span.attributes['gen_ai.span.kind'])))).toBe(false);
+      expect(JSON.stringify(spans.map(span => span.attributes))).not.toMatch(/gen_ai.request.model|gen_ai.usage/);
+      await flusher.flush(); expect(spans).toHaveLength(2);
     } finally { await flusher.shutdown(); }
   });
-  it('exports one independent AGENT per native execution with exact own time and observed parent run', async () => {
+
+  it('exports one linked local TASK per execution, with child observations owned by the correct TASK', async () => {
     const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: conv, localMessageId: query, updatedMs: DOUBAO_EPOCH,
       terminal: { ...parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, conversationId: conv } };
@@ -52,108 +55,97 @@ describe('Doubao Work task-level OTLP', () => {
       agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 9000 };
     const leaf: NativeExecution = { ...parent, executionKey: '00000000-0000-4000-8000-000000000003', agentId: 's_nativeLeaf', agentType: 'sub_agent',
       startedAtMs: DOUBAO_EPOCH + 5000, endedAtMs: DOUBAO_EPOCH + 8000 };
-    const reused: NativeExecution = { ...leaf, executionKey: '00000000-0000-4000-8000-000000000004', startedAtMs: DOUBAO_EPOCH + 10000, endedAtMs: DOUBAO_EPOCH + 11000 };
-    const spans: ReadableSpan[] = [];
-    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-execution-unit' }, undefined, () => ({
-      export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
-    }));
+    const pair = localPair(leaf.agentId, 'child-tool', 6000, 6500);
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
       await flusher.sendBatch(buildDoubaoTaskEvents('scope', root, root.terminal, Date.now()));
-      await vi.waitFor(() => expect(spans).toHaveLength(2));
-      for (const execution of [parent, leaf, reused]) await flusher.sendBatch(buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, execution, [parent, leaf, reused], Date.now()));
-      await vi.waitFor(() => expect(spans).toHaveLength(5));
-      const native = spans.filter(s => s.attributes['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution');
-      expect(native).toHaveLength(3);
-      const nano = (t: number[]) => BigInt(t[0]) * 1_000_000_000n + BigInt(t[1]);
-      for (const e of [parent, leaf, reused]) {
-        const span = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === e.executionKey)!;
-        expect(span.spanContext().spanId).toBe(nativeExecutionSpanId('scope', e.executionKey));
-        expect(nano(span.startTime)).toBe(BigInt(e.startedAtMs) * 1_000_000n);
-        expect(nano(span.endTime)).toBe(BigInt(e.endedAtMs) * 1_000_000n);
-        expect(nano(span.duration)).toBe(BigInt(e.endedAtMs - e.startedAtMs) * 1_000_000n);
-        expect(span.attributes['gen_ai.span.kind']).toBe('AGENT'); expect(span.status.code).toBe(0);
+      for (const execution of [parent, leaf]) {
+        const records = buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, execution, [parent, leaf], Date.now());
+        if (execution === leaf) records[0]['agent.doubao_work.tool_observations'] = nativeToolObservations([pair]);
+        await flusher.sendBatch(records);
       }
-      const child = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === leaf.executionKey)!;
-      expect(child.parentSpanId).toBe(nativeExecutionSpanId('scope', parent.executionKey));
-      const repeat = native.find(s => s.attributes['loongsuite.doubao_work.native_execution_id'] === reused.executionKey)!;
-      expect(repeat.parentSpanId).toBe(doubaoRootAgentSpanId(child.spanContext().traceId));
-      expect(repeat.attributes['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
-      expect(spans.some(s => ['LLM', 'STEP', 'TOOL'].includes(String(s.attributes['gen_ai.span.kind'])))).toBe(false);
+      await vi.waitFor(() => expect(spans).toHaveLength(4));
+      const tasks = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TASK');
+      expect(tasks).toHaveLength(2);
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+      const owner = tasks.find(span => span.attributes['gen_ai.agent.id'] === leaf.agentId)!;
+      const organizer = tasks.find(span => span.attributes['gen_ai.agent.id'] === parent.agentId)!;
+      expect(organizer.parentSpanId).toBeUndefined();
+      expect(organizer.links[0].context.spanId).toBe(doubaoRootAgentSpanId(organizer.spanContext().traceId));
+      expect(owner.parentSpanId).toBe(nativeExecutionSpanId('scope', parent.executionKey));
+      expect(owner.events.map(event => event.attributes?.['gen_ai.tool.call.id'])).toEqual(['child-tool', 'child-tool']);
+      expect(organizer.events).toHaveLength(0);
+      const diagnostics = createReadableSpanToOtlpSpanJsonArray([organizer, owner]).map(line => JSON.parse(line));
+      expect(diagnostics[0].links[0].spanId).toBe(organizer.links[0].context.spanId);
+      expect(diagnostics[1].events[0].timeUnixNano).toBe(pair.start.timeNano);
+      expect(diagnostics[1].events[1].attributes['gen_ai.tool.call.id']).toBe('child-tool');
+      for (const e of [parent, leaf]) {
+        const task = tasks.find(span => span.attributes['loongsuite.doubao_work.native_execution_id'] === e.executionKey)!;
+        expect(nano(task.startTime)).toBe(BigInt(e.startedAtMs) * 1_000_000n);
+        expect(nano(task.endTime)).toBe(BigInt(e.endedAtMs) * 1_000_000n);
+        expect(task.status.code).toBe(0);
+      }
+      await flusher.flush(); expect(spans).toHaveLength(4);
     } finally { await flusher.shutdown(); }
   });
-  it('exports late nested AGENT fragments with precise real tool intervals and native parents', async () => {
-    const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH,
+
+  it('does not let a late local execution or log-only tools truncate an active request in the same session', async () => {
+    const query = '00000000-0000-4000-8000-000000000002';
+    const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: '12345678', localMessageId: query, updatedMs: DOUBAO_EPOCH,
       terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
-    const pair = {
-      start: parseDoubaoLogLine(doubaoToolLine({ agent_id: 's_nativeLeaf', tcid: 'late-call' }, 6000, 111).trimEnd(), DOUBAO_FILE)!,
-      end: parseDoubaoLogLine(doubaoToolLine({ toolCallID: 'late-call', status: 'success', phase: 'execution_settled' }, 6000, 777).trimEnd(), DOUBAO_FILE)!,
-    };
-    const events = buildDoubaoTaskEvents('native-scope', root, root.terminal, Date.now());
-    const child = buildNativeToolFragment('native-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now());
-    const spans: ReadableSpan[] = [];
-    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-native-unit' }, undefined, () => ({
-      export: (batch, callback) => { spans.push(...batch); callback({ code: 0 }); }, shutdown: async () => {},
-    }));
+    const records = buildDoubaoTaskEvents('scope', root, root.terminal, Date.now());
+    const execution: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: '12345678', queryMessageId: query,
+      agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 4000, endedAtMs: DOUBAO_EPOCH + 9000 };
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
-      await flusher.sendBatch(events); await vi.waitFor(() => expect(spans).toHaveLength(2));
-      await flusher.sendBatch(child); await vi.waitFor(() => expect(spans).toHaveLength(5));
-      const rootAgent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT' && span.attributes['gen_ai.agent.id'] === 'doubao-work')!;
-      const leaf = spans.find(span => span.attributes['gen_ai.agent.id'] === 's_nativeLeaf' && span.attributes['gen_ai.span.kind'] === 'AGENT')!;
-      const organizer = spans.find(span => span.attributes['gen_ai.agent.id'] === 'o_nativeOrg' && span.attributes['gen_ai.span.kind'] === 'AGENT')!;
-      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
-      expect(rootAgent.spanContext().spanId).toBe(doubaoRootAgentSpanId(events[0].trace_id!));
-      expect(organizer.parentSpanId).toBe(rootAgent.spanContext().spanId);
-      expect(leaf.parentSpanId).toBe(organizer.spanContext().spanId);
-      expect(tool.parentSpanId).toBe(leaf.spanContext().spanId);
-      const nanos = (time: number[]) => BigInt(time[0]) * 1_000_000_000n + BigInt(time[1]);
-      for (const span of [organizer, leaf, tool]) {
-        expect(span.spanContext().traceId).toBe(events[0].trace_id);
-        expect(nanos(span.startTime).toString()).toBe(pair.start.timeNano);
-        expect(nanos(span.endTime).toString()).toBe(pair.end.timeNano);
-        expect(nanos(span.duration)).toBe(666000n);
-      }
-      expect(nanos(rootAgent.endTime)).toBeLessThan(nanos(leaf.startTime));
-      expect(leaf.attributes['loongsuite.doubao_work.timing_basis']).toBe('own_local_tool');
-      expect(organizer.attributes['loongsuite.doubao_work.timing_basis']).toBe('descendant_local_tool');
-      expect(leaf.attributes['loongsuite.doubao_work.native_creation_call_id']).toBe('native-child-create');
-      expect(JSON.stringify(spans.map(span => span.attributes))).not.toMatch(/SYNTHETIC_PRIVATE|gen_ai\.request\.model|gen_ai\.usage/);
+      await flusher.sendBatch(records.slice(0, 1));
+      await flusher.sendBatch([{ ...records[0], 'event.id': 'audit-tool', 'event.name': 'tool.call', 'loongsuite.doubao_work.trace_role': 'log_only' }]);
+      await flusher.sendBatch(buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, execution, [execution], Date.now()));
+      expect(spans.map(span => span.attributes['gen_ai.span.kind'])).toEqual(['TASK']);
+      await flusher.sendBatch(records.slice(1));
+      await vi.waitFor(() => expect(spans).toHaveLength(3));
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
     } finally { await flusher.shutdown(); }
   });
-  it('exports precise parallel TOOL children with no inferred STEP or LLM and no payload', async () => {
-    const terminal = parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!;
-    const tool = (data: Record<string, unknown>, ms: number, micros = 123) => parseDoubaoLogLine(doubaoToolLine(data, ms, micros).trimEnd(), DOUBAO_FILE)!;
-    const pairs = [
-      { start: tool({ tcid: 'parallel-a' }, 200), end: tool({ toolCallID: 'parallel-a', status: 'success', phase: 'execution_settled' }, 200, 456) },
-      { start: tool({ tcid: 'parallel-b', name: 'Bash' }, 199), end: tool({ toolCallID: 'parallel-b', name: 'Bash', status: 'error', phase: 'execution_settled', error_message: 'PRIVATE' }, 220) },
-    ];
-    const events = buildDoubaoTaskEvents('synthetic-profile', {
-      turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH,
-      selectedSkills: ['synthetic-analysis'],
-    }, terminal, Date.now(), pairs).map(entry => ({ ...entry, 'user.id': 'synthetic-user' }));
-    const exported: ReadableSpan[] = [];
-    const flusher = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:4318' }], serviceName: 'doubao-unit' }, undefined, () => ({
-      export: (spans, callback) => { exported.push(...spans); callback({ code: 0 }); }, shutdown: async () => {},
-    }));
+
+  it('bounds tool Span events and reports the collected facts omitted from the Span', async () => {
+    const pairs = Array.from({ length: 65 }, (_, i) => localPair('synthetic-turn', `bounded-${i}`, 1000 + i * 2, 1001 + i * 2));
+    const records = buildDoubaoTaskEvents('scope', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
+      conversationId: '12345678', updatedMs: DOUBAO_EPOCH },
+      parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, Date.now(), pairs);
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
-      await flusher.sendBatch(events);
-      await vi.waitFor(() => expect(exported).toHaveLength(4));
-      await flusher.flush();
-      expect(exported).toHaveLength(4);
-      expect(exported.map(s => s.attributes['gen_ai.span.kind']).sort()).toEqual(['AGENT', 'ENTRY', 'TOOL', 'TOOL']);
-      const agent = exported.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT')!;
-      expect(agent.attributes['loongsuite.doubao_work.selected_skills']).toEqual(['synthetic-analysis']);
-      const nano = (time: number[]) => BigInt(time[0]) * 1_000_000_000n + BigInt(time[1]);
-      for (const pair of pairs) {
-        const span = exported.find(s => s.attributes['gen_ai.tool.call.id'] === pair.start.tool!.id)!;
-        expect(span.parentSpanId).toBe(agent.spanContext().spanId);
-        expect(nano(span.startTime).toString()).toBe(pair.start.timeNano);
-        expect(nano(span.endTime).toString()).toBe(pair.end.timeNano);
-        expect(nano(span.duration)).toBe(BigInt(pair.end.timeNano) - BigInt(pair.start.timeNano));
-        expect(span.attributes['loongsuite.doubao_work.tool_boundary']).toBe('client_received_to_execution_settled');
-        expect(span.status.code).toBe(pair.end.tool!.status === 'success' ? 0 : 2);
-      }
-      expect(exported.find(s => s.attributes['gen_ai.tool.call.id'] === 'parallel-a')!.attributes['gen_ai.tool.call.duration']).toBe(0.333);
-      expect(JSON.stringify(exported.map(s => s.attributes))).not.toMatch(/PRIVATE|gen_ai\.usage|gen_ai\.request\.model|gen_ai\.tool\.call\.(arguments|result)/);
+      await flusher.sendBatch(records);
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+      expect(agent.events).toHaveLength(128);
+      expect(agent.attributes['loongsuite.doubao_work.tool_observations_count']).toBe(64);
+      expect(agent.attributes['loongsuite.doubao_work.tool_observations_not_in_span']).toBe(1);
+      expect(records.filter(record => record['event.name'] === 'tool.call')).toHaveLength(65);
+    } finally { await flusher.shutdown(); }
+  });
+
+  it('masks native TASK I/O and nested tool content before Span event projection', () => {
+    const key = 'sk-' + 'x'.repeat(24);
+    const masked = maskAgentActivityEntry({ time_unix_nano: String(BigInt(DOUBAO_EPOCH) * 1_000_000n),
+      'event.id': 'synthetic-mask', 'event.name': 'other', 'user.id': 'test',
+      'agent.doubao_work.task_input': key, 'agent.doubao_work.task_output': key,
+      'agent.doubao_work.tool_observations': [{ callId: 'call', arguments: JSON.stringify({ key }), result: key }],
+    }, { mode: 'all', types: [] });
+    expect(JSON.stringify(masked)).not.toContain(key);
+    expect(masked['agent.doubao_work.tool_observations']).toBeDefined();
+  });
+
+  it('does not reinterpret legacy tool fragments or log-only records as Agent invocations', async () => {
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
+    const records = buildDoubaoTaskEvents('scope', { turnId: 'legacy-fragment', queryMs: DOUBAO_EPOCH,
+      conversationId: '12345678', updatedMs: DOUBAO_EPOCH },
+      parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!, Date.now())
+      .map(event => ({ ...event, 'loongsuite.doubao_work.observation_scope': 'native_local_tool_fragment' }));
+    try {
+      await flusher.sendBatch(records); await flusher.flush();
+      expect(spans).toHaveLength(0);
+      await flusher.sendBatch(records.map(record => ({ ...record, 'loongsuite.doubao_work.trace_role': 'log_only' })));
+      await flusher.flush(); expect(spans).toHaveLength(0);
     } finally { await flusher.shutdown(); }
   });
   it.each([

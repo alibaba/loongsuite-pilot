@@ -49,94 +49,6 @@ export function hasModelToolSpanForOutput(tools, expectedToolCall) {
   });
 }
 
-// A bounded local execution observation has no observed LLM/React step. This
-// contract is specific to Doubao's native received/settled producer; it does
-// not relax ordinary model/tool or delegated-agent topology checks.
-export function isDoubaoLocalTool(tool, parent) {
-  return tool?.attributes?.['gen_ai.framework'] === 'doubao-work'
-    && tool.attributes['loongsuite.doubao_work.tool_boundary'] === 'client_received_to_execution_settled'
-    && Boolean(tool.attributes['gen_ai.tool.call.id'])
-    && parent?._kind === 'AGENT'
-    && parent.attributes?.['gen_ai.framework'] === 'doubao-work';
-}
-
-// Native create_agent ancestry is observable without a timed dispatch TOOL.
-// These AGENTs explicitly describe a local tool fragment, not a full invocation.
-export function isDoubaoNativeAgent(child, parent) {
-  if (isDoubaoNativeExecution(child, parent)) return true;
-  const attrs = child?.attributes || {};
-  const parentAttrs = parent?.attributes || {};
-  const parentScope = parentAttrs['loongsuite.doubao_work.observation_scope']
-    ?? parent?.resource?.['loongsuite.doubao_work.observation_scope'];
-  if (child?._kind !== 'AGENT' || parent?._kind !== 'AGENT'
-    || attrs['gen_ai.framework'] !== 'doubao-work' || parentAttrs['gen_ai.framework'] !== 'doubao-work'
-    || attrs['loongsuite.doubao_work.observation_scope'] !== 'native_local_tool_fragment'
-    || attrs['loongsuite.doubao_work.agent_boundary'] !== 'native_local_tool_interval'
-    || attrs['loongsuite.doubao_work.relation_basis'] !== 'native_create_agent_ancestry'
-    || !['own_local_tool', 'descendant_local_tool'].includes(attrs['loongsuite.doubao_work.timing_basis'])
-    || !/^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
-    || !/^[0-9a-f]{64}$/.test(attrs['loongsuite.doubao_work.fragment_id'] || '')) return false;
-  if (parentScope === 'native_local_tool_fragment') {
-    return attrs['gen_ai.agent.parent.id'] === parentAttrs['gen_ai.agent.id']
-      && attrs['loongsuite.doubao_work.fragment_id'] === parentAttrs['loongsuite.doubao_work.fragment_id'];
-  }
-  return parentScope === 'client_message'
-    && attrs['gen_ai.agent.parent.id'] === attrs['loongsuite.doubao_work.root_agent_id']
-    && Boolean(attrs['loongsuite.doubao_work.root_agent_id'])
-    && attrs['loongsuite.doubao_work.root_turn_id'] === parentAttrs['gen_ai.turn.id'];
-}
-
-function hasDoubaoExecutionIdentity(attrs) {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  let ancestors = attrs['loongsuite.doubao_work.native_ancestor_ids'];
-  // CMS trace search preserves array attributes as canonical JSON strings.
-  // Accept only that exact bounded encoding, not CSV or coerced identifiers.
-  if (typeof ancestors === 'string' && ancestors.length <= 2048) {
-    try { const parsed = JSON.parse(ancestors); ancestors = JSON.stringify(parsed) === ancestors ? parsed : undefined; }
-    catch { ancestors = undefined; }
-  }
-  const resolution = attrs['loongsuite.doubao_work.parent_resolution'];
-  return attrs['gen_ai.framework'] === 'doubao-work'
-    && attrs['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
-    && attrs['loongsuite.doubao_work.agent_boundary'] === 'native_sandbox_get_or_create_to_release'
-    && attrs['loongsuite.doubao_work.timing_basis'] === 'native_execution_startedAtMs_endedAtMs'
-    && attrs['loongsuite.doubao_work.relation_basis'] === 'native_create_agent_ancestry'
-    && uuid.test(attrs['loongsuite.doubao_work.native_execution_id'] || '')
-    && uuid.test(attrs['loongsuite.doubao_work.native_query_message_id'] || '')
-    && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_creation_call_id'] || '')
-    && /^[a-zA-Z0-9_-]{1,128}$/.test(attrs['loongsuite.doubao_work.native_sandbox_id'] || '')
-    && /^\d{1,30}$/.test(attrs['loongsuite.doubao_work.native_thread_id'] || '')
-    && ['root_request_ancestor', 'same_query_native_execution'].includes(resolution)
-    && (resolution === 'root_request_ancestor' ? !attrs['loongsuite.doubao_work.native_parent_execution_id']
-      : uuid.test(attrs['loongsuite.doubao_work.native_parent_execution_id'] || '')
-        && attrs['loongsuite.doubao_work.native_parent_execution_id'] !== attrs['loongsuite.doubao_work.native_execution_id'])
-    && Array.isArray(ancestors) && ancestors.length > 0 && ancestors.length <= 8
-    && ancestors.every(value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value))
-    && ancestors[0] === attrs['gen_ai.agent.parent.id']
-    && ancestors.at(-1) === attrs['loongsuite.doubao_work.root_agent_id']
-    && Boolean(attrs['loongsuite.doubao_work.root_turn_id']);
-}
-
-// These timestamps cover a persisted local sandbox execution, including release
-// capture. They never assert a whole cloud invocation or manufacture ancestors.
-export function isDoubaoNativeExecution(child, parent) {
-  const attrs = child?.attributes || {}, p = parent?.attributes || {};
-  if (child?._kind !== 'AGENT' || parent?._kind !== 'AGENT' || !hasDoubaoExecutionIdentity(attrs)
-    || p['gen_ai.framework'] !== 'doubao-work') return false;
-  if (attrs['loongsuite.doubao_work.parent_resolution'] === 'same_query_native_execution') {
-    return hasDoubaoExecutionIdentity(p)
-      && attrs['gen_ai.agent.parent.id'] === p['gen_ai.agent.id']
-      && attrs['loongsuite.doubao_work.native_parent_execution_id'] === p['loongsuite.doubao_work.native_execution_id']
-      && attrs['loongsuite.doubao_work.native_query_message_id'] === p['loongsuite.doubao_work.native_query_message_id']
-      && attrs['loongsuite.doubao_work.native_sandbox_id'] === p['loongsuite.doubao_work.native_sandbox_id']
-      && attrs['loongsuite.doubao_work.root_turn_id'] === p['loongsuite.doubao_work.root_turn_id'];
-  }
-  return attrs['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'
-    && !attrs['loongsuite.doubao_work.native_parent_execution_id']
-    && (p['loongsuite.doubao_work.observation_scope'] ?? parent.resource?.['loongsuite.doubao_work.observation_scope']) === 'client_message'
-    && attrs['loongsuite.doubao_work.root_turn_id'] === p['gen_ai.turn.id'];
-}
-
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -283,13 +195,7 @@ function hasExternalDelegationParent(span, spanMap) {
     !/^0+$/.test(span.parentSpanId) &&
     !spanMap.has(span.parentSpanId) &&
     Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
-      span.attributes?.['gen_ai.subagent.parent_tool_call.id'] ||
-      (hasDoubaoExecutionIdentity(span.attributes || {}) && span.attributes?.['agent.pilot.parent.turn.id']) ||
-      (span.attributes?.['loongsuite.doubao_work.observation_scope'] === 'native_local_tool_fragment'
-        && span.attributes?.['loongsuite.doubao_work.relation_basis'] === 'native_create_agent_ancestry'
-        && /^[0-9a-f]{64}$/.test(span.attributes?.['loongsuite.doubao_work.fragment_id'] || '')
-        && span.attributes?.['loongsuite.doubao_work.native_creation_call_id']
-        && span.attributes?.['agent.pilot.parent.turn.id']));
+      span.attributes?.['gen_ai.subagent.parent_tool_call.id']);
 }
 
 // Stop at delegated AGENT boundaries: their identity, usage and STEP sequence
@@ -340,9 +246,9 @@ export function validateStructure(trace) {
 
   for (const a of agents) {
     const external = hasExternalDelegationParent(a, spanMap);
-    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external || isDoubaoNativeAgent(a, spanMap.get(a.parentSpanId))
+    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external
       ? pass('structure.agent_under_entry')
-      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, evidenced native observation, or explicit external delegation context`, a.spanId, a.name));
+      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, or explicit external delegation context`, a.spanId, a.name));
     if (external) {
       checks.push(warn('structure.external_parent_context',
         `delegation parent ${a.parentSpanId} is outside this local trace fragment`, a.spanId, a.name));
@@ -372,11 +278,11 @@ export function validateStructure(trace) {
 
   for (const t of byKind('TOOL')) {
     const pk = parentKind(t);
-    if (pk !== 'STEP' && !isDoubaoLocalTool(t, spanMap.get(t.parentSpanId))) {
+    if (pk !== 'STEP') {
       checks.push(error('structure.tool_under_step', `TOOL parent is ${pk || 'none'}, expected STEP`, t.spanId, t.name));
     }
   }
-  if (byKind('TOOL').length > 0 && byKind('TOOL').every(t => parentKind(t) === 'STEP' || isDoubaoLocalTool(t, spanMap.get(t.parentSpanId)))) {
+  if (byKind('TOOL').length > 0 && byKind('TOOL').every(t => parentKind(t) === 'STEP')) {
     checks.push(pass('structure.tool_under_step'));
   } else if (byKind('TOOL').length === 0) {
     checks.push(pass('structure.tool_under_step'));
@@ -562,10 +468,7 @@ export function validateTime(trace, rules) {
     for (const c of children) {
       const cStart = BigInt(c.startTimeUnixNano);
       const cEnd = BigInt(c.endTimeUnixNano);
-      const nativeAgent = isDoubaoNativeAgent(c, s);
-      const delegatedAgent = (s._kind === 'TOOL' && c._kind === 'AGENT') || (nativeAgent
-        && (c.attributes?.['loongsuite.doubao_work.observation_scope'] !== 'native_sandbox_execution'
-          || c.attributes?.['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor'));
+      const delegatedAgent = s._kind === 'TOOL' && c._kind === 'AGENT';
       if (cStart < pStart || (!delegatedAgent && cEnd > pEnd)) {
         checks.push(error('time.parent_contains_children',
           `child ${c.name} [${cStart}-${cEnd}] outside parent ${s.name} [${pStart}-${pEnd}]`,
@@ -1107,11 +1010,6 @@ export function validateSemantic(trace, rules) {
     for (const t of toolSpans) {
       const args = t.attributes?.['gen_ai.tool.call.arguments'];
       if (args === undefined || args === null || args === '') {
-        if (isDoubaoLocalTool(t, trace.spanMap.get(t.parentSpanId))) {
-          checks.push(skipped('semantic.tool_has_arguments', 'Doubao local execution source does not expose payloads', t.spanId, t.name));
-          allHaveArgs = false;
-          continue;
-        }
         checks.push(error('semantic.tool_has_arguments',
           `TOOL ${t.attributes?.['gen_ai.tool.name'] || t.name} missing gen_ai.tool.call.arguments`,
           t.spanId, t.name));

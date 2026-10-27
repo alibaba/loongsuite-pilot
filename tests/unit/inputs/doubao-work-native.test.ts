@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseNativeGraph, buildNativeToolFragment } from '../../../src/inputs/doubao-work/doubao-work-native.js';
+import { parseNativeGraph, buildNativeToolEvents } from '../../../src/inputs/doubao-work/doubao-work-native.js';
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
 
-describe('Doubao native identity evidence and bounded tool fragments', () => {
+describe('Doubao native identity evidence and log-only tool observations', () => {
   const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH,
     terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
   const pair = {
@@ -24,17 +24,18 @@ describe('Doubao native identity evidence and bounded tool fragments', () => {
     expect(parseNativeGraph({ ...DOUBAO_NATIVE_FILES, m_secondMain: '' })).toBeUndefined();
     expect(parseNativeGraph({ ...DOUBAO_NATIVE_FILES, o_nativeOrg: DOUBAO_NATIVE_FILES.o_nativeOrg + '{half' })).toBeUndefined();
   });
-  it('emits an immutable late fragment with source microseconds and native ancestor evidence', () => {
-    const entries = buildNativeToolFragment('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now());
-    expect(entries).toHaveLength(4);
+  it('emits late tool facts without synthesizing Agent invocation boundaries', () => {
+    const entries = buildNativeToolEvents('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now());
+    expect(entries).toHaveLength(2);
     expect(entries[0].time_unix_nano).toBe(pair.start.timeNano);
-    expect(entries[3].time_unix_nano).toBe(pair.end.timeNano);
-    expect(entries[2]['gen_ai.tool.call.duration']).toBe(0.124);
-    expect(entries[0]['loongsuite.doubao_work.native_agent_ids']).toEqual(['s_nativeLeaf', 'o_nativeOrg']);
-    expect(entries[0]['loongsuite.doubao_work.native_parent_ids']).toEqual(['o_nativeOrg', 'm_nativeMain']);
-    expect(entries).toEqual(buildNativeToolFragment('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now()).map((entry, i) => ({ ...entry, observed_time_unix_nano: entries[i].observed_time_unix_nano })));
+    expect(entries[1].time_unix_nano).toBe(pair.end.timeNano);
+    expect(entries[1]['gen_ai.tool.call.duration']).toBe(0.124);
+    expect(entries[0]['gen_ai.turn.id']).toBe(root.turnId);
+    expect(entries[0]['loongsuite.doubao_work.trace_role']).toBe('log_only');
+    expect(entries.every(e => e['gen_ai.turn.start'] === undefined && e['gen_ai.turn.end'] === undefined)).toBe(true);
+    expect(entries).toEqual(buildNativeToolEvents('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, pair, Date.now()).map((entry, i) => ({ ...entry, observed_time_unix_nano: entries[i].observed_time_unix_nano })));
     expect(JSON.stringify(entries)).not.toMatch(/SYNTHETIC_PRIVATE|gen_ai\.usage|request\.model|selected_skills/);
-    expect(buildNativeToolFragment('synthetic-scope', root, { main: 'm_nativeMain', edges: {} }, pair, Date.now())).toEqual([]);
-    expect(buildNativeToolFragment('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, { ...pair, end: { ...pair.end, timeNano: pair.start.timeNano } }, Date.now())).toEqual([]);
+    expect(buildNativeToolEvents('synthetic-scope', root, { main: 'm_nativeMain', edges: {} }, pair, Date.now())).toEqual([]);
+    expect(buildNativeToolEvents('synthetic-scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, { ...pair, end: { ...pair.end, timeNano: pair.start.timeNano } }, Date.now())).toEqual([]);
   });
 });

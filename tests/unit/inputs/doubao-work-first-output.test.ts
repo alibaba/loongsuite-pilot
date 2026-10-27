@@ -18,10 +18,11 @@ describe('Doubao native first reasoning output', () => {
     const terminal = parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)!;
     const events = buildDoubaoTaskEvents('test', { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH,
       conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH, firstOutput }, terminal, DOUBAO_EPOCH + 60_000);
-    expect(events.map(e => e['event.name'])).toEqual(['other', 'llm.request', 'llm.response', 'other']);
-    expect(events[2].time_unix_nano).toBe((BigInt(DOUBAO_EPOCH + 1000) * 1_000_000n).toString());
-    expect(events[2].observed_time_unix_nano).toBe((BigInt(DOUBAO_EPOCH + 60_000) * 1_000_000n).toString());
-    expect(events[1].span_id).toBe(events[2].span_id);
+    expect(events.map(e => e['event.name'])).toEqual(['other', 'other', 'other']);
+    expect(events[1].time_unix_nano).toBe((BigInt(DOUBAO_EPOCH + 1000) * 1_000_000n).toString());
+    expect(events[1].observed_time_unix_nano).toBe((BigInt(DOUBAO_EPOCH + 60_000) * 1_000_000n).toString());
+    expect(events[1].span_id).toBeUndefined();
+    expect(events[1]['gen_ai.step.id']).toBeUndefined();
     expect(JSON.stringify({ firstOutput, events })).not.toMatch(/SYNTHETIC_PRIVATE|gen_ai\.response\.id|gen_ai\.request\.model|gen_ai\.usage|finish_reason/);
     expect(buildDoubaoTaskEvents('test', { turnId: 's_child', queryMs: DOUBAO_EPOCH,
       conversationId: 'synthetic-conversation', updatedMs: DOUBAO_EPOCH, firstOutput }, terminal, Date.now())).toHaveLength(2);

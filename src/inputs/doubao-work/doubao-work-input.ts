@@ -6,8 +6,9 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
-import { buildNativeToolFragment, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
+import { buildNativeToolEvents, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, readNativeExecutions } from './doubao-work-execution.js';
+import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations } from './doubao-work-content.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -248,7 +249,11 @@ export class DoubaoWorkInput extends BaseInput {
     // Consume the whole source window first, including rotated/out-of-order tool
     // records. A partial scan must not finalize requests ahead of unread tools.
     if (drained) {
-      for (const [key, pending] of Object.entries(next.pending)) this.complete(next, key, pending, entries);
+      let completed = 0;
+      for (const [key, pending] of Object.entries(next.pending)) {
+        if (completed++ >= 4) break;
+        await this.complete(next, key, pending, entries);
+      }
       if (performance.now() >= this.nextNativeScanAt) {
         this.nextNativeScanAt = performance.now() + this.nativeScanIntervalMs;
         await this.completeNative(next, entries);
@@ -359,16 +364,31 @@ export class DoubaoWorkInput extends BaseInput {
     if (event.selectedPartners !== undefined) pending.selectedPartners = event.selectedPartners;
   }
 
-  private complete(state: Checkpoint, key: string, pending: PendingTurn, entries: AgentActivityEntry[]): void {
+  private async complete(state: Checkpoint, key: string, pending: PendingTurn, entries: AgentActivityEntry[]): Promise<void> {
     if (pending.startObserved && pending.terminal) {
       const matched = Object.entries(state.tools ?? {}).filter(([, tool]) => tool.start?.turnId === pending.turnId);
       const pairs = matched.flatMap(([, tool]) => !tool.conflict && tool.start && tool.end ? [{ start: tool.start, end: tool.end }] : []);
-      const complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
+      let complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
       if (complete.length === 0) return;
+      const conversationId = pending.terminal.conversationId ?? pending.conversationId;
+      if (conversationId) {
+        try {
+          const graph = await this.readConversationGraph(conversationId, true);
+          if (graph) {
+            complete = enrichNativeToolEvents(complete.map(event => ({ ...event, 'gen_ai.agent.id': graph.main })), graph.content);
+            const io = nativeTaskContent(graph.content, graph.main, pending.queryMs, pending.terminal.timeNano,
+              pairs.map(pair => pair.start.tool!.id));
+            if (io.input !== undefined) complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
+            if (io.output !== undefined) complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
+          }
+        } catch {
+          this.logger.warn('Doubao Work native content unavailable; emitting only confirmed request metadata');
+        }
+      }
       const omitted = matched.length - complete.filter(entry => entry['event.name'] === 'tool.call').length;
       if (omitted) this.logger.warn('Doubao Work local tools lack a complete unambiguous in-request boundary; omitted', { tools: omitted });
       entries.push(...complete);
-      // Keep the actual root boundary for late child fragments. The sandbox
+      // Keep the actual root boundary for late child observations. The sandbox
       // producer supplies request identity; native graph files supply ancestry.
       const priorRoot = state.roots![pending.turnId];
       if (!priorRoot || priorRoot.queryMs === pending.queryMs) state.roots![pending.turnId] = {
@@ -376,7 +396,8 @@ export class DoubaoWorkInput extends BaseInput {
       };
       delete state.pending[key];
       state.completed[key] = Date.now();
-      for (const [toolKey] of matched) delete state.tools![toolKey];
+      const exportedCalls = new Set(complete.filter(event => event['event.name'] === 'tool.call').map(event => event['gen_ai.tool.call.id']));
+      for (const [toolKey, tool] of matched) if (tool.start?.tool && exportedCalls.has(tool.start.tool.id)) delete state.tools![toolKey];
     }
   }
 
@@ -390,7 +411,7 @@ export class DoubaoWorkInput extends BaseInput {
     const ordered = after < 0 ? pendingTools : [...pendingTools.slice(after + 1), ...pendingTools.slice(0, after + 1)];
     for (const [key, tool] of ordered) {
       if (++considered > MAX_TOOLS) break;
-      if (state.nativeCompleted![key] !== undefined) { delete state.tools![key]; continue; }
+      if (state.nativeCompleted![key] !== undefined) continue;
       if (tool.conflict || !tool.start?.tool || !tool.end?.tool || !tool.start.turnId) continue;
       const sandbox = state.sandboxes![tool.start.tool.sandboxId];
       if (!sandbox || sandbox.conflict || !sandbox.actors.includes(tool.start.turnId)) continue;
@@ -403,7 +424,7 @@ export class DoubaoWorkInput extends BaseInput {
       if (!scannedConversation) {
         scannedConversation = root.conversationId;
         state.nativeScanCursor = key;
-        try { graph = await this.readConversationGraph(root.conversationId); }
+        try { graph = await this.readConversationGraph(root.conversationId, true); }
         catch { this.logger.warn('Doubao Work native graph temporarily unavailable; preserving child tools'); }
       }
       if (!graph) continue;
@@ -413,11 +434,16 @@ export class DoubaoWorkInput extends BaseInput {
         visited.add(actor); actor = graph.edges[actor].parent;
       }
       if (actor !== graph.main) continue;
-      const fragment = buildNativeToolFragment(this.scope, root, graph, { start: tool.start, end: tool.end }, Date.now());
+      const fragment = buildNativeToolEvents(this.scope, root, graph, { start: tool.start, end: tool.end }, Date.now());
       if (!fragment.length) continue;
-      entries.push(...fragment);
+      const observations = enrichNativeToolEvents(fragment.filter(entry => entry['event.name'] === 'tool.call' || entry['event.name'] === 'tool.result')
+        .map(entry => ({ ...entry, 'gen_ai.turn.id': root.turnId,
+          'loongsuite.doubao_work.trace_role': 'log_only' })), graph.content);
+      for (const event of observations) {
+        delete event.parent_span_id;
+      }
+      entries.push(...observations);
       state.nativeCompleted![key] = Date.now();
-      delete state.tools![key];
     }
   }
 
@@ -435,7 +461,7 @@ export class DoubaoWorkInput extends BaseInput {
       // native source. No cursor, mtime or polling time becomes a span boundary.
       executions = await readNativeExecutions(this.snapshotRoot, conversationId);
       if (!executions.length) return;
-      graph = await this.readConversationGraph(conversationId);
+      graph = await this.readConversationGraph(conversationId, true);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.logger.warn('Doubao Work native execution metadata unavailable; preserving checkpoint');
       return;
@@ -456,8 +482,22 @@ export class DoubaoWorkInput extends BaseInput {
         continue;
       }
       const eligible = executions.filter(candidate => candidate.startedAtMs >= state.sinceMs && box.actors.includes(candidate.agentId));
+      const pairs = Object.entries(state.tools ?? {}).filter(([, tool]) => !tool.conflict && tool.start?.turnId === execution.agentId
+        && tool.start.tool?.sandboxId === execution.sandboxId && tool.end?.tool
+        && BigInt(tool.start.timeNano) >= BigInt(execution.startedAtMs) * 1_000_000n
+        && BigInt(tool.end.timeNano) <= BigInt(execution.endedAtMs) * 1_000_000n);
       const events = buildNativeExecutionEvents(this.scope, root, graph, execution, eligible, Date.now());
       if (!events.length) continue;
+      const observations = nativeToolObservations(pairs.map(([, tool]) => ({ start: tool.start!, end: tool.end! })), graph.content);
+      const io = nativeTaskContent(graph.content, execution.agentId, root.queryMs,
+        (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id));
+      for (const event of events) {
+        event['gen_ai.turn.id'] = root.turnId;
+        delete event['gen_ai.agent.scope'];
+      }
+      events[0]['agent.doubao_work.tool_observations'] = observations;
+      if (io.input !== undefined) events[0]['agent.doubao_work.task_input'] = io.input;
+      if (io.output !== undefined) events[0]['agent.doubao_work.task_output'] = io.output;
       const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
       const parentId = graph.edges[execution.agentId]?.parent;
       if (parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
@@ -472,15 +512,16 @@ export class DoubaoWorkInput extends BaseInput {
         if ((!hasParentRecord && parentMutation) || Date.now() - firstSeen < EXECUTION_PARENT_GRACE_MS) continue;
       }
       entries.push(...events);
+      for (const [toolKey] of pairs) delete state.tools![toolKey];
       state.executionsCompleted![execution.executionKey] = { digest, updatedMs: Date.now() };
       delete state.executionFirstSeen![execution.executionKey];
     }
   }
 
-  private readConversationGraph(conversationId: string): Promise<Awaited<ReturnType<typeof readNativeGraph>>> {
+  private readConversationGraph(conversationId: string, captureContent = false): Promise<Awaited<ReturnType<typeof readNativeGraph>>> {
     return this.sessionsRoot
-      ? readNativeGraph(this.sessionsRoot, conversationId)
-      : readNativeProfileGraph(this.userDataRoot!, conversationId);
+      ? readNativeGraph(this.sessionsRoot, conversationId, captureContent)
+      : readNativeProfileGraph(this.userDataRoot!, conversationId, captureContent);
   }
 }
 

@@ -42,10 +42,11 @@ describe('Doubao Work passive client-message input', () => {
     const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
     await appendFile(file, doubaoFirstOutputLine({}, 1100) + doubaoLine('on_message_session_end'));
     const events = await restarted.poll();
-    const llm = events.filter(e => e['event.name'].startsWith('llm.'));
-    expect(llm).toHaveLength(2);
-    expect(llm.map(e => e.time_unix_nano)).toEqual([DOUBAO_EPOCH, DOUBAO_EPOCH + 1000].map(ms => (BigInt(ms) * 1_000_000n).toString()));
-    expect(llm.every(e => e['loongsuite.doubao_work.llm_completeness'] === 'first_output_only')).toBe(true);
+    const observation = events.filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_first_model_output');
+    expect(observation).toHaveLength(1);
+    expect(observation[0].time_unix_nano).toBe((BigInt(DOUBAO_EPOCH + 1000) * 1_000_000n).toString());
+    expect(events.filter(e => e['event.name'].startsWith('llm.'))).toEqual([]);
+    expect(observation[0]['gen_ai.step.id']).toBeUndefined();
     expect(JSON.stringify(events)).not.toMatch(/SYNTHETIC_PRIVATE|gen_ai\.request\.model|gen_ai\.usage|finish_reason/);
     expect(await restarted.poll()).toEqual([]);
   });
@@ -116,7 +117,7 @@ describe('Doubao Work passive client-message input', () => {
     expect(events).toHaveLength(4);
     const childStart = events.find(e => e['gen_ai.agent.id'] === child.agentId && e['gen_ai.turn.start'] === true)!;
     const parentStart = events.find(e => e['gen_ai.agent.id'] === parent.agentId && e['gen_ai.turn.start'] === true)!;
-    expect(childStart.parent_span_id).toBe(parentStart['loongsuite.doubao_work.agent_span_id']);
+    expect(childStart.parent_span_id).toBe(parentStart['loongsuite.doubao_work.local_execution_span_id']);
     expect(childStart['loongsuite.doubao_work.native_parent_execution_id']).toBe(parent.executionKey);
     expect(childStart.time_unix_nano).toBe((BigInt(child.startedAtMs) * 1_000_000n).toString());
     expect(await restarted.poll()).toEqual([]);
@@ -166,7 +167,7 @@ describe('Doubao Work passive client-message input', () => {
     expect(await fresh.poll()).toEqual([]); expect(await fresh.poll()).toEqual([]);
   });
 
-  it('links late nested native tools, retries incomplete graph reads and restores without duplicates', async () => {
+  it('preserves late nested tool facts without invented invocation boundaries, including reuse and restart', async () => {
     const { file, input, stateStore, statePath, logs, sessionsRoot } = await setup();
     await appendFile(file, doubaoLine('on_message_sending_start', {}, 10)
       + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox') + doubaoLine('on_message_session_end'));
@@ -185,14 +186,17 @@ describe('Doubao Work passive client-message input', () => {
       const dir = path.join(sessionsRoot, 'synthetic-conversation', 'agents', id, 'system');
       await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, 'trajectory.jsonl'), source);
     }
-    const fragments = await restarted.poll();
-    expect(fragments).toHaveLength(4);
-    expect(fragments[0]['gen_ai.agent.id']).toBe('s_nativeLeaf');
-    expect(fragments[0]['loongsuite.doubao_work.native_creation_call_ids']).toEqual(['native-child-create', 'native-root-create']);
-    expect(fragments[3].time_unix_nano).toBe(parseDoubaoLogLine(end.trimEnd(), DOUBAO_FILE)!.timeNano);
+    const observations = await restarted.poll();
+    expect(observations).toHaveLength(2);
+    expect(observations.map(event => event['event.name'])).toEqual(['tool.call', 'tool.result']);
+    expect(observations.every(event => event['loongsuite.doubao_work.trace_role'] === 'log_only')).toBe(true);
+    expect(observations.every(event => event['gen_ai.turn.start'] === undefined && event['gen_ai.turn.end'] === undefined)).toBe(true);
+    expect(observations[0]['gen_ai.agent.id']).toBe('s_nativeLeaf');
+    expect(observations[0]['loongsuite.doubao_work.native_creator_agent_id']).toBe('o_nativeOrg');
+    expect(observations[1].time_unix_nano).toBe(parseDoubaoLogLine(end.trimEnd(), DOUBAO_FILE)!.timeNano);
     await appendFile(file, doubaoToolLine({ agent_id: 's_nativeLeaf', tcid: 'late-child' }, 5000) + end);
     expect(await restarted.poll()).toEqual([]);
-    // Same native agent, new sandbox and new root request: a separate fragment.
+    // Same native agent, new sandbox and request: separate source facts and trace.
     await appendFile(file, doubaoLine('on_message_sending_start', { chat_session_id: 'reuse-root' }, 7000)
       + doubaoCommandLine('reuse-root', 'reuse-sandbox', 7050)
       + doubaoLine('on_message_session_end', { chat_session_id: 'reuse-root' }, 8000)
@@ -201,11 +205,11 @@ describe('Doubao Work passive client-message input', () => {
       + doubaoToolLine({ agent_id: 's_nativeLeaf', sandbox_id: 'reuse-sandbox', tcid: 'reuse-tool' }, 9100)
       + doubaoToolLine({ sandbox_id: 'reuse-sandbox', toolCallID: 'reuse-tool', phase: 'execution_settled', status: 'success' }, 9200));
     const reused = await restarted.poll();
-    expect(reused).toHaveLength(6);
-    const child = reused.find(e => e['gen_ai.agent.scope'] === 'subagent')!;
-    expect(child['gen_ai.agent.id']).toBe(fragments[0]['gen_ai.agent.id']);
-    expect(child.trace_id).not.toBe(fragments[0].trace_id);
-    expect(child['gen_ai.turn.id']).not.toBe(fragments[0]['gen_ai.turn.id']);
+    expect(reused).toHaveLength(4);
+    const child = reused.find(e => e['loongsuite.doubao_work.trace_role'] === 'log_only')!;
+    expect(child['gen_ai.agent.id']).toBe(observations[0]['gen_ai.agent.id']);
+    expect(child.trace_id).not.toBe(observations[0].trace_id);
+    expect(child['gen_ai.turn.id']).not.toBe(observations[0]['gen_ai.turn.id']);
   });
 
   it('does not assign a child to a sandbox containing two root actors', async () => {
@@ -246,7 +250,8 @@ describe('Doubao Work passive client-message input', () => {
     await appendFile(file, log);
     expect(await input.poll()).toHaveLength(4);
     const child = await input.poll();
-    expect(child).toHaveLength(4);
+    expect(child).toHaveLength(2);
+    expect(child.every(event => event['loongsuite.doubao_work.trace_role'] === 'log_only')).toBe(true);
     expect(child.every(event => event['gen_ai.session.id'] === 'valid-conversation')).toBe(true);
   });
   it('pairs parallel local tools by native ID and retains selected skills only in that request', async () => {

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { buildDoubaoTaskEvents, doubaoDigest, doubaoRootAgentSpanId, type DoubaoLogEvent, type DoubaoPendingTurn } from './doubao-work-log.js';
+import { buildDoubaoTaskEvents, doubaoDigest, type DoubaoLogEvent, type DoubaoPendingTurn } from './doubao-work-log.js';
 import type { NativeGraph } from './doubao-work-native.js';
 
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -105,9 +105,8 @@ export function nativeExecutionSpanId(scope: string, executionKey: string): stri
   return doubaoDigest(JSON.stringify(['doubao-native-execution', scope, executionKey])).slice(0, 16);
 }
 
-/** One independent AGENT per genuine native execution key. Missing intermediate
- * executions are collapsed to the observed root request, never synthesized.
- * Native parent identity is retained separately from the selected trace parent. */
+/** One local TASK observation per genuine native execution key. This is not
+ * a cloud Agent invocation. Missing local ancestors remain causal links. */
 export function buildNativeExecutionEvents(
   scope: string, root: DoubaoPendingTurn & { terminal: DoubaoLogEvent }, graph: NativeGraph,
   execution: NativeExecution, siblings: NativeExecution[], observedMs: number,
@@ -137,13 +136,13 @@ export function buildNativeExecutionEvents(
   const terminal = { ...root.terminal, queryMs: e.startedAtMs, timeNano: (BigInt(e.endedAtMs) * 1_000_000n).toString(), clientOutcome: 'ended' as const };
   return buildDoubaoTaskEvents(scope, pending, terminal, observedMs).map((event, index) => ({
     ...event, trace_id: traceId, 'event.id': doubaoDigest(`${identity}:event:${index}`),
-    'gen_ai.turn.id': `native-sandbox-execution:${e.executionKey}`,
-    'gen_ai.agent.id': e.agentId, 'gen_ai.agent.name': e.agentId, 'gen_ai.agent.scope': 'subagent',
-    'gen_ai.agent.parent.id': edge.parent, 'agent.pilot.parent.turn.id': root.turnId,
-    parent_span_id: parent ? nativeExecutionSpanId(scope, parent.executionKey) : doubaoRootAgentSpanId(traceId),
-    'loongsuite.doubao_work.agent_span_id': nativeExecutionSpanId(scope, e.executionKey),
+    'gen_ai.turn.id': root.turnId,
+    'gen_ai.agent.id': e.agentId, 'gen_ai.agent.name': e.agentId,
+    'loongsuite.doubao_work.native_creator_agent_id': edge.parent,
+    ...(parent ? { parent_span_id: nativeExecutionSpanId(scope, parent.executionKey) } : {}),
+    'loongsuite.doubao_work.local_execution_span_id': nativeExecutionSpanId(scope, e.executionKey),
     'loongsuite.doubao_work.observation_scope': 'native_sandbox_execution',
-    'loongsuite.doubao_work.agent_boundary': 'native_sandbox_get_or_create_to_release',
+    'loongsuite.doubao_work.local_execution_boundary': 'native_sandbox_get_or_create_to_release',
     'loongsuite.doubao_work.timing_basis': 'native_execution_startedAtMs_endedAtMs',
     'loongsuite.doubao_work.relation_basis': 'native_create_agent_ancestry',
     'loongsuite.doubao_work.parent_resolution': parent ? 'same_query_native_execution' : 'root_request_ancestor',

@@ -27,6 +27,11 @@ export const FIELDS_TO_MASK = new Set<string>([
   'system_instructions',
   'tool.definitions',
 
+  // Doubao native TASK observations are copied to Span events after masking.
+  'agent.doubao_work.tool_observations',
+  'agent.doubao_work.task_input',
+  'agent.doubao_work.task_output',
+
   'agent._cinput',
   'agent._ctext',
   'agent._ccontent',
