@@ -134,13 +134,59 @@ describe('TraceLinker', () => {
     expect(input.trace_id).toBe(UP_TRACE);
   });
 
+  it('does not consume session fallback on empty metadata in an earlier batch', async () => {
+    writeTurn('do X', TP);
+    writeSession(TP_SESS);
+    const tl = linker();
+    const metadata = otherEvent('t1', '');
+    await tl.stamp([metadata]);
+    expect(metadata.parent_span_id).toBeUndefined();
+    expect(fs.existsSync(path.join(dir, `${SID}.session-context.done`))).toBe(false);
+    const input = otherEvent('t1', 'do X');
+    const llm = llmEvent('t1');
+    await tl.stamp([input, llm]);
+    expect(input.trace_id).toBe(UP_TRACE);
+    expect(input.parent_span_id).toBe(UP_SPAN);
+    expect(llm.trace_id).toBe(UP_TRACE);
+    expect(new CorrelationStore(dir).resolveSessionFirst(SID)).toBeNull();
+  });
+
+  it('matches a pre-truncation hash without requiring a prefix or display text', async () => {
+    const prompt = '界'.repeat(33000);
+    fs.writeFileSync(path.join(dir, `${SID}.jsonl`), JSON.stringify({
+      type: 'turn', contentHash: contentHash(prompt), traceparent: TP,
+    }) + '\n');
+    const input = otherEvent('t1', '');
+    input['agent.pilot.correlation.content_hash'] = contentHash(prompt);
+    await linker().stamp([input]);
+    expect(input.trace_id).toBe(UP_TRACE);
+    expect(input.parent_span_id).toBe(UP_SPAN);
+    // Stable turn ownership also survives restart with truncated display text.
+    const replay = otherEvent('t1', prompt.slice(0, 32768) + '...[truncated]');
+    replay['agent.pilot.correlation.content_hash'] = contentHash(prompt);
+    await linker().stamp([replay]);
+    expect(replay.trace_id).toBe(UP_TRACE);
+  });
+
+  it('ignores an invalid producer hash and matches the actual text', async () => {
+    writeTurn('do X', TP);
+    const input = otherEvent('t1', 'do X');
+    input['agent.pilot.correlation.content_hash'] = 'invalid';
+    await linker().stamp([input]);
+    expect(input.trace_id).toBe(UP_TRACE);
+  });
+
   it('uses source order to identify the first turn when resolving a batch', async () => {
     writeSession(TP_SESS);
     const first = otherEvent('t1', '');
     const second = otherEvent('t2', 'later');
-    await linker().stamp([first, second]);
-    expect(first.trace_id).toBe(SESS_TRACE);
+    const tl = linker();
+    await tl.stamp([first, second]);
+    expect(first.trace_id).not.toBe(SESS_TRACE); // empty metadata cannot claim it
     expect(second.trace_id).not.toBe(SESS_TRACE);
+    const firstInput = otherEvent('t1', 'actual first input');
+    await tl.stamp([firstInput]);
+    expect(firstInput.trace_id).toBe(SESS_TRACE);
   });
 
   it('turn-level record takes priority over session-level on the first turn', async () => {

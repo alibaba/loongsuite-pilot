@@ -243,3 +243,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
 | `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
+
+### 逐轮关联原文 hash
+
+Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。

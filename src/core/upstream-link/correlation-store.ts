@@ -205,9 +205,10 @@ export class CorrelationStore {
    * turns stays linear overall instead of O(turns^2)); `contentPrefix` is a
    * fallback used only when no exact record matches (covers agents that rewrite
    * the prompt, e.g. appending `@file`). Both consume the lowest unconsumed
-   * matching record in file order. Null if no match.
+   * matching record in file order. An optional producer hash uses the same raw
+   * UTF-8 algorithm before display truncation. Null if no match.
    */
-  resolveTurn(sessionId: string, collectedText: string, turnId?: string): string | null {
+  resolveTurn(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): string | null {
     const state = this.load(sessionId);
     if (!state || state.turns.length === 0) return null;
     const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
@@ -216,7 +217,8 @@ export class CorrelationStore {
     // Exact path: advance the hash bucket cursor past already-consumed entries
     // (a bucket entry may have been consumed via the prefix fallback), then take
     // the first unconsumed index.
-    const hash = contentHash(collectedText);
+    const hash = collectedHash && /^[0-9a-f]{16}$/.test(collectedHash)
+      ? collectedHash : contentHash(collectedText);
     const bucket = state.hashIndex.get(hash);
     if (bucket) {
       let c = state.hashCursor.get(hash) ?? 0;

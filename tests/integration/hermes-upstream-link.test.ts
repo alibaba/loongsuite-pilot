@@ -23,7 +23,16 @@ describe('Hermes per-turn upstream trace linking', () => {
     }
   });
 
-  it.each([false, true])('links two tool turns without session fallback (one record per batch=%s)', async splitBatches => {
+  it.each([
+    { splitBatches: false, input: 'normal' },
+    { splitBatches: true, input: 'normal' },
+    { splitBatches: false, input: 'history-only' },
+    { splitBatches: true, input: 'history-only' },
+    { splitBatches: false, input: 'late-history' },
+    { splitBatches: true, input: 'late-history' },
+    { splitBatches: false, input: 'long-hash-only' },
+    { splitBatches: true, input: 'long-hash-only' },
+  ])('links repeated tool turns: $input (split=$splitBatches)', async ({ splitBatches, input: inputCase }) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hermes-upstream-'));
     temporaryDirectories.push(root);
     const producerDir = path.join(root, 'producer');
@@ -33,7 +42,8 @@ describe('Hermes per-turn upstream trace linking', () => {
     await fs.mkdir(correlateDir);
     const sessionId = 'hermes-native-session';
     const fixture = (await fs.readFile(FIXTURE_PATH, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    const prompt = fixture.find(event => event.hook === 'pre_llm_call').payload.user_message;
+    const nativePrompt = fixture.find(event => event.hook === 'pre_llm_call').payload.user_message;
+    const prompt = inputCase === 'long-hash-only' ? '界'.repeat(33000) : nativePrompt;
     // Deliberately repeat the same prompt: matching must consume each turn's
     // record once, in order, rather than reusing the previous turn's context.
     const turns = [
@@ -41,7 +51,8 @@ describe('Hermes per-turn upstream trace linking', () => {
       { id: 'turn-2', trace: '22222222222222222222222222222222', parent: '2222222222222222' },
     ];
     await fs.writeFile(path.join(correlateDir, `${sessionId}.jsonl`), turns.map(turn => JSON.stringify({
-      type: 'turn', sessionId, contentHash: contentHash(prompt), contentPrefix: prompt,
+      type: 'turn', sessionId, contentHash: contentHash(prompt),
+      ...(inputCase === 'long-hash-only' ? {} : { contentPrefix: prompt }),
       traceparent: `00-${turn.trace}-${turn.parent}-01`,
     })).join('\n') + '\n');
     const events = turns.flatMap(turn => fixture.map(envelope => ({
@@ -50,6 +61,16 @@ describe('Hermes per-turn upstream trace linking', () => {
       // use that id, never the provisional id allocated at pre_llm_call.
       payload: {
         ...envelope.payload, session_id: sessionId,
+        ...('user_message' in envelope.payload ? {
+          user_message: ['history-only', 'late-history'].includes(inputCase) && envelope.hook === 'pre_llm_call' ? '' : prompt,
+        } : {}),
+        ...('conversation_history' in envelope.payload ? {
+          conversation_history: inputCase === 'late-history' && envelope.hook === 'pre_llm_call' ? []
+            : envelope.payload.conversation_history.map((message: any) =>
+              message.role === 'user' ? { ...message, content: prompt } : message),
+        } : {}),
+        ...(inputCase === 'late-history' && envelope.hook === 'pre_api_request' && envelope.payload.api_call_count === 1
+          ? { conversation_history: [{ role: 'user', content: prompt }] } : {}),
         ...('task_id' in envelope.payload ? { task_id: turn.id } : {}),
       },
     })));
@@ -102,6 +123,9 @@ for event in json.loads(pathlib.Path(sys.argv[2]).read_text()):
         && record['agent.hermes.hook'] === 'turn_start');
       expect(inputs).toHaveLength(1);
       expect(inputs[0].parent_span_id).toBe(turn.parent);
+      expect(inputs[0]['agent.pilot.correlation.content_hash']).toBe(contentHash(prompt));
+      const text = (inputs[0]['gen_ai.input.messages_delta'] as any[])[0].parts[0].content;
+      expect(text).toBe(inputCase === 'long-hash-only' ? prompt.slice(0, 32768) + '...[truncated]' : prompt);
       expect(inputs[0]['gen_ai.usage.input_tokens']).toBeUndefined();
       expect(inputs[0]['gen_ai.usage.output_tokens']).toBeUndefined();
       expect(turnRecords.filter(record => record['event.name'] === 'agent.input')).toHaveLength(1);

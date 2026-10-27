@@ -1004,12 +1004,35 @@ def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> N
         emitted.add(key)
 
 
+def _capture_turn_input(turn: Dict[str, Any], messages: List[Dict[str, Any]]) -> None:
+    # Capture only this turn's first user message, before display truncation.
+    # Keep a bounded display value and the existing correlation protocol hash;
+    # gen_ai.input.messages_hash hashes a different (structured) representation.
+    if turn.get("input_content_hash"):
+        return
+    message = next((item for item in messages if item.get("role") == "user"), {})
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(str(item.get("text", item.get("content", "")) or "")
+                       for item in content if isinstance(item, dict)
+                       and item.get("type") in ("text", "input_text", "output_text"))
+    else:
+        text = ""
+    if text:
+        turn["input_text"] = _truncate(text)
+        turn["input_content_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        # Later hooks may omit history; retain the newly observed input for them.
+        turn["initial_messages"] = _bounded_value(messages)
+
+
 def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
     # Wait until the first API request has bound the native turn/task id, then
     # append input before any LLM record can be collected on a different trace.
     # The input has no step id: it is once per turn and must not collide with
     # the step-scoped turn_end marker or repeat on retries/lifecycle flushes.
-    if ("other", None, None) in turn.get("emitted", set()):
+    if ("other", None, None) in turn.get("emitted", set()) or not turn.get("input_content_hash"):
         return
     if not turn.get("input_span_id"):
         turn["input_span_id"] = _new_span_id()
@@ -1021,9 +1044,10 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
     record.update({
         "agent.hermes.hook": "turn_start",
         "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
-        "gen_ai.input.messages_delta": _messages([
-            {"role": "user", "content": turn.get("user_message", "")}
-        ]),
+        "agent.pilot.correlation.content_hash": turn["input_content_hash"],
+        "gen_ai.input.messages_delta": [{"role": "user", "parts": [
+            {"type": "text", "content": turn["input_text"]}
+        ]}],
     })
     # Reuse stable event ids and append acknowledgement. If this write fails,
     # leave the input retryable and do not let the request overtake it.
@@ -1059,6 +1083,7 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
+    _capture_turn_input(turn, messages)
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
     if index:
@@ -1353,7 +1378,9 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
         payload.get("sender_id", ""),
         payload.get("turn_id", ""),
     )
-    turn["initial_messages"] = _bounded_value(_current_turn_messages(turn, payload))
+    messages = _current_turn_messages(turn, payload)
+    _capture_turn_input(turn, messages)
+    turn["initial_messages"] = _bounded_value(messages)
     _remember_turn(state, turn, payload)
 
 
@@ -1376,6 +1403,9 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
                          payload.get("sender_id", ""), observer_turn_id)
     elif isinstance(observer_turn_id, str) and observer_turn_id:
         turn["observer_turn_id"] = observer_turn_id
+    if not turn.get("user_message") and isinstance(payload.get("user_message"), str):
+        turn["user_message"] = payload["user_message"]
+        _capture_turn_input(turn, [{"role": "user", "content": payload["user_message"]}])
     _remember_turn(state, turn, payload)
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")

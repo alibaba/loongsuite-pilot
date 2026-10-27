@@ -2,7 +2,15 @@
 
 上游应用在发送每轮用户请求前，写入一条关联记录。Pilot 采集到该轮数据后，根据会话 ID 和用户输入找到记录，让该轮调用链沿用上游 Trace ID，并挂到指定的上游 Span 下。
 
-> **版本说明**：v1.13.0 的 OpenClaw 有前置空文本事件导致关联失效的问题；Hermes 缺少携带用户文本的 `other` 输入事件，也无法按此方式逐轮关联。本分支分别修复了两个入口，并增加插件事件经过采集与 Trace 转换的两轮回归测试。部署时须使用包含相应修复的版本，Hermes 还须更新其已部署的 Pilot 插件。
+在 OpenClaw / Hermes 上使用本文方案，需要同时满足以下部署条件：
+
+- **采集器**：安装包含 [PR #508](https://github.com/alibaba/loongsuite-pilot/pull/508) 全部修复的构建或后续正式版本。发布前请使用该 PR 验证通过的完整提交构建；不能仅凭“高于 v1.13.0”判断支持。修复包括 OpenClaw 前置生命周期事件过滤、空文本不消耗 session 兜底和逐轮关联状态恢复。
+- **Hermes 插件**：更新 Hermes 实际加载的 Pilot 插件，并重启 Hermes 进程。只升级采集器或只替换磁盘文件，不会更新已运行进程中的插件。新插件从本轮用户消息生成输入事件，在截断正文前计算关联 hash。
+- **关联记录**：上游仍需在每轮请求前写入本文的 `turn` 记录，目录须对上游和 Pilot 均可访问。
+
+`TRACEPARENT` 环境变量是另一种首轮 session 关联方式，仅对调用 `recordUpstreamContextOnce` 写入 session 记录的 Hook 生效。OpenClaw / Hermes 的 Pilot 插件本身不直接读取该环境变量，设置变量不能代替逐轮关联文件。
+
+已有有效父工具上下文的子代理保留原生 trace / parent 关系，不用子会话关联文件覆盖父工具链路。
 
 ```text
 上游创建 Span → 写入关联记录 → 向 Agent 发送请求 → Pilot 采集并关联 → 输出 Trace
