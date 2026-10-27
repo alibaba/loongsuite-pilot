@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { contentHash } from '../../utils/content-hash.js';
 import { createLogger } from '../../utils/logger.js';
 
@@ -23,6 +24,8 @@ interface SessionState {
   sessions: SessionRecord[];
   /** Indices already consumed (consume-once), preserved across file re-reads. */
   consumedTurns: Set<number>;
+  /** Native turn -> record, allowing checkpoint replay to recover its own claim. */
+  resolvedTurns: Map<string, number>;
   sessionConsumed: boolean;
   /** contentHash -> ascending turn indices, for O(1) exact-match lookup. */
   hashIndex: Map<string, number[]>;
@@ -54,8 +57,9 @@ function safeName(value: string): string {
  *   - `turn`    records (adapter, per prompt): matched by content, consume-once.
  *   - `session` records (env hook, first turn): applied to a session's first turn.
  *
- * State is per-session and lazily (re)loaded by mtime. Consumption cursors live
- * in memory and survive file re-reads (records are append-only, indices stable).
+ * State is per-session and lazily (re)loaded by mtime. Atomic disk claims keep
+ * consume-once semantics across collector restarts and idle-state eviction.
+ * In-memory cursors avoid rechecking claims within one collector incarnation.
  */
 export class CorrelationStore {
   private readonly dir: string;
@@ -97,6 +101,39 @@ export class CorrelationStore {
         error: String(err),
       });
       return true;
+    }
+  }
+
+  private claimTurnContext(
+    sessionId: string, index: number, record: TurnRecord, turnId?: string,
+  ): { claimed: boolean; turnId?: string } {
+    // Include record identity so replacing a file does not make a new context
+    // collide with an old claim at the same append-only position. No prompt
+    // text or upstream credentials are copied into the marker or its name.
+    const digest = createHash('sha256').update(JSON.stringify(record)).digest('hex');
+    const marker = path.join(this.dir, `${safeName(sessionId)}.turn-context-${index}-${digest}.done`);
+    const temporary = path.join(this.dir, `.turn-claim-${randomUUID()}.tmp`);
+    try {
+      // Publish a complete owner atomically. A collector crash between create
+      // and write must not leave an empty claim that loses a replayed turn.
+      fs.writeFileSync(temporary, JSON.stringify({ turnId }), { flag: 'wx', mode: 0o600 });
+      fs.linkSync(temporary, marker);
+      return { claimed: true, turnId };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+        try {
+          const owner = JSON.parse(fs.readFileSync(marker, 'utf8')).turnId;
+          return { claimed: !!turnId && owner === turnId, turnId: typeof owner === 'string' ? owner : undefined };
+        } catch {
+          return { claimed: false };
+        }
+      }
+      logger.warn('failed to persist turn context consumption', {
+        sessionId, index, error: String(err),
+      });
+      return { claimed: true, turnId }; // I/O failure must not block collection.
+    } finally {
+      try { fs.unlinkSync(temporary); } catch { /* absent or left for retention */ }
     }
   }
 
@@ -149,6 +186,7 @@ export class CorrelationStore {
       turns,
       sessions,
       consumedTurns: existing?.consumedTurns ?? new Set<number>(),
+      resolvedTurns: existing?.resolvedTurns ?? new Map<string, number>(),
       sessionConsumed: existing?.sessionConsumed ?? this.isSessionConsumedOnDisk(sessionId),
       // Rebuilt on every (re)read; indices are stable (append-only file), and
       // cursors re-derive from consumedTurns on first use, so a reset is safe.
@@ -169,9 +207,11 @@ export class CorrelationStore {
    * the prompt, e.g. appending `@file`). Both consume the lowest unconsumed
    * matching record in file order. Null if no match.
    */
-  resolveTurn(sessionId: string, collectedText: string): string | null {
+  resolveTurn(sessionId: string, collectedText: string, turnId?: string): string | null {
     const state = this.load(sessionId);
     if (!state || state.turns.length === 0) return null;
+    const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
+    if (resolved !== undefined) return state.turns[resolved].traceparent;
 
     // Exact path: advance the hash bucket cursor past already-consumed entries
     // (a bucket entry may have been consumed via the prefix fallback), then take
@@ -180,11 +220,14 @@ export class CorrelationStore {
     const bucket = state.hashIndex.get(hash);
     if (bucket) {
       let c = state.hashCursor.get(hash) ?? 0;
-      while (c < bucket.length && state.consumedTurns.has(bucket[c])) c += 1;
-      if (c < bucket.length) {
-        const idx = bucket[c];
+      while (c < bucket.length) {
+        const idx = bucket[c++];
+        if (state.consumedTurns.has(idx)) continue;
         state.consumedTurns.add(idx);
-        state.hashCursor.set(hash, c + 1);
+        const claim = this.claimTurnContext(sessionId, idx, state.turns[idx], turnId);
+        if (claim.turnId) state.resolvedTurns.set(claim.turnId, idx);
+        if (!claim.claimed) continue;
+        state.hashCursor.set(hash, c);
         return state.turns[idx].traceparent;
       }
       state.hashCursor.set(hash, c);
@@ -198,6 +241,9 @@ export class CorrelationStore {
       const t = state.turns[i];
       if (t.contentPrefix !== undefined && t.contentPrefix.length > 0 && collectedText.startsWith(t.contentPrefix)) {
         state.consumedTurns.add(i);
+        const claim = this.claimTurnContext(sessionId, i, t, turnId);
+        if (claim.turnId) state.resolvedTurns.set(claim.turnId, i);
+        if (!claim.claimed) continue;
         return t.traceparent;
       }
     }

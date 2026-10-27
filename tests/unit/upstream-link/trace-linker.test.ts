@@ -82,6 +82,22 @@ describe('TraceLinker', () => {
     expect(llm.trace_id).toBe(UP_TRACE);
   });
 
+  it('keeps repeated prompts on distinct contexts across restart while replay keeps its own context', async () => {
+    writeTurn('do X', TP);
+    await linker().stamp([otherEvent('t1', 'do X')]);
+    writeTurn('do X', TP_SESS);
+    const restarted = linker();
+    const replay = otherEvent('t1', 'do X');
+    await restarted.stamp([replay]);
+    expect(replay.trace_id).toBe(UP_TRACE);
+    const next = otherEvent('t2', 'do X');
+    const llm = llmEvent('t2');
+    await restarted.stamp([next, llm]);
+    expect(next.trace_id).toBe(SESS_TRACE);
+    expect(next.parent_span_id).toBe(SESS_SPAN);
+    expect(llm.trace_id).toBe(SESS_TRACE);
+  });
+
   it('links an entire batch when a metadata-only other precedes the user input', async () => {
     writeTurn('do X', TP);
     const metadata = otherEvent('t1', '');
@@ -224,9 +240,8 @@ describe('TraceLinker', () => {
     await tl.stamp([other]);
     // A future cutoff means "everything older than now+1s" -> evict all.
     tl.pruneIdle(Date.now() + 1000);
-    // After eviction the store re-reads the file; the consumed record is gone
-    // from memory, so the same text resolves again (consume cursor reset).
-    expect(store.resolveTurn(SID, 'do X')).toBe(TP);
+    // Eviction must not make the disk claim reusable for another native turn.
+    expect(store.resolveTurn(SID, 'do X')).toBeNull();
   });
 
   it('pruneIdle keeps sessions accessed within the cutoff', async () => {

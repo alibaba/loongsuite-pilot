@@ -56,6 +56,51 @@ describe('CorrelationStore', () => {
     expect(store.resolveTurn(SID, 'OK')).toBeNull(); // no more
   });
 
+  it('does not reuse a consumed turn after collector restart and append', () => {
+    write([turnRec('OK', TP1)]);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK')).toBe(TP1);
+    fs.appendFileSync(path.join(dir, `${SID}.jsonl`), turnRec('OK', TP2) + '\n');
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK')).toBe(TP2);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK')).toBeNull();
+  });
+
+  it('persists prefix consumption and shares claims between existing collectors', () => {
+    write([turnRec('analyze', TP1), turnRec('analyze', TP2)]);
+    const first = new CorrelationStore(dir);
+    const second = new CorrelationStore(dir);
+    // Both stores have loaded the file before either consumes a matching turn.
+    expect(first.resolveTurn(SID, 'unrelated')).toBeNull();
+    expect(second.resolveTurn(SID, 'unrelated')).toBeNull();
+    expect(first.resolveTurn(SID, 'analyze@file:///a')).toBe(TP1);
+    expect(second.resolveTurn(SID, 'analyze@file:///b')).toBe(TP2);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'analyze@file:///c')).toBeNull();
+  });
+
+  it('restores a replayed native turn to its own context without consuming the next prompt', () => {
+    write([turnRec('OK', TP1), turnRec('OK', TP2)]);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK', 'turn-1')).toBe(TP1);
+    const restarted = new CorrelationStore(dir);
+    expect(restarted.resolveTurn(SID, 'OK', 'turn-1')).toBe(TP1);
+    expect(restarted.resolveTurn(SID, 'OK', 'turn-2')).toBe(TP2);
+    expect(restarted.resolveTurn(SID, 'OK', 'turn-1')).toBe(TP1);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK', 'turn-2')).toBe(TP2);
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'OK', 'turn-3')).toBeNull();
+  });
+
+  it('keeps turn claims private without modifying adapter records', () => {
+    write([turnRec('private prompt', TP1)]);
+    const original = fs.readFileSync(path.join(dir, `${SID}.jsonl`), 'utf8');
+    expect(new CorrelationStore(dir).resolveTurn(SID, 'private prompt')).toBe(TP1);
+    const markers = fs.readdirSync(dir).filter(file => file.endsWith('.done'));
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).not.toContain('private prompt');
+    expect(fs.readFileSync(path.join(dir, markers[0]), 'utf8')).not.toContain('private prompt');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.join(dir, markers[0])).mode & 0o777).toBe(0o600);
+    }
+    expect(fs.readFileSync(path.join(dir, `${SID}.jsonl`), 'utf8')).toBe(original);
+  });
+
   it('resolveSessionFirst returns once then null', () => {
     write([JSON.stringify({ type: 'session', sessionId: SID, traceparent: TP_SESS })]);
     const store = new CorrelationStore(dir);
@@ -109,8 +154,8 @@ describe('CorrelationStore', () => {
     // Nothing older than a past cutoff -> keep; record stays consumed.
     expect(store.pruneIdle(Date.now() - 60_000)).toBe(0);
     expect(store.resolveTurn(SID, 'OK')).toBeNull();
-    // Evict everything older than the future -> state dropped, cursor resets.
+    // Eviction drops the in-memory cursor, but must not reuse its disk claim.
     expect(store.pruneIdle(Date.now() + 1000)).toBe(1);
-    expect(store.resolveTurn(SID, 'OK')).toBe(TP1);
+    expect(store.resolveTurn(SID, 'OK')).toBeNull();
   });
 });

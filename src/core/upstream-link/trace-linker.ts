@@ -128,7 +128,7 @@ export class TraceLinker {
 
     const text = extractUserText(entry);
     const isFirstTurn = this.firstTurnBySession.get(sessionId) === turnId;
-    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn);
+    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId);
 
     if (!tp) {
       if (text) this.cache.set(key, { resolved: false });
@@ -144,7 +144,7 @@ export class TraceLinker {
     this.apply(entry, state);
   }
 
-  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean): Promise<string | null> {
+  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string): Promise<string | null> {
     // No correlation file for this session → nothing was written for it, so there
     // is nothing to wait for. Short-circuit to avoid burning the retry budget
     // (retries × retryDelayMs) on the hot path — the common case when linking is
@@ -156,7 +156,7 @@ export class TraceLinker {
     if (text) {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-        const turnTp = this.store.resolveTurn(sessionId, text);
+        const turnTp = this.store.resolveTurn(sessionId, text, turnId);
         if (turnTp) {
           if (isFirstTurn) this.store.markSessionConsumed(sessionId);
           return turnTp;
