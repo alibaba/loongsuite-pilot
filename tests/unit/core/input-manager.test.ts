@@ -372,7 +372,7 @@ describe('InputManager', () => {
       expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
     });
 
-    it('links TRACEPARENT with the native session before applying invocation session identity', async () => {
+    it.each([false, true])('links native-session input before applying invocation identity (input=%s)', async withInput => {
       const nativeSessionId = 'opencode-native-session';
       const customerSessionId = 'customer-session';
       const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
@@ -399,6 +399,9 @@ describe('InputManager', () => {
           sessionId: nativeSessionId,
           trace_id: localTraceId,
           'gen_ai.turn.id': `${nativeSessionId}:t1`,
+          ...(withInput ? { 'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'actual input' }] },
+          ] } : {}),
         });
         entry[INVOCATION_SESSION_ID_FIELD] = customerSessionId;
 
@@ -408,8 +411,13 @@ describe('InputManager', () => {
         expect(flusher.batchCalls).toHaveLength(1);
         const dispatched = flusher.batchCalls[0][0];
         expect(dispatched['gen_ai.session.id']).toBe(customerSessionId);
-        expect(dispatched.trace_id).toBe(upstreamTraceId);
-        expect(dispatched.parent_span_id).toBe(upstreamSpanId);
+        expect(dispatched.trace_id).toBe(withInput ? upstreamTraceId : localTraceId);
+        expect(dispatched.parent_span_id).toBe(withInput ? upstreamSpanId : undefined);
+        if (!withInput) {
+          // Invocation identity still applies, but metadata cannot consume the native session context.
+          expect(new CorrelationStore(correlateDir).resolveSessionFirst(nativeSessionId))
+            .toBe(`00-${upstreamTraceId}-${upstreamSpanId}-01`);
+        }
         expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
       } finally {
         await cleanupTempDir(dataDir);

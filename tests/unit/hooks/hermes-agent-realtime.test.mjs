@@ -254,7 +254,10 @@ print(json.dumps({'terminal': len(terminal)}))
       expect(new Set(out.retry_final.map(r => r['event.id'])).size).toBe(out.retry_final.length);
       expect(out.retained).toBe(1);
       const unfinished = out.retry_final.filter(r => r['gen_ai.turn.id'] === 'turn2');
-      expect(unfinished.map(r => r['event.name'])).toEqual(['other', 'llm.request', 'other']);
+      // This session never supplied a user input: keep request/terminal evidence,
+      // without emitting an empty turn_start that could claim session fallback.
+      expect(unfinished.map(r => r['event.name'])).toEqual(['llm.request', 'other']);
+      expect(unfinished.some(r => r['agent.hermes.hook'] === 'turn_start')).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 });
