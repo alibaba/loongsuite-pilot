@@ -1,310 +1,412 @@
-# AI Coding Agent Insight Schema
+# AI Agent Audit Schema
 
-本 skill 的业务语义入口，覆盖 SLS 数据源绑定、字段 schema、报表层次、公共查询原子和 CTE 口径。报表 spec 默认只引用 logical source，不在每个 spec 中重复维护真实 project/logstore。
+本 skill 的业务语义入口，覆盖应用事实、意图审计、风险事件、可选组织维表、指标口径和公共 CTE。报表 spec 通过 logical source 引用数据源。
 
-## Runtime Binding
+## Data Source Bindings
 
-- 默认 CLI profile: `test`
-- 默认 project: `agentloop-xxx`
-- 默认 region: `cn-shanghai`
+- **Project / Region**：报表目标 Project 及其所属 Region。
+- **CLI profile**：调用方指定的已配置 profile。
+- **查询时间**：SLS 查询接口和各 chartQuery 使用相同时间窗口。
+- **SQL 表名**：含连字符的 Logstore 名使用双引号包裹，例如 `"agent-event"`。
 
-| logical source | project | region | logstore | role | time field |
-|---|---|---|---|---|---|
-| `ai_coding_events` | `agentloop-xxx` | `cn-shanghai` | `agent-event-webtracking` | Agent 事件事实表 | `__time__` |
-| `dept_roster` | `agentloop-xxx` | `cn-shanghai` | `department` | 可选员工/部门维表，仅团队层报表需要 | 无独立时间过滤 |
+| logical source | logstore | 用途 | 查询时间 |
+|---|---|---|---|
+| `ai_coding_events` | `agent-event` + `agent-event-webtracking` | 同字段契约、不同写入链路的应用事实，合并读取 | `__time__`，Unix 秒 |
+| `intent_events` | `audit-event` | 普通与风险意图的识别结果；按事件名限定范围 | `__time__`，Unix 秒 |
+| `incident_events` | `incident-event` | 经过关联、过滤或提升的高保真风险 | `__time__`，Unix 秒 |
+| `dept_roster` | 客户提供，例如 `department` | 可选组织维表；不属于事件 schema | 由客户确认快照有效期 |
+
+`ebpf-event` 是独立的运行时观测来源，应用 Token 报表使用上述两张应用事实表。
 
 ## Source Composition
 
-| analysis need | required sources | can use | must not use |
-|---|---|---|---|
-| 只分析 Agent 事件事实 | `ai_coding_events` | 活跃用户、事件数、Token、Agent/模型/供应商、Skill、Tool、用户明细、Token 集中度 | 总在册人数、覆盖率、未产生日志员工列表、部门/团队 TopN、`dept_user` |
-| 需要组织、覆盖率、在册员工或团队筛选 | `ai_coding_events`, `dept_roster` | 事件事实指标 + 总人数、覆盖率、团队明细、未产生日志员工列表、部门筛选、团队 TopN | 不适用 |
+| 分析范围 | 所需数据源 | 可支持的指标 |
+|---|---|---|
+| 应用行为与用量 | `ai_coding_events` | 事件、活跃用户、Session、模型响应、Token、缓存、Tool、Skill |
+| 意图与风险 | `intent_events` / `incident_events`；按需关联应用事实 | 意图分类、风险分布、关联证据及对应的已观测用量 |
+| 组织与人群分析 | 事实源 + `dept_roster` 或客户自定义外表 | 在册人数、使用覆盖率、未使用员工、部门层级、团队筛选及部门用量 |
+| 其他业务维度 | 事实源 + 客户提供的外表 | 按用户、应用、项目等映射到客户业务维度，指标范围由外表契约确定 |
 
-具体报表名称、模块和布局属于 `cases/loongsuite-pilot-insight/input/<scenario>-spec.md`；本文件只定义数据源能力和组合边界。
+事件事实只能给出已观测用户及行为；在册员工、姓名、部门和业务归属由外表补充。外表关联能力独立于事实 schema，具体表名、关联键、唯一性及有效期在接入时绑定。报表名称、TopN、筛选项和布局放在场景 spec 中。
 
 ## Source: ai_coding_events
 
-Agent 事件日志，每条记录对应一次 LoongSuite Pilot / AI Coding Agent 调用事件。
+每条记录对应一次 Agent 行为事件。模型调用、工具调用和会话行为通过 `event.name` 区分；`user.id` 表示发起请求的用户，具体标识形式由接入方式决定。
 
-- **角色**: 主事实表
-- **默认 chartQuery logstore**: `agent-event-webtracking`
-- **SQL 约定**: 在该 logstore 的图表查询中，事件表可用 `FROM log`；跨 logstore CTE 中需要显式表名时，`agent-event-webtracking` 需用引号包裹为 `"agent-event-webtracking"`。
+### 字段 Schema
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `__time__` | long | 事件时间戳（Unix 秒） |
-| `event.id` | text | 事件唯一 ID |
-| `event.parent.id` | text | 父事件 ID |
-| `event.name` | text | 事件类型，如 `llm.request`、`llm.response`、`tool.call`、`tool.result` |
-| `user.id` | text | 用户工号 |
-| `gen_ai.session.id` | text | 会话 ID |
-| `gen_ai.turn.id` | text | Turn ID |
-| `gen_ai.step.id` | text | Step ID |
-| `gen_ai.agent.id` | text | Agent ID |
-| `gen_ai.agent.name` | text | Agent 名称 |
-| `gen_ai.agent.type` | text | Agent 类型 |
-| `gen_ai.provider.name` | text | 模型供应商 |
-| `gen_ai.request.id` | text | 请求 ID |
-| `gen_ai.request.model` | text | 请求模型名 |
-| `gen_ai.input.messages_delta` | json | 请求输入消息增量 |
-| `gen_ai.response.id` | text | 模型响应 ID |
-| `gen_ai.response.model` | text | 响应模型名；当 request.model 缺失时作为 fallback |
-| `gen_ai.response.finish_reasons` | text | 响应结束原因 |
-| `gen_ai.output.messages` | json | 响应输出消息内容 |
-| `gen_ai.usage.input_tokens` | long | 输入 Token 数 |
-| `gen_ai.usage.output_tokens` | long | 输出 Token 数 |
-| `gen_ai.usage.total_tokens` | long | 总 Token 数 |
-| `gen_ai.usage.cache_creation.input_tokens` | long | Cache creation 输入 Token 数 |
-| `gen_ai.usage.cache_read.input_tokens` | long | Cache read 输入 Token 数 |
-| `gen_ai.usage.input_cost` | double | 输入成本 |
-| `gen_ai.usage.output_cost` | double | 输出成本 |
-| `gen_ai.usage.total_cost` | double | 总成本 |
-| `gen_ai.tool.name` | text | 工具名称 |
-| `gen_ai.tool.call.id` | text | 工具调用 ID |
-| `gen_ai.tool.call.exec.id` | text | 工具执行 ID |
-| `gen_ai.tool.call.arguments` | json | 工具调用参数 |
-| `gen_ai.tool.call.arguments.file_path` | text | 从工具调用参数索引出的文件路径；用于 Skill 名解析 |
-| `gen_ai.tool.call.result` | json | 工具调用结果 |
-| `gen_ai.tool.call.duration` | long | 工具调用耗时 |
-| `error.type` | text | 错误类型 |
-| `error.message` | text | 错误信息 |
-| `trace_id` | text | Trace ID |
-| `span_id` | text | Span ID |
-| `parent_span_id` | text | Parent Span ID |
-| `service.name` | text | 服务名 |
-| `host.id` | text | 主机 ID |
-| `host.ip` | text | 主机 IP |
-| `host.name` | text | 主机名 |
+SLS 元数据 `__time__` 为秒级过滤时间，`__source__`、`__tag__:*` 按实际索引访问；语义时间 `time_unix_nano` 为 int64 纳秒，不可把两者单位混用。下面的 string/int/json 是逻辑类型，SQL 能否分析仍需确认索引类型及统计开关。
 
-### 常用过滤条件
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `event.id` | string | 事件唯一标识，全局唯一。 |
+| `event.name` | string | 事件类型，表示该条记录描述的行为类别。取值见“事件名称与兼容名称”。 |
+| `time_unix_nano` | int64 | 事件发生时间，单位为纳秒级 Unix 时间戳。 |
 
-- `event.name: "tool.call"` — 仅工具调用事件
-- `"gen_ai.tool.name" IS NOT NULL` — 有工具名的事件
-- `regexp_like("gen_ai.tool.call.arguments.file_path", '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')` — 可解析 Skill 名的事件；若本地只有 JSON 参数字段，再改用 `json_extract_scalar("gen_ai.tool.call.arguments", '$.file_path')`
-- `"error.type" IS NOT NULL OR "error.message" IS NOT NULL` — 异常事件
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `__tag__:__hostname__` | string | SLS LogGroup 主机名元数据。`host.name` 为空或缺失时，用作主机名的兼容值。 |
+| `__source__` | string | SLS 写入来源元数据。`host.ip` 为空或缺失时，用作 Agent 主机 IP 的兼容值；不表示网络对端或外联目标。 |
+| `host.id` | string | 主机或执行环境的稳定标识。 |
+| `host.name` | string | Agent 运行所在的主机、Pod、容器或执行环境名称。 |
+| `host.ip` | string | Agent 运行所在主机的 IP 地址。审计结果表将该值平铺为 `source_ip`。 |
 
-### 派生字段
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `user.id` | string | 发起请求的用户标识。 |
+| `gen_ai.agent.type` | string | Agent 类型标识，例如 `qoder`、`cursor`、`claude-code`。 |
+| `gen_ai.agent.id` | string | Agent 实例唯一标识。 |
+| `gen_ai.agent.name` | string | Agent 实例的可读名称。 |
 
-`gen_ai.skill.name` 当前线上没有赋值，不作为事实字段使用。
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gen_ai.session.id` | string | 会话唯一标识，对应一次完整的 Agent 对话或任务。 |
+| `gen_ai.turn.id` | string | Turn 唯一标识，对应一次用户输入到 Agent 最终响应的完整交互。 |
+| `gen_ai.turn.start` | boolean | 是否为 Turn 的起始事件。仅在值为 `true` 时写入。 |
+| `gen_ai.turn.end` | boolean | 是否为 Turn 的结束事件。仅在值为 `true` 时写入。 |
+| `gen_ai.step.id` | string | Step 唯一标识，对应一个 ReAct 循环（思考 → 动作 → 观察）。 |
 
-```sql
-WHERE regexp_like(t."gen_ai.tool.call.arguments.file_path", '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gen_ai.provider.name` | string | 模型服务提供方标识，例如 `anthropic`、`openai`、`qwen`、`deepseek`。 |
+| `gen_ai.request.model` | string | 请求模型名称。 |
+| `gen_ai.response.model` | string | 实际响应的模型名称，可能与请求模型不同。 |
+| `gen_ai.response.id` | string | 模型响应的唯一标识，由模型服务返回。 |
+| `gen_ai.response.finish_reasons` | string[] | 模型停止原因，常见取值包括 `stop`、`tool_calls`、`length`、`content_filter`、`error`。 |
 
-CASE
-  WHEN regexp_like(regexp_extract("gen_ai.tool.call.arguments.file_path", '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\.[0-9]+')
-  THEN regexp_extract("gen_ai.tool.call.arguments.file_path", '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)
-  WHEN lower(regexp_extract("gen_ai.tool.call.arguments.file_path", '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')
-  THEN regexp_replace(regexp_extract("gen_ai.tool.call.arguments.file_path", '/([^/]+)$', 1), '(?i)(\.skill)?\.md$', '')
-  ELSE regexp_extract("gen_ai.tool.call.arguments.file_path", '/([^/]+)/[^/]+$', 1)
-END AS skill_name
-```
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gen_ai.input.messages_delta` | json | 增量输入消息，记录自上次可重建输入以来新增的消息内容。是审计分析和 Session 浏览中使用的主要输入内容字段。 |
+| `gen_ai.input.messages` | json | 发送给模型的完整消息历史。该字段可能包含敏感信息，按需启用采集。 |
+| `gen_ai.output.messages` | json | 模型输出消息，包含角色、文本、工具调用和推理内容。 |
+| `gen_ai.system_instructions` | json | 系统指令或开发者指令，与对话消息分离的提示词内容。 |
+| `gen_ai.tool.definitions` | json | 模型请求时可用的工具定义列表。 |
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gen_ai.usage.input_tokens` | int | 输入 Token 数量（包含缓存读取）。 |
+| `gen_ai.usage.output_tokens` | int | 输出 Token 数量。 |
+| `gen_ai.usage.cache_read.input_tokens` | int | 从缓存中读取的输入 Token 数量，已包含在 `input_tokens` 中。 |
+| `gen_ai.usage.cache_creation.input_tokens` | int | 写入缓存的输入 Token 数量，已包含在 `input_tokens` 中。 |
+| `gen_ai.usage.total_tokens` | int | 总 Token 数量，等于 `input_tokens + output_tokens`。 |
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gen_ai.tool.name` | string | 工具名称，与模型调用中的 function/tool name 一致。 |
+| `gen_ai.tool.call.id` | string | 工具调用标识，由模型生成，用于关联调用与结果。 |
+| `gen_ai.tool.call.arguments` | json | 工具调用参数。该字段可能包含敏感信息。 |
+| `gen_ai.tool.call.result` | json | 工具执行结果。该字段可能包含敏感信息。 |
+| `gen_ai.tool.call.duration` | int | 工具执行耗时，单位为毫秒。 |
+| `gen_ai.skill.name` | string | 工具加载的 Skill 名称（如适用）。 |
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `error.type` | string | 错误类型标识，在操作发生错误时写入。无错误时该字段不存在。 |
+| `error.message` | string | 错误详情的可读描述。 |
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `trace_id` | string | W3C Trace ID（32 位十六进制），用于分布式链路关联。 |
+| `span_id` | string | Span ID（16 位十六进制）。 |
+| `parent_span_id` | string | 父 Span ID（16 位十六进制）。 |
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `__tag__:__service_name__` | string | Agent 应用或服务名称，用于按应用维度筛选和归因。 |
+| `service.name` | string | 应用名称（备用），当 `__tag__:__service_name__` 缺失时作为补充。 |
+
+### 事件名称与兼容名称
+
+| 行为 | 标准事件名 | 兼容事件名 |
+|---|---|---|
+| 模型请求 | `gen_ai.model.request` | `llm.request` |
+| 模型响应 | `gen_ai.model.response` | `llm.response` |
+| 工具调用 | `gen_ai.tool.call` | `tool.call` |
+| 工具结果 | `gen_ai.tool.result` | `tool.result` |
+| 子 Agent 调用/结果 | `gen_ai.agent.invoke` / `gen_ai.agent.result` | — |
+
+模型与工具统计同时匹配标准事件名和兼容事件名。其他名称（如 `agent.input`、`other`）保留原值，分别统计。
+
+### 指标口径
+
+- 应用事件数：两表合并后的记录数（不额外去重）。模型响应数：仅上述两种 response 事件名；不得把 request、response、tool 混作调用数。
+- Token：在响应粒度统计输入、输出，`total = input + output`。`input_tokens` 已包含 cache read 和 cache creation，不再重复相加。缺失用量不是零；可用已采集字段求“已观测 Token”，同时给出完整用量响应数/覆盖率，不当成完整消耗或账单。
+- 缓存命中率：有效配对样本上的 `sum(cache_read_tokens) / sum(input_tokens)`；有效条件为输入 > 0 且 0 ≤ 缓存读取 ≤ 输入。显式缓存 0 是未命中，字段缺失是未知；缺失、异常样本不进该比率分子分母，必须另报覆盖率与异常数。跨模型/Agent 汇总重新相除，不平均百分比。
+- 用量一致性：`cache_read_tokens > input_tokens` 属于异常缓存样本，单独计数；总 Token 按输入与输出之和计算。
+- Agent 维度使用 `gen_ai.agent.type`，未知单列；实例名称不等于类型。模型优先 `gen_ai.response.model`（实际响应），再用请求模型，最后 `unknown`。若看请求模型分布，应单独命名。
+- 活跃用户按有效 `user.id` 去重；缺失用户只从用户 Top 中排除，不能从全量用量悄悄排除。Session/Turn 按用户及会话上下文计数，不把 Turn 当成已完成业务任务。
+- Tool 次数只统计 call；`gen_ai.skill.name` 是可选字段，先查非空覆盖。可从已执行工具读取的 `file_path` 派生 Skill 名，但必须标成路径推断，核对工具及结果，不能仅凭模型消息中的调用意图认定已执行。
+- 成本统计需要独立的账单或价格表，Token 用量本身不表示人民币、credits、节省金额或业务效率。使用 `gen_ai.usage.*_cost` 等扩展字段前，确认目标数据源的字段定义和采集覆盖。
 
 ### SQL 原子元素
 
-这些元素来自当前报表的已校验查询，是可组合构件，不是完整图表 SQL。生成新报表时按 `事实层清洗 -> 可选维表 JOIN -> 目标聚合` 组合，按需裁剪未使用字段。
+按需求组合基础表达式、过滤条件和聚合，再选择是否使用公共 CTE 或外表。下面是局部构件，不要求每个图表复制完整 CTE。
 
 #### 基础清洗表达式
 
+以下投影直接作用于原始 Logstore 行。复制到已有 CTE 时，使用该层实际保留的列名；例如原始 `"user.id"` 先投影为 `user_id` 后，后续层对 `user_id` 清洗。不能在尚未产生别名的查询层引用它。
+
+| 用途 | 原始行表达式 | 说明 |
+|---|---|---|
+| 用户标识 | `nullif(nullif("user.id", ''), 'null') AS user_id` | 清洗后 `user_id IS NOT NULL` 才是有效用户；全量行为/用量事实不能因此被过滤。 |
+| Session 标识 | `nullif(nullif("gen_ai.session.id", ''), 'null') AS session_id` | 关联 Session 时仍须结合用户、来源等身份上下文。 |
+| Agent 类型 | `coalesce(nullif(nullif("gen_ai.agent.type", ''), 'null'), 'unknown') AS agent_type` | 不用 Agent 实例名称替代类型。 |
+| 供应商 | `coalesce(nullif(nullif("gen_ai.provider.name", ''), 'null'), 'unknown') AS provider` | 未知值保留为 `unknown`。 |
+| 实际响应模型 | `coalesce(nullif(nullif("gen_ai.response.model", ''), 'null'), nullif(nullif("gen_ai.request.model", ''), 'null'), 'unknown') AS model` | 按实际响应优先；请求模型分析应单独命名。 |
+| 输入 Token | `try_cast("gen_ai.usage.input_tokens" AS bigint) AS input_tokens` | 转换失败或字段缺失仍是未知。 |
+| 输出 Token | `try_cast("gen_ai.usage.output_tokens" AS bigint) AS output_tokens` | 缺失或转换失败仍是未知。 |
+| 缓存读取 Token | `try_cast("gen_ai.usage.cache_read.input_tokens" AS bigint) AS cache_read_tokens` | 可缺失；只在缓存有效样本过滤通过时进入比率。 |
+| 工具名称 | `nullif(nullif("gen_ai.tool.name", ''), 'null') AS tool_name` | 只在需要 Tool 分析时投影。 |
+| Skill 显式字段 | `nullif(nullif("gen_ai.skill.name", ''), 'null') AS skill_name_explicit` | 可选字段；先检查覆盖率。非空时优先作为 Skill 名称。 |
+
+响应中的 `observed_tokens` 使用 `coalesce(input_tokens, 0) + coalesce(output_tokens, 0)`；基础数值列仍保留 NULL，用于计算字段覆盖。两个事实源按相同投影合并，Tool、Skill、错误等字段仅在对应分析需要时补充。
+
+#### 常用过滤条件
+
+以下条件除错误事件外使用已清洗的别名。过滤所需字段必须已投影到当前层；直接查询原始行时使用对应源字段表达式。模型响应、工具调用等条件分别作用于相应事实范围，不应互相套用。例如原始行的 Tool call 条件是 `"event.name" IN ('gen_ai.tool.call', 'tool.call')`；`event_name` 是投影后的别名。
+
+| 条件 | 表达式 | 用途 |
+|---|---|---|
+| 有效用户 | `user_id IS NOT NULL` | 用户统计；全量用量不因此丢弃缺失用户的事实 |
+| 模型响应 | `event_name IN ('gen_ai.model.response', 'llm.response')` | 响应数、Token 与缓存分析 |
+| 工具调用 | `event_name IN ('gen_ai.tool.call', 'tool.call')` | 调用数；结果事件不计入，调用本身不等于执行完成 |
+| 有工具名 | `tool_name IS NOT NULL` | 工具名已按基础表达式清洗 |
+| 有效缓存样本 | `input_tokens > 0 AND cache_read_tokens >= 0 AND cache_read_tokens <= input_tokens` | 仅响应粒度；作为 `cache_valid`，无效/缺失样本另计 |
+| 错误事件 | `nullif(nullif("error.type", ''), 'null') IS NOT NULL OR nullif(nullif("error.message", ''), 'null') IS NOT NULL` | 原始行条件；经 CTE 时需先投影相应错误列 |
+
+#### Skill 来源与路径推断
+
+Skill 名优先使用非空 `gen_ai.skill.name`。字段缺失时，可将文件路径单列为 `path_inferred` 候选；名称解析按实际目录布局确定，不把路径推断当作直接采集事实。
+
+先确认路径字段的索引与分析配置：已建立动态子字段时可用 `"gen_ai.tool.call.arguments.file_path" AS skill_path`；仅保留 JSON 参数时使用 `json_extract_scalar("gen_ai.tool.call.arguments", '$.file_path') AS skill_path`。选择当前表实际支持的表达式，不能用 COALESCE 引用不存在的子字段。路径候选谓词为：
+
 ```sql
-"user.id" AS user_id
-coalesce(nullif("gen_ai.agent.type", 'null'), nullif("gen_ai.agent.name", 'null'), 'unknown') AS agent_type
-coalesce(nullif("gen_ai.provider.name", 'null'), 'unknown') AS provider
-coalesce(nullif("gen_ai.request.model", 'null'), nullif("gen_ai.response.model", 'null'), 'unknown') AS model
-coalesce("gen_ai.usage.input_tokens", 0) AS input_tokens
-coalesce("gen_ai.usage.output_tokens", 0) AS output_tokens
-coalesce("gen_ai.usage.total_tokens", 0) AS total_tokens
+regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 ```
 
-- 有效事件用户：`"user.id" IS NOT NULL AND "user.id" <> ''`。
-- `agent_type` 优先用 `gen_ai.agent.type`，缺失时 fallback 到 `gen_ai.agent.name`。
-- `model` 优先用 request model，缺失时 fallback 到 response model。
-- `'null'` 字符串按缺失值处理；空字符串暂不额外归一为 `NULL`，除非后续数据质量确认需要。
+该谓词只识别路径形态。确认 Skill 加载或工具执行还需核对工具种类、匹配结果或其他执行证据；不能将模型消息中的调用意图直接当作执行事实。
 
 #### 时间粒度
 
-```sql
-date_trunc('day', __time__) AS t
-date_format(from_unixtime(__time__), '%H:00') AS h
-```
+`__time__` 为原始 Unix 秒；已投影为 `ts` 的 CTE 使用 `ts`。连续趋势保留日期，日内小时分布才折叠为 24 个时段。以下固定时差日桶假设报表采用 UTC+8；其他时区按其时区规则计算，不能直接沿用该偏移。
 
-- 日趋势统一使用 `t` 作为时间列。
-- 小时分布展示为 `HH:00`，例如 `09:00`、`18:00`；不要再输出整数小时。
-
-#### 事实层聚合
-
-`event_user_day` 用于大多数趋势、分布、明细和 Token 集中度视图：
-
-```sql
-SELECT
-  date_trunc('day', __time__) AS t,
-  "user.id" AS user_id,
-  <agent_type> AS agent_type,
-  <provider> AS provider,
-  <model> AS model,
-  sum(<input_tokens>) AS input_tokens,
-  sum(<output_tokens>) AS output_tokens,
-  sum(<total_tokens>) AS total_tokens,
-  count(1) AS events
-FROM log
-WHERE "user.id" IS NOT NULL AND "user.id" <> ''
-GROUP BY t, user_id, agent_type, provider, model
-```
-
-`event_user_hour` 用于 Token 使用时段分布：
-
-```sql
-SELECT
-  date_format(from_unixtime(__time__), '%H:00') AS h,
-  "user.id" AS user_id,
-  sum(<total_tokens>) AS total_tokens
-FROM log
-WHERE "user.id" IS NOT NULL AND "user.id" <> ''
-GROUP BY h, user_id
-```
-
-`tool_call` 用于工具调用 TopN：
-
-```sql
-nullif(nullif("gen_ai.tool.name", 'null'), '') AS tool_name
-```
-
-`skill_call` 用于 Skill TopN。线上优先使用已索引的扁平字段 `gen_ai.tool.call.arguments.file_path`；若本地数据只有 JSON 字段，再改用 `json_extract_scalar("gen_ai.tool.call.arguments", '$.file_path')`。
-
-```sql
-WHERE regexp_like(<file_path>, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
-
-CASE
-  WHEN regexp_like(regexp_extract(<file_path>, '/([^/]+)/[^/]+$', 1), '^v?[0-9]+\.[0-9]+')
-  THEN regexp_extract(<file_path>, '/([^/]+)/v?[0-9][^/]*/[^/]+$', 1)
-  WHEN lower(regexp_extract(<file_path>, '/([^/]+)/[^/]+$', 1)) IN ('skills', 'skill', '.claude', 'agents', 'resources', '.qoderwork', 'docs')
-  THEN regexp_replace(regexp_extract(<file_path>, '/([^/]+)$', 1), '(?i)(\.skill)?\.md$', '')
-  ELSE regexp_extract(<file_path>, '/([^/]+)/[^/]+$', 1)
-END AS skill_name
-```
-
-#### 可组合指标
-
-| 指标 | 推荐来源 | 聚合方式 | 备注 |
-|---|---|---|---|
-| 事件数 | `event_user_day.events` | `sum(events)` | count 可加 |
-| 活跃用户数 | `event_user_day.user_id` | `approx_distinct(user_id)` | 事件层报表中的使用人数 |
-| 输入/输出/总 Token | `event_user_day.*_tokens` | `sum(...)` | Token 可加 |
-| 单事件平均 Token | `event_user_day` | `sum(total_tokens) / nullif(sum(events), 0)` | 表格中保留 2 位小数 |
-| AI Agent / 模型 / 供应商占比 | `event_user_day` | 按维度 group，`sum(total_tokens)` | 饼图或 Top 表 |
-| Tool 调用次数 | `tool_call.tool_name` | `count(1)` | 过滤空 tool |
-| Skill 调用次数 | `skill_call.skill_name` | `count(1)` | 过滤空值和 `SKILL` |
-| Skill 使用人数 | `skill_call.skill_name`, `user_id` | `approx_distinct(user_id)` | 不依赖部门维表 |
-
-#### Token 集中度模式
-
-集中度类图表使用三步组合：
-
-1. `user_token`: 按用户汇总总 Token；事件层报表只包含有事件的用户，团队层报表可从 `dept_user` LEFT JOIN 保留 0 Token 员工。
-2. `ranked`: 用 `row_number() OVER (ORDER BY total_tokens DESC)`、`count(1) OVER ()` 和 `sum(total_tokens) OVER ()` 得到排名、人数和总 Token。
-3. 目标视图：Top10/Top20 占比、互斥分层或按天分区趋势。
-
-互斥分层推荐：
-
-| 分层 | 条件 | 说明 |
+| 粒度 | Unix 秒桶表达式 | 展示与边界 |
 |---|---|---|
-| `Top 10%` | `rn <= ceil(user_count * 0.10)` | 贡献最高的前 10% 用户 |
-| `10%-20%` | `rn <= ceil(user_count * 0.20)` 且不在 Top10% | Top20% 扣除 Top10% |
-| `后80%` | 其余用户 | 长尾用户 |
+| 连续小时 | `cast(floor(__time__ / 3600) * 3600 AS bigint) AS hour_ts` | 保留日期，按报表时区展示 |
+| UTC+8 自然日 | `cast(floor((__time__ + 28800) / 86400) * 86400 - 28800 AS bigint) AS day_ts` | 桶值仍是 Unix 秒；按北京时间展示日期 |
 
-按天集中度趋势时，窗口函数都加 `PARTITION BY t`。
+缺失观测不直接当作业务零。周内分布保留星期与小时，避免与日内 24 小时分布混淆。
 
-#### 事件层报表边界
+#### 可组合指标与可加性
 
-当 spec 的 `data.sources` 只有 `ai_coding_events` 时：
+| 指标 | 聚合原子 | 来源与汇总约束 |
+|---|---|---|
+| 事件数 / 响应数 | `count(*)` | 分别来自 `event_base` / `usage_events`，不额外去重 |
+| 已观测 Token | `sum(observed_tokens)` | 仅模型响应；保留完整用量字段覆盖 |
+| 活跃用户 | `approx_distinct(user_id)` | NULL 用户不计人数；跨组 distinct 数不可相加 |
+| Session / Turn | 按对应身份键去重 | 保留用户、来源及会话上下文；跨组不可直接相加 |
+| 平均响应用量 | `1.0 * sum(observed_tokens) / nullif(count(*), 0)` | `usage_events` 粒度；非整数除法，重算分子分母 |
+| 缓存命中率 | `1.0 * sum(CASE WHEN cache_valid THEN cache_read_tokens END) / nullif(sum(CASE WHEN cache_valid THEN input_tokens END), 0)` | `usage_events` 中条件聚合；比率为 0–1，展示百分比时乘 100 |
+| 有效缓存覆盖 | `1.0 * count_if(cache_valid) / nullif(count(*), 0)` | 有效缓存响应数 / 全部模型响应数；另列字段缺失与异常 |
+| Tool / Skill | 在相应调用事实中按名称计数及用户去重 | 显式 Skill 与路径推断分开命名；不能跨组相加用户数 |
+| 人群覆盖率 | 匹配事实的人群数 / 外表目标人群数 | 外表决定分母；零 Token 不等于未使用 |
+| Token 集中度 | 先按用户汇总，再用窗口函数排名和累计 | 明确人群范围；分层互斥，按天分析时按日期分区 |
 
-- 可以生成活跃用户、事件数、Token、Agent/模型/供应商/Tool/Skill、用户明细和 Token 集中度。
-- 不生成总在册人数、覆盖率、未产生日志员工列表、部门/团队 TopN；这些都需要 `dept_roster` 或客户自定义外表。
-- 用户维度使用 `user_id`，展示名可写 `用户ID` 或 `工号`，但不能补充姓名、部门或团队。
-- 不使用 `dept_user`、`dept_name_*` 或 `department`。
+### 公共 CTE 组合示例
 
-### 关联方式
-
-通过 `"user.id"` 与员工维表的 `work_no` 关联。
-
-## Source: dept_roster
-
-部门花名册原始表，用于团队层报表的部门统计和覆盖率计算。事件层报表不依赖该表。
-
-- **角色**: 维表（通过 CTE `dept_user` 引用）
-- **logstore**: `department`
-- **索引字段**: `dept_name`、`name`、`work_no`
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `work_no` | text | 工号 |
-| `name` | text | 姓名 |
-| `dept_name` | text | 完整部门路径，建议使用 `一级部门-二级部门-三级组` 三段结构 |
-
-### 数据清洗规则
-
-- 有效员工：`work_no IS NOT NULL AND work_no <> ''`
-- 不内置任何特定组织范围过滤；如客户需要限制事业部、外包或测试账号，在本文件中补充本地过滤规则。
-
-### 部门层级拆分
+以下示例展示“事实合并与清洗 → 响应用量”的组合接口。按报表需要裁剪字段和 CTE，或补充已披露的工具等字段；完整查询以 `* |` 起始，在 CTE 后接目标 SELECT。
 
 ```sql
-COALESCE(SPLIT_PART(dept_name, '-', 1), '') AS dept_name_1  -- 一级部门/事业群/中台
-COALESCE(SPLIT_PART(dept_name, '-', 2), '') AS dept_name_2  -- 二级部门（主要统计维度）
-COALESCE(SPLIT_PART(dept_name, '-', 3), '') AS dept_name_3  -- 三级组/团队
-```
-
-### 公共 CTE
-
-```sql
-WITH dept_user AS (
-  SELECT
-    work_no,
-    name,
-    COALESCE(SPLIT_PART(dept_name, '-', 1), '') AS dept_name_1,
-    COALESCE(SPLIT_PART(dept_name, '-', 2), '') AS dept_name_2,
-    COALESCE(SPLIT_PART(dept_name, '-', 3), '') AS dept_name_3
-  FROM department
-  WHERE work_no IS NOT NULL AND work_no <> ''
-  GROUP BY work_no, name, dept_name
-),
-active_user AS (
-  SELECT
-    date_trunc('day', __time__) AS t,
-    "user.id" AS user_id,
-    coalesce(nullif("gen_ai.agent.type", 'null'), nullif("gen_ai.agent.name", 'null'), 'unknown') AS agent_type,
-    coalesce(nullif("gen_ai.provider.name", 'null'), 'unknown') AS provider,
-    coalesce(nullif("gen_ai.request.model", 'null'), nullif("gen_ai.response.model", 'null'), 'unknown') AS model,
-    sum(coalesce("gen_ai.usage.input_tokens", 0)) AS input_tokens,
-    sum(coalesce("gen_ai.usage.output_tokens", 0)) AS output_tokens,
-    sum(coalesce("gen_ai.usage.total_tokens", 0)) AS total_tokens,
-    sum(coalesce("gen_ai.usage.input_cost", 0)) AS input_cost,
-    sum(coalesce("gen_ai.usage.output_cost", 0)) AS output_cost,
-    sum(coalesce("gen_ai.usage.total_cost", 0)) AS total_cost,
-    count(1) AS events
-  FROM log
-  WHERE "user.id" IS NOT NULL AND "user.id" <> ''
-  GROUP BY t, user_id, agent_type, provider, model
+WITH event_raw AS (
+  SELECT __time__ AS ts, "event.name" AS event_name, "user.id" AS user_id,
+    "gen_ai.session.id" AS session_id, "gen_ai.agent.type" AS agent_type,
+    "gen_ai.provider.name" AS provider,
+    coalesce(nullif(nullif("gen_ai.response.model", ''), 'null'),
+      nullif(nullif("gen_ai.request.model", ''), 'null'), 'unknown') AS model,
+    try_cast("gen_ai.usage.input_tokens" AS bigint) AS input_tokens,
+    try_cast("gen_ai.usage.output_tokens" AS bigint) AS output_tokens,
+    try_cast("gen_ai.usage.cache_read.input_tokens" AS bigint) AS cache_read_tokens
+  FROM "agent-event"
+  UNION ALL
+  SELECT __time__ AS ts, "event.name" AS event_name, "user.id" AS user_id,
+    "gen_ai.session.id" AS session_id, "gen_ai.agent.type" AS agent_type,
+    "gen_ai.provider.name" AS provider,
+    coalesce(nullif(nullif("gen_ai.response.model", ''), 'null'),
+      nullif(nullif("gen_ai.request.model", ''), 'null'), 'unknown') AS model,
+    try_cast("gen_ai.usage.input_tokens" AS bigint) AS input_tokens,
+    try_cast("gen_ai.usage.output_tokens" AS bigint) AS output_tokens,
+    try_cast("gen_ai.usage.cache_read.input_tokens" AS bigint) AS cache_read_tokens
+  FROM "agent-event-webtracking"
+), event_base AS (
+  SELECT ts, event_name,
+    nullif(nullif(user_id, ''), 'null') AS user_id,
+    nullif(nullif(session_id, ''), 'null') AS session_id,
+    coalesce(nullif(nullif(agent_type, ''), 'null'), 'unknown') AS agent_type,
+    coalesce(nullif(nullif(provider, ''), 'null'), 'unknown') AS provider,
+    model, input_tokens, output_tokens, cache_read_tokens
+  FROM event_raw
+), usage_events AS (
+  SELECT *, coalesce(input_tokens, 0) + coalesce(output_tokens, 0) AS observed_tokens,
+    input_tokens > 0 AND cache_read_tokens >= 0 AND cache_read_tokens <= input_tokens AS cache_valid
+  FROM event_base
+  WHERE event_name IN ('gen_ai.model.response', 'llm.response')
 )
 ```
 
-| CTE | GROUP BY | 用途 |
-|-----|----------|------|
-| `dept_user` | `work_no` | 花名册，含部门层级拆分 |
-| `active_user` | `t`, `user_id`, `agent_type`, `provider`, `model` | 每天 × 用户 × Agent × 供应商 × 模型粒度汇总（Token/成本/事件） |
+| 构件 | 粒度与用途 |
+|---|---|
+| `event_base` | 全部应用事件；用户活动、事件类型、Tool、Skill 等分析的基础 |
+| `usage_events` | 模型响应；Token、缓存及用量字段覆盖统计的基础 |
+| `event_user_day` / `active_user` | 按北京时间日期 × 用户 × Agent × 供应商 × 模型预聚合；事件数来自全部事件，Token 仅累计响应事件 |
+| `user_activity` / `user_usage` | 在目标窗口内按用户预聚合，供人群及组织外表关联 |
+| Session 聚合 | 包含用户、来源及 Session 身份，按需要保留 Agent、模型等维度；先聚合再关联标签或风险 |
 
-### 字段可加性
+## Source: intent_events
 
-| 字段 | 外层可用 `sum()` | 说明 |
-|------|:---:|------|
-| `input_tokens` | Yes | 每条事件唯一属于一个 GROUP BY 组，sum 精确 |
-| `output_tokens` | Yes | 同上 |
-| `total_tokens` | Yes | 同上 |
-| `input_cost` | Yes | 同上 |
-| `output_cost` | Yes | 同上 |
-| `total_cost` | Yes | 同上 |
-| `events` | Yes | count 可加 |
-| `approx_distinct(...)` | No | 不可加。同一实体可能跨多个 GROUP BY 组，sum 会膨胀 |
+意图审计结果存储于共享的 `audit-event`。查询必须限定 `event_name IN ('intent.user_intent', 'intent.custom_user_intent')`，不能把同表的安全发现或 Skill 事实计为意图。`event_domain = 'user_intent'` 表示普通意图，`event_domain = 'security'` 表示风险意图。
 
-- JOIN 条件：`d.work_no = a.user_id`
-- 查询前缀：团队层报表可继续使用 `*|`；需要跨 logstore CTE 时显式引用 `department`
-- 按需裁剪：图表只需要部分 CTE 时，省略不用的即可
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `audit_event_id` | string | 审计结果标识。 |
+| `event_name` | string | `intent.user_intent` 或 `intent.custom_user_intent`，区分默认与自定义意图识别。 |
+| `event_domain` | string | 普通意图为 `user_intent`，风险意图为 `security`。 |
+| `source_scope` | string | 证据来源范围；跨表关联必须保留，应用事实对应 `application`。 |
+| `time_unix_nano` | int64 | 代表性用户输入的语义时间，单位为纳秒。 |
+| `service_name` / `agent_type` / `user` | string | 应用、Agent 类型和用户平铺列；应用名可能缺失。 |
+| `evidence_session_id` | string | 意图所属 Session。 |
+| `evidence_event_id` | string | 代表性用户输入事件。 |
+| `intent_category` / `intent_subcategory` | string | 普通意图分类与子类；风险意图不使用这两列。 |
+| `usage_total_tokens` | int64 | 按意图占比分摊的 Session Token；同一 Session 各意图行之和为其已分摊总量，不能再次重复累加 Session 总量。 |
+| `risk_type` / `risk_subtype` / `severity` | string | 风险意图的风险分类及严重性。 |
+| `reason` / `entities` | string / json | 识别摘要与实体快照，可能包含敏感内容。 |
+| `detector_name` / `detector_version` | string | 识别器及版本。 |
+
+### Session 与模型用量关联
+
+- Session 关联键包含来源、用户、Session ID；不能仅用 Session ID，也不能跨 application/runtime 合并。应用名可用时辅助核验归属，缺失时不得构造多应用笛卡尔关联。
+- 同一 Session 可以包含多个意图。先将事实聚合到目标 Session 粒度，再将意图归为 Session × 分类 × 子类的标签集合；标签归组不改变应用事件数，也不对应用事件 ID 去重。
+- 意图属于多标签维度。标签组中的 Session 数及用量可以在组内统计；同一个 Session 可进入多个标签组，跨标签组不能直接相加。只需判断有无标签时，先生成唯一 Session 键集合再关联，避免复制事实行。
+- `usage_total_tokens` 是意图分摊量，不含模型维度。没有明确的归属规则时，不将其直接分配给某个模型；Session 标签关联统计与按意图分摊统计应分别命名。
+- 两侧使用明确的查询窗口，展示匹配与未匹配的事实组数及覆盖率。窗口内用量不等于完整 Session 生命周期用量；意图记录与应用响应落入窗口的时间可能不同。
+
+## Source: incident_events
+
+记录经过规则关联、过滤或提升的高保真风险，适用于风险明细、趋势、实体调查和证据回溯。该表不保存模型用量、业务成功或工单处置状态。
+
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `incident_event_id` | string | 高保真安全事件主键。该字段按确定性规则生成，适合用于去重、幂等写入和外部系统引用。 |
+| `event_name` | string | 高保真事件名，固定采用 `incident.<risk_type>` 形式。来源事件类型、数据暴露位置和操作阶段不会编码进该字段。 |
+| `source_scope` | enum | 数据来源范围，取值为 `application` 或 `runtime`，分别表示应用侧审计和运行时审计。 |
+| `time_unix_nano` | int64 | 事件生成或证据链归并时间，单位为纳秒。页面查询仍以日志时间窗口过滤为准，该字段主要用于事实语义时间和证据回捞。 |
+| `service_name` | string | 应用或服务名，无法明确时可为空或使用占位值。 |
+| `agent_type` | string | Agent 类型，例如 qoder、cursor、claude-code 等。 |
+| `user` | string | 用户实体的平铺查询列，优先取自 `user.id`。适合按用户筛选和分组。 |
+| `host` | string | 主机实体的平铺查询列，优先取自 `host.name`；`host.name` 为空或缺失时，兼容使用 `__tag__:__hostname__`。 |
+| `source_ip` | string | Agent 主机 IP 实体的平铺查询列，优先取自 `host.ip`；`host.ip` 为空或缺失时，兼容使用 `__source__`。该字段不表示网络对端或外联目标。 |
+| `severity` | enum | 风险严重性，表示风险成立后可能造成的影响，从高到低取 `critical`、`high`、`medium`、`low`，页面上对应严重、高危、中危和低危。 |
+| `confidence` | number | 系统对当前风险判断的确定程度，取值为 0 到 1。取值由相应的检测规则和当前证据确定。 |
+| `risk_type` | string | 风险类型，对应产品中的主分类。该字段是配置风险筛选、通知规则和二次分析时最常用的分类字段。 |
+| `risk_subtype` | string | 风险子类，在所属 `risk_type` 下标识具体风险事实。对于敏感数据暴露事件，它通常表示敏感数据类型；对于敏感文件变更事件，它通常表示文件类型和动作。 |
+| `data_exposure_surface` | enum | 敏感数据的暴露位置，可为空；取 `agent_input`、`model_input`、`model_output`、`tool_input`、`tool_output`、`agent_output` 或 `network_egress`。该字段不表示操作是否已执行。 |
+| `operation_stage` | enum | 当前证据能够确认的操作阶段，可为空；取 `intent`、`invoked`、`executed` 或 `completed`。历史空值显示为“阶段未记录”；该字段不表示操作成功或失败。 |
+| `risk_signature` | string | 精确风险签名，用于识别同一个具体风险实例。适合做单个风险的去重、明细聚合和复现定位。 |
+| `risk_family_key` | string | 同类风险聚合键，用于把同一类风险合并展示，适合风险队列、趋势和影响面分析。 |
+| `reason` | string | 风险判定理由或证据摘要，可为空。由模型或其他语义研判生成的事件通常使用该字段说明风险为何成立。 |
+| `evidence_security_event_ids` | string[] | 支撑该事件的低保真安全发现 ID 数组。 |
+| `evidence_event_ids` | string[] | 支撑该事件的原始活动事件 ID 数组。 |
+| `evidence_session_id` | string | 事件归属的证据 Session。`incident-event` 不保存顶层 `session_id`，Session 下钻和统计应使用该字段。 |
+| `evidence_subject_type` | string | 证据主体类型，用于描述事件主要关联的主体类别。 |
+| `evidence_subject_value` | string | 证据主体值，与 `evidence_subject_type` 配合使用。 |
+| `evidence_subject_key` | string | 证据主体稳定键，用于更可靠地关联主体。 |
+| `evidence_values` | object[] | 结构化证据值数组，例如命中的敏感类型、脱敏后的值、文件路径、命令片段、外发目标等。 |
+| `entities` | object[] | 关键风险实体快照，例如应用、用户、主机、Agent 主机 IP、工具、域名、目标 IP、Secret、PII、文件路径或命令实体。多信号晋升事件应合并所有关键实体。 |
+| `detector_name` | string | 生成该事件的检测器或服务名称。 |
+| `detector_version` | string | 检测器或服务版本。 |
+
+### 分类与关联
+
+- `event_name` 采用 `incident.<risk_type>` 形式。`risk_type` 目录：`prompt_injection`、`model_refusal`、`sensitive_data_exposure`、`unexpected_code_execution`、`destructive_action`、`privilege_escalation`、`persistence`、`defense_impairment`、`credential_access`、`remote_control_channel`、`unauthorized_network_exposure`、`agent_misrepresentation`、`system_discovery`、`outbound_action`、`sensitive_file_mutation`。历史值保持原样，不能未经确认把旧类型合并到新分类。
+- `severity`：`critical/high/medium/low`；`confidence`：0–1。`data_exposure_surface`：`agent_input/model_input/model_output/tool_input/tool_output/agent_output/network_egress`；`operation_stage`：`intent/invoked/executed/completed`。缺失阶段为“未记录”，`completed` 不代表成功，`network_egress` 不代表已发送成功。
+- 风险条数按记录数统计，`incident_event_id` 用于明细引用与幂等关联。`risk_signature` 用于具体风险聚合，`risk_family_key` 用于同类风险聚合，三者计数不可混称“事件数”。同一 Session 可有多个风险，不能把 risk_type 分组后的去重 Session 数相加。
+- Session 用 `evidence_session_id`，没有顶层 `session_id`。应用风险回捞先限定授权用户/应用和 `source_scope='application'`，再按 `evidence_session_id` 及 `evidence_event_ids` → `event.id` 查询两张应用事实表；runtime 风险回捞 `ebpf-event`。不要只靠时间或 trace_id 关联。
+- 用量与风险先各自聚合到相同的用户/应用/Session 粒度再 JOIN，避免一条模型响应被多个风险及展开证据数组放大。无风险记录也不能断言安全。
+
+## Source: dept_roster（外表关联示例）
+
+外表用于补充事实中不存在的人群分母和业务维度。以下假设客户提供一张可在 SLS SQL 中引用的 `department` 花名册，并确认 `user.id = work_no`。它可以是部门维表 Logstore 或客户已配置的可关联外部表；实际表名、字段和读取方式按客户环境绑定。
+
+### 假设表结构与关联契约
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `work_no` | string | 员工工号；在选定的有效花名册内，一名员工一行 |
+| `name` | string | 姓名，用于展示，不作为关联键 |
+| `dept_name` | string | 完整部门路径；本例约定为“一级部门-二级部门-三级团队” |
+
+- `work_no` 非空，并与事实侧 `user_id` 使用相同标识体系。若事件用户是账号或邮箱，先通过客户身份映射表转换，不能直接当作工号。
+- 接入时确认员工范围、唯一部门归属、部门路径分隔符及花名册有效期。一人多部门或多个有效版本需要先约定归属、快照选择或分摊方式，不能任取一行。
+- 花名册有效期与事实查询窗口分别确定。本例使用选定的一份有效花名册；如其存于 Logstore，确认读取范围能覆盖该快照，避免短时间查询遗漏员工。
+- `dept_user` 是符合上述契约的员工维度，不通过按姓名、部门一起 GROUP BY 来掩盖一个工号的多重归属。
+
+### 员工维度与部门层级
+
+以下 CTE 接在公共事实 CTE 后。`department` 的结构、唯一性和分隔符均为本例假设；客户外表可替换为其他组织结构。
+
+```sql
+, dept_user AS (
+  SELECT work_no, name, dept_name,
+    coalesce(split_part(dept_name, '-', 1), '') AS dept_name_1,
+    coalesce(split_part(dept_name, '-', 2), '') AS dept_name_2,
+    coalesce(split_part(dept_name, '-', 3), '') AS dept_name_3
+  FROM department
+  WHERE work_no IS NOT NULL AND work_no <> ''
+)
+```
+
+`dept_name_1`、`dept_name_2`、`dept_name_3` 分别表示一级部门、二级部门和三级团队。部门筛选作用于 `dept_user`，参与统计的分子和分母使用同一组织范围。
+
+### 预聚合后关联：保留完整人群
+
+先将事实聚合到用户粒度，再从员工维度 LEFT JOIN，可同时统计在册人数、使用人数和用量。以下片段续接上述 CTE，使用任意应用事件定义“使用”；Token 仍只取模型响应。
+
+```sql
+, user_activity AS (
+  SELECT user_id, count(*) AS events
+  FROM event_base WHERE user_id IS NOT NULL GROUP BY user_id
+), user_usage AS (
+  SELECT user_id, sum(observed_tokens) AS observed_tokens
+  FROM usage_events WHERE user_id IS NOT NULL GROUP BY user_id
+)
+SELECT d.dept_name_2, d.dept_name_3,
+  count(*) AS roster_users, count(a.user_id) AS active_users,
+  round(100.0 * count(a.user_id) / nullif(count(*), 0), 2) AS coverage_pct,
+  sum(coalesce(a.events, 0)) AS events,
+  sum(coalesce(u.observed_tokens, 0)) AS observed_tokens
+FROM dept_user d
+LEFT JOIN user_activity a ON d.work_no = a.user_id
+LEFT JOIN user_usage u ON d.work_no = u.user_id
+GROUP BY d.dept_name_2, d.dept_name_3
+```
+
+示例中两张事实聚合表均为每用户一行，因此 LEFT JOIN 后仍为每员工一行，`count(*)` 才能作为在册人数。若保留日期、Agent、模型等维度，一名员工可对应多行；在册人数和使用人数应从员工集合重新去重统计，不能逐行计数或相加。
+
+### 关联方向与指标边界
+
+| 需求 | 关联模式 | 指标含义 |
+|---|---|---|
+| 组织覆盖、未使用员工、含零用量人群 | `dept_user LEFT JOIN user_activity/user_usage` | 花名册保留全部员工；未使用员工使用 `a.user_id IS NULL` 筛选 |
+| 仅分析在册员工的已观测行为 | 事实预聚合后 INNER JOIN `dept_user` | 只保留属于选定花名册的事件用户，不用于推导全部在册人数 |
+| 全量事实用量及组织匹配质量 | 事实预聚合后 LEFT JOIN `dept_user` | 保留未匹配用户，单列未归属用量；不因缺少花名册映射而丢失事实 |
+| 按天覆盖与零用量趋势 | 日期集合 × `dept_user`，再 LEFT JOIN 对应日期事实 | 每天都有完整分母；日期范围与花名册有效期一致 |
+
+LEFT JOIN 的事实时间、Agent、模型等条件在事实 CTE 中应用，避免在最终 WHERE 中过滤事实列而丢掉未使用员工。花名册侧的组织过滤可在 `dept_user` 中应用，或在外层对 `d` 的字段应用。
+
+`active_user` / `event_user_day` 中的事件数及 Token 可在不重复的分组间相加；去重用户、Session、Turn、百分比及部门人数需要在目标粒度重算。若同一员工属于多个组织，只有已明确的分摊指标可跨组织相加。
+
+其他外表沿用相同方法：先声明表结构和关联键，再确认一对一、多对一或多对多关系及有效期，确定保留事实还是保留目标人群，最后聚合。涉及历史部门归属时按事实时间匹配对应的有效版本；不使用当前花名册替代历史归属而不作说明。
+
+## 参考文档
+
+- [事实事件字段说明](https://help.aliyun.com/zh/agentloop/user-guide/fact-event-field-description)
+- [风险事件字段说明](https://help.aliyun.com/zh/document_detail/3045695.html)
