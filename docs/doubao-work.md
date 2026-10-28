@@ -51,7 +51,7 @@ Background native scans cover one known conversation, 64 Agents and ancestry dep
 
 ## Incremental processing and performance limits
 
-Logs, native sources and round reconstruction share an 8 MiB read allowance, 4096 decoded/reconstruction work units and a cooperative 50 ms target per cycle. Native reads use 64 KiB chunks and processing yields every 256 units. Exhaustion preserves progress for later cycles rather than returning empty evidence. File operations, individual JSON decodes and finalization can exceed this cooperative time target.
+Logs, native sources and round reconstruction share an 8 MiB read allowance, 4096 decoded/reconstruction work units and a cooperative 50 ms target per cycle. Native reads use 64 KiB chunks and processing yields every 256 units. Exhaustion preserves progress for later cycles rather than returning empty evidence. Multi-file log sweeps retain their current position; a drained window that consumed the budget gives finalization a fresh cycle, preventing later-file or completion starvation. File operations, individual JSON decodes and finalization can exceed this cooperative time target.
 
 Native parsing is reused by file identity, size and nanosecond modification/change markers. Unchanged sources require no body opens/reads. Appends verify first/tail anchors; rewrites, truncation, replacement or conflicting markers invalidate the cache. JSONL consumes complete lines only. Metadata times never supply semantic timestamps.
 

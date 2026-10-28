@@ -40,6 +40,24 @@ async function setup(workBudget: ConstructorParameters<typeof DoubaoWorkInput>[0
 }
 
 describe('Doubao performance and recovery contracts', () => {
+  it('resumes a slow 128-file sweep and gives completed requests a fresh finalization budget', async () => {
+    const { input, file, stateStore } = await setup({ milliseconds: 15 });
+    const name = (index: number) => DOUBAO_FILE.replace('.0.log', `.${index}.log`);
+    for (let index = 1; index < 130; index++) await writeFile(path.join(path.dirname(file), name(index)), '');
+    await writeFile(path.join(path.dirname(file), name(129)), doubaoLine('on_message_session_start', {}, 10) + doubaoLine('on_message_session_end'));
+    let tick = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => tick++);
+    const entries: any[] = [];
+    for (let cycle = 0; cycle < 256 && entries.length === 0; cycle++) entries.push(...await input.poll());
+    const saved = stateStore.get('doubao-work').extra!.doubaoWork as any;
+    expect(Object.keys(saved.files)).toHaveLength(128);
+    expect(saved.files[name(1)]).toBeUndefined();
+    expect(saved.files[name(129)].offset).toBeGreaterThan(0);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]['gen_ai.turn.start']).toBe(true); expect(entries[1]['gen_ai.turn.end']).toBe(true);
+    for (let cycle = 0; cycle < 64; cycle++) expect(await input.poll()).toEqual([]);
+  });
+
   it('retains an ended request across temporary native I/O failure and restart instead of finalizing missing content', async () => {
     const { input, file, sessionsRoot, stateStore, statePath, options } = await setup();
     const cid = '12345678', directory = path.join(sessionsRoot, cid, 'agents/m_main/system'); await mkdir(directory, { recursive: true });
@@ -149,7 +167,7 @@ describe('Doubao performance and recovery contracts', () => {
       entries = await input.poll();
       if ((input as any).reconstructionJobs.size) {
         reconstructedCycles++;
-        if (reconstructedCycles > 1) expect(input.delta.rawReadBytes).toBe(64);
+        if (reconstructedCycles > 1) expect(input.delta.rawReadBytes).toBeLessThanOrEqual(64); // at most the unchanged log boundary
         priorRead = (input as any).nativeReader.stats().bodyReadBytes;
       }
     }

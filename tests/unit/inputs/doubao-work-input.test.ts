@@ -583,12 +583,20 @@ describe('Doubao Work passive client-message input', () => {
     const name = (index: number) => DOUBAO_FILE.replace('.0.log', `.${index}.log`);
     for (let index = 1; index < 130; index++) await writeFile(path.join(logs, name(index)), '');
     expect(await input.poll()).toEqual([]);
+    // A cooperative cycle may stop before all 128 metadata operations finish.
+    // Assert bounded eventual progress rather than a machine-speed deadline.
+    for (let cycle = 0; cycle < 128 && Object.keys((stateStore.get('doubao-work').extra?.doubaoWork as any).files).length < 128; cycle++) {
+      expect(await input.poll()).toEqual([]);
+    }
     let files = (stateStore.get('doubao-work').extra?.doubaoWork as any).files;
     expect(Object.keys(files)).toHaveLength(128);
     expect(files[name(1)]).toBeUndefined();
     expect(files[name(129)]).toBeDefined();
     await writeFile(path.join(logs, name(130)), '');
     expect(await input.poll()).toEqual([]);
+    for (let cycle = 0; cycle < 128 && !(stateStore.get('doubao-work').extra?.doubaoWork as any).files[name(130)]; cycle++) {
+      expect(await input.poll()).toEqual([]);
+    }
     files = (stateStore.get('doubao-work').extra?.doubaoWork as any).files;
     expect(Object.keys(files)).toHaveLength(128);
     expect(files[name(2)]).toBeUndefined();

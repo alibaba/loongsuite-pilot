@@ -81,6 +81,8 @@ export class DoubaoWorkInput extends BaseInput {
   private readonly reportedIoErrors = new Set<string>();
   private nativeDeferred = false;
   private baselineState: { state: Checkpoint; names: string[]; index: number } | undefined;
+  private logSweep: { names: string[]; index: number; drained: boolean } | undefined;
+  private finalizeLogWindow: string[] | undefined;
   private readonly reconstructionJobs = new Map<string, { version: string; conversation: string; bytes: number; updatedMs: number;
     steps: Generator<number, NativeRoundReconstruction | undefined>; graph: NativeGraph; executions?: NativeExecution[] }>();
 
@@ -148,6 +150,7 @@ export class DoubaoWorkInput extends BaseInput {
     this.wakeup = undefined;
     this.nativeReader.clear(); this.cycleGraphs.clear();
     this.reconstructionJobs.clear();
+    this.logSweep = undefined; this.finalizeLogWindow = undefined;
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
@@ -226,10 +229,16 @@ export class DoubaoWorkInput extends BaseInput {
     this.nativeReader.beginCycle(active);
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
-    let drained = true;
+    const finalizationCycle = this.finalizeLogWindow?.length === names.length
+      && this.finalizeLogWindow.every((name, index) => name === names[index]);
+    this.finalizeLogWindow = undefined;
+    const sweep = this.logSweep ??= { names, index: 0, drained: true };
+    let drained = finalizationCycle || sweep.drained;
     let moreLogWork = false;
-    for (const name of names) {
-      if (this.budget.exhausted) { drained = false; break; }
+    if (!finalizationCycle) for (; sweep.index < sweep.names.length; sweep.index++) {
+      if (this.budget.exhausted) break;
+      const name = sweep.names[sweep.index];
+      if (!names.includes(name)) { drained = false; continue; }
       let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
       try {
         handle = await fs.open(path.join(this.logDir, name), 'r');
@@ -299,11 +308,25 @@ export class DoubaoWorkInput extends BaseInput {
         }
         if (!sameCursor(next.files[name], cursor)) next.files[name] = cursor;
       } catch (error) {
+        if (error instanceof DoubaoWorkDeferred && error.reason === 'cycle_budget') {
+          // Retry this exact file with a fresh budget. Advancing here could
+          // repeatedly strand it at the end of every metadata time slice.
+          this.defer(error); moreLogWork = true; break;
+        }
         drained = false;
         // Failed stat/read is not deletion. Do not mutate this file's committed cursor.
         if (!this.defer(error)) this.logger.warn('Doubao Work log read unavailable; preserving file checkpoint');
       } finally {
         await handle?.close().catch(() => undefined);
+      }
+    }
+    if (!finalizationCycle) {
+      if (sweep.index < sweep.names.length) {
+        sweep.drained = drained; drained = false; moreLogWork = true;
+      } else {
+        // New rotations join the next sweep before any request is finalized.
+        drained &&= names.length === sweep.names.length && names.every((name, index) => name === sweep.names[index]);
+        this.logSweep = undefined;
       }
     }
     if (moreLogWork) this.defer(new DoubaoWorkDeferred('source_backlog'));
@@ -335,6 +358,11 @@ export class DoubaoWorkInput extends BaseInput {
         if (this.nativeDeferred) this.nextNativeScanAt = 0;
       }
     }
+    // A full source window can itself consume the cycle. Give its completion
+    // work a fresh budget next cycle rather than re-statting the same 128 files
+    // first forever. Source cursors and pending evidence are already durable;
+    // this scheduling state is memory-only and reconstructed after restart.
+    if (drained && this.budget.exhausted) this.finalizeLogWindow = names;
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
     const selected = new Set(names);
