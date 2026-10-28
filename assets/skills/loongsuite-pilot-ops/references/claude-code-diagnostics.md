@@ -155,13 +155,14 @@ claude () { BUN_OPTIONS="--preload=/Users/<you>/.loongsuite-pilot/hooks/claude-c
 ```bash
 # intercept 文件会在 hook processor 合并后被清理，因此优先看最终 JSONL 字段
 grep -h -oE '"gen_ai\.system_instructions"[[:space:]]*:|"gen_ai\.response\.time_to_first_token"[[:space:]]*:[[:space:]]*[0-9]+' \
-  ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date -u +%Y-%m-%d).jsonl | tail -20
+  ~/.loongsuite-pilot/logs/claude-code/claude-code-$(date +%Y-%m-%d).jsonl | tail -20
 
 # 若刚触发完还未合并，可短暂看到 intercept 原始文件
 find ~/.loongsuite-pilot/intercept/claude-code -type f -name '*.json' -mmin -10 2>/dev/null | head
 ```
 
-Hook 日志按 UTC 日期命名。检查自定义安装目录时，将以上 `~/.loongsuite-pilot` 换成本次启动使用的
+Hook 日志按 Hook 进程的本地日历日命名。以上 `date` 应与 Hook 使用相同的时区；时区不一致或排查跨午夜的会话时，
+先用第 2 步的 `ls` 确认实际文件日期。检查自定义安装目录时，将以上 `~/.loongsuite-pilot` 换成本次启动使用的
 `LOONGSUITE_PILOT_DATA_DIR`。TTFT 是整数纳秒，system instructions 位于 `llm.request` 上，TTFT 位于 `llm.response` 上。
 
 若两个字段都缺失且 intercept 目录没有新文件，先按上面的步骤确认 preload 路径与新进程环境，再确认安装的
