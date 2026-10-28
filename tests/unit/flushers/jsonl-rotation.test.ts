@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
 import { getTodayDateString } from '../../../src/utils/fs-utils.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES } from '../../../src/utils/segmented-jsonl-writer.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true }))); });
@@ -86,4 +87,27 @@ it('does not reuse a segment name after retention removes previously closed file
   const newNames = (await fs.readdir(outputDir)).filter(file => file.includes('.part-'));
   expect(newNames.length).toBeGreaterThan(0);
   expect(newNames.some(file => oldNames.includes(file))).toBe(false);
+});
+
+it('serializes two writer instances sharing the same active file', async () => {
+  const { outputDir, options, flusher } = await setup();
+  const next = new JsonlFlusher(options);
+  await Promise.all(Array.from({ length: 24 }, (_, i) => (i % 2 ? next : flusher).send(entry(String(i)))));
+  await Promise.all([flusher.shutdown(), next.shutdown()]);
+  const { files, records } = await readAll(outputDir);
+  expect(records).toHaveLength(24);
+  expect(new Set(records.map(record => record['event.id'])).size).toBe(24);
+  for (const file of files) expect((await fs.stat(path.join(outputDir, file))).size).toBeLessThanOrEqual(1024);
+});
+
+it('reclaims a sparse legacy file over 3 GiB before the next append without archiving it', async () => {
+  const { outputDir, flusher } = await setup();
+  const active = path.join(outputDir, `copilot-${getTodayDateString()}.jsonl`);
+  await fs.writeFile(active, 'old');
+  await fs.truncate(active, LOCAL_LOG_EMERGENCY_FILE_BYTES + 1);
+  await flusher.send(entry('new'));
+  const { files, records } = await readAll(outputDir);
+  expect(files).toHaveLength(1);
+  expect(records.map(record => record['event.id'])).toEqual(['new']);
+  expect((await fs.stat(active)).size).toBeLessThanOrEqual(1024);
 });

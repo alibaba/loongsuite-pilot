@@ -8,6 +8,7 @@ const mockEnsureDir = vi.fn().mockResolvedValue(undefined);
 const mockGetTodayDateString = vi.fn().mockReturnValue('2026-04-27');
 
 vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
   lstat: vi.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' })),
   appendFile: (...args: unknown[]) => mockAppendLine(...args),
 }));

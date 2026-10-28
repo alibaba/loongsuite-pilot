@@ -5,6 +5,7 @@ import type { StatusBarConfig } from '../types/index.js';
 import { writeJsonFile, readJsonFile, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { scanJsonlTail } from './jsonl-tail-reader.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES } from '../utils/segmented-jsonl-writer.js';
 
 const logger = createLogger('MetricsSummaryWriter');
 
@@ -249,6 +250,7 @@ export class MetricsSummaryWriter {
 
       const fileStat = await this.safeStat(file);
       if (!fileStat) continue;
+      if (this.skipOversizedOutput(file, fileStat)) continue;
 
       const baseName = path.basename(file);
       let startOffset = 0;
@@ -337,6 +339,16 @@ export class MetricsSummaryWriter {
     }
   }
 
+  private skipOversizedOutput(filePath: string, stat: fsSync.Stats): boolean {
+    if (stat.size <= LOCAL_LOG_EMERGENCY_FILE_BYTES) return false;
+    // Avoid holding an unlinked legacy giant open while retention reclaims it.
+    // Already-observed current-day state and historical digests stay intact.
+    logger.warn('metrics summary skipped oversized output file', {
+      file: path.basename(filePath), bytes: stat.size, maxBytes: LOCAL_LOG_EMERGENCY_FILE_BYTES,
+    });
+    return true;
+  }
+
   private ensureDayStats(map: Map<string, DayStats>, day: string): DayStats {
     let stats = map.get(day);
     if (!stats) {
@@ -372,8 +384,8 @@ export class MetricsSummaryWriter {
     state: CurrentDayState,
     files: string[],
   ): Promise<CurrentDayState> {
-    const existingByName = new Map(state.files.map(file => [file.fileName, file]));
-    const nextByName = new Map(existingByName);
+    const existingByIdentity = new Map(state.files.map(file => [fileIdentity(file), file]));
+    const nextByIdentity = new Map(existingByIdentity);
     let totalBytesRead = 0;
 
     for (const filePath of files) {
@@ -382,31 +394,36 @@ export class MetricsSummaryWriter {
 
       const fileStat = await this.safeStat(filePath);
       if (!fileStat) continue;
+      if (this.skipOversizedOutput(filePath, fileStat)) continue;
 
       const fileName = path.basename(filePath);
-      // A size rotation renames the active inode. Transfer its already-scanned
-      // stats, including when refresh observes the gap before a new active file.
-      const named = existingByName.get(fileName);
-      const existing = named && sameFileIdentity(named, fileStat) ? named
-        : state.files.find(file => sameFileIdentity(file, fileStat));
-      if (existing && existing.fileName !== fileName) {
-        const old = nextByName.get(existing.fileName);
-        if (old && sameFileIdentity(old, fileStat)) nextByName.delete(existing.fileName);
+      const identity = fileIdentity(fileStat);
+      // Keep previously counted data even if retention removed the rotated
+      // inode before this refresh could observe its archive name. A later
+      // reappearance of that inode still resumes the same cached statistics.
+      const existing = existingByIdentity.get(identity);
+      for (const [key, previous] of nextByIdentity) {
+        if (key !== identity && previous.fileName === fileName) {
+          nextByIdentity.set(key, { ...previous, fileName: `retired:${key}` });
+        }
       }
       const canResume = existing !== undefined
         && sameFileIdentity(existing, fileStat)
         && existing.offset <= fileStat.size
         && existing.size <= fileStat.size;
       const startOffset = canResume ? existing.offset : 0;
-      const stats = canResume ? deserializeDayStats(existing.stats) : createDayStats();
+      // In-place truncation starts a new read range without retracting events
+      // already observed today, just as deleting a closed segment does not.
+      const stats = existing ? deserializeDayStats(existing.stats) : createDayStats();
       const result = await scanJsonlTail(filePath, startOffset, fileStat.size, {
+        expectedFileIdentity: fileStat,
         onRecord: record => {
           this.applyRecord(record as Record<string, string>, stats);
         },
       });
       totalBytesRead += result.bytesRead;
 
-      nextByName.set(fileName, {
+      nextByIdentity.set(identity, {
         fileName,
         dev: fileStat.dev,
         ino: fileStat.ino,
@@ -419,14 +436,14 @@ export class MetricsSummaryWriter {
 
     logger.debug('metrics current-day files refreshed', {
       day: state.day,
-      fileCount: nextByName.size,
+      fileCount: nextByIdentity.size,
       bytesRead: totalBytesRead,
     });
 
     return {
       version: 1,
       day: state.day,
-      files: Array.from(nextByName.values())
+      files: Array.from(nextByIdentity.values())
         .sort((left, right) => left.fileName.localeCompare(right.fileName)),
     };
   }
@@ -948,6 +965,10 @@ function sameFileIdentity(file: CurrentDayFileState, stat: fsSync.Stats): boolea
   return file.dev === stat.dev
     && file.ino === stat.ino
     && file.birthtimeMs === stat.birthtimeMs;
+}
+
+function fileIdentity(file: Pick<CurrentDayFileState, 'dev' | 'ino' | 'birthtimeMs'>): string {
+  return `${file.dev}:${file.ino}:${file.birthtimeMs}`;
 }
 
 function finiteNumber(value: unknown): number {

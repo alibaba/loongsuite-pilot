@@ -5,7 +5,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
-import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
+import { resolveHome, directoryExists, writeTextFileAtomic } from '../../utils/fs-utils.js';
 import { resolveDataDir } from '../../utils/data-dir.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { BaseSessionInput, type SessionInputOptions } from '../base/base-session-input.js';
@@ -21,6 +21,8 @@ export interface CopilotLogInputOptions extends Omit<SessionInputOptions, 'sessi
   multimodal?: unknown;
   /** Wait for native evidence when session exporter capability is unknown. */
   nativeGraceMs?: number;
+  /** Explicit event-time floor for controlled historical replay. Persisted once; defaults to first activation. */
+  historyStartTimeMs?: number;
 }
 
 /** Incrementally index source files; checkpoint only complete queued interactions.
@@ -36,11 +38,20 @@ export class CopilotLogInput extends BaseSessionInput {
   private queuedKeys: string[] = [];
   private watcher?: fsSync.FSWatcher;
   private readonly nativeGraceMs: number;
+  private readonly policyFile: string;
+  private readonly initialHistoryStartTimeMs?: number;
+  private historyStartTimeMs?: number;
 
   constructor(opts: CopilotLogInputOptions) {
     super({ stateStore: opts.stateStore, sessionDir: opts.sessionDir ?? path.join(copilotHome(), 'session-state'),
       filePattern: opts.filePattern ?? '*/events.jsonl', pollIntervalMs: Number.isFinite(opts.pollIntervalMs) && opts.pollIntervalMs! > 0 ? opts.pollIntervalMs! : DEFAULT_POLL_INTERVAL_MS });
     const dataDir = opts.dataDir || resolveDataDir();
+    this.initialHistoryStartTimeMs = opts.historyStartTimeMs;
+    if (this.initialHistoryStartTimeMs !== undefined
+      && (!Number.isSafeInteger(this.initialHistoryStartTimeMs) || this.initialHistoryStartTimeMs < 0)) {
+      throw new RangeError('Copilot historyStartTimeMs must be a nonnegative epoch-millisecond integer');
+    }
+    this.policyFile = path.join(dataDir, 'state', 'copilot', 'collection-policy.json');
     this.nativeGraceMs = opts.nativeGraceMs ?? 30_000;
     this.index = new CopilotSourceIndex(path.join(dataDir, 'state', 'copilot', 'source-index.sqlite'), (file, offset) => {
       this.logger.warn('Skipping malformed complete Copilot record', { file, offset });
@@ -68,9 +79,39 @@ export class CopilotLogInput extends BaseSessionInput {
   }
   protected async processSessionLine(): Promise<AgentActivityEntry | null> { return null; }
 
+  private async applyHistoryPolicy(): Promise<void> {
+    if (this.historyStartTimeMs === undefined) {
+      let policy: unknown;
+      try { policy = JSON.parse((await fs.readFile(this.policyFile, 'utf8')).replace(/^\uFEFF/, '')); }
+      catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`Cannot read Copilot collection policy: ${String(err)}`);
+      }
+      const indexedStart = await this.index.historyStartTime();
+      if (policy !== undefined) {
+        const value = policy as { schema?: unknown; historyStartTimeMs?: unknown } | null;
+        if (!value || value.schema !== 1 || !Number.isSafeInteger(value.historyStartTimeMs)
+          || typeof value.historyStartTimeMs !== 'number' || value.historyStartTimeMs < 0) {
+          throw new Error('Invalid Copilot collection policy; refusing to reset the historical boundary');
+        }
+        if (indexedStart !== undefined && indexedStart !== value.historyStartTimeMs) {
+          throw new Error('Copilot collection policy disagrees with the source index');
+        }
+        this.historyStartTimeMs = value.historyStartTimeMs;
+      } else {
+        const start = indexedStart ?? this.initialHistoryStartTimeMs ?? Date.now();
+        await writeTextFileAtomic(this.policyFile, JSON.stringify({ schema: 1, historyStartTimeMs: start }) + '\n', {
+          mode: 0o600, expected: { exists: false },
+        });
+        this.historyStartTimeMs = start;
+      }
+    }
+    await this.index.applyHistoryPolicy(this.historyStartTimeMs);
+  }
+
   protected override async collect(): Promise<AgentActivityEntry[]> {
     this.queuedKeys = [];
     await this.index.open();
+    await this.applyHistoryPolicy();
     let files: string[];
     try { files = await this.discoverSessionFiles(); } catch { return []; }
     await this.index.pruneDeletedSessions(files);
@@ -97,16 +138,20 @@ export class CopilotLogInput extends BaseSessionInput {
         } catch { /* markers are advisory */ }
       }
     } catch { /* no hooks yet */ }
-    for (const file of otelFiles) {
-      try { await this.index.ingest(file, 'span'); }
-      catch (err) { this.logger.warn('Copilot OTel source unavailable; retaining source state', { file, error: String(err) }); }
-    }
+    // A real user boundary is authoritative when native clocks differ. Index it
+    // before native evidence so a late/skewed span cannot suppress a new turn.
     for (const file of files) {
       try { await this.index.ingest(file, 'event'); }
       catch (err) { this.logger.warn('Copilot source unavailable; checkpoint retained', { file, error: String(err) }); }
     }
+    for (const file of otelFiles) {
+      try { await this.index.ingest(file, 'span'); }
+      catch (err) { this.logger.warn('Copilot OTel source unavailable; retaining source state', { file, error: String(err) }); }
+    }
+    await this.index.restoreDeferredSpans();
     for (const pending of await this.index.pending()) {
       const sid = pending.session;
+      if (!await this.index.isEligible(sid, pending.id)) continue;
       const requireOtel = externalOtel.has(sid) || await this.index.hasNative(sid);
       const source = await this.index.load(sid, pending.id);
       // Global installation state says nothing about an already-open terminal.

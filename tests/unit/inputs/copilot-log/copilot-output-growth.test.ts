@@ -37,7 +37,7 @@ it('measures real collector-to-JSONL growth and finite history drain using synth
       await fs.writeFile(path.join(otel, 'native.jsonl'), native);
       const stateFile = path.join(dir, 'state.json');
       const state = new StateStore(stateFile); await state.load();
-      input = new CopilotLogInput({ stateStore: state, sessionDir: sessions, dataDir: dir, otelDir: otel });
+      input = new CopilotLogInput({ stateStore: state, sessionDir: sessions, dataDir: dir, otelDir: otel, historyStartTimeMs: 0 });
       const flusher = new JsonlFlusher({ enabled: true, outputDir: output, rotateDaily: true, maxFileSizeMb: 1 });
       await flusher.start();
       let records = 0, inputMessageBytes = 0, maxRecordBytes = 0, duplicateIds = 0, requestDeltas = 0;

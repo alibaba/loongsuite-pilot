@@ -34,7 +34,8 @@ import {
   type GlobalAttributesProvider,
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { appendSegmentedJsonl, DEFAULT_JSONL_SEGMENT_BYTES } from '../utils/segmented-jsonl-writer.js';
 import { formatTime } from '../utils/time-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -2201,7 +2202,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const filepath = path.join(dir, filename);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
-        await appendLine(filepath, line);
+        await appendSegmentedJsonl(filepath, line);
       }
     } catch (err) {
       logger.warn('Debug log write failed (non-blocking)', { err: String(err) });
@@ -2226,7 +2227,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       for (const line of jsonLines) {
         const obj = JSON.parse(line);
         obj._error = error;
-        await appendLine(filepath, JSON.stringify(obj));
+        await appendSegmentedJsonl(filepath, JSON.stringify(obj), DEFAULT_JSONL_SEGMENT_BYTES, 'failed');
       }
     } catch (err) {
       logger.warn('Failed-log write failed', { err: String(err) });
