@@ -41,6 +41,7 @@ export class CopilotSourceIndex {
       CREATE TABLE IF NOT EXISTS partial_chunks(path TEXT, position INTEGER, body BLOB, PRIMARY KEY(path,position));
       CREATE TABLE IF NOT EXISTS native_wait(session TEXT, interaction TEXT, since INTEGER, PRIMARY KEY(session,interaction));
       CREATE TABLE IF NOT EXISTS collection_policy(start_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS index_migrations(name TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS ignored_interactions(session TEXT, id TEXT, reason TEXT, PRIMARY KEY(session,id));
       CREATE TABLE IF NOT EXISTS deferred_spans(session TEXT,id TEXT,interaction TEXT,trace TEXT,path TEXT,identity TEXT,offset INTEGER,bytes INTEGER,checked INTEGER DEFAULT 0,
             PRIMARY KEY(session,id));
@@ -70,7 +71,7 @@ export class CopilotSourceIndex {
         const previous = await this.historyStartTime();
         if (previous !== undefined && previous !== startMs) throw new Error('Copilot source-index history boundary changed');
         this.collectionStartMs = startMs;
-        if (previous !== undefined) return;
+        if (previous !== undefined) { await this.migrateLegacyNativeBodies(); return; }
         await this.exec('BEGIN IMMEDIATE');
         try {
             await this.run('INSERT INTO collection_policy VALUES(?)', [startMs]);
@@ -86,6 +87,43 @@ export class CopilotSourceIndex {
                 if (page.length === 256) await new Promise<void>(resolve => setImmediate(resolve));
             }
             await this.run("DELETE FROM records AS r WHERE r.kind='span' AND r.interaction='' AND NOT EXISTS(SELECT 1 FROM records c WHERE c.kind='span' AND c.session=r.session AND c.trace=r.trace AND c.interaction<>'')");
+            await this.exec('COMMIT');
+        } catch (err) { await this.exec('ROLLBACK'); throw err; }
+        await this.migrateLegacyNativeBodies();
+    }
+    /** Legacy records have no byte locators. Reindex native sources once under
+     * the adopted boundary, retaining offsets durably between bounded polls. */
+    private async migrateLegacyNativeBodies(): Promise<void> {
+        const migration = 'legacy-native-bodies-v1';
+        if ((await this.all('SELECT 1 FROM index_migrations WHERE name=?', [migration])).length) return;
+        await this.exec('BEGIN IMMEDIATE');
+        try {
+            await this.exec(`CREATE TEMP TABLE legacy_native_traces AS
+              SELECT DISTINCT r.session,r.trace FROM records r JOIN ignored_interactions i
+                ON i.session=r.session AND i.id=r.interaction
+              WHERE r.kind='span' AND i.reason LIKE 'native-%'
+                AND NOT EXISTS(SELECT 1 FROM records c JOIN records u
+                  ON u.session=c.session AND u.interaction=c.interaction
+                  WHERE c.kind='span' AND c.session=r.session AND c.trace=r.trace
+                    AND u.kind='event' AND u.type='user.message');`);
+            const [count] = await this.all<{n: number}>('SELECT COUNT(*) AS n FROM legacy_native_traces');
+            if (count.n) {
+                await this.exec(`DELETE FROM records WHERE kind='span' AND EXISTS(
+                  SELECT 1 FROM legacy_native_traces t WHERE t.session=records.session AND t.trace=records.trace);
+                  DELETE FROM partial_chunks WHERE path IN (SELECT path FROM sources WHERE kind='span');
+                  DELETE FROM partial_sources WHERE path IN (SELECT path FROM sources WHERE kind='span');
+                  DELETE FROM deferred_spans WHERE path IN (SELECT path FROM sources WHERE kind='span');
+                  UPDATE sources SET offset=0,anchor='',session='',active='' WHERE kind='span';`);
+                // Let reingestion retain byte locators for skewed evidence. A
+                // later authoritative user may still authorize restoration.
+                await this.exec(`DELETE FROM interactions WHERE EXISTS(SELECT 1 FROM ignored_interactions i
+                  WHERE i.session=interactions.session AND i.id=interactions.id AND i.reason LIKE 'native-%')
+                  AND NOT EXISTS(SELECT 1 FROM records u WHERE u.kind='event' AND u.type='user.message'
+                    AND u.session=interactions.session AND u.interaction=interactions.id);`);
+                await this.run("DELETE FROM ignored_interactions WHERE reason LIKE 'native-%'");
+            }
+            await this.exec('DROP TABLE legacy_native_traces');
+            await this.run('INSERT INTO index_migrations VALUES(?)', [migration]);
             await this.exec('COMMIT');
         } catch (err) { await this.exec('ROLLBACK'); throw err; }
     }

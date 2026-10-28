@@ -120,6 +120,9 @@ describe('Copilot first-adoption history boundary', () => {
     await fs.writeFile(x.file, lines(f.events)); await fs.writeFile(x.native, lines(f.spans));
     const input = x.create(base + 5000); const batch = await collect(input);
     expect(batch.some((r: any) => r['event.name'] === 'llm.response')).toBe(true);
+    const request = batch.find((r: any) => r['event.name'] === 'llm.request');
+    expect(JSON.stringify(request?.['gen_ai.input.messages_delta'])).toContain('Read the sample.');
+    expect(String(request?.time_unix_nano)).toBe(String(BigInt(base + 1000) * 1_000_000n));
     expect(await (input as any).index.all('SELECT * FROM ignored_interactions')).toEqual([]);
   });
 
@@ -253,7 +256,8 @@ describe('Copilot first-adoption history boundary', () => {
     await fs.writeFile(x.native, lines(f.spans));
     const legacy = new CopilotSourceIndex(x.index); await legacy.open(); await legacy.ingest(x.native, 'span'); await legacy.close();
     const input = x.create(base + 5000); expect(await collect(input)).toEqual([]);
-    expect((await (input as any).index.all('SELECT reason FROM ignored_interactions'))[0].reason).toBe('native-before-activation');
+    expect(await (input as any).index.all("SELECT * FROM records WHERE kind='span'")).toEqual([]);
+    expect(await (input as any).index.all('SELECT * FROM deferred_spans')).toHaveLength(2);
     await fs.writeFile(x.file, lines(f.events));
     expect((await collect(input)).some((r: any) => r['event.name'] === 'llm.response')).toBe(true);
     expect(await (input as any).index.all('SELECT * FROM ignored_interactions')).toEqual([]);
@@ -282,4 +286,38 @@ describe('Copilot first-adoption history boundary', () => {
     expect(batch).toHaveLength(1); expect(batch[0]['gen_ai.copilot.session_summary']).toBe(true);
     await queued(input); expect(await collect(input)).toEqual([]);
   });
+});
+
+it('reclaims legacy native-only bodies with an existing policy and rebuilds locators across bounded polls and restart', async () => {
+  const x = await setup(), f = conversation();
+  const spans = [...f.spans, ...Array.from({ length: 40 }, (_, i) => ({ ...f.spans[1], spanId: `old-tool-${i}`,
+    attributes: { 'gen_ai.conversation.id': 'session-test', 'gen_ai.operation.name': 'execute_tool',
+      'private.test.body': 'x'.repeat(128 * 1024) } }))];
+  await fs.writeFile(x.native, lines(spans));
+  const size = (await fs.stat(x.native)).size;
+  const legacy = new CopilotSourceIndex(x.index); await legacy.open();
+  await legacy.ingest(x.native, 'span'); await legacy.ingest(x.native, 'span');
+  expect((await legacy.all("SELECT SUM(length(body)) AS n FROM records WHERE kind='span'"))[0].n).toBeGreaterThan(5 * 1024 * 1024);
+  // Simulate a policy already adopted by the earlier PR revision.
+  await legacy.run('INSERT INTO collection_policy VALUES(?)', [base + 5000]);
+  await legacy.run('INSERT INTO ignored_interactions VALUES(?,?,?)', ['session-test', 'interaction-a', 'native-before-activation']);
+  await legacy.markDelivered(['copilot:previous:delivered']);
+  await legacy.applyHistoryPolicy(base + 5000);
+  expect(await legacy.all("SELECT * FROM records WHERE kind='span'")).toEqual([]);
+  expect((await legacy.all('PRAGMA freelist_count'))[0].freelist_count).toBeGreaterThan(0);
+  await legacy.ingest(x.native, 'span');
+  const offset = (await legacy.all('SELECT offset FROM sources WHERE path=?', [x.native]))[0].offset;
+  expect(offset).toBeGreaterThan(0); expect(offset).toBeLessThan(size);
+  await legacy.close();
+  const next = new CopilotSourceIndex(x.index); await next.open();
+  try {
+    await next.applyHistoryPolicy(base + 5000);
+    expect((await next.all('SELECT offset FROM sources WHERE path=?', [x.native]))[0].offset).toBe(offset);
+    await next.ingest(x.native, 'span');
+    expect(await next.all("SELECT * FROM records WHERE kind='span'")).toEqual([]);
+    expect(await next.all('SELECT id FROM deferred_spans')).toHaveLength(spans.length);
+    expect((await next.all('SELECT offset FROM sources WHERE path=?', [x.native]))[0].offset).toBe(size);
+    expect(await next.all('SELECT * FROM delivered')).toEqual([{ key: 'copilot:previous:delivered' }]);
+    expect(await next.pending()).toEqual([]);
+  } finally { await next.close(); }
 });

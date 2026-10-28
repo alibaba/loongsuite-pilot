@@ -79,18 +79,22 @@ export function parseInteractions(events, spans = [], { requireOtel = false } = 
       const model = a['gen_ai.response.model'] || ms[0]?.data?.model || a['gen_ai.request.model'] || '';
       const startNs = ns(c?.startTime) || legacy.isoToUnixNanos(start?.timestamp || ms[0]?.timestamp);
       const endNs = ns(c?.endTime) || legacy.isoToUnixNanos(ms.at(-1)?.timestamp);
-      return { apiId, ms, c, a, step, start, model, startNs, endNs };
+      // Native clocks describe span timing; transcript clocks order message evidence.
+      const transcriptStartNs = legacy.isoToUnixNanos(start?.timestamp || ms[0]?.timestamp);
+      const inputCutoff = transcriptStartNs && (!startNs || BigInt(transcriptStartNs) > BigInt(startNs))
+        ? transcriptStartNs : startNs;
+      return { apiId, ms, c, a, step, start, model, startNs, endNs, inputCutoff };
     }).filter(call => call.startNs && call.endNs)
-      .sort((a, b) => BigInt(a.startNs) < BigInt(b.startNs) ? -1 : BigInt(a.startNs) > BigInt(b.startNs) ? 1 : 0);
+      .sort((a, b) => BigInt(a.inputCutoff) < BigInt(b.inputCutoff) ? -1 : BigInt(a.inputCutoff) > BigInt(b.inputCutoff) ? 1 : 0);
     const consumedInputs = new Set();
-    for (const { apiId, ms, c, a, step, start, model, startNs, endNs } of calls) {
+    for (const { apiId, ms, c, a, step, start, model, startNs, endNs, inputCutoff } of calls) {
       const input = [];
       // Transcript messages are incremental evidence, not a snapshot of the
       // model's full (possibly compacted) context. Emit each fragment once per
       // interaction; the converter accumulates request deltas across its steps.
       for (const e of history) {
         const when = legacy.isoToUnixNanos(e.timestamp);
-        if (!when || BigInt(when) >= BigInt(startNs)) continue;
+        if (!when || BigInt(when) >= BigInt(inputCutoff)) continue;
         if (consumedInputs.has(e)) continue;
         if (e.type === 'system.message' || e.type === 'user.message') {
           if (typeof e.data?.content === 'string') input.push({role:e.type === 'system.message' ? 'system' : 'user',parts:[{type:'text',content:e.data.content}]});

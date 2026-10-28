@@ -58,3 +58,15 @@ describe('Copilot native OTel / transcript contract',()=>{
  });
 
 });
+
+it('uses transcript ordering for skewed native clocks without changing span timing', () => {
+ const f = toolConversation();
+ const nativeStart = [Date.UTC(2026, 8, 1) / 1000, 0];
+ for (const span of f.spans) { span.startTime = nativeStart; }
+ const records = parseInteractions(f.events, f.spans, { requireOtel: true })[0].records;
+ const requests = records.filter(r => r['event.name'] === 'llm.request');
+ expect(requests).toHaveLength(2);
+ expect(requests[0]['gen_ai.input.messages_delta'].map(m => m.role)).toEqual(['user']);
+ expect(requests[1]['gen_ai.input.messages_delta'].map(m => m.role)).toEqual(['assistant', 'tool']);
+ for (const request of requests) expect(request.time_unix_nano).toBe(String(BigInt(nativeStart[0]) * 1_000_000_000n));
+});

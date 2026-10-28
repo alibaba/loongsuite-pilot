@@ -54,3 +54,30 @@ it.each(['root', 'leaf'])('rediscovers a rollout published during a %s directory
   expect(await listFiles()).toEqual([transcript]);
   expect(vi.mocked(fs.readdir).mock.calls.length).toBe(reads);
 });
+
+it.each(['root', 'leaf'])('retries a failed %s scan without requiring a directory mtime change', async level => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-rollout-discovery-failure-'));
+  tempDirs.push(root);
+  const sessionDir = path.join(root, 'sessions');
+  const leaf = path.join(sessionDir, '2026', '06', '24');
+  await fs.mkdir(leaf, { recursive: true });
+  const transcript = path.join(leaf, 'rollout-existing.jsonl');
+  await fs.writeFile(transcript, '{}\n');
+  const input = new CodexTranscriptInput({ stateStore: new StateStore(path.join(root, 'state.json')), sessionDir });
+  const list = () => (input as any).listDefaultRolloutFiles();
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  let fail = true;
+  vi.mocked(fs.readdir).mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+    if (String(args[0]) === (level === 'root' ? sessionDir : leaf) && fail) {
+      fail = false;
+      throw Object.assign(new Error('temporary enumeration failure'), { code: 'EMFILE' });
+    }
+    return actual.readdir(...args);
+  }) as typeof fs.readdir);
+  expect(await list()).toEqual([]);
+  expect((input as any).cachedDefaultRollout).toBeNull();
+  expect(await list()).toEqual([transcript]);
+  const reads = vi.mocked(fs.readdir).mock.calls.length;
+  expect(await list()).toEqual([transcript]);
+  expect(vi.mocked(fs.readdir).mock.calls.length).toBe(reads);
+});
