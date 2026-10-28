@@ -56,7 +56,8 @@ export function addDoubaoAssistantRounds(
   for (let i = 0; i < rounds.length; i++) {
     const round = rounds[i], time = times[i];
     const stepId = doubaoDigest(`${parent.traceId}:${ownerId}:assistant-step:${round.id}`).slice(0, 16);
-    const step = fixedSpan(tracer, 'step', { ...common, 'gen_ai.span.kind': 'STEP', 'gen_ai.operation.name': 'step', 'gen_ai.step.id': stepId }, parent, stepId, time.start);
+    const step = fixedSpan(tracer, 'react step', { ...common, 'gen_ai.span.kind': 'STEP', 'gen_ai.operation.name': 'step',
+      'gen_ai.step.id': stepId, 'gen_ai.react.round': round.ordinal }, parent, stepId, time.start);
     const llmId = doubaoDigest(`${parent.traceId}:${ownerId}:assistant-llm:${round.id}`).slice(0, 16);
     const llm = fixedSpan(tracer, 'chat', { ...common, 'gen_ai.span.kind': 'LLM', 'gen_ai.operation.name': 'chat',
       'gen_ai.step.id': stepId, 'gen_ai.input.messages': JSON.stringify(round.inputMessages),

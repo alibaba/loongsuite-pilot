@@ -49,6 +49,9 @@ describe('Doubao assistant rounds through the actual OTLP converter', () => {
     const steps = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
     const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
     expect([llms.length, steps.length, tools.length, spans.length]).toEqual([4, 4, 5, 15]);
+    expect(steps.map(span => [span.name, span.attributes['gen_ai.react.round']])).toEqual([
+      ['react step', 1], ['react step', 2], ['react step', 3], ['react step', 4],
+    ]);
     expect(llms.map(span => JSON.parse(String(span.attributes['gen_ai.input.messages'])).length)).toEqual([1, 3, 7, 9]);
     expect(llms.map(span => [nano(span.startTime), nano(span.endTime)])).toEqual([
       [ns(0), sourceNs(1000)], [sourceNs(1100), sourceNs(2000)], [sourceNs(2500), sourceNs(5000)], [sourceNs(5200), sourceNs(10_000)],
