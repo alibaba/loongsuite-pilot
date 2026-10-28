@@ -182,6 +182,34 @@ describe('dsh-event-transform (real fixture)', () => {
     expect(results.map(r => r['gen_ai.tool.name'])).toEqual(['write', 'read']);
   });
 
+  it.each([false, true].flatMap(wrapped => [
+    { name: 'text', content: [{ type: 'text', text: 'one\n' }, { type: 'text', text: 'two' }], isError: false, output: 'one\ntwo' },
+    { name: 'error', content: [{ type: 'text', text: 'missing file' }], isError: true, output: 'missing file' },
+    { name: 'empty', content: [], isError: false, output: '' },
+    { name: 'image', content: [{ type: 'image', data: 'synthetic-image', mimeType: 'image/png' }], isError: false,
+      output: [{ type: 'image', data: 'synthetic-image', mimeType: 'image/png' }] },
+    { name: 'no error flag', content: [{ type: 'text', text: 'ok' }], isError: undefined, output: 'ok' },
+  ].map(testCase => ({ ...testCase, wrapped }))))('keeps $name tool responses in the next LLM input (wrapped=$wrapped)',
+    ({ wrapped, content, isError, output }) => {
+      const state = newState();
+      const emit = (type: string, data: Record<string, unknown>) => transformDshRecord({
+        sid: 'synthetic-session', time: 1_800_000_000_000, type, data: { turn: 1, step: 1, ...data },
+      }, ClientType.Dsh, state);
+      const nativeResult = { content, isError };
+      emit('tool/call', { callId: 'call-test', name: 'read' });
+      const result = emit('tool/result', { message: {
+        source: { callId: 'call-test' },
+        ...(wrapped ? { content: [{ type: 'tool-result', toolCallId: 'call-test', ...nativeResult }] } : nativeResult),
+      } });
+      const request = emit('assistant/chunk', { step: 2, chunk: { type: 'text-delta', text: 'done' } });
+      const expected = [{ role: 'tool', parts: [{
+        type: 'tool_call_response', id: 'call-test', response: { output, ...(isError !== undefined ? { isError } : {}) },
+      }] }];
+      expect(result?.['gen_ai.tool.call.result']).toEqual(expected);
+      expect(request?.['gen_ai.input.messages']).toEqual(expected);
+      expect(request?.['gen_ai.input.messages_delta']).toEqual(expected);
+    });
+
   it('all events share a per-turn stable trace_id', async () => {
     const { entries } = await loadAll();
     const traceIds = new Set(entries.map(e => e.trace_id));
@@ -748,8 +776,15 @@ describe('dsh-event-transform (correlation isolation)', () => {
       },
     }, ClientType.Dsh, state);
 
-    expect(result('call-b')?.['gen_ai.tool.name']).toBe('write');
-    expect(result('call-a')?.['gen_ai.tool.name']).toBe('read');
+    const resultB = result('call-b');
+    const resultA = result('call-a');
+    expect(resultB?.['gen_ai.tool.name']).toBe('write');
+    expect(resultA?.['gen_ai.tool.name']).toBe('read');
+    for (const [entry, id] of [[resultB, 'call-b'], [resultA, 'call-a']] as const) {
+      expect(entry?.['gen_ai.tool.call.result']).toEqual([{ role: 'tool', parts: [{
+        type: 'tool_call_response', id, response: { output: 'ok' },
+      }] }]);
+    }
     expect(result('orphan')).toBeNull();
   });
 

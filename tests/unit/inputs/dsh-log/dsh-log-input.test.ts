@@ -227,6 +227,9 @@ describe('DshLogInput state isolation and restart recovery', () => {
     const delta = request?.['gen_ai.input.messages_delta'] as Array<{ role: string }>;
 
     expect(delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(delta[1]).toEqual({ role: 'tool', parts: [{
+      type: 'tool_call_response', id: 'call-1', response: { output: '# README' },
+    }] });
     expect(JSON.stringify(delta)).not.toContain('private-prompt');
     expect(JSON.stringify(request?.['gen_ai.input.messages'])).toContain('private-prompt');
   });
