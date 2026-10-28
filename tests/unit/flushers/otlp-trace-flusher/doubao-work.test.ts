@@ -6,7 +6,8 @@ import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js
 import { buildDoubaoTaskEvents, doubaoRootAgentSpanId, parseDoubaoLogLine } from '../../../../src/inputs/doubao-work/doubao-work-log.js';
 import { buildNativeExecutionEvents, nativeExecutionSpanId, type NativeExecution } from '../../../../src/inputs/doubao-work/doubao-work-execution.js';
 import { parseNativeGraph } from '../../../../src/inputs/doubao-work/doubao-work-native.js';
-import { nativeToolObservations } from '../../../../src/inputs/doubao-work/doubao-work-content.js';
+import { nativeToolObservations, parseNativeContent } from '../../../../src/inputs/doubao-work/doubao-work-content.js';
+import { reconstructNativeRounds } from '../../../../src/inputs/doubao-work/doubao-work-rounds.js';
 import { createReadableSpanToOtlpSpanJsonArray } from '../../../../src/flushers/otlp-json-serializer.js';
 import { maskAgentActivityEntry } from '../../../../src/mask/entry-masker.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../../helpers/doubao-work-fixture.js';
@@ -121,21 +122,57 @@ describe('Doubao Work truthful partial OTLP', () => {
     } finally { await flusher.shutdown(); }
   });
 
-  it('retains background execution facts without creating an orphan or stretching the ended client request', async () => {
+  it.each([2000, 4000])('exports a background execution as a deterministic linked root without stretching the request (start=%s)', async start => {
     const root = { turnId: 'synthetic-turn', queryMs: DOUBAO_EPOCH, conversationId: '12345678',
       localMessageId: '00000000-0000-4000-8000-000000000002', updatedMs: DOUBAO_EPOCH,
       terminal: parseDoubaoLogLine(doubaoLine('on_message_session_end'), DOUBAO_FILE)! };
     const e: NativeExecution = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: '12345678', queryMessageId: root.localMessageId,
-      agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + 2000, endedAtMs: DOUBAO_EPOCH + 9000 };
+      agentId: 'o_nativeOrg', agentType: 'organizer', sandboxId: 'synthetic-sandbox', startedAtMs: DOUBAO_EPOCH + start, endedAtMs: DOUBAO_EPOCH + 9000 };
     const facts = buildNativeExecutionEvents('scope', root, parseNativeGraph(DOUBAO_NATIVE_FILES)!, e, [e], Date.now());
+    const rows = [
+      { role: 'assistant', tool_calls: [{ id: 'background-read', function: { name: 'Read', arguments: { file_path: 'child.txt' } } }] },
+      { role: 'tool', tool_call_id: 'background-read', content: 'child file result' },
+      { role: 'assistant', content: 'child final' },
+    ];
+    const content = parseNativeContent({ [e.agentId]: rows.map(row => JSON.stringify(row)).join('\n') + '\n' },
+      { [e.agentId]: `## [${new Date(DOUBAO_EPOCH + 1).toISOString()}] 需求\nCURRENT CHILD\n` })!;
+    facts[0]['agent.doubao_work.tool_observations'] = nativeToolObservations([localPair(e.agentId, 'background-read', 5000, 5500)], content);
+    facts[0]['agent.doubao_work.assistant_rounds'] = reconstructNativeRounds(content, e.agentId, DOUBAO_EPOCH,
+      String(BigInt(e.endedAtMs) * 1_000_000n), ['background-read'], 'local_execution_fragment') as any;
     const spans: ReadableSpan[] = [], flusher = collector(spans);
     try {
       await flusher.sendBatch(buildDoubaoTaskEvents('scope', root, root.terminal, Date.now()));
       await flusher.sendBatch(facts); await flusher.flush();
       expect(facts).toHaveLength(2);
       expect(facts[1].time_unix_nano).toBe(String(BigInt(e.endedAtMs) * 1_000_000n));
-      expect(spans).toHaveLength(2);
-      expect(spans.every(span => nano(span.endTime) === BigInt(root.terminal.timeNano))).toBe(true);
+      expect(spans).toHaveLength(8);
+      const task = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TASK')!;
+      const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
+      const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+      expect(task.parentSpanId).toBeUndefined();
+      expect(task.spanContext().traceId).not.toBe(agent.spanContext().traceId);
+      expect(task.links[0].context).toEqual({ traceId: agent.spanContext().traceId, spanId: agent.spanContext().spanId, traceFlags: 1 });
+      expect(task.attributes['loongsuite.doubao_work.origin_trace_id']).toBe(agent.spanContext().traceId);
+      expect(task.attributes['loongsuite.doubao_work.trace_parent_resolution']).toBe('linked_client_request');
+      const step = spans.find(span => span.spanContext().spanId === tool.parentSpanId)!;
+      expect(step.attributes['gen_ai.span.kind']).toBe('STEP');
+      expect(step.parentSpanId).toBe(task.spanContext().spanId);
+      expect(tool.spanContext().traceId).toBe(task.spanContext().traceId);
+      const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      expect(llms).toHaveLength(2);
+      expect(llms.every(span => span.spanContext().traceId === task.spanContext().traceId)).toBe(true);
+      expect(llms[0].attributes['gen_ai.output.messages']).toContain('background-read');
+      expect(llms[1].attributes['gen_ai.input.messages']).toContain('child file result');
+      expect(llms[1].attributes['gen_ai.output.messages']).toContain('child final');
+      expect([nano(task.startTime), nano(task.endTime)]).toEqual([BigInt(e.startedAtMs) * 1_000_000n, BigInt(e.endedAtMs) * 1_000_000n]);
+      expect(spans.filter(span => ['ENTRY', 'AGENT'].includes(String(span.attributes['gen_ai.span.kind'])))
+        .every(span => nano(span.endTime) === BigInt(root.terminal.timeNano))).toBe(true);
+      const replayed: ReadableSpan[] = [], replay = collector(replayed);
+      try {
+        await replay.sendBatch(facts); await replay.flush();
+        expect(replayed.map(span => span.spanContext())).toEqual(spans.filter(span => span.spanContext().traceId === task.spanContext().traceId)
+          .map(span => span.spanContext()));
+      } finally { await replay.shutdown(); }
     } finally { await flusher.shutdown(); }
   });
 

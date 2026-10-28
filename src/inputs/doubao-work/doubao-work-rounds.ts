@@ -40,8 +40,12 @@ export function reconstructNativeRounds(
   const bodies = [...new Set(current.map(item => item.text))];
   if (bodies.length !== 1 || current.length !== 1) return undefined;
   const body = bodies[0];
-  const delimiters = rows.flatMap((row, index) => row.role === 'user' && row.content === body ? [index] : []);
-  if (delimiters.length > 1 || (delimiters.length === 0 && assignments[0]?.text !== body)) return undefined;
+  const demandKey = nativeDemandKey(body);
+  const matchesDemand = (value: unknown) => typeof value === 'string'
+    && value.length <= MAX_INPUT_BYTES && nativeDemandKey(value) === demandKey;
+  const delimiters = rows.flatMap((row, index) => row.role === 'user' && matchesDemand(row.content) ? [index] : []);
+  if (delimiters.length > 1 || (delimiters.length === 0
+    && (assignments[0]?.text !== body || rows[0]?.role === 'user'))) return undefined;
   let first = delimiters.length === 1 ? delimiters[0] + 1 : 0;
   let last = rows.findIndex((row, index) => index >= first && row.role === 'user');
   if (last < 0) last = rows.length;
@@ -61,7 +65,8 @@ export function reconstructNativeRounds(
 
   const history: ObservedMessage[] = [];
   const initial = assignments[0]?.text;
-  if (initial && !(rows[0]?.role === 'user' && rows[0].content === initial)) {
+  if (initial && !(rows[0]?.role === 'user' && typeof rows[0].content === 'string'
+    && nativeDemandKey(rows[0].content) === nativeDemandKey(initial))) {
     history.push({ role: 'user', parts: [{ type: 'text', content: initial }] });
   }
   const rounds: NativeAssistantRound[] = [];
@@ -103,6 +108,27 @@ export function reconstructNativeRounds(
     previousAssistant = row.role === 'assistant' ? encoded : undefined;
   }
   return { rounds, omittedRounds, duplicateAssistantRows };
+}
+
+/** The client expands its own Skill URI before persisting a user message.
+ * Compare only those two observed reference forms; preserve all instructions,
+ * labels and original message content. Typed tokens avoid collisions with
+ * arbitrary Markdown or a user-written normalization placeholder. */
+function nativeDemandKey(value: string): string {
+  const parts: (string | { skill: string; label: string })[] = [];
+  const links = /\[([^\]\r\n]*)\]\((?:<([^<>\r\n]+)>|([^\s()<>]+))\)/g;
+  let cursor = 0;
+  for (const match of value.matchAll(links)) {
+    const target = match[2] ?? match[3];
+    const uri = /^skill:\/\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})(?:\?[^\s<>]*)?$/.exec(target);
+    const local = /^(?:[a-zA-Z]:\/|\/)[^\r\n<>]*\/\.doubaowork\/agent_mode\/workspace\/\.skills\/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})\/SKILL\.md$/.exec(target.replace(/\\/g, '/'));
+    const skill = uri?.[1] ?? local?.[1];
+    if (!skill) continue;
+    parts.push(value.slice(cursor, match.index), { skill, label: match[1] });
+    cursor = match.index! + match[0].length;
+  }
+  parts.push(value.slice(cursor));
+  return JSON.stringify(parts);
 }
 
 function visibleMessage(row: Record<string, unknown>): ObservedMessage | undefined {

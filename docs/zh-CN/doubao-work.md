@@ -37,15 +37,19 @@
 
 同 query、sandbox 下唯一覆盖子执行、且在根请求区间内的本地父执行构成 TASK → TASK。其余完全位于已观察请求区间内的本地 TASK，依据精确 query 归属挂到根 AGENT；`trace_parent_resolution` 区分本地父执行与所属请求。Span Link 另外保留原根关联，但树结构不依赖后端是否保存 Link。`native_creator_agent_id` 仅表示创建者身份，不充当云端逐次 invocation 父边。
 
-执行区间超出已观察客户端请求时，继续保留标准日志中的本地执行边界、身份及已采集工具事实，不导出无法被现有请求树容纳的 TASK Span。不延长请求、不复制祖先，也不制造新的 ENTRY / AGENT。元数据晚到而实际区间仍在请求内时，可以正常补上同一棵树；这与真正超出请求的后台执行分别报告。
+执行区间跨过客户端请求结束、或在请求结束后才开始时，每个完整 execution 导出一棵独立、ID 确定的本地执行 Trace，以 TASK 为根。通过 Span Link 关联原请求 AGENT，并以 `origin_trace_id` / `origin_span_id` 保留可查询的关联；标准执行事实仍使用原请求 Trace ID。其 LLM / STEP / TOOL 使用该独立 Trace 的身份，保留源执行及工具时间。不延长原请求、不复制祖先，也不制造新的 ENTRY / AGENT。元数据只是晚到、实际区间仍在请求内时，继续补入原树。执行开始早于原请求等身份或边界冲突仍拒绝导出。
 
-子记录先到时短暂等待父记录；已观察父 Write/Edit 成功时在既有关联状态上限内继续等待。没有完整或唯一父执行证据时保留原始身份和 `parent_resolution`，不制造中间 Span。客户端仅持久化有被跟踪文件变更的本地执行；纯 Read/Bash、纯云端或未落盘的子 Agent 不保证有 TASK。未归入 Span 的真实工具日志仍保留。
+请求内的子记录先到时等待父记录 30 秒；有本次请求区间内的源时间证明父 Write/Edit 成功时，宽限延长到首次发现后的 120 秒。成功的同内容 Write 不保证产生父快照，等待到期后按已确认请求归属降级，不无限等待；旧 checkpoint 中没有源时间的 Write 见证不延长宽限。后台执行采用独立根，不等待父快照。没有完整或唯一父执行证据时保留原始身份和 `parent_resolution`，不制造中间 Span。客户端仅持久化有被跟踪文件变更的本地执行；纯 Read/Bash、纯云端或未落盘的子 Agent 不保证有 TASK。未归入 Span 的真实工具日志仍保留。
 
 ## 内容、边界与可靠性
 
 只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史、不读取 Cookie、登录缓存或消息数据库，也不读取快照中的文件正文。
 
 本次需求必须在源请求窗口中唯一；复用时结合原生 user 分隔记录及精确工具 ID 选择本次输出。LLM 输入可以保留同一会话此前的可见历史作为上下文，但不会把历史 assistant 输出再次生成为本次 LLM。原始内容字段最多 64 KiB；每轮输入最多 64 KiB，超出时移除最早完整消息。每个所属请求 / 本地执行最多 64 个 assistant 轮次，展开内容合计最多 512 KiB，超限记录省略数量。相邻重复的无工具最终答复只保留一个可见轮次。
+
+原生 Skill 引用从 `skill://<name>?...` 展开为该客户端 `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` 的绝对路径时，以 Skill 标识和标签识别等价需求。其他指令文字仍须相同，歧义分隔记录拒绝匹配；不进行任意路径、链接或模糊文本匹配。实际消息内容不改写，也不重复追加原始需求和展开后的 user 消息。
+
+缺少源结束事件的请求保留 pending，不以会话切换、首输出或采集时间补造结束。完成扫描有界轮转并保存游标；未收口请求及无效结束元数据不会阻塞后续已结束请求，collector 重启后仍继续公平扫描。
 
 已取得本次需求而最终轨迹尚未落盘时，遥测管道最多等待 2 秒，随后有界降级；不阻塞客户端，也不改变已有请求及本地工具的源时间。Windows 本地回调名 `Bash` 可对应原生 `PowerShell`：两者分别保留，避免误报工具类型。新增历史消息、工具参数和结果均先走统一 InputManager 脱敏，再转换 Span；不在脱敏后重新读取原文。内部轮次内容只用于转换，JSONL 不重复复制整份展开历史。
 
@@ -73,7 +77,7 @@ Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 
 
 真实验收分别核对源日志、标准 JSONL、OTLP 和 CMS 回读，确认每轮 I/O、同批并行工具、ID / 时间 / 归属、TASK 唯一性与异步 Link。根请求的完整可见轨迹形成 ENTRY → AGENT → STEP → LLM / TOOL；本地执行片段中的 STEP 归属对应 TASK，不冒充完整云端 Agent invocation。缺少轨迹的本地 TOOL 仍直接挂在原所属 AGENT 或 TASK 下，保留 `genai.observed-tools.v1` 部分观测契约。标准事件日志保留 call/result，已导出的工具不重复复制为父 Span events。
 
-原有完整 Pilot ReAct validator 保持不变，不增加产品特例。缺少轨迹时直接挂在 AGENT/TASK 下的 TOOL，或 TASK 下的局部 STEP，仍可能超出该 validator 的完整 Agent 树契约；保留实际失败和推荐属性缺口。内容与推算算法的核验不等于精确模型遥测通过；同时回查 CMS 默认调用次数及耗时统计，报告实际影响。
+原有完整 Pilot ReAct validator 保持不变，不增加产品特例。缺少轨迹时直接挂在 AGENT/TASK 下的 TOOL、TASK 下的局部 STEP，以及独立 TASK 根，仍可能超出该 validator 的完整 Agent 树契约；独立本地执行按局部观测解释，不宣称完整 Agent 拓扑通过。保留实际失败和推荐属性缺口。内容与推算算法的核验不等于精确模型遥测通过；同时回查 CMS 默认调用次数及耗时统计，报告实际影响。
 
 本地观测日志用 `local_execution_phase` 表示资源起止，以 `root_turn_id` 保留关联；不写客户端 `gen_ai.turn.start/end`，也不创建新的客户端 turn。
 

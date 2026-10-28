@@ -33,7 +33,89 @@ async function setup(initial = '') {
   return { root, logs, file, input, statePath, stateStore, sessionsRoot, snapshotRoot };
 }
 
+async function missingParentFixture(background = false) {
+  const fixture = await setup();
+  const conv = '12345678', query = '00000000-0000-4000-8000-000000000002';
+  for (const [id, source] of Object.entries(DOUBAO_NATIVE_FILES)) {
+    const folder = path.join(fixture.sessionsRoot, conv, 'agents', id, 'system');
+    await mkdir(folder, { recursive: true }); await writeFile(path.join(folder, 'trajectory.jsonl'), source);
+  }
+  const child = { executionKey: '00000000-0000-4000-8000-000000000001', conversationId: conv, queryMessageId: query,
+    agentId: 's_nativeLeaf', agentType: 'sub_agent', sandboxId: 'synthetic-sandbox',
+    startedAtMs: DOUBAO_EPOCH + (background ? 12_000 : 3000), endedAtMs: DOUBAO_EPOCH + (background ? 13_000 : 4000) };
+  const folder = path.join(fixture.snapshotRoot, '123', conv, child.executionKey); await mkdir(folder, { recursive: true });
+  await writeFile(path.join(folder, `${child.agentId}.json`), JSON.stringify({ execution: child }));
+  const meta = { conversation_id: conv, send_local_message_id: query };
+  await appendFile(fixture.file, doubaoLine('on_message_session_start', meta, 10)
+    + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
+    + doubaoCommandLine('o_nativeOrg', 'synthetic-sandbox', 100)
+    + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 200)
+    + doubaoToolLine({ agent_id: 'o_nativeOrg', name: 'Write', tcid: 'successful-noop-write' }, 1000)
+    + doubaoToolLine({ name: 'Write', toolCallID: 'successful-noop-write', phase: 'execution_settled', status: 'success' }, 2000)
+    + doubaoLine('on_message_session_end', meta, 10_000));
+  return { ...fixture, child };
+}
+
 describe('Doubao Work passive client-message input', () => {
+  it('bounds a missing parent snapshot wait across restart even when the parent Write succeeded', async () => {
+    const { input, stateStore, statePath, logs, sessionsRoot, snapshotRoot, child } = await missingParentFixture();
+    const now = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    await input.poll(); await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    clock.mockReturnValue(now + 90_000);
+    expect(await restarted.poll()).toEqual([]);
+    clock.mockReturnValue(now + 120_001);
+    const events = await restarted.poll();
+    expect(events).toHaveLength(2);
+    expect(events[0]['loongsuite.doubao_work.native_execution_id']).toBe(child.executionKey);
+    expect(events[0]['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
+    expect(events[0].parent_span_id).toBeUndefined();
+    expect(events[1].time_unix_nano).toBe(String(BigInt(child.endedAtMs) * 1_000_000n));
+    expect(await restarted.poll()).toEqual([]);
+  });
+
+  it.each(['legacy', 'previous-query'])('does not extend the parent wait using %s Write evidence', async mode => {
+    const { input, stateStore } = await missingParentFixture();
+    const now = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    await input.poll();
+    const state = stateStore.get('doubao-work'), checkpoint = state.extra!.doubaoWork as any;
+    const witness = checkpoint.nativeMutationActors[JSON.stringify(['synthetic-sandbox', 'o_nativeOrg'])];
+    if (mode === 'legacy') delete witness.timeNano;
+    else witness.timeNano = String(BigInt(DOUBAO_EPOCH - 1000) * 1_000_000n);
+    stateStore.set('doubao-work', state);
+    clock.mockReturnValue(now + 30_001);
+    expect(await input.poll()).toHaveLength(2);
+  });
+
+  it('does not block an independent background execution on a missing parent snapshot', async () => {
+    const { input, child } = await missingParentFixture(true);
+    const events = (await input.poll()).filter(event => event['loongsuite.doubao_work.local_execution_phase']);
+    expect(events).toHaveLength(2);
+    expect(events[0]['loongsuite.doubao_work.native_execution_id']).toBe(child.executionKey);
+  });
+
+  it.each([false, true])('does not starve a completed request behind four unclosable requests (invalid terminal=%s)', async invalidTerminal => {
+    const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
+    let source = '';
+    for (let i = 0; i < 4; i++) {
+      const meta = { chat_session_id: `pending-${i}`, conversation_id: '', send_local_message_id: `pending-message-${i}` };
+      source += doubaoLine('on_message_session_start', meta, 10 + i);
+      if (invalidTerminal) source += doubaoLine('on_message_session_end', meta, 100 + i);
+    }
+    source += doubaoLine('on_message_session_start', { chat_session_id: 'ready' }, 200)
+      + doubaoLine('on_message_session_end', { chat_session_id: 'ready' }, 300);
+    await appendFile(file, source);
+    const first = await input.poll(); await stateStore.save();
+    const restored = new StateStore(statePath); await restored.load();
+    const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
+    const events = [...first, ...await restarted.poll()];
+    expect(events).toHaveLength(2);
+    expect(events.every(event => event['gen_ai.turn.id'] === 'ready')).toBe(true);
+    expect(Object.keys((restored.get('doubao-work').extra!.doubaoWork as any).pending)).toHaveLength(4);
+    expect(await restarted.poll()).toEqual([]);
+  });
+
   it('drops presentation inspections restored from an older checkpoint while keeping a real Bash call', async () => {
     const { file, input, stateStore, statePath, logs, sessionsRoot, snapshotRoot } = await setup();
     const call = doubaoToolLine({ name: 'Bash', tcid: 'real-bash' }, 100);
@@ -137,7 +219,7 @@ describe('Doubao Work passive client-message input', () => {
       + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 200)
       + doubaoToolLine({ agent_id: 'o_nativeOrg', name: 'Write', tcid: 'parent-mutation' }, 1000)
       + doubaoToolLine({ name: 'Write', toolCallID: 'parent-mutation', phase: 'execution_settled', status }, 2000)
-      + doubaoLine('on_message_session_end', meta));
+      + doubaoLine('on_message_session_end', meta, 10_000));
     expect((await input.poll()).filter(e => e['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution')).toEqual([]);
     await stateStore.save();
     const restored = new StateStore(statePath); await restored.load();
@@ -183,7 +265,7 @@ describe('Doubao Work passive client-message input', () => {
     await appendFile(file, doubaoLine('on_message_session_start', meta, 10)
       + doubaoCommandLine('synthetic-turn', 'synthetic-sandbox')
       + doubaoCommandLine('s_nativeLeaf', 'synthetic-sandbox', 4000)
-      + doubaoLine('on_message_session_end', meta));
+      + doubaoLine('on_message_session_end', meta, 10_000));
     expect(await input.poll()).toHaveLength(2);
     await stateStore.save();
     const restored = new StateStore(statePath); await restored.load();

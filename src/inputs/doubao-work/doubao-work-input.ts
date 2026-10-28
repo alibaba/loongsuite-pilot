@@ -21,6 +21,7 @@ const MAX_TOOLS = 4096;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPLETED_TTL_MS = 7 * PENDING_TTL_MS;
 const EXECUTION_PARENT_GRACE_MS = 30_000;
+const EXECUTION_PARENT_WRITE_GRACE_MS = 120_000;
 
 interface FileCursor { identity: string; offset: number; anchor?: string; skippingLine?: boolean }
 interface PendingTurn extends DoubaoPendingTurn { startObserved: boolean; terminal?: DoubaoLogEvent }
@@ -30,6 +31,7 @@ interface Checkpoint {
   sinceMs: number;
   files: Record<string, FileCursor>;
   pending: Record<string, PendingTurn>;
+  pendingScanCursor?: string;
   completed: Record<string, number>;
   tools?: Record<string, PendingTool>;
   roots?: Record<string, PendingTurn & { terminal: DoubaoLogEvent }>;
@@ -39,7 +41,7 @@ interface Checkpoint {
   executionsCompleted?: Record<string, { digest: string; updatedMs: number }>;
   executionScanCursor?: string;
   executionFirstSeen?: Record<string, number>;
-  nativeMutationActors?: Record<string, { callId: string; updatedMs: number }>;
+  nativeMutationActors?: Record<string, { callId: string; timeNano?: string; updatedMs: number }>;
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions {
@@ -255,9 +257,16 @@ export class DoubaoWorkInput extends BaseInput {
     // Consume the whole source window first, including rotated/out-of-order tool
     // records. A partial scan must not finalize requests ahead of unread tools.
     if (drained) {
-      let completed = 0;
-      for (const [key, pending] of Object.entries(next.pending)) {
-        if (completed++ >= 4) break;
+      const pending = Object.entries(next.pending);
+      const after = pending.findIndex(([key]) => key === next.pendingScanCursor);
+      const ordered = after < 0 ? pending : [...pending.slice(after + 1), ...pending.slice(0, after + 1)];
+      let attempts = 0;
+      for (const [key, pending] of ordered) {
+        if (!pending.startObserved || !pending.terminal) continue;
+        if (attempts++ >= 4) break;
+        // Invalid terminal metadata or a temporarily unavailable trajectory
+        // must not repeatedly occupy every completion slot after restart.
+        next.pendingScanCursor = key;
         await this.complete(next, key, pending, entries);
       }
       if (performance.now() >= this.nextNativeScanAt) {
@@ -333,7 +342,7 @@ export class DoubaoWorkInput extends BaseInput {
           // The native writer persists mutation-bearing executions only when
           // they release. Retain this content-free witness after tool emission
           // so child snapshots can wait for a long-running real parent.
-          state.nativeMutationActors![actorKey] = { callId: start.tool.id, updatedMs: Date.now() };
+          state.nativeMutationActors![actorKey] = { callId: start.tool.id, timeNano: end.timeNano, updatedMs: Date.now() };
         }
       }
       return;
@@ -521,16 +530,21 @@ export class DoubaoWorkInput extends BaseInput {
       if (io.output !== undefined) events[1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
       const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
       const parentId = graph.edges[execution.agentId]?.parent;
-      if (parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
+      const background = BigInt(execution.endedAtMs) * 1_000_000n > BigInt(root.terminal.timeNano);
+      if (!background && parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
         const hasParentRecord = eligible.some(candidate => candidate.agentId === parentId && candidate.queryMessageId === execution.queryMessageId
           && candidate.conversationId === execution.conversationId && candidate.sandboxId === execution.sandboxId);
         const parentMutation = state.nativeMutationActors![JSON.stringify([execution.sandboxId, parentId])];
-        // A successful native Write/Edit means the parent may release much
-        // later than its children. Wait within the existing 24h/4096 checkpoint
-        // bounds, rather than committing an irreversible fallback at 30s.
-        // Without such evidence the short grace still allows a late snapshot;
-        // an existing but ambiguous/non-enclosing parent is never guessed.
-        if ((!hasParentRecord && parentMutation) || Date.now() - firstSeen < EXECUTION_PARENT_GRACE_MS) continue;
+        // Write success is not proof of a future snapshot (a same-content
+        // write may produce no tracked mutation). Extend the grace only for
+        // source-timed evidence in this request, and always bound that wait.
+        // Background executions are independent roots linked to the request;
+        // they do not require an enclosing parent snapshot to be exported.
+        const currentWrite = typeof parentMutation?.timeNano === 'string' && /^\d{19}$/.test(parentMutation.timeNano)
+          && BigInt(parentMutation.timeNano) >= BigInt(root.queryMs) * 1_000_000n
+          && BigInt(parentMutation.timeNano) <= BigInt(root.terminal.timeNano);
+        const grace = !hasParentRecord && currentWrite ? EXECUTION_PARENT_WRITE_GRACE_MS : EXECUTION_PARENT_GRACE_MS;
+        if (Date.now() - firstSeen < grace) continue;
       }
       entries.push(...events);
       for (const [toolKey] of pairs) delete state.tools![toolKey];

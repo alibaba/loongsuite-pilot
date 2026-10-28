@@ -16,6 +16,48 @@ function content(rows: unknown[], assignments = assignment('CURRENT')) {
 }
 
 describe('visible assistant-round reconstruction', () => {
+  it.each([
+    '/Users/synthetic/Library/Application Support/DoubaoWork/Profile 2/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md',
+    'C:\\Users\\synthetic\\AppData\\Local\\DoubaoWork\\User Data\\Profile 3\\.doubaowork\\agent_mode\\workspace\\.skills\\doubao-human-signal\\SKILL.md',
+  ])('matches an expanded native Skill link without duplicating the user input (%s)', skillPath => {
+    const demand = '[去AI味](skill://doubao-human-signal?type=2&id=123)\nRead then Write.';
+    const expanded = `[去AI味](<${skillPath}>)\nRead then Write.`;
+    const rows = [{ role: 'user', content: expanded }, assistant(['read']), result('read'), assistant(['write']), result('write'), final];
+    const rebuilt = reconstructNativeRounds(content(rows, assignment(demand)), actor, DOUBAO_EPOCH, end, ['read', 'write'])!;
+    expect(rebuilt?.rounds).toHaveLength(3);
+    expect(rebuilt.rounds.map(round => round.inputMessages.length)).toEqual([1, 3, 5]);
+    expect(rebuilt.rounds[0].inputMessages[0].parts[0].content).toBe(expanded);
+  });
+
+  it('selects an expanded Skill on reuse while preserving historical messages only as input', () => {
+    const demand = '[去AI味](skill://doubao-human-signal?type=2&id=123)\nCURRENT';
+    const expanded = '[去AI味](</Users/synthetic/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md>)\nCURRENT';
+    const rows = [assistant(['old']), result('old'), { ...final, content: 'OLD' }, { role: 'user', content: expanded }, assistant(['new']), result('new'), final];
+    const rebuilt = reconstructNativeRounds(content(rows, assignment('OLD', -30_000) + assignment(demand)), actor, DOUBAO_EPOCH, end, ['new'])!;
+    expect(rebuilt?.rounds).toHaveLength(2);
+    expect(rebuilt.rounds.flatMap(round => round.callIds)).toEqual(['new']);
+    expect(rebuilt.rounds[0].inputMessages.at(-1)!.parts[0].content).toBe(expanded);
+  });
+
+  it.each([
+    '[去AI味](</Users/synthetic/.doubaowork/agent_mode/workspace/.skills/other-skill/SKILL.md>)\nCURRENT',
+    '[去AI味](https://example.test/doubao-human-signal/SKILL.md)\nCURRENT',
+    '[去AI味](</unrelated/.skills/doubao-human-signal/SKILL.md>)\nCURRENT',
+    '[去AI味](</Users/synthetic/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md>)\nOTHER',
+  ])('does not treat an unrelated link or changed instruction as the current request (%s)', expanded => {
+    const demand = '[去AI味](skill://doubao-human-signal?type=2&id=123)\nCURRENT';
+    const rows = [{ role: 'user', content: expanded }, assistant(['new']), result('new'), final];
+    expect(reconstructNativeRounds(content(rows, assignment(demand)), actor, DOUBAO_EPOCH, end, ['new'])).toBeUndefined();
+  });
+
+  it('rejects ambiguous repeated Skill demands instead of selecting the last matching text', () => {
+    const demand = '[去AI味](skill://doubao-human-signal?type=2&id=123)\nCURRENT';
+    const expanded = '[去AI味](</Users/synthetic/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md>)\nCURRENT';
+    const rows = [{ role: 'user', content: demand }, assistant(['old']), result('old'), final,
+      { role: 'user', content: expanded }, assistant(['new']), result('new'), final];
+    expect(reconstructNativeRounds(content(rows, assignment(demand)), actor, DOUBAO_EPOCH, end, ['new'])).toBeUndefined();
+  });
+
   it('keeps three parallel tool calls in one assistant round and carries their results into the next input', () => {
     const rows = [assistant(['write']), result('write'), assistant(['a', 'b', 'c']), result('b'), result('c'), result('a'), assistant(['recover']), result('recover'), final];
     const rebuilt = reconstructNativeRounds(content(rows), actor, DOUBAO_EPOCH, end, ['write', 'a', 'b', 'c', 'recover'])!;

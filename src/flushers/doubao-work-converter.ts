@@ -167,38 +167,43 @@ function addRecordToolEvents(span: Span, records: EventLogRecord[]): void {
   span.setAttribute(`${PREFIX}tool_observations_not_in_span`, calls.length - emitted);
 }
 
-/** One TASK per actual local execution UUID. Its resource lifetime is known;
- * the cloud Agent's invocation is not. The exact owning request is a causal
- * parent for contained work; never stretch it to accommodate background work.
+/** One TASK per actual local execution UUID. Contained work retains its
+ * existing parent. Background resource lifetimes are separate rooted traces
+ * linked to the originating request, never a stretched client invocation.
  */
 function convertLocalExecution(records: EventLogRecord[], options: Options) {
   const start = records.find(record => record[`${PREFIX}local_execution_phase`] === 'start');
   const end = records.find(record => record[`${PREFIX}local_execution_phase`] === 'end');
-  const traceId = start?.trace_id, spanId = start?.[`${PREFIX}local_execution_span_id`];
+  const originTraceId = start?.trace_id, spanId = start?.[`${PREFIX}local_execution_span_id`];
   if (!start || !end || !options.observationTracer || !validTime(start.time_unix_nano) || !validTime(end.time_unix_nano)
     || BigInt(end.time_unix_nano) <= BigInt(start.time_unix_nano)
-    || typeof traceId !== 'string' || !/^[0-9a-f]{32}$/.test(traceId)
+    || typeof originTraceId !== 'string' || !/^[0-9a-f]{32}$/.test(originTraceId)
     || typeof spanId !== 'string' || !/^[0-9a-f]{16}$/.test(spanId)) {
     return { spanCount: 0, traceIds: [], warnings: ['Invalid local execution observation; no TASK exported'] };
   }
   const rootStart = start[`${PREFIX}root_request_start_unix_nano`], rootEnd = start[`${PREFIX}root_request_end_unix_nano`];
-  if (!validTime(rootStart) || !validTime(rootEnd) || BigInt(start.time_unix_nano) < BigInt(rootStart)
-    || BigInt(end.time_unix_nano) > BigInt(rootEnd)) {
-    return { spanCount: 0, traceIds: [], warnings: ['Local execution extends outside the observed client request; retained as canonical facts without inventing an enclosing invocation'] };
+  if (!validTime(rootStart) || !validTime(rootEnd) || BigInt(rootEnd) <= BigInt(rootStart)
+    || BigInt(start.time_unix_nano) < BigInt(rootStart)) {
+    return { spanCount: 0, traceIds: [], warnings: ['Local execution has no consistent originating request boundary; no TASK exported'] };
   }
-  const rootContext = { traceId, spanId: doubaoRootAgentSpanId(traceId), traceFlags: TraceFlags.SAMPLED };
+  const background = BigInt(end.time_unix_nano) > BigInt(rootEnd);
+  const traceId = background ? doubaoDigest(`doubao-work:background:${originTraceId}:${spanId}`).slice(0, 32) : originTraceId;
+  const rootContext = { traceId: originTraceId, spanId: doubaoRootAgentSpanId(originTraceId), traceFlags: TraceFlags.SAMPLED };
   const parentId = start.parent_span_id;
   const hasLocalParent = start[`${PREFIX}parent_resolution`] === 'same_query_native_execution'
     && start[`${PREFIX}native_parent_in_request`] === true
     && typeof parentId === 'string' && /^[0-9a-f]{16}$/.test(parentId);
-  const context = trace.setSpanContext(ROOT_CONTEXT, hasLocalParent ? { ...rootContext, spanId: parentId as string } : rootContext);
+  const context = background ? ROOT_CONTEXT
+    : trace.setSpanContext(ROOT_CONTEXT, hasLocalParent ? { ...rootContext, spanId: parentId as string } : rootContext);
   const attributes: Attributes = {
     'gen_ai.span.kind': 'TASK', 'gen_ai.operation.name': 'run_task',
     'gen_ai.task.name': 'doubao.local_execution', 'gen_ai.framework': 'doubao-work',
     'loongsuite.trace.contract': OBSERVATION_CONTRACT,
     [`${PREFIX}observation_scope`]: 'native_sandbox_execution',
     [`${PREFIX}trace_completeness`]: 'local_execution_observation',
-    [`${PREFIX}trace_parent_resolution`]: hasLocalParent ? 'enclosing_local_execution' : 'owning_client_request',
+    [`${PREFIX}trace_parent_resolution`]: background ? 'linked_client_request'
+      : hasLocalParent ? 'enclosing_local_execution' : 'owning_client_request',
+    ...(background ? { [`${PREFIX}origin_trace_id`]: originTraceId, [`${PREFIX}origin_span_id`]: rootContext.spanId } : {}),
     ...(typeof start[`${PREFIX}root_turn_id`] === 'string' ? { 'gen_ai.turn.id': start[`${PREFIX}root_turn_id`] as string } : {}),
   };
   for (const [key, value] of Object.entries(start)) {
@@ -234,8 +239,9 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     toolRecords.push({ ...common, 'event.name': 'tool.call', time_unix_nano: item.startNano, 'gen_ai.tool.call.arguments': item.arguments },
       { ...common, 'event.name': 'tool.result', time_unix_nano: item.endNano, 'tool.result.status': item.status, 'gen_ai.tool.call.result': item.result });
   }
-  const rounds = addDoubaoAssistantRounds(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, start);
-  const toolSpanCount = addLocalToolSpans(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, start, rounds.placements);
+  const ownerRecord = background ? { ...start, trace_id: traceId } : start;
+  const rounds = addDoubaoAssistantRounds(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, ownerRecord);
+  const toolSpanCount = addLocalToolSpans(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, ownerRecord, rounds.placements);
   if (Array.isArray(observations)) span.setAttribute(`${PREFIX}tool_observations_not_in_span`, observations.length - toolSpanCount);
   span.end(nanoTime(end.time_unix_nano));
   return { spanCount: 1 + rounds.spanCount + toolSpanCount, traceIds: [traceId], warnings: [] };
@@ -271,8 +277,8 @@ export function enrichDoubaoClientRequest(records: AgentActivityEntry[], spans: 
     else span.attributes['loongsuite.trace.contract'] = OBSERVATION_CONTRACT;
     span.attributes[`${PREFIX}trace_completeness`] = hasRounds ? 'client_request_and_assistant_rounds' : 'client_request_and_local_observations';
     span.attributes[`${PREFIX}unsupported_trace_layers`] = hasRounds
-      ? ['provider_model_metadata', 'provider_usage', 'provider_timing', 'full_delegated_agent', 'out_of_request_local_execution_span']
-      : ['react', 'llm', 'cloud_tool_span', 'full_delegated_agent', 'out_of_request_local_execution_span'];
+      ? ['provider_model_metadata', 'provider_usage', 'provider_timing', 'full_delegated_agent', 'complete_background_execution_coverage']
+      : ['react', 'llm', 'cloud_tool_span', 'full_delegated_agent', 'complete_background_execution_coverage'];
     span.attributes[`${PREFIX}observed_local_tool_calls`] = records.filter(record => record['event.name'] === 'tool.call').length;
     const firstOutput = records.find(record => record['event.name'] === 'other'
       && record[`${PREFIX}observation_scope`] === 'native_first_model_output');
