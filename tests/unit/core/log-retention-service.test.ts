@@ -214,6 +214,33 @@ describe('LogRetentionService', () => {
       expect(result.deleted).toBe(1);
     });
 
+    it('reclaims closed output segments under pressure while preserving active files today', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output'); await fs.mkdir(outputDir, { recursive: true });
+      const active = path.join(outputDir, `copilot-${today()}.jsonl`);
+      const sealed = path.join(outputDir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+      const otherActive = path.join(outputDir, `cursor-${today()}.jsonl`);
+      await writeSizedFile(active, OUTPUT_RETENTION_MAX_TOTAL_BYTES / 2);
+      await writeSizedFile(sealed, OUTPUT_RETENTION_MAX_TOTAL_BYTES / 2);
+      await writeSizedFile(otherActive, 1024);
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runCleanup()).deleted).toBe(1);
+      expect((await fs.readdir(outputDir)).sort()).toEqual([path.basename(active), path.basename(otherActive)].sort());
+    });
+
+    it('includes undated closed segments in capacity cleanup without following symlinks', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output'); await fs.mkdir(outputDir, { recursive: true });
+      const sealed = path.join(outputDir, 'copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-all.jsonl');
+      const active = path.join(outputDir, `cursor-${today()}.jsonl`);
+      const external = path.join(tmpDir, 'external.jsonl');
+      await writeSizedFile(sealed, OUTPUT_RETENTION_MAX_TOTAL_BYTES); await writeSizedFile(active, 1024);
+      await writeSizedFile(external, OUTPUT_RETENTION_MAX_TOTAL_BYTES);
+      await fs.symlink(external, path.join(outputDir, `copilot.part-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-${today()}.jsonl`));
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runCleanup()).deleted).toBe(1);
+      expect(await fs.stat(external)).toBeDefined();
+      expect(await fs.lstat(path.join(outputDir, `copilot.part-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-${today()}.jsonl`))).toBeDefined();
+    });
+
     it('enforces the SLS failure total limit while preserving the active segment', async () => {
       const slsDir = path.join(tmpDir, 'logs', 'sls-failed-logs');
       await fs.mkdir(slsDir, { recursive: true });

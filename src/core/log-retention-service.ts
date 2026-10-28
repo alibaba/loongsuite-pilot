@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { LogRetentionConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { SLS_FAILURE_LOG_MAX_TOTAL_BYTES } from '../flushers/sls-failure-log-writer.js';
+import { parseOutputSegment } from '../utils/jsonl-output-file.js';
 
 const logger = createLogger('LogRetention');
 
@@ -382,12 +383,13 @@ export class LogRetentionService {
   private async collectDatedOutputFiles(dir: string, files: string[]): Promise<DatedLogFile[]> {
     const result: DatedLogFile[] = [];
     for (const file of files) {
-      const dateStr = extractDate(file);
-      if (!dateStr) continue;
-
       const fullPath = path.join(dir, file);
-      const stat = await safeStat(fullPath);
+      const stat = await safeLstat(fullPath);
       if (!stat?.isFile()) continue;
+      const segment = parseOutputSegment(file);
+      const dateStr = extractDate(file) ?? (segment?.date === 'all' ? localDateString(new Date(stat.mtimeMs))
+        : file.endsWith('-all.jsonl') ? localDateString(new Date()) : null);
+      if (!dateStr) continue;
 
       result.push({
         file,
@@ -433,9 +435,10 @@ export class LogRetentionService {
 
     const minKeepCutoff = dateCutoff(OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS);
     const candidates = files
-      .filter(file => file.dateStr !== today && file.dateStr < minKeepCutoff)
+      .filter(file => parseOutputSegment(file.file) !== undefined
+        || (file.dateStr !== today && file.dateStr < minKeepCutoff))
       .sort((a, b) => a.dateStr.localeCompare(b.dateStr)
-        || b.size - a.size
+        || a.mtimeMs - b.mtimeMs
         || a.file.localeCompare(b.file));
 
     let deleted = 0;

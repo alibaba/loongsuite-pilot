@@ -14,9 +14,11 @@
 
 ```text
 <agent-id>-YYYY-MM-DD.jsonl
+<agent-id>.part-<id>-YYYY-MM-DD.jsonl
 ```
 
-每一行是一条规范化事件。
+第一种是当前写入文件，带 `part` 唯一标识的是按大小滚动后封存的分片。
+日期后缀仍可被 Dashboard 和保留清理识别。每一行是一条规范化事件。
 
 JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 boolean，
 消息和工具载荷保持 array/object。宽表日志等只接受字符串列的后端，应只在各自
@@ -29,7 +31,8 @@ JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 
   "jsonl": {
     "enabled": true,
     "outputDir": "~/.loongsuite-pilot/logs/output",
-    "rotateDaily": true
+    "rotateDaily": true,
+    "maxFileSizeMb": 100
   }
 }
 ```
@@ -39,6 +42,11 @@ JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 
 | `enabled` | 开启或关闭本地 JSONL 输出。 |
 | `outputDir` | 输出文件目录。 |
 | `rotateDaily` | 按日期写入文件。 |
+| `maxFileSizeMb` | 下一条事件会使文件超过此 MiB 数时先滚动，默认 100；Agent 事件、原始 topic 及 `rotateDaily=false` 均生效。非正数或非有限数回退默认值。 |
+
+单条 JSON 事件不会为满足文件限制而被拆分或截断。超过限制的单条事件完整
+写入并告警，下次追加前滚动；已有超大文件也在下次写入前滚动。
+`rotateDaily=false` 时文件名以 `all` 代替日期。
 
 ## 保留和磁盘保护
 
@@ -47,8 +55,8 @@ JSONL 会保留原生 JSON 类型：token 数量保持 number，标志位保持 
 Pilot 也内置了针对异常大日志的磁盘保护清理：
 
 - 单个 Output 文件超过 512 MiB，且已经超过 2 天时，可以被提前清理。
-- 如果 `logs/output` 超过 2 GiB，会从更老日期的 Output 文件开始删除，直到目录低于水位。
-- 当天 Output 文件不会被保留清理删除。空间压力清理也会保留昨天的 Output 文件。
+- 如果 `logs/output` 超过 2 GiB，周期清理会优先淘汰较老的可清理文件和封存的 `part` 分片，当天封存分片也可淘汰。
+- 当天和昨天未分片的文件、当前活跃文件继续保留；封存的 `all` 分片按修改日期参与清理。活跃文件和单条超大事件可能使目录仍高于水位；这是周期保留目标，不是实时磁盘配额。
 
 环境变量：
 

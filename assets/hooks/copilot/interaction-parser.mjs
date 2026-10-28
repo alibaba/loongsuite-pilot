@@ -10,7 +10,7 @@ const id = value => crypto.createHash('sha256').update(value).digest('hex').slic
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
 /** Return complete, independently checkpointable interactions. No observation-time closure. */
-export function parseInteractions(events, spans = [], { requireOtel = false, contextEvents = events } = {}) {
+export function parseInteractions(events, spans = [], { requireOtel = false } = {}) {
   const session = events.find(e => e.type === 'session.start');
   const sessionId = session?.data?.sessionId;
   if (!sessionId) return [];
@@ -71,7 +71,7 @@ export function parseInteractions(events, spans = [], { requireOtel = false, con
     // Failed provider calls can exist only in OTel. Preserve them without inventing output.
     for (const c of chats) if (!apiMessages.has(c.attributes['gen_ai.response.id']) && c.status?.code === 2)
       apiMessages.set(c.attributes['gen_ai.response.id'] || c.spanId, []);
-    for (const [apiId, ms] of apiMessages) {
+    const calls = [...apiMessages].map(([apiId, ms]) => {
       const c = chats.find(s => s.attributes['gen_ai.response.id'] === apiId || s.spanId === apiId);
       const a = c?.attributes || {};
       const step = String(a['github.copilot.turn_id'] ?? ms[0]?.data?.turnId ?? apiId);
@@ -79,11 +79,19 @@ export function parseInteractions(events, spans = [], { requireOtel = false, con
       const model = a['gen_ai.response.model'] || ms[0]?.data?.model || a['gen_ai.request.model'] || '';
       const startNs = ns(c?.startTime) || legacy.isoToUnixNanos(start?.timestamp || ms[0]?.timestamp);
       const endNs = ns(c?.endTime) || legacy.isoToUnixNanos(ms.at(-1)?.timestamp);
-      if (!startNs || !endNs) continue;
+      return { apiId, ms, c, a, step, start, model, startNs, endNs };
+    }).filter(call => call.startNs && call.endNs)
+      .sort((a, b) => BigInt(a.startNs) < BigInt(b.startNs) ? -1 : BigInt(a.startNs) > BigInt(b.startNs) ? 1 : 0);
+    const consumedInputs = new Set();
+    for (const { apiId, ms, c, a, step, start, model, startNs, endNs } of calls) {
       const input = [];
-      for (const e of contextEvents) {
+      // Transcript messages are incremental evidence, not a snapshot of the
+      // model's full (possibly compacted) context. Emit each fragment once per
+      // interaction; the converter accumulates request deltas across its steps.
+      for (const e of history) {
         const when = legacy.isoToUnixNanos(e.timestamp);
         if (!when || BigInt(when) >= BigInt(startNs)) continue;
+        if (consumedInputs.has(e)) continue;
         if (e.type === 'system.message' || e.type === 'user.message') {
           if (typeof e.data?.content === 'string') input.push({role:e.type === 'system.message' ? 'system' : 'user',parts:[{type:'text',content:e.data.content}]});
         } else if (e.type === 'assistant.message') {
@@ -91,8 +99,9 @@ export function parseInteractions(events, spans = [], { requireOtel = false, con
         } else if (e.type === 'tool.execution_complete' && e.data?.toolCallId) {
           input.push({role:'tool',parts:[{type:'tool_call_response',id:e.data.toolCallId,response:e.data.result ?? null}]});
         }
+        consumedInputs.add(e);
       }
-      const llm = ms.length ? legacy.buildMergedLlmSpan(sessionId, trace, step, ms, start, null, model, input, null, null) : {
+      const llm = ms.length ? legacy.buildMergedLlmSpan(sessionId, trace, step, ms, start, null, model, null, null, null) : {
         'event.name': 'llm.response', 'user.id': '', 'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': 'copilot', 'gen_ai.step.id': step,
         'gen_ai.request.model': model, 'gen_ai.response.model': model,
@@ -118,7 +127,7 @@ export function parseInteractions(events, spans = [], { requireOtel = false, con
         'gen_ai.step.id': step, 'gen_ai.request.id': apiId, 'gen_ai.response.id': apiId,
         'gen_ai.request.model': a['gen_ai.request.model'] || model,
         'gen_ai.provider.name': llm['gen_ai.provider.name'], time_unix_nano: startNs,
-        ...(llm['gen_ai.input.messages'] ? { 'gen_ai.input.messages': llm['gen_ai.input.messages'] } : {}),
+        ...(input.length ? { 'gen_ai.input.messages_delta': input } : {}),
       };
       llm.time_unix_nano = endNs;
       entries.push(request, llm);

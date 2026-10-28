@@ -195,13 +195,6 @@ export class CopilotSourceIndex {
         const events = rows.map(r => JSON.parse(r.body));
         return { events, spans: spans.map(r => JSON.parse(r.body)) };
     }
-    async context(session: string, last: string): Promise<any[]> {
-        // Fetch history only after an interaction is ready. Irrelevant hook/native
-        // history stays on disk; memory is proportional to the emitted LLM context.
-        const history = await this.all(`SELECT body FROM records WHERE kind='event' AND session=? AND stamp<=?
-      AND type IN ('user.message','system.message','assistant.message','tool.execution_complete') ORDER BY stamp,rowid`, [session, last]);
-        return history.map(r => JSON.parse(r.body));
-    }
     async hasNative(session: string): Promise<boolean> {
         return (await this.all('SELECT 1 FROM records WHERE kind=\'span\' AND session=? LIMIT 1', [session])).length > 0;
     }

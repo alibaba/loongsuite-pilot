@@ -114,14 +114,11 @@ export class CopilotLogInput extends BaseSessionInput {
       // degradation; explicit no-file markers do not wait. Never degrade while
       // a discovered source is still being drained.
       if (!requireOtel && !markerSessions.has(sid) && !pending.id.startsWith('summary:')) {
-        const closed = parseInteractions(source.events, [], { requireOtel: false, contextEvents: [] }).length > 0;
+        const closed = parseInteractions(source.events, [], { requireOtel: false }).length > 0;
         if (!closed || await this.index.awaitingNative(sid, pending.id, Date.now(), this.nativeGraceMs) || await this.index.hasUnreadSource()) continue;
       }
       const key = `copilot:${sid}:${pending.id}`;
-      const ready = parseInteractions(source.events, source.spans, { requireOtel, contextEvents: [] }).some(b => b.key === key);
-      if (!ready) continue;
-      const context = pending.id.startsWith('summary:') ? [] : await this.index.context(sid, source.events.at(-1)?.timestamp || '');
-      const batch = parseInteractions(source.events, source.spans, { requireOtel, contextEvents: context }).find(b => b.key === key);
+      const batch = parseInteractions(source.events, source.spans, { requireOtel }).find(b => b.key === key);
       if (batch?.records.length) {
         this.queuedKeys = [key];
         return batch.records.map(record => ({ ...record, 'gen_ai.copilot.telemetry.source': requireOtel ? 'native-otel' : 'transcript-only' })); // explicit degradation, never invented usage

@@ -384,7 +384,15 @@ export class MetricsSummaryWriter {
       if (!fileStat) continue;
 
       const fileName = path.basename(filePath);
-      const existing = existingByName.get(fileName);
+      // A size rotation renames the active inode. Transfer its already-scanned
+      // stats, including when refresh observes the gap before a new active file.
+      const named = existingByName.get(fileName);
+      const existing = named && sameFileIdentity(named, fileStat) ? named
+        : state.files.find(file => sameFileIdentity(file, fileStat));
+      if (existing && existing.fileName !== fileName) {
+        const old = nextByName.get(existing.fileName);
+        if (old && sameFileIdentity(old, fileStat)) nextByName.delete(existing.fileName);
+      }
       const canResume = existing !== undefined
         && sameFileIdentity(existing, fileStat)
         && existing.offset <= fileStat.size

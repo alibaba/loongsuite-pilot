@@ -127,6 +127,23 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalSessions).toBe(1);
   });
 
+  it('transfers scanned offsets on rotation without double counting during the rename gap', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = `copilot-${today()}.jsonl`, closed = `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`;
+    await writeJsonlFile(outputDir, active, [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    await fs.rename(path.join(outputDir, active), path.join(outputDir, closed));
+    await writer.refresh();
+    let summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1200);
+    await writeJsonlFile(outputDir, active, [makeLlmResponse()]); await writer.refresh();
+    summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(2400);
+    const restarted = new MetricsSummaryWriter(tmpDir, makeConfig()); await restarted.refresh();
+    summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(2400);
+  });
+
   it.each([
     ['historical', 'llm.request', 'llm.response', 'tool.call', 'tool.result'],
     ['standard', 'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result'],

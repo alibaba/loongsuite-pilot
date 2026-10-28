@@ -14,8 +14,11 @@ Files are named by agent and date:
 
 ```text
 <agent-id>-YYYY-MM-DD.jsonl
+<agent-id>.part-<id>-YYYY-MM-DD.jsonl
 ```
 
+The first name is the active file; `part` files with unique IDs are closed size-based
+segments. Their date suffix remains compatible with Dashboard and retention.
 Each line is one normalized event.
 
 JSONL preserves native JSON types: token counts remain numbers, flags remain
@@ -30,7 +33,8 @@ backend boundary.
   "jsonl": {
     "enabled": true,
     "outputDir": "~/.loongsuite-pilot/logs/output",
-    "rotateDaily": true
+    "rotateDaily": true,
+    "maxFileSizeMb": 100
   }
 }
 ```
@@ -40,6 +44,12 @@ backend boundary.
 | `enabled` | Enables or disables local JSONL output. |
 | `outputDir` | Directory where output files are written. |
 | `rotateDaily` | Rotates output by date. |
+| `maxFileSizeMb` | Rotates before the next event would exceed this many MiB (default 100). Applies to Agent events and raw topics, including `rotateDaily=false`. Non-positive or non-finite values use the default. |
+
+A JSON event is never split or truncated to meet a file limit. A single event
+larger than the limit is written intact with a warning and rotated before the
+next append. Existing oversized active files are also rotated on their next
+write. `rotateDaily=false` uses `all` in place of the date.
 
 ## Retention And Disk Protection
 
@@ -48,8 +58,8 @@ Local JSONL output follows the global retention policy in [Configuration Guide](
 Pilot also has fixed disk-protection cleanup for unusually large local output:
 
 - Output files larger than 512 MiB can be removed after they are older than 2 days.
-- If `logs/output` exceeds 2 GiB, older dated output files are removed until the directory is back under the limit.
-- Today's output file is never removed by retention cleanup. Size-pressure cleanup also keeps yesterday's output files.
+- If `logs/output` exceeds 2 GiB, periodic cleanup removes eligible old files and closed `part` segments, including today's closed segments, oldest first.
+- Today's and yesterday's unsegmented/active files stay protected. Closed `all` segments also participate in cleanup using their modification date. Active files and single oversized events can keep the directory over the target; this is a periodic retention target, not an instantaneous disk quota.
 
 Environment variables:
 
