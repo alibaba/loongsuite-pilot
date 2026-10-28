@@ -31,11 +31,12 @@ function runConfig(platform, args = [], existing, command = 'install', probePadd
     if (platform === 'bash') {
       const scriptPath = resolve(root, 'config-writer.js');
       const valuePath = resolve(root, 'status-bar-value');
+      const probePath = resolve(root, 'probe-input');
       result = spawnSync('bash', ['-c', `${shellPrelude}
 msg() { :; }
 capture_node() {
   # Match the real writer's stdin consumption so printf cannot fail with SIGPIPE.
-  cat > /dev/null
+  cat > "$PILOT_TEST_PROBE"
   printf '%s' "$2" > "$PILOT_TEST_JS"
   printf '%s' "$LP_ENABLE_STATUS_BAR_APP" > "$PILOT_TEST_STATUS_BAR"
 }
@@ -43,11 +44,19 @@ NODE_BIN=capture_node
 PROBE_RESULT="$(printf '%${probePadding}s' '')[]"
 ${shellWriter}
 write_config`, 'installer-test', command, '--data-dir', root, ...args], {
-        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath },
+        encoding: 'utf8', env: { ...env, PILOT_TEST_JS: scriptPath, PILOT_TEST_STATUS_BAR: valuePath, PILOT_TEST_PROBE: probePath },
       });
       if (result.status === 0) {
+        const isolatedRequire = specifier => {
+          const module = require(specifier);
+          if (specifier !== 'fs' && specifier !== 'node:fs') return module;
+          return {
+            ...module,
+            readFileSync: (file, ...options) => module.readFileSync(file === 0 ? probePath : file, ...options),
+          };
+        };
         runInNewContext(readFileSync(scriptPath, 'utf8'), {
-          require, console,
+          require: isolatedRequire, console,
           process: { env: { LP_ENABLE_STATUS_BAR_APP: readFileSync(valuePath, 'utf8') } },
         });
       }
