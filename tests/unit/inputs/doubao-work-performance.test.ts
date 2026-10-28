@@ -104,7 +104,7 @@ describe('Doubao performance and recovery contracts', () => {
     for (let i = 0; i < 10; i++) { expect(await input.poll()).toEqual([]); await stateStore.save(); }
     expect(update).not.toHaveBeenCalled();
     expect(stateStore.get('doubao-work').extra!.doubaoWork).toBe(original);
-    expect(await readFile(statePath)).toEqual(bytes);
+    expect((await readFile(statePath)).equals(bytes)).toBe(true);
     expect(await stat(statePath)).toMatchObject({ ino: before.ino, mtimeMs: before.mtimeMs });
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 8 * 24 * 60 * 60_000);
     await input.poll(); await stateStore.save(); clock.mockRestore();
