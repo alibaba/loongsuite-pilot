@@ -131,6 +131,102 @@ afterEach(() => {
 });
 
 describe('Hermes TTFT native callback bridge (simulated contract)', () => {
+  it('delivers the native first delta while another session is blocked writing JSONL', () => {
+    const { responses, extra } = runScenario(String.raw`
+begin('streaming', start=100)
+writer_entered, release_writer, delivered = threading.Event(), threading.Event(), threading.Event()
+original_writer = plugin._write_records
+def slow_writer(records):
+    writer_entered.set()
+    assert release_writer.wait(3), 'test writer timed out'
+    original_writer(records)
+plugin._write_records = slow_writer
+writer = threading.Thread(target=lambda: begin('other-session', start=110))
+writer.start()
+assert writer_entered.wait(2)
+result, errors = [], []
+def stream():
+    try:
+        # Capture request context on this thread without consulting the state lock.
+        plugin._TTFT_API.set(api)
+        result.append(AIAgent('streaming')._interruptible_streaming_api_call({'delta_times': [140]}, on_first_delta=delivered.set))
+    except BaseException as error: errors.append(str(error))
+api = next(iter(plugin._SESSIONS['streaming']['turns'].values()))['apis'][0]
+stream_thread = threading.Thread(target=stream)
+stream_thread.start()
+try:
+    extra['native_delivered_before_writer_released'] = delivered.wait(1)
+    stream_thread.join(timeout=.2)
+    extra['stream_completed_before_writer_released'] = not stream_thread.is_alive()
+finally:
+    release_writer.set()
+    writer.join(timeout=3)
+    stream_thread.join(timeout=3)
+    plugin._write_records = original_writer
+assert not errors, errors
+end('streaming')
+flush('streaming')
+`);
+    expect(extra.native_delivered_before_writer_released).toBe(true);
+    expect(extra.stream_completed_before_writer_released).toBe(true);
+    expect(responses).toHaveLength(1);
+    expect(responses[0][TTFT]).toBe(40);
+  });
+
+  it('matches native turn identity when bounded hook workers isolate ContextVar updates', () => {
+    const { responses } = runScenario(String.raw`
+import contextvars
+# Each hook receives a copy, exactly as the current Hermes bounded dispatcher.
+contextvars.copy_context().run(begin, "bounded", 1_000_000_000)
+agent = AIAgent("bounded")
+agent._current_task_id = "turn-bounded"
+agent._interruptible_streaming_api_call({"delta_times": [1_250_000_000]})
+end("bounded")
+flush("bounded")
+`);
+    expect(responses[0][TTFT]).toBe(250_000_000);
+  });
+
+  it('does not guess between ambiguous or mismatched requests after a context copy', () => {
+    const { responses } = runScenario(String.raw`
+import contextvars
+contextvars.copy_context().run(begin, "ambiguous", 100, 1)
+contextvars.copy_context().run(begin, "ambiguous", 200, 2)
+agent = AIAgent("ambiguous")
+agent._current_task_id = "turn-ambiguous"
+agent._interruptible_streaming_api_call({"delta_times": [300]})
+end("ambiguous", 1)
+agent._current_task_id = "different-turn"
+agent._interruptible_streaming_api_call({"delta_times": [400]})
+end("ambiguous", 2)
+flush("ambiguous")
+`);
+    expect(responses).toHaveLength(2);
+    expect(responses.every(response => response[TTFT] === undefined)).toBe(true);
+  });
+
+  it('observes the native helper behind the new Hermes lazy forwarding facade', () => {
+    const { responses, extra } = runScenario(String.raw`
+helpers = types.ModuleType("agent.chat_completion_helpers")
+helpers.interruptible_streaming_api_call = native_method
+sys.modules["agent.chat_completion_helpers"] = helpers
+def forwarder(self, *args, **kwargs):
+    return helpers.interruptible_streaming_api_call(self, *args, **kwargs)
+forwarder.__module__ = "agent.lazy_forward"
+AIAgent._interruptible_streaming_api_call = forwarder
+begin("lazy", start=1_000_000_000)
+seen = []
+result = AIAgent("lazy")._interruptible_streaming_api_call(
+    {"delta_times": [1_250_000_000]}, on_first_delta=lambda: seen.append("called"))
+end("lazy")
+flush("lazy")
+extra.update(seen=seen, facade_unchanged=AIAgent._interruptible_streaming_api_call is forwarder)
+`);
+    expect(responses).toHaveLength(1);
+    expect(responses[0][TTFT]).toBe(250_000_000);
+    expect(extra).toEqual({ seen: ['called'], facade_unchanged: true });
+  });
+
   it('records first delta in nanoseconds across an ordinary thread and preserves every callback invocation', () => {
     const { responses, extra } = runScenario(String.raw`
 begin("first", start=1_000_000_000)
@@ -212,7 +308,9 @@ assert not failures, failures
     expect(byTurn.foreground[TTFT]).toBe(30);
     expect(byTurn.background[TTFT]).toBe(900);
     expect(byTurn.foreground['user.id']).toBe('im-user-A');
-    expect(byTurn.background['user.id']).toBe(os.hostname());
+    // The background turn inherits a known session sender if foreground has
+    // already established it; thread scheduling may create it first instead.
+    expect([os.hostname(), 'im-user-A']).toContain(byTurn.background['user.id']);
     expect(byTurn.foreground.trace_id).not.toBe(byTurn.background.trace_id);
   });
 

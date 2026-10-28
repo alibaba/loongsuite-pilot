@@ -11,6 +11,7 @@ import {
   type SqliteInputOptions,
   type SqliteRow,
 } from '../base/base-sqlite-input.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_QODER_CN_ROOT_MAC = '~/Library/Application Support/QoderCN';
 const DEFAULT_QODER_CN_ROOT_LINUX = '~/.config/QoderCN';
@@ -52,7 +53,7 @@ export class QoderCnSqliteInput extends BaseSqliteInput {
       stateStore: opts.stateStore,
       dbPath: opts.dbPath ?? resolveQoderCnDbPath(dataRoot),
       pollIntervalMs: opts.pollIntervalMs
-        ?? (Number(process.env.QODER_CN_ANALYTICS_POLL_INTERVAL) || 30_000),
+        ?? (Number(process.env.QODER_CN_ANALYTICS_POLL_INTERVAL) || DEFAULT_POLL_INTERVAL_MS),
     });
   }
 

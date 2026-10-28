@@ -698,7 +698,7 @@ type TranscriptMessagePart =
   | UriPart;
 
 /** Codex content blocks → GenAI parts (text + uri). */
-function transcriptInputMessage(
+export function transcriptInputMessage(
   role: string,
   content: unknown,
   blobToUri?: BlobToUriFn,

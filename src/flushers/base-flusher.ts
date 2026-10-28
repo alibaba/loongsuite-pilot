@@ -1,6 +1,14 @@
 import type { AgentActivityEntry } from '../types/index.js';
 import type { TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
 
+/** A Codex cursor must not advance until its configured log output accepts the batch. */
+export class CodexOutputDurabilityError extends Error {
+  constructor(output: string) {
+    super(`${output} did not acknowledge Codex events`);
+    this.name = 'CodexOutputDurabilityError';
+  }
+}
+
 /**
  * Abstract base for all data output flushers.
  * Extend this to add new output destinations (SLS, JSONL, HTTP, etc.).
@@ -9,7 +17,7 @@ export abstract class BaseFlusher {
   abstract readonly name: string;
 
   abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
-  abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void>;
+  abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;
 

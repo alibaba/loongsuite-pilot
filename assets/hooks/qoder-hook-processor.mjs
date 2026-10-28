@@ -77,6 +77,56 @@ export function extractUserIdentity(extra) {
   return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
 }
 
+// CN IDE exposes email beside `user`; phone-only Alibaba Cloud accounts may
+// have a name without an email. Never treat a login name/phone/account ID as email.
+function accountEmail(value) {
+  const email = nonEmptyIdentityValue(value);
+  return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
+}
+
+export function extractQoderCnUserIdentity(extra) {
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
+  const user = extra.user && typeof extra.user === 'object' && !Array.isArray(extra.user)
+    ? extra.user : undefined;
+  const name = nonEmptyIdentityValue(user?.name);
+  const email = accountEmail(user?.email) ?? accountEmail(extra.email);
+  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+}
+
+function readQoderAppUserIdentity(agentId) {
+  const product = { qoder: 'qoder', 'qoder-cn': 'qodercn' }[agentId];
+  if (!product) return undefined;
+  // This is the Desktop's public account projection, not its credential store.
+  // It is rewritten on account changes (including logout), not on a heartbeat.
+  // Read per Stop and carry that snapshot through retries, rather than caching
+  // it by session or mixing the Desktop account into an IDE invocation.
+  const statusPath = path.join(os.homedir(), `.${agentId}`, '.qoder-app-status.json');
+  const limit = 16 * 1024;
+  let fd;
+  try {
+    fd = fs.openSync(statusPath, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) return undefined;
+    const buffer = Buffer.alloc(limit + 1);
+    const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (length > limit) return undefined;
+    const status = JSON.parse(buffer.toString('utf8', 0, length));
+    if (status?.schema_version !== 1 || status.product !== product
+      || status.writer !== 'main' || status.logged_in !== true) return undefined;
+    const snapshotAt = typeof status.snapshot_at === 'string' ? Date.parse(status.snapshot_at) : NaN;
+    if (!Number.isFinite(snapshotAt) || snapshotAt > Date.now() + 5 * 60_000) return undefined;
+    const name = nonEmptyIdentityValue(status.name);
+    const email = accountEmail(status.email);
+    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+}
+
 async function resolveQoderCliUserIdentity() {
   const authPath = path.join(QODER_HOME, '.auth', 'user');
   let authStat;
@@ -553,9 +603,20 @@ async function main() {
   const snapshot = readTranscriptSnapshot(transcriptPath);
   const cliTranscript = agentId === 'qoder'
     && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
-  const userIdentity = cliTranscript
-    ? await resolveQoderCliUserIdentity()
-    : (agentId === 'qoder' ? extractUserIdentity(extra) : undefined);
+  const desktopInvocation = parentBusinessInfo?.product === 'app';
+  let userIdentity;
+  if (agentId === 'qoder-cn') {
+    userIdentity = extractQoderCnUserIdentity(extra)
+      ?? (desktopInvocation ? readQoderAppUserIdentity(agentId) : undefined);
+  } else if (agentId === 'qoder' && desktopInvocation) {
+    // Desktop embeds CLI-format transcripts but owns a separate login. Do not
+    // attribute its requests to a possibly different standalone CLI account.
+    userIdentity = extractUserIdentity(extra) ?? readQoderAppUserIdentity(agentId);
+  } else if (cliTranscript) {
+    userIdentity = await resolveQoderCliUserIdentity();
+  } else if (agentId === 'qoder') {
+    userIdentity = extractUserIdentity(extra);
+  }
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),

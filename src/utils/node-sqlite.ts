@@ -15,10 +15,12 @@ export const NODE_SQLITE_PROBE = "require('node:sqlite')";
 export const SQLITE_SYNC_PAGE = 1000;
 
 interface StatementSync {
+  run(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
 }
 
-interface DatabaseSyncInstance {
+export interface DatabaseSyncInstance {
+  exec(sql: string): void;
   prepare(sql: string): StatementSync;
   close(): void;
 }

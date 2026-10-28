@@ -127,6 +127,41 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalSessions).toBe(1);
   });
 
+  it.each([
+    ['historical', 'llm.request', 'llm.response', 'tool.call', 'tool.result'],
+    ['standard', 'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result'],
+  ])('counts %s model/tool names equally without adding Agent delegation usage', async (
+    _label, requestName, responseName, toolCallName, toolResultName,
+  ) => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [
+      makeLlmRequest({ 'event.name': requestName, 'gen_ai.agent.type': 'codex' }),
+      makeLlmResponse({ 'event.name': responseName, 'gen_ai.agent.type': 'codex' }),
+      makeToolCall({ 'event.name': toolCallName, 'gen_ai.agent.type': 'codex' }),
+      makeToolCall({ 'event.name': toolResultName, 'gen_ai.agent.type': 'codex' }),
+      // Delegation events may carry model/tool metadata, but are not new executions.
+      ...['gen_ai.agent.invoke', 'gen_ai.agent.result'].map(eventName => makeLlmResponse({
+        'event.name': eventName, 'gen_ai.agent.type': 'codex',
+        'gen_ai.agent.invocation.id': 'delegation-1', 'gen_ai.tool.name': 'spawn_agent',
+        'gen_ai.usage.total_tokens': '999999',
+      })),
+    ]);
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today).toMatchObject({
+      totalRequests: 1, totalToolCalls: 1, totalEvents: 6, totalSessions: 1,
+      totalTokens: 1200, inputTokens: 1000, outputTokens: 200,
+      cacheReadTokens: 500, cacheCreationTokens: 100,
+    });
+    expect(summary.ranges.today.modelShares).toEqual([
+      expect.objectContaining({ model: 'claude-opus-4-6', totalTokens: 1200 }),
+    ]);
+    expect(summary.ranges.today.agentShares).toEqual([
+      expect.objectContaining({ agentType: 'codex', tokens: 1200, events: 6 }),
+    ]);
+  });
+
   it('reads events from the configured JSONL output directory', async () => {
     const outputDir = path.join(tmpDir, 'custom-jsonl-output');
     await writeJsonlFile(outputDir, `codex-${today()}.jsonl`, [makeLlmResponse()]);

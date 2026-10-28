@@ -64,15 +64,34 @@ export function backfillLifecycleFields(
  * or uninstaller that no longer has GROK_HOME / PI_CODING_AGENT_DIR would
  * repair or clean the documented default and leave the custom home dirty.
  */
+/** Point a definition at one settings file without consulting the persisted path. */
+export function definitionAtHookSettings(def: AgentDefinition, settingsPath: string): AgentDefinition {
+  if (!def.hook) return def;
+  const resolved = path.resolve(settingsPath);
+  const home = homeFromConfigFile(resolved);
+  return {
+    ...def,
+    detection: {
+      ...def.detection,
+      paths: uniquePaths([home, ...def.detection.paths]),
+    },
+    hook: { ...def.hook, settingsPath: resolved },
+  };
+}
+
 export function applyPersistedDeployTargets(
   def: AgentDefinition,
   record?: DeployedAgentRecord,
+  opts?: { preserveHookSettings?: boolean; preservePluginConfig?: boolean },
 ): AgentDefinition {
   if (!record) return def;
 
   let next = def;
+  if (def.copilotPlugin && record.copilotPluginTargets) {
+    next = { ...next, copilotPlugin: { ...def.copilotPlugin, ...record.copilotPluginTargets } };
+  }
   const hookSettingsPath = absolutePath(record.hookSettingsPath);
-  if (hookSettingsPath && def.hook) {
+  if (!opts?.preserveHookSettings && hookSettingsPath && def.hook) {
     next = {
       ...next,
       detection: {
@@ -84,7 +103,7 @@ export function applyPersistedDeployTargets(
   }
 
   const pluginInjectConfigPath = absolutePath(record.pluginInjectConfigPath);
-  if (pluginInjectConfigPath && def.pluginInject) {
+  if (!opts?.preservePluginConfig && pluginInjectConfigPath && def.pluginInject) {
     const rest = (def.pluginInject.configPaths ?? [])
       .filter(candidate => path.resolve(candidate) !== pluginInjectConfigPath);
     next = {

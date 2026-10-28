@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { fakeStreamingFetch } from '../../../helpers/openclaw-stream.mjs';
 import {
   INVOCATION_SESSION_ID_FIELD,
@@ -94,6 +95,34 @@ function readOutputRecords() {
   const text = fs.readFileSync(logFile, 'utf-8');
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
+
+it('makes each model SpanID readable before completion and reuses it for its provider response', async () => {
+  const handlers = registerPlugin(await loadPlugin());
+  const ctx = { runId: 'realtime-run', sessionId: 'realtime-session', sessionKey: 'agent:main:realtime', agentId: 'main' };
+  for (let i = 1; i <= 2; i++) {
+    const callId = `${ctx.runId}:model:${i}`;
+    handlers.model_call_started({ ...ctx, callId, provider: 'test', model: 'test-model' }, ctx);
+    const read = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      const rows = fs.readdirSync(process.argv[1]).filter(n => n.endsWith('.jsonl'))
+        .flatMap(n => fs.readFileSync(process.argv[1] + '/' + n, 'utf8').trim().split('\\n').map(JSON.parse));
+      console.log(JSON.stringify(rows));
+    `, path.join(pilotDataDir, 'logs/openclaw')], { encoding: 'utf8' });
+    expect(read.status, read.stderr).toBe(0);
+    const request = JSON.parse(read.stdout).at(-1);
+    expect(request['event.name']).toBe('llm.request');
+    expect(request.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(request.span_id).not.toBe('0'.repeat(16));
+    handlers.model_call_ended({ ...ctx, callId, outcome: 'completed', durationMs: 3 }, ctx);
+    handlers.before_message_write({ sessionKey: ctx.sessionKey, message: {
+      role: 'assistant', content: [{ type: 'text', text: 'done' }], provider: 'test', model: 'test-model',
+      usage: { input: 2, output: 1 }, stopReason: 'stop', responseId: `provider-${i}`,
+    } }, ctx);
+    const response = readOutputRecords().find(r => r['event.name'] === 'llm.response' && r['gen_ai.response.id'] === `provider-${i}`);
+    expect(response.span_id).toBe(request.span_id);
+  }
+  expect(new Set(readOutputRecords().filter(r => r['event.name'] === 'llm.request').map(r => r.span_id)).size).toBe(2);
+});
 
 async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {}) {
   const handlers = registerPlugin(plugin, pluginConfig);

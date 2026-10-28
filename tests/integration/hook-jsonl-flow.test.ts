@@ -232,6 +232,10 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'hook-processor-base.mjs'),
     );
     await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
+    );
+    await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
       path.join(sharedDir, 'decode-payload.mjs'),
     );
@@ -359,6 +363,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),
@@ -724,6 +732,10 @@ describe('Hook JSONL integration flow', () => {
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/hook-processor-base.mjs'),
       path.join(sharedDir, 'hook-processor-base.mjs'),
+    );
+    await fs.copyFile(
+      path.resolve(process.cwd(), 'assets/hooks/shared/sync-file-lock.mjs'),
+      path.join(sharedDir, 'sync-file-lock.mjs'),
     );
     await fs.copyFile(
       path.resolve(process.cwd(), 'assets/hooks/shared/decode-payload.mjs'),

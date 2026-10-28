@@ -25,6 +25,7 @@ import {
 } from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -115,7 +116,7 @@ export class QoderTraceInput extends BaseInput {
   private multimodalStopped = false;
 
   constructor(opts: QoderTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';

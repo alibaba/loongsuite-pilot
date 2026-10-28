@@ -10,9 +10,12 @@ import {
 } from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { CodexOutputDurabilityError } from '../../../src/flushers/base-flusher.js';
 import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
 import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
 import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
@@ -80,6 +83,52 @@ describe('InputManager', () => {
     await manager.stopAll();
     expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'denied')).toBe(false);
     expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'allowed')).toBe(true);
+  });
+
+  it.each([undefined, 'CodexTurnJournalError', 'CodexOutputDurabilityError'])(
+    'keeps the shared Codex checkpoint behind durable output acceptance (failure=%s)', async failureName => {
+    const root = await createTempDir('codex-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    store.setOffset('codex', 1);
+    await store.save();
+    const input = new StubInput('codex-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling) });
+    manager.registerInput(input as any);
+    let accept!: () => void;
+    let fail!: (failure: Error) => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const durability = new Promise<void>((resolve, rejectPromise) => { accept = resolve; fail = rejectPromise; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await durability; });
+    const healthyOutput = new MockFlusher('healthy-output');
+    manager.setFlusher(new MultiFlusher([flusher, healthyOutput]));
+    store.setOffset('codex', 2);
+    store.setOffset('other-input', 3);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': 'native-codex' })]);
+    const saving = store.save();
+    await startedOutput;
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+    try {
+      if (failureName) {
+        const failure = failureName === 'CodexOutputDurabilityError' ? new CodexOutputDurabilityError('SLS')
+          : Object.assign(new Error('journal failed'), { name: failureName });
+        const rejectedSave = expect(saving).rejects.toBe(failure);
+        fail(failure);
+        await rejectedSave;
+        await expect(store.save()).rejects.toBe(failure);
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+      } else {
+        accept();
+        await saving;
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 2 }, 'other-input': { lastOffset: 3 } });
+      }
+      // Entry handling never calls StateStore.save, so stopping drains the
+      // queue after durable acceptance without recursively awaiting itself.
+      await manager.stopAll();
+      expect(healthyOutput.batchCalls).toHaveLength(1);
+    } finally { accept(); await cleanupTempDir(root); }
   });
 
   describe('registerInput and event dispatch (T030)', () => {

@@ -468,15 +468,15 @@ export class MetricsSummaryWriter {
       if (sessionId) repoEntry.sessions.add(sessionId);
     }
 
-    if (eventName === 'llm.request') {
+    if (eventName === 'llm.request' || eventName === 'gen_ai.model.request') {
       stats.requests++;
     }
 
-    if (eventName === 'tool.call') {
+    if (eventName === 'tool.call' || eventName === 'gen_ai.tool.call') {
       stats.toolCalls++;
     }
 
-    if (eventName === 'llm.response') {
+    if (eventName === 'llm.response' || eventName === 'gen_ai.model.response') {
       const inputTokens = toNumber(record['gen_ai.usage.input_tokens']);
       const outputTokens = toNumber(record['gen_ai.usage.output_tokens']);
       const cacheReadTokens = toNumber(record['gen_ai.usage.cache_read.input_tokens']);

@@ -191,6 +191,71 @@ describe('uninstall cleans hook configs for all hook agents', () => {
 });
 
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes V1/V2 references from both keys while preserving unrelated plugins', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-uninstall-'));
+    try {
+      const config = join(root, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: ['file:///pilot/plugins/opencode/plugin.mjs', 'third-party'], plugins: [{ package: 'file:///pilot/plugins/opencode' }, '/other/plugins/opencode-extra'] }));
+      const result = spawnSync(process.execPath, ['-e', script, config, '/pilot'], { encoding: 'utf8' });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['third-party'], plugins: ['/other/plugins/opencode-extra'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([['sh', sh], ['ps1', ps1]])('%s removes only exact owned paths or package IDs, including encoded paths', (style, source) => {
+    const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');
+    const marker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+    const scriptStart = source.indexOf(marker, start) + marker.length;
+    const end = source.indexOf(style === 'sh' ? '\n" "$cfg"' : "\n'@ $cfg", scriptStart);
+    const script = source.slice(scriptStart, end).replace(/\\\$/g, '$');
+    for (const dataDir of ['/custom/pilot data', 'C:\\custom\\pilot data']) {
+      const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-owned-'));
+      try {
+        const managed = dataDir.replace(/\\/g, '/') + '/plugins/opencode';
+        const url = (managed.startsWith('/') ? 'file://' : 'file:///') + managed.replace(/ /g, '%20');
+        const thirdParty = [
+          '/third-party/plugins/opencode', 'file:///third-party/plugins/opencode/',
+          '/third-party/plugins/opencode/plugin.mjs', '/other/pilot data/plugins/opencode',
+          '/third-party/loongsuite-pilot-opencode-custom', 'loongsuite-pilot-opencode-extra',
+          `${managed}-extra`, `${url}/child-plugin.mjs`,
+          { package: '/third-party/plugins/opencode' }, ['file:///third-party/plugins/opencode/plugin.mjs', {}],
+        ];
+        const config = join(root, 'opencode.jsonc');
+        writeFileSync(config, '// original comment\n' + JSON.stringify({
+          plugin: [managed, `${url}/`, [url + '/plugin.mjs', {}], ...thirdParty],
+          plugins: [{ package: url }, `${managed}/plugin.mjs`, 'loongsuite-pilot-opencode', 'loongsuite-pilot-opencode@1.0.0', ...thirdParty],
+        }));
+        const result = spawnSync(process.execPath, ['-e', script, config, dataDir], { encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: thirdParty, plugins: thirdParty });
+        expect(readFileSync(`${config}.bak`, 'utf8')).toContain('// original comment');
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+
+  it('the actual shell function passes a custom data directory and preserves third-party plugins', () => {
+    const start = sh.indexOf('remove_opencode_plugin()');
+    const end = sh.indexOf('\n# Remove only the Hermes', start);
+    const root = mkdtempSync(join(tmpdir(), 'pilot-opencode-shell-'));
+    try {
+      const configDir = join(root, '.config', 'opencode');
+      const dataDir = join(root, 'pilot data');
+      mkdirSync(configDir, { recursive: true });
+      const config = join(configDir, 'opencode.json');
+      writeFileSync(config, JSON.stringify({ plugin: [`${dataDir}/plugins/opencode`, '/third-party/plugins/opencode'] }));
+      const result = spawnSync('/bin/bash', ['-c', 'msg() { :; }\n' + sh.slice(start, end) + '\nremove_opencode_plugin'], {
+        encoding: 'utf8', env: { HOME: root, DATA_DIR: dataDir, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ plugin: ['/third-party/plugins/opencode'] });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('sh defines remove_opencode_plugin', () => {
     expect(sh).toMatch(/remove_opencode_plugin\(\)\s*\{/);
   });
@@ -238,15 +303,19 @@ describe('uninstall cleans the OpenCode plugin-inject spec', () => {
   });
 });
 
-// Regression for the 2026-07-29 bug where two orphan `}` survived after
-// Remove-MimoCodePlugin's closing brace (rebase artifact), throwing the
-// whole .ps1 brace balance off and breaking PowerShell parsing. The brace
-// counts must match across the entire file — PowerShell is whitespace- and
-// brace-sensitive, so even one orphan brace aborts the uninstall flow.
+// Lightweight structural guard, not a PowerShell parser. Braces inside strings,
+// comments and embedded Node here-strings are data and must not be counted.
+function structuralBraces(source) {
+  const code = source.replace(/@['"][\s\S]*?^['"]@|'(?:''|[^'])*'|"(?:`[\s\S]|[^"`])*"|<#[\s\S]*?#>|#[^\r\n]*/gm, '');
+  return { open: (code.match(/\{/g) || []).length, close: (code.match(/\}/g) || []).length };
+}
 describe('installer-opensource.ps1 brace balance', () => {
+  it('ignores quoted regex braces but detects orphan code braces', () => {
+    expect(structuralBraces("function f { $pattern = '(?=[}\\]])' }")).toEqual({ open: 1, close: 1 });
+    expect(structuralBraces('function f { } }')).toEqual({ open: 1, close: 2 });
+  });
   it('open { count equals close } count across the whole file', () => {
-    const open = (ps1.match(/\{/g) || []).length;
-    const close = (ps1.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(ps1);
     expect(open).toBe(close);
   });
 
@@ -260,8 +329,7 @@ describe('installer-opensource.ps1 brace balance', () => {
     expect(end).toBeGreaterThan(start);
     const body = ps1.slice(start, end);
     // The function body must be brace-balanced on its own.
-    const open = (body.match(/\{/g) || []).length;
-    const close = (body.match(/\}/g) || []).length;
+    const { open, close } = structuralBraces(body);
     expect(open).toBe(close);
   });
 });

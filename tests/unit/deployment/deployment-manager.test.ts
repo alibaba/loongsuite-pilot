@@ -242,6 +242,64 @@ describe('DeploymentManager', () => {
       expect(afterDisable).not.toContain('/opt/toggle.sh');
     });
 
+    it('cleans disabled Copilot registrations, assets and shell blocks and retries failed cleanup', async () => {
+      const root = path.join(tmpDir, '.copilot');
+      const def: AgentDefinition = { id: 'copilot', displayName: 'Copilot', deployMode: 'copilot-plugin', detection: {paths:[root],commands:[]},
+        copilotPlugin: { pluginRoot:path.join(root,'installed-plugins/pilot/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),
+          configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested' } };
+      await writeAgentDef(def);vi.mocked(detectAgent).mockResolvedValue(true);
+      const mgr=makeManager();expect((await mgr.deployAll())[0].success).toBe(true);
+      await fs.writeFile(def.copilotPlugin!.configPath!,'{broken');
+      expect((await mgr.deployAll(()=>false))[0].success).toBe(false);expect(mgr.hasRecord('copilot')).toBe(true);
+      await expect(fs.stat(path.join(def.copilotPlugin!.pluginRoot,'plugin.json'))).resolves.toBeDefined();
+      await fs.writeFile(def.copilotPlugin!.configPath!,'{}');
+      expect((await mgr.deployAll(()=>false))[0].success).toBe(true);expect(mgr.hasRecord('copilot')).toBe(false);
+      await expect(fs.stat(def.copilotPlugin!.pluginRoot)).rejects.toMatchObject({code:'ENOENT'});
+      expect(await fs.readFile(path.join(tmpDir,'.bashrc'),'utf8')).not.toContain('loongsuite-pilot copilot otel');
+    });
+
+    it('persists failed first Copilot deployment for disable cleanup after restart and target drift', async () => {
+      const root = path.join(tmpDir, '.copilot');
+      const def: AgentDefinition = { id: 'copilot', displayName: 'Copilot', deployMode: 'copilot-plugin', detection: {paths:[root],commands:[]},
+        copilotPlugin: {pluginRoot:path.join(root,'installed-plugins/pilot/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),
+          configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested'} };
+      await writeAgentDef(def); vi.mocked(detectAgent).mockResolvedValue(true);
+      await fs.mkdir(path.join(tmpDir, '.bashrc'));
+      const mgr = makeManager();
+      expect((await mgr.deployAll())[0]).toMatchObject({success:false,cleanupRequired:true});
+      const state = JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8'));
+      expect(state.copilot.cleanupRequired).toBe(true);
+      expect(JSON.parse(await fs.readFile(def.copilotPlugin!.settingsPath,'utf8')).enabledPlugins['pilot@pilot']).toBe(true);
+      // Cleanup failure keeps the state retryable, even in a new daemon.
+      const next = makeManager();
+      expect((await next.deployAll(()=>false))[0].success).toBe(false);
+      expect(next.hasRecord('copilot')).toBe(true);
+      await fs.rmdir(path.join(tmpDir,'.bashrc'));
+      const moved = {...def, copilotPlugin:{...def.copilotPlugin!, settingsPath:path.join(tmpDir,'other/settings.json'),configPath:path.join(tmpDir,'other/config.json'),pluginRoot:path.join(tmpDir,'other/plugin')}};
+      await writeAgentDef(moved);
+      expect((await makeManager().deployAll(()=>false))[0].success).toBe(true);
+      expect(JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8')).copilot).toBeUndefined();
+      await expect(fs.stat(def.copilotPlugin!.pluginRoot)).rejects.toMatchObject({code:'ENOENT'});
+      expect(JSON.parse(await fs.readFile(def.copilotPlugin!.settingsPath,'utf8')).enabledPlugins['pilot@pilot']).toBeUndefined();
+      await expect(fs.stat(path.join(tmpDir,'other'))).rejects.toMatchObject({code:'ENOENT'});
+    });
+
+    it('does not track validation-only Copilot failures and clears partial status after repair', async () => {
+      const root = path.join(tmpDir,'.copilot'); await fs.mkdir(root);
+      const def: AgentDefinition = {id:'copilot',displayName:'Copilot',deployMode:'copilot-plugin',detection:{paths:[root],commands:[]},
+        copilotPlugin:{pluginRoot:path.join(root,'plugins/pilot'),pluginId:'pilot',settingsPath:path.join(root,'settings.json'),configPath:path.join(root,'config.json'),events:['sessionStart'],hookCommand:path.join(dataDir,'hooks/copilot.sh'),format:'nested'}};
+      await writeAgentDef(def);vi.mocked(detectAgent).mockResolvedValue(true);
+      await fs.writeFile(def.copilotPlugin!.settingsPath,'{invalid');
+      const mgr=makeManager();expect((await mgr.deployAll())[0]).toMatchObject({success:false,cleanupRequired:false});expect(mgr.hasRecord('copilot')).toBe(false);
+      await fs.writeFile(def.copilotPlugin!.settingsPath,'{}');await fs.mkdir(path.join(tmpDir,'.bashrc'));
+      expect((await mgr.deployAll())[0].success).toBe(false);
+      await fs.rmdir(path.join(tmpDir,'.bashrc'));
+      expect((await makeManager().deployAll())[0].success).toBe(true);
+      const state=JSON.parse(await fs.readFile(path.join(dataDir,'deployed-agents.json'),'utf8'));
+      expect(state.copilot.cleanupRequired).toBe(false);
+      expect((await makeManager().deployAll())[0].reason).toBe('up-to-date');
+    });
+
     it('removes the DSH YAML block and enabled marker when DSH is disabled', async () => {
       const pluginPath = path.join(dataDir, 'plugins', 'dsh', 'plugin.mjs');
       const patchPath = path.join(tmpDir, 'dsh-home', 'cordis.patch.yml');

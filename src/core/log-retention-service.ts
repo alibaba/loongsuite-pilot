@@ -24,6 +24,7 @@ const METRIC_ALARM_STREAM_NAMES = new Set([
   'pilot-agent-metrics',
   'pilot-flusher-metrics',
   'pilot-input-metrics',
+  'pilot-hook-metrics',
   'pilot-alarm-metrics',
   'pilot-alarms',
   'pilot-updater-events',

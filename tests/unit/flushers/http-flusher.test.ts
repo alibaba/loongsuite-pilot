@@ -32,6 +32,7 @@ describe('HttpFlusher', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAxiosPost.mockReset().mockResolvedValue({ status: 200 });
     vi.useFakeTimers();
     flusher = new HttpFlusher(makeConfig());
   });
@@ -41,6 +42,79 @@ describe('HttpFlusher', () => {
   });
 
   describe('buffer and auto-flush (T018)', () => {
+    it('posts one Codex batch immediately and waits for network ACK below the buffer threshold', async () => {
+      let acknowledge!: () => void;
+      mockAxiosPost.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const entries = [1, 2].map(index => buildTestEntry({ 'event.id': `codex-${index}`, 'gen_ai.agent.type': 'codex' }));
+      let accepted = false;
+      const sending = flusher.sendBatch(entries).then(() => { accepted = true; });
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+      expect(mockAxiosPost.mock.calls[0][1].entries).toHaveLength(2);
+      expect(accepted).toBe(false);
+      acknowledge();
+      await sending;
+      await flusher.flush();
+      expect(accepted).toBe(true);
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+    });
+
+    it('retries the same failed Codex batch on the existing timer and only accepts its ACK', async () => {
+      flusher = new HttpFlusher(makeConfig({ flushIntervalMs: 100 }));
+      await flusher.start();
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary-queued' }));
+      mockAxiosPost.mockRejectedValueOnce(new Error('offline'));
+      let accepted = false;
+      const sending = flusher.send(buildTestEntry({ 'event.id': 'codex-retry', 'gen_ai.agent.type': 'codex' }))
+        .then(() => { accepted = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(accepted).toBe(false);
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(100);
+      await sending;
+      expect(accepted).toBe(true);
+      expect(mockAxiosPost.mock.calls.map(call => call[1].entries.map((entry: Record<string, string>) => entry['event.id'])))
+        .toEqual([['codex-retry'], ['ordinary-queued'], ['codex-retry']]);
+      await flusher.flush();
+      expect(mockAxiosPost).toHaveBeenCalledTimes(3);
+      await flusher.shutdown();
+    });
+
+    it('serializes Codex retries across timer and concurrent flush calls', async () => {
+      let acknowledge!: () => void;
+      mockAxiosPost.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+      const sending = flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      const first = flusher.flush();
+      const second = flusher.flush();
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+      acknowledge();
+      await Promise.all([sending, first, second]);
+      await flusher.flush();
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+    });
+
+    it('keeps every pending Codex batch until its own ACK', async () => {
+      mockAxiosPost.mockRejectedValueOnce(new Error('offline'));
+      const first = flusher.send(buildTestEntry({ 'event.id': 'first', 'gen_ai.agent.type': 'codex' }));
+      const second = flusher.send(buildTestEntry({ 'event.id': 'second', 'gen_ai.agent.type': 'codex' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+      await flusher.flush();
+      await Promise.all([first, second]);
+      expect(mockAxiosPost.mock.calls.map(call => call[1].entries[0]['event.id'])).toEqual(['first', 'first', 'second']);
+    });
+
+    it('cancels a retained Codex batch without retrying it after its input stops', async () => {
+      const controller = new AbortController();
+      mockAxiosPost.mockRejectedValueOnce(new Error('offline'));
+      const sending = flusher.sendBatch([buildTestEntry({ 'gen_ai.agent.type': 'codex' })], undefined, controller.signal);
+      const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await rejected;
+      await flusher.flush();
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
+    });
+
     it('buffers entries until batchMaxSize is reached', async () => {
       for (let i = 0; i < 4; i++) {
         await flusher.send(buildTestEntry());
@@ -91,6 +165,32 @@ describe('HttpFlusher', () => {
       expect(mockAxiosPost).toHaveBeenCalledOnce();
       const body = mockAxiosPost.mock.calls[0][1];
       expect(body.entries).toHaveLength(2);
+    });
+
+    it('releases a failed Codex send during shutdown and leaves ordinary flushing intact', async () => {
+      await flusher.start();
+      mockAxiosPost.mockRejectedValueOnce(new Error('offline'));
+      const sending = flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      await vi.advanceTimersByTimeAsync(0);
+      await flusher.send(buildTestEntry({ 'event.id': 'ordinary' }));
+      await flusher.shutdown();
+      await rejected;
+      await vi.advanceTimersByTimeAsync(99999);
+      expect(mockAxiosPost).toHaveBeenCalledTimes(2);
+      expect(mockAxiosPost.mock.calls[1][1].entries[0]['event.id']).toBe('ordinary');
+    });
+
+    it('aborts an in-flight Codex request before waiting for shutdown', async () => {
+      mockAxiosPost.mockImplementationOnce((_url, _body, options) => new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }));
+      const sending = flusher.send(buildTestEntry({ 'gen_ai.agent.type': 'codex' }));
+      const rejected = expect(sending).rejects.toMatchObject({ name: 'CodexOutputDurabilityError' });
+      await flusher.shutdown();
+      await rejected;
+      expect(mockAxiosPost.mock.calls[0][2].signal.aborted).toBe(true);
+      expect(mockAxiosPost).toHaveBeenCalledOnce();
     });
 
     it('does not flush when buffer is empty', async () => {

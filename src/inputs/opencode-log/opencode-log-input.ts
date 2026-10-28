@@ -3,6 +3,7 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 export class OpenCodeLogInput extends BaseHookInput {
   readonly id = 'opencode-log';
@@ -13,7 +14,7 @@ export class OpenCodeLogInput extends BaseHookInput {
       stateStore: opts!.stateStore,
       logDir: opts?.logDir ?? resolveHome('~/.loongsuite-pilot/logs/opencode'),
       logPrefix: opts?.logPrefix ?? 'opencode',
-      pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
   }
 
@@ -28,6 +29,14 @@ export class OpenCodeLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.OpenCode, 'opencode');
+    // V1 serializes structured tool payloads into JSON strings; V2 emits
+    // native JSON. Preserve their content with one canonical representation.
+    const normalized = { ...record };
+    for (const key of ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']) {
+      const value = normalized[key];
+      if (typeof value !== 'string' || !/^\s*[\[{]/.test(value)) continue;
+      try { normalized[key] = JSON.parse(value); } catch { /* Plain/truncated tool text is retained verbatim. */ }
+    }
+    return transformHookRecord(normalized, ClientType.OpenCode, 'opencode');
   }
 }

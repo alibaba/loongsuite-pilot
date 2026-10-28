@@ -143,18 +143,22 @@ vi.mock('../../../src/inputs/qoder-work/qoder-work-input.js', () => ({
   })),
 }));
 
-vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', () => ({
-  CursorHookInput: vi.fn().mockImplementation(() => ({
-    id: 'cursor-hook',
-    agentType: 'cursor',
-    collectionMethod: 'hook-jsonl',
-    setWorkspacePolicy: vi.fn(),
-    on: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-    running: false,
-  })),
-}));
+vi.mock('../../../src/inputs/cursor-hook/cursor-hook-input.js', async () => {
+  const { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } = await import('../../../src/utils/poll-interval.js');
+  return {
+    CursorHookInput: vi.fn().mockImplementation((opts?: { pollIntervalMs?: number }) => ({
+      id: 'cursor-hook',
+      agentType: 'cursor',
+      collectionMethod: 'hook-jsonl',
+      pollIntervalMs: resolvePollIntervalMs(opts?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+      setWorkspacePolicy: vi.fn(),
+      on: vi.fn(),
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      running: false,
+    })),
+  };
+});
 
 // Static methods need to be mocked on the mock class itself
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
@@ -230,6 +234,8 @@ function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
     },
     fileCollection: {
       enabled: false,
+      file: { enabled: false },
+      qoderApi: { enabled: false },
     },
     pipeline: {
       enabled: false,
@@ -311,7 +317,7 @@ describe('Orchestrator', () => {
         expect(escapedTargets).toEqual([]);
         expect(writes).toContain(configPath);
         expect(JSON.parse(fs.readFileSync(configPath, 'utf8')).plugin).toEqual([
-          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode/plugin.mjs`,
+          `file://${dataDir.replace(/\\/g, '/')}/plugins/opencode`,
         ]);
       } finally {
         try { await orch?.stop(); }
@@ -458,6 +464,37 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('applies listener poll intervals and lets the unified env override them', async () => {
+      vi.unstubAllEnvs();
+      delete process.env.LOONGSUITE_PILOT_POLL_INTERVAL_MS;
+      const config = makeConfig();
+      config.listeners['copilot-log'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['cursor-hook'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['codex-transcript'] = { enabled: true, pollInterval: 30_000 };
+      config.listeners['qoder-cn-sqlite'] = { enabled: true, pollInterval: 30_000 };
+
+      const pollInterval = (target: Orchestrator, id: string) => (
+        target.getInputManager().getInput(id) as { pollIntervalMs?: number } | undefined
+      )?.pollIntervalMs;
+
+      const orch = new Orchestrator(config);
+      await orch.start();
+      expect(pollInterval(orch, 'copilot-log')).toBe(30_000);
+      expect(pollInterval(orch, 'cursor-hook')).toBe(30_000);
+      expect(pollInterval(orch, 'codex-transcript')).toBe(30_000);
+      expect(pollInterval(orch, 'qoder-cn-sqlite')).toBe(30_000);
+      await orch.stop();
+
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      const overridden = new Orchestrator(config);
+      await overridden.start();
+      expect(pollInterval(overridden, 'cursor-hook')).toBe(3_000);
+      expect(pollInterval(overridden, 'codex-transcript')).toBe(3_000);
+      expect(pollInterval(overridden, 'qoder-cn-sqlite')).toBe(3_000);
+      await overridden.stop();
+      vi.unstubAllEnvs();
+    });
+
     it('passes the configured QoderCN trace poll interval to the input', async () => {
       const config = makeConfig();
       config.listeners['qoder-cn-trace'] = { enabled: true, pollInterval: 1000 };
@@ -492,7 +529,7 @@ describe('Orchestrator', () => {
 
     it('registers the QwenWorkCN Hook listener as a fallback when trace is disabled', async () => {
       const config = makeConfig();
-      config.listeners['qwen-work-cn-trace'] = { enabled: false };
+      config.listeners['qwen-work-cn-trace'] = { enabled: false, pollInterval: 0 };
       config.listeners['qwen-work-cn-hook'] = { enabled: true, pollInterval: 1234 };
 
       const orch = new Orchestrator(config);
@@ -549,6 +586,21 @@ describe('Orchestrator', () => {
       const discoveryIdx = callOrder.indexOf('discovery.stop');
       const stateStoreIdx = callOrder.indexOf('stateStore.save');
       expect(discoveryIdx).toBeLessThan(stateStoreIdx);
+    });
+
+    it('cancels pending outputs before discovery waits for an input startup', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const manager = orch.getInputManager();
+      let cancelled = false;
+      const cancel = vi.spyOn(manager, 'cancelPendingOutputs').mockImplementation(() => { cancelled = true; });
+      // Discovery.stop drains processing, which may itself be waiting for a
+      // first input cycle's HTTP ACK. Detect the wrong order without hanging.
+      mockDiscoveryStop.mockImplementationOnce(async () => {
+        if (!cancelled) throw new Error('Discovery is waiting for uncancelled HTTP output');
+      });
+      await expect(orch.stop()).resolves.toBeUndefined();
+      expect(cancel).toHaveBeenCalled();
     });
 
     it('emits stopped event', async () => {
@@ -720,7 +772,7 @@ describe('Orchestrator', () => {
       error: 'presign failed',
     });
 
-    let setProcessor: ReturnType<typeof vi.spyOn>;
+    let setProcessor: ReturnType<typeof vi.spyOn<InputManager.prototype, 'setMultimodalProcessor'>>;
 
     beforeEach(() => {
       mockCreateDelegatedOssUploader.mockClear();

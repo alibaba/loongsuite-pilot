@@ -1739,6 +1739,42 @@ INTERCEPTBLOCK
     echo ""
 }
 
+# Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
+remove_copilot_plugin() {
+    local copilot_home="$HOME/.copilot"
+    [ -d "$copilot_home" ] || return 0
+    local node_bin="${NODE_BIN:-}" helper="" version="" cache="$HOME/.loongsuite-pilot"
+    if [ ! -x "$node_bin" ] && [ -f "$cache/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$cache/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    if [ -f "$cache/current" ]; then version=$(tr -d '\r\n' < "$cache/current"); fi
+    local candidate
+    for candidate in "$cache/versions/$version/dist/copilot-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/copilot-cleanup.cjs"; do
+        if [ -f "$candidate" ]; then helper="$candidate"; break; fi
+    done
+    if [ -z "$node_bin" ] || [ -z "$helper" ]; then
+        echo "Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved" >&2
+        return 0
+    fi
+    if ! "$node_bin" "$helper" "$copilot_home"; then
+        echo "Copilot cleanup incomplete; config and plugin assets preserved for retry" >&2
+    fi
+}
+
+remove_copilot_otel_environment() {
+    local file
+    for file in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$file" ] || continue
+        local tmp="${file}.pilot-copilot-$$.tmp"
+        if sed '/^# >>> loongsuite-pilot copilot otel >>>$/,/^# <<< loongsuite-pilot copilot otel <<<$/{d;}' "$file" > "$tmp"; then
+            cat "$tmp" > "$file"
+        fi
+        rm -f "$tmp"
+    done
+    rm -f "$DATA_DIR/state/copilot/otel-enabled"
+}
+
 remove_claude_code_fetch_intercept() {
     for file in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$file" ] && grep -q 'loongsuite-pilot BEGIN claude-code-intercept' "$file" 2>/dev/null; then
@@ -2522,9 +2558,32 @@ remove_opencode_plugin() {
         result=$(node -e "
 const fs = require('fs');
 const f = process.argv[1];
-// Our entries are identified by the pluginId or the plugin file path.
-const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
-const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
+// Match legacy plugins/opencode/plugin.mjs only under this installation.
+const normalize = value => {
+  if (typeof value !== 'string') return '';
+  let plain = value;
+  if (plain.startsWith('file://')) {
+    try {
+      const url = new URL(plain);
+      plain = decodeURIComponent(url.pathname);
+      if (plain[0] === '/' && plain[2] === ':') plain = plain.slice(1);
+      if (url.hostname && url.hostname !== 'localhost') {
+        if (process.platform !== 'win32') return '';
+        plain = '//' + url.hostname + plain;
+      }
+    } catch { return ''; }
+  }
+  plain = plain.split(String.fromCharCode(92)).join('/');
+  while (plain.endsWith('/')) plain = plain.slice(0, -1);
+  return process.platform === 'win32' ? plain.toLowerCase() : plain;
+};
+const dataDir = normalize(process.argv[2]);
+const managed = dataDir ? dataDir + '/plugins/opencode' : null;
+const isOurs = s => typeof s === 'string' && (
+  s === 'loongsuite-pilot-opencode' || s.startsWith('loongsuite-pilot-opencode@') ||
+  (managed !== null && (normalize(s) === managed || normalize(s) === managed + '/plugin.mjs'))
+);
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : (e?.package ?? ''));
 // JSONC fallback: strip block comments, whole-line // comments, and trailing
 // // comments preceded by whitespace. URL values like file:/// are never
 // touched because their slashes are not preceded by whitespace.
@@ -2537,16 +2596,19 @@ try {
   let data, hadComments = false;
   try { data = JSON.parse(raw); }
   catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
-  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
-  if (!key) { process.stdout.write('nochange'); process.exit(0); }
-  const before = data[key].length;
-  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
-  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
+  let removed = 0;
+  for (const key of ['plugin', 'plugins']) {
+    if (!Array.isArray(data[key])) continue;
+    const before = data[key].length;
+    data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+    removed += before - data[key].length;
+  }
+  if (!removed) { process.stdout.write('nochange'); process.exit(0); }
   if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" 2>/dev/null) || result="error"
+" "$cfg" "$DATA_DIR" 2>/dev/null) || result="error"
 
         case "$result" in
             cleaned)
@@ -3035,6 +3097,8 @@ cmd_uninstall() {
     remove_qoderclicn_token_intercept
     retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
+    remove_copilot_otel_environment
+    remove_copilot_plugin
     echo ""
 
     # Remove OTel Claude plugin

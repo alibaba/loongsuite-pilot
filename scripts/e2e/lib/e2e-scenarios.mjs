@@ -760,11 +760,17 @@ const COMMON_REQUIRED = [
 ];
 const EVENT_NAME_ENUM = new Set([
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
+  'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result',
+  'gen_ai.agent.invoke', 'gen_ai.agent.result',
   'skill.use', 'tool.approve', 'agent.input', 'other',
 ]);
 const CONDITIONAL_REQUIRED = {
   'tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
   'tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.tool.call': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.tool.result': ['gen_ai.tool.name', 'gen_ai.tool.call.id'],
+  'gen_ai.agent.invoke': ['gen_ai.agent.invocation.id'],
+  'gen_ai.agent.result': ['gen_ai.agent.invocation.id'],
   'skill.use': ['gen_ai.skill.name'],
 };
 const COVERAGE_FIELDS = [
@@ -777,6 +783,8 @@ const COVERAGE_FIELDS = [
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens',
   'gen_ai.tool.name', 'gen_ai.tool.call.id', 'gen_ai.tool.call.duration',
   'tool.result.status', 'error.type',
+  'gen_ai.agent.id', 'gen_ai.agent.parent.id', 'gen_ai.agent.peer.id',
+  'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
 ];
 const NUMBER_FIELDS = [
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
@@ -826,18 +834,25 @@ function hasValue(value) {
   return value !== undefined && value !== null && value !== '';
 }
 
+function pairingEventName(value) {
+  return ({
+    'gen_ai.model.request': 'llm.request',
+    'gen_ai.model.response': 'llm.response',
+    'gen_ai.tool.call': 'tool.call',
+    'gen_ai.tool.result': 'tool.result',
+  })[value] || value;
+}
+
 function normalizedAgentType(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function isTerminalTurnEntry(entry) {
-  if (entry['gen_ai.agent.scope'] === 'subagent') return false;
-  if (entry['gen_ai.turn.end'] === true) return true;
   const agentType = normalizedAgentType(entry['gen_ai.agent.type']);
-  if (agentType === 'codex') {
-    return entry['agent.codex.turn_status'] === 'completed'
-      || entry['agent.codex.turn_status'] === 'interrupted';
-  }
+  if (entry['gen_ai.agent.scope'] === 'subagent' && agentType !== 'codex') return false;
+  if (entry['gen_ai.turn.end'] === true) return true;
+  // Codex status applies to every record; only the native marker closes a turn.
+  if (agentType === 'codex') return false;
   if (agentType === 'openclaw') {
     return entry['agent.openclaw.hook'] === 'llm_output';
   }
@@ -984,15 +999,16 @@ for (const row of rows) {
 const steps = new Map();
 for (const row of rows) {
   const entry = row.entry;
-  if (entry['event.name'] !== 'llm.request' && entry['event.name'] !== 'llm.response') continue;
+  const eventName = pairingEventName(entry['event.name']);
+  if (eventName !== 'llm.request' && eventName !== 'llm.response') continue;
   if (!hasValue(entry['gen_ai.step.id'])) continue;
   const key = String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id'] || '') + '\\0' + String(entry['gen_ai.step.id']);
   if (!steps.has(key)) steps.set(key, []);
   steps.get(key).push(row);
 }
 for (const stepRows of steps.values()) {
-  const requests = stepRows.filter(row => row.entry['event.name'] === 'llm.request');
-  const responses = stepRows.filter(row => row.entry['event.name'] === 'llm.response');
+  const requests = stepRows.filter(row => pairingEventName(row.entry['event.name']) === 'llm.request');
+  const responses = stepRows.filter(row => pairingEventName(row.entry['event.name']) === 'llm.response');
   if (requests.length !== 1 || responses.length !== 1) {
     addIssue(stepRows[0].file, 'model_pair_error', ['event.name', 'gen_ai.step.id']);
   }
@@ -1001,7 +1017,8 @@ for (const stepRows of steps.values()) {
 const tools = new Map();
 for (const row of rows) {
   const entry = row.entry;
-  if (entry['event.name'] !== 'tool.call' && entry['event.name'] !== 'tool.result') continue;
+  const eventName = pairingEventName(entry['event.name']);
+  if (eventName !== 'tool.call' && eventName !== 'tool.result') continue;
   const callId = entry['gen_ai.tool.call.id'];
   if (!hasValue(callId)) continue;
   const key = String(entry['gen_ai.session.id']) + '\\0' + String(callId);
@@ -1009,8 +1026,8 @@ for (const row of rows) {
   tools.get(key).push(row);
 }
 for (const toolRows of tools.values()) {
-  const calls = toolRows.filter(row => row.entry['event.name'] === 'tool.call');
-  const results = toolRows.filter(row => row.entry['event.name'] === 'tool.result');
+  const calls = toolRows.filter(row => pairingEventName(row.entry['event.name']) === 'tool.call');
+  const results = toolRows.filter(row => pairingEventName(row.entry['event.name']) === 'tool.result');
   const names = new Set(toolRows.map(row => row.entry['gen_ai.tool.name']).filter(hasValue));
   if (calls.length !== 1 || results.length !== 1 || names.size !== 1) {
     addIssue(toolRows[0].file, 'tool_pair_error', ['event.name', 'gen_ai.tool.call.id', 'gen_ai.tool.name']);
@@ -1021,7 +1038,9 @@ const turns = new Map();
 for (const row of rows) {
   const entry = row.entry;
   if (!hasValue(entry['gen_ai.turn.id'])) continue;
-  if (entry['gen_ai.agent.scope'] === 'subagent') continue;
+  if (entry['gen_ai.agent.scope'] === 'subagent'
+    && normalizedAgentType(entry['gen_ai.agent.type']) !== 'codex') continue;
+  if (entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result') continue;
   const key = String(entry['gen_ai.agent.type']) + '\\0'
     + String(entry['gen_ai.session.id']) + '\\0' + String(entry['gen_ai.turn.id']);
   if (!turns.has(key)) turns.set(key, []);

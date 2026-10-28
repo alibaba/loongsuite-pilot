@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
+import path from 'node:path';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
 
@@ -101,6 +102,43 @@ await build({
   minifySyntax: true,
   define: commonDefine,
   plugins: commonPlugins,
+});
+
+// Self-contained uninstall helper: JSONC edits stay available without node_modules.
+await build({
+  entryPoints: ['src/copilot-cleanup-cli.ts'],
+  outfile: 'dist/copilot-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  define: commonDefine, plugins: commonPlugins,
+});
+
+// Container hook CLI. No native-deps-guard banner and no node:sqlite: a
+// payload whose libc cannot load the daemon must still be able to install
+// hooks. postAlarm is the stub in this file; proprietary builds alias it.
+await build({
+  entryPoints: ['src/hook-cli.ts'],
+  outfile: 'dist/hook-cli.cjs',
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  bundle: true,
+  mainFields: ['module', 'main'],
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  minifySyntax: true,
+  define: commonDefine,
+  plugins: [
+    ...commonPlugins,
+    {
+      name: 'hook-cli-alarm-alias',
+      setup(b) {
+        if (!isProprietary) return;
+        b.onResolve({ filter: /\/post-alarm\.js$/ }, () => ({
+          path: path.resolve('src/internal/alarm-sender.internal.ts'),
+        }));
+      },
+    },
+  ],
 });
 
 await build({
