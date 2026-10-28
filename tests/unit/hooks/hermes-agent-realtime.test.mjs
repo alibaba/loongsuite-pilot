@@ -95,6 +95,7 @@ hooks['pre_api_request'](**base, api_call_count=1)
 turn = p._find_turn(p._SESSIONS['s'], base)
 assert ('other', None, None) not in turn['emitted']
 assert not turn.get('input_content_hash')
+assert not list(pathlib.Path(sys.argv[2]).glob('logs/hermes-agent/*.jsonl'))
 # The later native request supplies the real current user content in text blocks.
 current = [dict(role='user', content='previous turn'),
            dict(role='assistant', content='previous answer'),
@@ -107,7 +108,7 @@ inputs = [r for r in records if r.get('agent.hermes.hook') == 'turn_start']
 assert len(inputs) == 1
 assert inputs[0]['gen_ai.input.messages_delta'][0]['parts'][0]['content'] == 'current prompt'
 assert inputs[0]['agent.pilot.correlation.content_hash'] == hashlib.sha256(b'current prompt').hexdigest()[:16]
-assert [r['event.name'] for r in records] == ['llm.request', 'other', 'llm.request', 'llm.request']
+assert [r['event.name'] for r in records] == ['other', 'llm.request', 'llm.request', 'llm.request']
 assert all(r['gen_ai.turn.id'] == 't' for r in records)
 `;
       const result = spawnSync('python3', ['-c', scenario, plugin, root], {

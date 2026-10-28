@@ -39,6 +39,8 @@ MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
+MAX_PENDING_INPUT_RECORDS = 128
+MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -637,7 +639,6 @@ def _session(session_id: str) -> Dict[str, Any]:
 def _new_turn(
     session_id: str,
     user_message: Any = "",
-    history_length: int = 1,
     sender_id: Any = "",
     observer_turn_id: Any = "",
 ) -> Dict[str, Any]:
@@ -667,7 +668,9 @@ def _new_turn(
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
-        "history_length": max(1, history_length),
+        # None means the initial history boundary was not observed. Do not
+        # confuse an empty snapshot with a known first-message boundary.
+        "history_start": None,
         "apis": [],
         "tools": {},
     }
@@ -729,8 +732,12 @@ def _defer_evicted_turn(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
 
 
 def _flush_turn(state: Dict[str, Any], turn: Dict[str, Any], payload: Dict[str, Any]) -> None:
-    if any(api.get("post_ns") is not None for api in turn["apis"]):
-        _write_new_records(turn, _build_records(turn, state, payload, final=True))
+    _capture_turn_input(turn, _current_turn_messages(turn, payload))
+    if not turn.get("input_content_hash"):
+        turn["input_resolution_closed"] = True
+    # Also drain requests without a response: input must not be required for
+    # collection at completion, eviction or process exit.
+    _write_new_records(turn, _build_records(turn, state, payload, final=True))
     if turn["apis"]:
         api = turn["apis"][-1]
         step_id, _ = _api_ids(turn, api)
@@ -859,10 +866,20 @@ def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> Lis
     history = payload.get("conversation_history")
     if not isinstance(history, list):
         history = []
-    start = max(0, int(turn.get("history_length") or 1) - 1)
-    current = [item for item in history[start:] if isinstance(item, dict)]
+    start = turn.get("history_start")
+    if start is None and history:
+        # The first request can carry the whole resumed conversation. Establish
+        # its current user boundary once, then retain it through tool retries.
+        start = next((i for i in range(len(history) - 1, -1, -1)
+                      if isinstance(history[i], dict) and history[i].get("role") == "user"), None)
+        if start is not None:
+            turn["history_start"] = start
+    current = [item for item in history[start:] if isinstance(item, dict)] if start is not None else []
     if not current:
-        current = [{"role": "user", "content": turn.get("user_message", "")}]
+        text = turn.get("user_message", "")
+        if not text and isinstance(payload.get("user_message"), str):
+            text = payload["user_message"]
+        current = [{"role": "user", "content": text}]
         response = payload.get("assistant_response")
         if response is not None:
             current.append({"role": "assistant", "content": response, "finish_reason": "stop"})
@@ -990,25 +1007,61 @@ def _api_ids(turn: Dict[str, Any], api: Dict[str, Any]) -> Any:
     return api["step_id"], "%s:r" % api["step_id"]
 
 
-def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+def _record_key(record: Dict[str, Any]) -> Any:
+    return record["event.name"], record.get("gen_ai.step.id"), record.get("gen_ai.tool.call.id")
+
+
+def _append_record(turn: Dict[str, Any], record: Dict[str, Any]) -> None:
     emitted = turn.setdefault("emitted", set())
     event_ids = turn.setdefault("event_ids", {})
+    key = _record_key(record)
+    if key in emitted:
+        return
+    record["event.id"] = event_ids.setdefault(key, record["event.id"])
+    _write_records([record])
+    emitted.add(key)
+
+
+def _write_new_records(turn: Dict[str, Any], records: List[Dict[str, Any]]) -> None:
+    emitted = turn.setdefault("emitted", set())
+    pending = turn.setdefault("pending_records", {})
+    # Retry committed-to-release records before accepting more snapshots. A
+    # persistently failing writer must not grow staging on every later hook.
+    _drain_pending_records(turn)
     for record in records:
-        if record["event.name"] == "llm.request":
-            _write_turn_input(turn, record)
-        key = (record["event.name"], record.get("gen_ai.step.id"), record.get("gen_ai.tool.call.id"))
-        if key in emitted:
+        key = _record_key(record)
+        if key in emitted or key in pending:
             continue
-        record["event.id"] = event_ids.setdefault(key, record["event.id"])
-        _write_records([record])
-        emitted.add(key)
+        size = len(json.dumps(record, ensure_ascii=True, default=str).encode("utf-8"))
+        pending[key] = (record, size)
+        turn["pending_bytes"] = turn.get("pending_bytes", 0) + size
+        if not turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+            if len(pending) > MAX_PENDING_INPUT_RECORDS or turn["pending_bytes"] > MAX_PENDING_INPUT_BYTES:
+                # Once local export starts, late input cannot change this trace.
+                turn["input_resolution_closed"] = True
+        _drain_pending_records(turn)
+
+
+def _drain_pending_records(turn: Dict[str, Any]) -> None:
+    pending = turn.get("pending_records", {})
+    if not turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+        return
+    if pending and turn.get("input_content_hash") and not turn.get("input_resolution_closed"):
+        request = next((r for r, _ in pending.values() if r["event.name"] == "llm.request"), None)
+        if request is not None:
+            _write_turn_input(turn, request)
+    for key in list(pending):
+        record, size = pending[key]
+        _append_record(turn, record)
+        pending.pop(key)
+        turn["pending_bytes"] -= size
 
 
 def _capture_turn_input(turn: Dict[str, Any], messages: List[Dict[str, Any]]) -> None:
     # Capture only this turn's first user message, before display truncation.
     # Keep a bounded display value and the existing correlation protocol hash;
     # gen_ai.input.messages_hash hashes a different (structured) representation.
-    if turn.get("input_content_hash"):
+    if turn.get("input_content_hash") or turn.get("input_resolution_closed"):
         return
     message = next((item for item in messages if item.get("role") == "user"), {})
     content = message.get("content")
@@ -1023,8 +1076,10 @@ def _capture_turn_input(turn: Dict[str, Any], messages: List[Dict[str, Any]]) ->
     if text:
         turn["input_text"] = _truncate(text)
         turn["input_content_hash"] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        if not turn.get("user_message"):
+            turn["user_message"] = turn["input_text"]
         # Later hooks may omit history; retain the newly observed input for them.
-        turn["initial_messages"] = _bounded_value(messages)
+        turn["initial_messages"] = _bounded_value([message])
 
 
 def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
@@ -1051,7 +1106,7 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
     })
     # Reuse stable event ids and append acknowledgement. If this write fails,
     # leave the input retryable and do not let the request overtake it.
-    _write_new_records(turn, [record])
+    _append_record(turn, record)
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1120,6 +1175,7 @@ def _build_records(
     if not apis:
         return []
     current_messages = _current_turn_messages(turn, payload)
+    _capture_turn_input(turn, current_messages)
     assistant_positions = [
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
@@ -1368,16 +1424,19 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
         return
     state = _session(session_id)
     history = payload.get("conversation_history")
-    history_length = len(history) if isinstance(history, list) else 1
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
     turn = _new_turn(
         session_id,
         payload.get("user_message", ""),
-        history_length,
         payload.get("sender_id", ""),
         payload.get("turn_id", ""),
     )
+    if isinstance(history, list) and history:
+        # pre_llm_call observes the new turn boundary. A preceding assistant is
+        # already history; an empty snapshot leaves the boundary unknown.
+        last = history[-1]
+        turn["history_start"] = len(history) - 1 if isinstance(last, dict) and last.get("role") == "user" else len(history)
     messages = _current_turn_messages(turn, payload)
     _capture_turn_input(turn, messages)
     turn["initial_messages"] = _bounded_value(messages)
@@ -1393,13 +1452,8 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     turn = _find_turn(state, payload)
     observer_turn_id = payload.get("turn_id")
     if turn is None:
-        history = payload.get("conversation_history")
-        history_length = len(history) if isinstance(history, list) else 1
         user_message = payload.get("user_message", "")
-        if not user_message and isinstance(history, list):
-            user_message = next((item.get("content", "") for item in reversed(history)
-                                 if isinstance(item, dict) and item.get("role") == "user"), "")
-        turn = _new_turn(session_id, user_message, history_length,
+        turn = _new_turn(session_id, user_message,
                          payload.get("sender_id", ""), observer_turn_id)
     elif isinstance(observer_turn_id, str) and observer_turn_id:
         turn["observer_turn_id"] = observer_turn_id

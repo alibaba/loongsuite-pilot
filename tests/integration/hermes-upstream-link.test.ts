@@ -30,6 +30,8 @@ describe('Hermes per-turn upstream trace linking', () => {
     { splitBatches: true, input: 'history-only' },
     { splitBatches: false, input: 'late-history' },
     { splitBatches: true, input: 'late-history' },
+    { splitBatches: false, input: 'full-late-history' },
+    { splitBatches: true, input: 'full-late-history' },
     { splitBatches: false, input: 'long-hash-only' },
     { splitBatches: true, input: 'long-hash-only' },
   ])('links repeated tool turns: $input (split=$splitBatches)', async ({ splitBatches, input: inputCase }) => {
@@ -62,15 +64,24 @@ describe('Hermes per-turn upstream trace linking', () => {
       payload: {
         ...envelope.payload, session_id: sessionId,
         ...('user_message' in envelope.payload ? {
-          user_message: ['history-only', 'late-history'].includes(inputCase) && envelope.hook === 'pre_llm_call' ? '' : prompt,
+          user_message: ['history-only', 'late-history', 'full-late-history'].includes(inputCase) && envelope.hook === 'pre_llm_call' ? '' : prompt,
         } : {}),
         ...('conversation_history' in envelope.payload ? {
-          conversation_history: inputCase === 'late-history' && envelope.hook === 'pre_llm_call' ? []
-            : envelope.payload.conversation_history.map((message: any) =>
-              message.role === 'user' ? { ...message, content: prompt } : message),
+          conversation_history: ['late-history', 'full-late-history'].includes(inputCase) && envelope.hook === 'pre_llm_call' ? []
+            : [
+              ...(inputCase === 'full-late-history' ? [
+                { role: 'user', content: 'Previous prompt' }, { role: 'assistant', content: 'Previous answer' },
+              ] : []),
+              ...envelope.payload.conversation_history.map((message: any) =>
+                message.role === 'user' ? { ...message, content: prompt } : message),
+            ],
         } : {}),
-        ...(inputCase === 'late-history' && envelope.hook === 'pre_api_request' && envelope.payload.api_call_count === 1
-          ? { conversation_history: [{ role: 'user', content: prompt }] } : {}),
+        ...(['late-history', 'full-late-history'].includes(inputCase) && envelope.hook === 'pre_api_request' && envelope.payload.api_call_count === 1
+          ? { conversation_history: [
+            ...(inputCase === 'full-late-history' ? [
+              { role: 'user', content: 'Previous prompt' }, { role: 'assistant', content: 'Previous answer' },
+            ] : []), { role: 'user', content: prompt },
+          ] } : {}),
         ...('task_id' in envelope.payload ? { task_id: turn.id } : {}),
       },
     })));

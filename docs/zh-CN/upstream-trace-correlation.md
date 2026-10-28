@@ -115,3 +115,9 @@ writeTurnContext({
 Hermes 修复在首个 `llm.request` 前追加一次携带用户输入的 `other` 事件（`agent.hermes.hook=turn_start`），使用此时已确定的原生 turn/task ID。模型重试与后续 LLM 调用复用同一轮关联结果，不会重复写入该输入事件。这是逐轮关联文件的支持，不代表新增了 `TRACEPARENT` 环境变量接入。
 
 注意：当前逐轮关联使用 `traceparent` 中的 Trace ID 和 Parent Span ID，不完整透传采样标志和 `tracestate`；也不会自动把上下文注入 Agent 发出的网络请求。
+
+### Hermes 输入迟到与无输入兜底
+
+Hermes 尚未提供当前用户输入时，Pilot 插件暂存本轮请求、响应和工具事件。首次确认输入后，先写 `turn_start` 再按原始观察顺序释放记录，保留原始时间戳、事件/Span ID 和 token；初始 history 为空时，从首次有效完整 history 确定当前用户消息的起点，后续工具步骤不更换边界。
+
+若终止、淘汰或进程正常退出时仍无输入，释放原始记录而不生成空 `turn_start`。每轮暂存上限为 128 条记录、2 MiB；超限时提前释放并固定使用本地 trace，后续输入不再切换该轮关联，避免拆链。强制终止 Agent 进程会丢失尚未落盘的暂存数据。
