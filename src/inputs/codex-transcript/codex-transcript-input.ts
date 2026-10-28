@@ -2445,16 +2445,14 @@ async function collectRolloutFiles(
 ): Promise<void> {
   let entries: Dirent[];
   try {
+    // Snapshot before readdir: a producer may publish a rollout (or a dated
+    // subdirectory) after readdir took its listing. Recording the later mtime
+    // would cache that stale listing indefinitely, missing all new turns.
+    // With the earlier mtime, the next poll invalidates and rescans it.
+    if (dirMtimes) dirMtimes.set(dir, (await fs.stat(dir)).mtimeMs);
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
     return;
-  }
-  if (dirMtimes) {
-    try {
-      dirMtimes.set(dir, (await fs.stat(dir)).mtimeMs);
-    } catch {
-      return;
-    }
   }
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name);
