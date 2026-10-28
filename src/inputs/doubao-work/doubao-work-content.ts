@@ -8,19 +8,28 @@ export interface NativeCallContent {
   actor: string; name: string; decisionId: string; recordIndex: number;
   arguments?: string; result?: string; resultIndex?: number;
 }
-interface NativeAssignment { timeMs: number; text: string }
+export interface NativeAssignment { timeMs: number; text: string }
 export interface NativeContent {
   calls: Record<string, NativeCallContent>;
   assignments: Record<string, NativeAssignment[]>;
   lastAnswers: Record<string, { index: number; text: string }>;
   /** Original message order for visible assistant-round reconstruction. */
   transcripts?: Record<string, Record<string, unknown>[]>;
+  /** Original row position when a bounded native window has evicted history. */
+  transcriptOffsets?: Record<string, number>;
+  /** Reader-private cache metadata; never used for semantic event time/IDs. */
+  sourceVersions?: Record<string, string>;
+  sourceBytes?: Record<string, number>;
+  findUserRows?: (actor: string, fingerprint: string) => readonly number[] | undefined;
 }
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0
-    && Buffer.byteLength(value) <= MAX_CONTENT_BYTES ? value : undefined;
+    && Buffer.byteLength(value) <= MAX_CONTENT_BYTES ? independentNativeString(value) : undefined;
 }
+
+/** Small cached fields must not retain a large JSON string's backing store. */
+export function independentNativeString(value: string): string { return Buffer.from(value, 'utf16le').toString('utf16le'); }
 
 /** Content is read only for the freshly identified conversation. Nothing here
  * supplies model names, model time, token usage, or a guessed finish reason.
@@ -33,32 +42,8 @@ export function parseNativeContent(files: Record<string, string>, assignments: R
     const rows = content.split('\n').filter(Boolean).map(line => JSON.parse(line));
     result.transcripts![actor] = rows;
     for (let index = 0; index < rows.length; index++) {
-      const row = rows[index];
-      if (row.role === 'assistant' && Array.isArray(row.tool_calls)) {
-        const ids = row.tool_calls.map((call: { id?: unknown }) => call?.id);
-        if (!ids.every((id: unknown) => typeof id === 'string' && ID.test(id))) return undefined;
-        const decisionId = doubaoDigest(JSON.stringify([actor, ids]));
-        for (const call of row.tool_calls) {
-          if (++count > MAX_CALLS || result.calls[call.id] || typeof call.function?.name !== 'string'
-            || !/^[a-zA-Z0-9_.:-]{1,256}$/.test(call.function.name)) return undefined;
-          const raw = call.function?.arguments;
-          let args: string | undefined;
-          if (raw !== undefined) {
-            try {
-              const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = text(JSON.stringify(parsed));
-            }
-            catch { /* Non-JSON arguments are not promoted into a JSON field. */ }
-          }
-          result.calls[call.id] = { actor, name: call.function.name, decisionId, recordIndex: index,
-            ...(args === undefined ? {} : { arguments: args }) };
-        }
-      } else if (row.role === 'tool' && typeof row.tool_call_id === 'string') {
-        const call = result.calls[row.tool_call_id];
-        if (!call || call.actor !== actor || call.resultIndex !== undefined) return undefined;
-        call.resultIndex = index;
-        call.result = text(row.content);
-      }
+      if (rows[index].role === 'assistant' && Array.isArray(rows[index].tool_calls)) count += rows[index].tool_calls.length;
+      if (count > MAX_CALLS || !appendNativeContentRow(result, actor, rows[index], index)) return undefined;
     }
     const last = rows.at(-1);
     const answer = last?.role === 'assistant' && !last.tool_calls?.length ? text(last.content) : undefined;
@@ -75,6 +60,38 @@ export function parseNativeContent(files: Record<string, string>, assignments: R
     });
   }
   return result;
+}
+
+/** Shared by complete-file fixtures and the incremental native reader. */
+export function appendNativeContentRow(result: NativeContent, actor: string, row: Record<string, any>, index: number, prunedHistory = false): boolean {
+  delete result.lastAnswers[actor];
+  if (row.role === 'assistant' && Array.isArray(row.tool_calls)) {
+    const ids = row.tool_calls.map((call: { id?: unknown }) => call?.id);
+    if (!ids.every((id: unknown) => typeof id === 'string' && ID.test(id))) return false;
+    const decisionId = doubaoDigest(JSON.stringify([actor, ids]));
+    for (const call of row.tool_calls) {
+      if (result.calls[call.id] || typeof call.function?.name !== 'string'
+        || !/^[a-zA-Z0-9_.:-]{1,256}$/.test(call.function.name)) return false;
+      const raw = call.function?.arguments;
+      let args: string | undefined;
+      if (raw !== undefined) {
+        try {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = text(JSON.stringify(parsed));
+        } catch { /* Invalid arguments are not promoted into a JSON field. */ }
+      }
+      result.calls[call.id] = { actor, name: independentNativeString(call.function.name), decisionId, recordIndex: index,
+        ...(args === undefined ? {} : { arguments: args }) };
+    }
+  } else if (row.role === 'tool' && typeof row.tool_call_id === 'string') {
+    const call = result.calls[row.tool_call_id];
+    if (!call) return prunedHistory;
+    if (call.actor !== actor || call.resultIndex !== undefined) return false;
+    call.resultIndex = index; call.result = text(row.content);
+  }
+  const answer = row.role === 'assistant' && !row.tool_calls?.length ? text(row.content) : undefined;
+  if (answer) result.lastAnswers[actor] = { index, text: answer };
+  return true;
 }
 
 /** A unique native assignment in this request window plus exact tool IDs is

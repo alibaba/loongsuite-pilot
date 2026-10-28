@@ -16,6 +16,23 @@ function content(rows: unknown[], assignments = assignment('CURRENT')) {
 }
 
 describe('visible assistant-round reconstruction', () => {
+  it('keeps the exact UTF-8/escaped JSON suffix and stable source identity for long reused history', () => {
+    const history = [{ role: 'user', content: 'OLD' }, ...Array.from({ length: 80 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `${i}:` + '中文😀"\\\n'.repeat(120) })), { role: 'user', content: 'CURRENT' }];
+    const rows = [...history, final], parsed = content(rows, assignment('OLD', -30_000) + assignment('CURRENT'));
+    const rebuilt = reconstructNativeRounds(parsed, actor, DOUBAO_EPOCH, end, [])!;
+    const expected = history.map(row => ({ role: row.role, parts: [{ type: 'text', content: row.content }] }));
+    while (Buffer.byteLength(JSON.stringify(expected)) > 64 * 1024 && expected.length > 1) expected.shift();
+    expect(rebuilt.rounds).toHaveLength(1); expect(rebuilt.rounds[0].inputMessages).toEqual(expected);
+    expect(rebuilt.rounds[0].sourceIndex).toBe(rows.length - 1); expect(rebuilt.rounds[0].inputTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(rebuilt.rounds[0].inputMessages))).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it('retains the oversized-single-input omission rule', () => {
+    const c = content([final], assignment('"'.repeat(40_000)));
+    expect(reconstructNativeRounds(c, actor, DOUBAO_EPOCH, end, []))
+      .toEqual({ rounds: [], omittedRounds: 1, duplicateAssistantRows: 0 });
+  });
+
   it.each([
     '/Users/synthetic/Library/Application Support/DoubaoWork/Profile 2/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md',
     'C:\\Users\\synthetic\\AppData\\Local\\DoubaoWork\\User Data\\Profile 3\\.doubaowork\\agent_mode\\workspace\\.skills\\doubao-human-signal\\SKILL.md',

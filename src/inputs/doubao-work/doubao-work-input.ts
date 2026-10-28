@@ -6,15 +6,17 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry, type JsonValue } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, isDoubaoPresentationInspection, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
-import { buildNativeToolEvents, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
-import { buildNativeExecutionEvents, isUniqueNativeToolOwner, readNativeExecutions } from './doubao-work-execution.js';
-import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations } from './doubao-work-content.js';
-import { reconstructNativeRounds } from './doubao-work-rounds.js';
+import { buildNativeToolEvents, type NativeGraph } from './doubao-work-native.js';
+import { buildNativeExecutionEvents, isUniqueNativeToolOwner, type NativeExecution } from './doubao-work-execution.js';
+import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations, type NativeContent } from './doubao-work-content.js';
+import { nativeDemandFingerprint, nativeRoundSteps, type NativeAssistantRound, type NativeRoundReconstruction } from './doubao-work-rounds.js';
+import { checkpointDraft } from './doubao-work-state.js';
+import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
+import { DoubaoWorkNativeReader } from './doubao-work-reader.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
 const READ_BYTES = 1024 * 1024;
-const CYCLE_BYTES = 8 * READ_BYTES;
 const MAX_PENDING = 512;
 const MAX_COMPLETED = 4096;
 const MAX_TOOLS = 4096;
@@ -48,6 +50,8 @@ export interface DoubaoWorkInputOptions extends InputOptions {
   logDir?: string; sessionsRoot?: string; snapshotRoot?: string;
   /** Native metadata has no watcher. Limit scans independently of log wakeups. */
   nativeScanIntervalMs?: number;
+  /** Internal work limits; useful for deterministic incremental recovery tests. */
+  workBudget?: { bytes?: number; milliseconds?: number; records?: number };
 }
 
 /** Read-only adapter for observed macOS and Windows client lifecycle logs. */
@@ -65,6 +69,20 @@ export class DoubaoWorkInput extends BaseInput {
   private warnedFileLimit = false;
   private readonly nativeScanIntervalMs: number;
   private nextNativeScanAt = 0;
+  private nextCompactionAt = 0;
+  private nextCacheDiagnosticsAt = 0;
+  private normalizedCheckpoint = false;
+  private executionScanCursor: string | undefined;
+  private readonly executionDigests = new WeakMap<NativeExecution, string>();
+  private readonly nativeReader: DoubaoWorkNativeReader;
+  private readonly workLimits: DoubaoWorkInputOptions['workBudget'];
+  private budget!: DoubaoWorkBudget;
+  private readonly cycleGraphs = new Map<string, Promise<NativeGraph | undefined>>();
+  private readonly reportedIoErrors = new Set<string>();
+  private nativeDeferred = false;
+  private baselineState: { state: Checkpoint; names: string[]; index: number } | undefined;
+  private readonly reconstructionJobs = new Map<string, { version: string; conversation: string; bytes: number; updatedMs: number;
+    steps: Generator<number, NativeRoundReconstruction | undefined>; graph: NativeGraph; executions?: NativeExecution[] }>();
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
@@ -74,6 +92,9 @@ export class DoubaoWorkInput extends BaseInput {
     this.userDataRoot = this.logDir ? path.resolve(this.logDir, '../..') : undefined;
     this.snapshotRoot = opts.snapshotRoot ?? (this.logDir ? path.resolve(this.logDir, '../../coding/snapshot') : undefined);
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
+    this.workLimits = opts.workBudget;
+    this.nativeReader = new DoubaoWorkNativeReader({ sessionsRoot: this.sessionsRoot, userDataRoot: this.userDataRoot,
+      snapshotRoot: this.snapshotRoot, diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
   }
 
   static defaultLogDir(): string | undefined {
@@ -125,10 +146,15 @@ export class DoubaoWorkInput extends BaseInput {
     this.watcher = undefined;
     if (this.wakeup) clearTimeout(this.wakeup);
     this.wakeup = undefined;
+    this.nativeReader.clear(); this.cycleGraphs.clear();
+    this.reconstructionJobs.clear();
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     if (!this.logDir) return [];
+    this.budget = new DoubaoWorkBudget(this.getInputRuntimeAccumulator(), this.workLimits);
+    this.cycleGraphs.clear(); this.nativeDeferred = false;
+    for (const [key, job] of this.reconstructionJobs) if (Date.now() - job.updatedMs > 60_000) this.reconstructionJobs.delete(key);
     let allNames: string[];
     try {
       allNames = (await fs.readdir(this.logDir, { withFileTypes: true }))
@@ -150,26 +176,35 @@ export class DoubaoWorkInput extends BaseInput {
     }
     // Baseline all existing files once. New rotations are subsequently read from byte zero.
     if (!saved) {
-      const initial: Checkpoint = { schema: 1, sinceMs: Date.now(), files: {}, pending: {}, completed: {} };
-      for (const name of names) {
+      this.baselineState ??= { state: { schema: 1, sinceMs: Date.now(), files: {}, pending: {}, completed: {} }, names, index: 0 };
+      const baseline = this.baselineState, initial = baseline.state;
+      for (; baseline.index < baseline.names.length; baseline.index++) {
+        const name = baseline.names[baseline.index];
         try {
+          if (this.budget.exhausted) { this.defer(new DoubaoWorkDeferred('cycle_budget')); return []; }
           const stat = await fs.stat(path.join(this.logDir, name));
           // Fingerprint the cursor boundary to detect in-place truncate-and-regrow.
           const handle = await fs.open(path.join(this.logDir, name), 'r');
           try {
-            initial.files[name] = { identity: fileIdentity(stat), offset: stat.size, anchor: await boundaryAnchor(handle, stat.size, this.getInputRuntimeAccumulator()) };
+            initial.files[name] = { identity: fileIdentity(stat), offset: stat.size, anchor: await boundaryAnchor(handle, stat.size, this.getInputRuntimeAccumulator(), this.budget) };
           } finally { await handle.close(); }
-        } catch { return []; } // Do not commit an incomplete initial baseline.
+        } catch (error) {
+          if (!this.defer(error)) this.baselineState = undefined;
+          return []; // Do not commit an incomplete initial baseline.
+        }
       }
       this.setState({ extra: { doubaoWork: initial } });
+      this.baselineState = undefined;
       return [];
     }
-    const next: Checkpoint = JSON.parse(JSON.stringify(saved));
+    const draft = checkpointDraft(saved), next = draft.value;
     next.tools ??= {};
     // An older collector may have checkpointed this helper before upgrade.
     // Apply the same source distinction to restored receipt/settlement facts.
-    for (const [key, pair] of Object.entries(next.tools)) {
-      if ([pair.start?.tool, pair.end?.tool].some(tool => tool && isDoubaoPresentationInspection(tool.name, tool.id))) delete next.tools[key];
+    if (!this.normalizedCheckpoint) {
+      for (const [key, pair] of Object.entries(next.tools)) {
+        if ([pair.start?.tool, pair.end?.tool].some(tool => tool && isDoubaoPresentationInspection(tool.name, tool.id))) delete next.tools[key];
+      }
     }
     next.roots ??= {};
     next.sandboxes ??= {};
@@ -177,12 +212,24 @@ export class DoubaoWorkInput extends BaseInput {
     next.executionsCompleted ??= {};
     next.executionFirstSeen ??= {};
     next.nativeMutationActors ??= {};
+    const active = new Set(Object.values(next.pending).flatMap(p => {
+      const conversation = p.conversationId ?? p.terminal?.conversationId;
+      return conversation ? [conversation] : [];
+    }));
+    for (const job of this.reconstructionJobs.values()) active.add(job.conversation);
+    const boxes = new Set(Object.values(next.tools).flatMap(tool => tool.start?.tool ? [tool.start.tool.sandboxId] : []));
+    for (const id of boxes) {
+      const roots = next.sandboxes[id]?.actors.filter(actor => !/^[mos]_[a-zA-Z0-9]+$/.test(actor));
+      const root = roots?.length === 1 ? next.roots[roots[0]] : undefined;
+      if (root?.conversationId) active.add(root.conversationId);
+    }
+    this.nativeReader.beginCycle(active);
     const entries: AgentActivityEntry[] = [];
     const events: DoubaoLogEvent[] = [];
-    let remainingBytes = CYCLE_BYTES;
     let drained = true;
+    let moreLogWork = false;
     for (const name of names) {
-      if (remainingBytes <= 0) { drained = false; break; }
+      if (this.budget.exhausted) { drained = false; break; }
       let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
       try {
         handle = await fs.open(path.join(this.logDir, name), 'r');
@@ -192,20 +239,18 @@ export class DoubaoWorkInput extends BaseInput {
         const prior = next.files[name] ?? Object.values(next.files).find(cursor => cursor.identity === identity);
         const cursor: FileCursor = prior?.identity === identity && prior.offset <= stat.size
           ? { ...prior } : { identity, offset: 0 };
-        if (cursor.anchor && cursor.anchor !== await boundaryAnchor(handle, cursor.offset, this.getInputRuntimeAccumulator())) {
+        if (cursor.anchor && cursor.anchor !== await boundaryAnchor(handle, cursor.offset, this.getInputRuntimeAccumulator(), this.budget)) {
           cursor.offset = 0;
           cursor.skippingLine = false;
         }
         const unread = stat.size - cursor.offset;
         this.getInputRuntimeAccumulator()?.observeBacklog(unread);
         if (unread > 0) {
-          const requested = Math.min(READ_BYTES, remainingBytes, unread);
+          const requested = Math.min(READ_BYTES, this.budget.remainingBytes - 64, unread);
+          if (requested <= 0) throw new DoubaoWorkDeferred('cycle_budget');
           const buffer = Buffer.allocUnsafe(requested);
-          const started = performance.now();
-          const { bytesRead } = await handle.read(buffer, 0, requested, cursor.offset);
-          this.getInputRuntimeAccumulator()?.observeRead(bytesRead, requested, performance.now() - started);
-          remainingBytes -= bytesRead;
-          if (bytesRead < unread) drained = false;
+          const bytesRead = await this.budget.read(handle, buffer, requested, cursor.offset);
+          if (bytesRead < unread) { drained = false; moreLogWork = true; }
           const chunk = buffer.subarray(0, bytesRead);
           let from = 0;
           let records = 0;
@@ -213,23 +258,30 @@ export class DoubaoWorkInput extends BaseInput {
           const fileEvents: DoubaoLogEvent[] = [];
           let maxLineBytes = 0;
           while (from < chunk.length) {
+            if (this.budget.exhausted && from > 0) { drained = false; break; }
             const newline = chunk.indexOf(10, from);
             if (newline < 0) break; // A normal trailing half-line keeps its old offset.
             const end = newline + 1;
             records++;
             maxLineBytes = Math.max(maxLineBytes, end - from);
+            let recognized = false;
             if (!cursor.skippingLine) {
               const event = parseDoubaoLogLine(chunk.subarray(from, newline).toString('utf8'), name);
               if (event) {
                 parsed++;
+                recognized = true;
                 fileEvents.push(event);
               }
             }
+            // Unrelated log text is byte/time bounded, without spending the
+            // decoded-record allowance needed by native JSON and round work.
+            this.budget.record(recognized ? 1 : 0, 1);
             cursor.skippingLine = false;
             from = end;
+            await this.budget.yieldIfNeeded();
           }
           // An oversized line is skipped through its newline without unbounded buffering.
-          if (from === 0 && bytesRead === READ_BYTES) {
+          if (from === 0 && bytesRead === READ_BYTES && chunk.indexOf(10) < 0) {
             from = bytesRead;
             cursor.skippingLine = true;
             this.logger.warn('Doubao Work oversized log line skipped');
@@ -237,31 +289,38 @@ export class DoubaoWorkInput extends BaseInput {
           cursor.offset += from;
           const after = await handle.stat();
           if (fileIdentity(after) !== identity || after.size < cursor.offset) { drained = false; continue; }
-          cursor.anchor = await boundaryAnchor(handle, cursor.offset, this.getInputRuntimeAccumulator());
+          cursor.anchor = await boundaryAnchor(handle, cursor.offset, this.getInputRuntimeAccumulator(), this.budget, true);
+          if (cursor.offset < stat.size) drained = false;
+          if (from > 0 && this.budget.exhausted && cursor.offset < stat.size) moreLogWork = true;
           events.push(...fileEvents);
           this.getInputRuntimeAccumulator()?.observeCommittedBatch({
             bytes: from, records, parseSuccessRecords: parsed, parseFailedRecords: 0, maxRecordBytes: maxLineBytes,
           });
         }
-        next.files[name] = cursor;
-      } catch {
+        if (!sameCursor(next.files[name], cursor)) next.files[name] = cursor;
+      } catch (error) {
         drained = false;
         // Failed stat/read is not deletion. Do not mutate this file's committed cursor.
-        this.logger.warn('Doubao Work log read unavailable; preserving file checkpoint');
+        if (!this.defer(error)) this.logger.warn('Doubao Work log read unavailable; preserving file checkpoint');
       } finally {
         await handle?.close().catch(() => undefined);
       }
     }
+    if (moreLogWork) this.defer(new DoubaoWorkDeferred('source_backlog'));
     events.sort((a, b) => BigInt(a.timeNano) < BigInt(b.timeNano) ? -1 : BigInt(a.timeNano) > BigInt(b.timeNano) ? 1 : 0);
     for (const event of events) this.consume(next, event);
     // Consume the whole source window first, including rotated/out-of-order tool
     // records. A partial scan must not finalize requests ahead of unread tools.
     if (drained) {
+      if ([...this.reconstructionJobs.keys()].some(key => key.startsWith('execution:'))) await this.completeNativeExecutions(next, entries);
       const pending = Object.entries(next.pending);
       const after = pending.findIndex(([key]) => key === next.pendingScanCursor);
-      const ordered = after < 0 ? pending : [...pending.slice(after + 1), ...pending.slice(0, after + 1)];
+      const rotated = after < 0 ? pending : [...pending.slice(after + 1), ...pending.slice(0, after + 1)];
+      const ordered = [...rotated.filter(([key]) => this.reconstructionJobs.has(`request:${key}`)),
+        ...rotated.filter(([key]) => !this.reconstructionJobs.has(`request:${key}`))];
       let attempts = 0;
       for (const [key, pending] of ordered) {
+        if (this.budget.exhausted) { this.defer(new DoubaoWorkDeferred('cycle_budget')); break; }
         if (!pending.startObserved || !pending.terminal) continue;
         if (attempts++ >= 4) break;
         // Invalid terminal metadata or a temporarily unavailable trajectory
@@ -269,28 +328,38 @@ export class DoubaoWorkInput extends BaseInput {
         next.pendingScanCursor = key;
         await this.complete(next, key, pending, entries);
       }
-      if (performance.now() >= this.nextNativeScanAt) {
+      if (!this.budget.exhausted && performance.now() >= this.nextNativeScanAt) {
         this.nextNativeScanAt = performance.now() + this.nativeScanIntervalMs;
         await this.completeNative(next, entries);
         await this.completeNativeExecutions(next, entries);
+        if (this.nativeDeferred) this.nextNativeScanAt = 0;
       }
     }
     // Confirmed absence or the explicit capacity window may evict a cursor;
     // transient stat/read errors for selected files still preserve their state.
     const selected = new Set(names);
     for (const name of Object.keys(next.files)) if (!selected.has(name)) delete next.files[name];
-    const dropped = compact(next.pending, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
-    if (dropped) this.logger.warn('Doubao Work incomplete requests expired or exceeded capacity; no trace inferred', { requests: dropped });
-    compact(next.completed, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
-    const droppedTools = compact(next.tools!, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
-    if (droppedTools) this.logger.warn('Doubao Work unmatched local tools expired or exceeded capacity', { tools: droppedTools });
-    compact(next.roots, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
-    compact(next.sandboxes, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
-    compact(next.nativeCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
-    compact(next.executionsCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item.updatedMs);
-    compact(next.executionFirstSeen, MAX_COMPLETED, PENDING_TTL_MS, item => item);
-    compact(next.nativeMutationActors, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
-    this.setState({ extra: { doubaoWork: next } });
+    if (events.length || entries.length || Date.now() >= this.nextCompactionAt) {
+      this.nextCompactionAt = Date.now() + 60_000;
+      const dropped = compact(next.pending, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
+      if (dropped) this.logger.warn('Doubao Work incomplete requests expired or exceeded capacity; no trace inferred', { requests: dropped });
+      compact(next.completed, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
+      const droppedTools = compact(next.tools!, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
+      if (droppedTools) this.logger.warn('Doubao Work unmatched local tools expired or exceeded capacity', { tools: droppedTools });
+      compact(next.roots, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
+      compact(next.sandboxes, MAX_PENDING, PENDING_TTL_MS, item => item.updatedMs);
+      compact(next.nativeCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item);
+      compact(next.executionsCompleted, MAX_COMPLETED, COMPLETED_TTL_MS, item => item.updatedMs);
+      compact(next.executionFirstSeen, MAX_COMPLETED, PENDING_TTL_MS, item => item);
+      compact(next.nativeMutationActors, MAX_TOOLS, PENDING_TTL_MS, item => item.updatedMs);
+    }
+    const committed = draft.finish();
+    if (committed !== saved) this.setState({ extra: { doubaoWork: committed } });
+    this.normalizedCheckpoint = true;
+    if (committed !== saved || this.nativeDeferred || Date.now() >= this.nextCacheDiagnosticsAt) {
+      this.nextCacheDiagnosticsAt = Date.now() + 60_000;
+      this.logger.debug('Doubao Work native cache statistics', { ...this.nativeReader.stats() });
+    }
     return entries;
   }
 
@@ -388,7 +457,7 @@ export class DoubaoWorkInput extends BaseInput {
       const conversationId = pending.terminal.conversationId ?? pending.conversationId;
       if (conversationId) {
         try {
-          const graph = await this.readConversationGraph(conversationId, true);
+          const graph = await this.readConversationGraph(conversationId, true, `request:${key}`);
           if (graph) {
             complete = enrichNativeToolEvents(complete.map(event => ({ ...event, 'gen_ai.agent.id': graph.main })), graph.content);
             const io = nativeTaskContent(graph.content, graph.main, pending.queryMs, pending.terminal.timeNano,
@@ -399,11 +468,12 @@ export class DoubaoWorkInput extends BaseInput {
             if (io.input !== undefined && io.output === undefined && Date.now() - pending.updatedMs < 2_000) return;
             if (io.input !== undefined) complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
             if (io.output !== undefined) complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
-            const reconstruction = reconstructNativeRounds(graph.content, graph.main, pending.queryMs,
-              pending.terminal.timeNano, pairs.map(pair => pair.start.tool!.id));
+            const reconstruction = await this.reconstruct(`request:${key}`, conversationId, graph.content, graph.main, pending.queryMs,
+              pending.terminal.timeNano, pairs.map(pair => pair.start.tool!.id), 'client_request', graph);
             if (reconstruction) complete[0]['agent.doubao_work.assistant_rounds'] = reconstruction as unknown as JsonValue;
           }
-        } catch {
+        } catch (error) {
+          if (this.defer(error)) return;
           this.logger.warn('Doubao Work native content unavailable; emitting only confirmed request metadata');
         }
       }
@@ -426,12 +496,13 @@ export class DoubaoWorkInput extends BaseInput {
   private async completeNative(state: Checkpoint, entries: AgentActivityEntry[]): Promise<void> {
     if (!this.sessionsRoot && !this.userDataRoot) return;
     let scannedConversation: string | undefined;
-    let graph: Awaited<ReturnType<typeof readNativeGraph>>;
+    let graph: NativeGraph | undefined;
     let considered = 0;
     const pendingTools = Object.entries(state.tools ?? {});
     const after = pendingTools.findIndex(([key]) => key === state.nativeScanCursor);
     const ordered = after < 0 ? pendingTools : [...pendingTools.slice(after + 1), ...pendingTools.slice(0, after + 1)];
     for (const [key, tool] of ordered) {
+      if (this.budget.exhausted) { this.defer(new DoubaoWorkDeferred('cycle_budget')); break; }
       if (++considered > MAX_TOOLS) break;
       if (state.nativeCompleted![key] !== undefined) continue;
       if (tool.conflict || !tool.start?.tool || !tool.end?.tool || !tool.start.turnId) continue;
@@ -446,8 +517,8 @@ export class DoubaoWorkInput extends BaseInput {
       if (!scannedConversation) {
         scannedConversation = root.conversationId;
         state.nativeScanCursor = key;
-        try { graph = await this.readConversationGraph(root.conversationId, true); }
-        catch { this.logger.warn('Doubao Work native graph temporarily unavailable; preserving child tools'); }
+        try { graph = await this.readConversationGraph(root.conversationId, true, undefined, true); }
+        catch (error) { if (!this.defer(error)) this.logger.warn('Doubao Work native graph temporarily unavailable; preserving child tools'); }
       }
       if (!graph) continue;
       const visited = new Set<string>();
@@ -474,22 +545,37 @@ export class DoubaoWorkInput extends BaseInput {
     const roots = Object.values(state.roots ?? {}).filter(root => root.conversationId && root.localMessageId);
     const conversations = [...new Set(roots.map(root => root.conversationId!))].sort();
     if (!conversations.length) return;
-    const after = conversations.indexOf(state.executionScanCursor ?? '');
-    const conversationId = conversations[(after + 1) % conversations.length];
-    state.executionScanCursor = conversationId;
+    const after = conversations.indexOf(this.executionScanCursor ?? state.executionScanCursor ?? '');
+    const resumed = [...this.reconstructionJobs].find(([key, job]) => key.startsWith('execution:') && conversations.includes(job.conversation));
+    const conversationId = resumed?.[1].conversation ?? conversations[(after + 1) % conversations.length];
+    // Scheduling alone is not source progress. Keep idle rotation in memory;
+    // persist it together with actual execution/wait changes below.
+    this.executionScanCursor = conversationId;
     let executions, graph;
     try {
       // One conversation per cycle, with independent byte/file limits on each
       // native source. No cursor, mtime or polling time becomes a span boundary.
-      executions = await readNativeExecutions(this.snapshotRoot, conversationId);
+      executions = resumed?.[1].executions ?? await this.nativeReader.executions(conversationId, this.budget);
       if (!executions.length) return;
-      graph = await this.readConversationGraph(conversationId, true);
+      for (const execution of executions) {
+        const prior = state.executionsCompleted![execution.executionKey];
+        if (prior && prior.digest !== this.executionDigest(execution)) this.logger.warn('Doubao Work completed native execution changed; not exporting a conflicting span');
+      }
+      const unfinished = executions.some(execution => execution.agentType !== 'main_agent' && execution.startedAtMs >= state.sinceMs
+        && !state.executionsCompleted![execution.executionKey]);
+      if (!unfinished) return;
+      // A newly released execution may have persisted its trajectory after
+      // an earlier root read in this same cycle. Revalidate stamps, reusing
+      // decoded rows when unchanged and parsing only a newly appended tail.
+      graph = resumed?.[1].graph ?? await this.readConversationGraph(conversationId, true, undefined, true);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.logger.warn('Doubao Work native execution metadata unavailable; preserving checkpoint');
+      if (!this.defer(error) && (error as NodeJS.ErrnoException).code !== 'ENOENT') this.logger.warn('Doubao Work native execution metadata unavailable; preserving checkpoint');
       return;
     }
     if (!graph) return;
     for (const execution of executions) {
+      if (resumed && resumed[0] !== `execution:${execution.executionKey}`) continue;
+      if (this.budget.exhausted) { this.defer(new DoubaoWorkDeferred('cycle_budget')); break; }
       if (execution.startedAtMs < state.sinceMs) continue;
       const matched = roots.filter(root => root.conversationId === execution.conversationId && root.localMessageId === execution.queryMessageId);
       if (matched.length !== 1) continue;
@@ -498,11 +584,8 @@ export class DoubaoWorkInput extends BaseInput {
       // sandbox. Never correlate by wall-clock proximity or directory mtime.
       if (!box || box.conflict || !box.actors.includes(root.turnId) || !box.actors.includes(execution.agentId)
         || box.actors.filter(actor => !/^[mos]_[a-zA-Z0-9]+$/.test(actor)).length !== 1) continue;
-      const digest = doubaoDigest(JSON.stringify(execution)), prior = state.executionsCompleted![execution.executionKey];
-      if (prior) {
-        if (prior.digest !== digest) this.logger.warn('Doubao Work completed native execution changed; not exporting a conflicting span');
-        continue;
-      }
+      const digest = this.executionDigest(execution), prior = state.executionsCompleted![execution.executionKey];
+      if (prior) continue;
       const eligible = executions.filter(candidate => candidate.startedAtMs >= state.sinceMs && box.actors.includes(candidate.agentId));
       const pairs = Object.entries(state.tools ?? {}).filter(([, tool]) => !tool.conflict && tool.start?.turnId === execution.agentId
         && tool.start.tool?.sandboxId === execution.sandboxId && tool.end?.tool
@@ -513,6 +596,20 @@ export class DoubaoWorkInput extends BaseInput {
         && isUniqueNativeToolOwner(execution, eligible, tool.start!.timeNano, tool.end!.timeNano));
       const events = buildNativeExecutionEvents(this.scope, root, graph, execution, eligible, Date.now());
       if (!events.length) continue;
+      const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
+      state.executionScanCursor = conversationId;
+      const parentId = graph.edges[execution.agentId]?.parent;
+      const background = BigInt(execution.endedAtMs) * 1_000_000n > BigInt(root.terminal.timeNano);
+      if (!background && parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
+        const hasParentRecord = eligible.some(candidate => candidate.agentId === parentId && candidate.queryMessageId === execution.queryMessageId
+          && candidate.conversationId === execution.conversationId && candidate.sandboxId === execution.sandboxId);
+        const parentMutation = state.nativeMutationActors![JSON.stringify([execution.sandboxId, parentId])];
+        const currentWrite = typeof parentMutation?.timeNano === 'string' && /^\d{19}$/.test(parentMutation.timeNano)
+          && BigInt(parentMutation.timeNano) >= BigInt(root.queryMs) * 1_000_000n
+          && BigInt(parentMutation.timeNano) <= BigInt(root.terminal.timeNano);
+        const grace = !hasParentRecord && currentWrite ? EXECUTION_PARENT_WRITE_GRACE_MS : EXECUTION_PARENT_GRACE_MS;
+        if (Date.now() - firstSeen < grace) continue;
+      }
       const observations = nativeToolObservations(pairs.map(([, tool]) => ({ start: tool.start!, end: tool.end! })), graph.content);
       const io = nativeTaskContent(graph.content, execution.agentId, root.queryMs,
         (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id));
@@ -521,31 +618,16 @@ export class DoubaoWorkInput extends BaseInput {
         delete event['gen_ai.agent.scope'];
       }
       events[0]['agent.doubao_work.tool_observations'] = observations;
-      const reconstruction = reconstructNativeRounds(graph.content, execution.agentId, root.queryMs,
-        (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id), 'local_execution_fragment');
+      let reconstruction;
+      try {
+        reconstruction = await this.reconstruct(`execution:${execution.executionKey}`, conversationId, graph.content, execution.agentId, root.queryMs,
+          (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id), 'local_execution_fragment', graph, executions);
+      } catch (error) { if (this.defer(error)) break; throw error; }
       if (reconstruction) events[0]['agent.doubao_work.assistant_rounds'] = reconstruction as unknown as JsonValue;
       if (io.input !== undefined) events[0]['agent.doubao_work.task_input'] = io.input;
       if (io.output !== undefined) events[0]['agent.doubao_work.task_output'] = io.output;
       if (io.input !== undefined) events[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
       if (io.output !== undefined) events[1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
-      const firstSeen = state.executionFirstSeen![execution.executionKey] ??= Date.now();
-      const parentId = graph.edges[execution.agentId]?.parent;
-      const background = BigInt(execution.endedAtMs) * 1_000_000n > BigInt(root.terminal.timeNano);
-      if (!background && parentId !== graph.main && events[0]['loongsuite.doubao_work.parent_resolution'] === 'root_request_ancestor') {
-        const hasParentRecord = eligible.some(candidate => candidate.agentId === parentId && candidate.queryMessageId === execution.queryMessageId
-          && candidate.conversationId === execution.conversationId && candidate.sandboxId === execution.sandboxId);
-        const parentMutation = state.nativeMutationActors![JSON.stringify([execution.sandboxId, parentId])];
-        // Write success is not proof of a future snapshot (a same-content
-        // write may produce no tracked mutation). Extend the grace only for
-        // source-timed evidence in this request, and always bound that wait.
-        // Background executions are independent roots linked to the request;
-        // they do not require an enclosing parent snapshot to be exported.
-        const currentWrite = typeof parentMutation?.timeNano === 'string' && /^\d{19}$/.test(parentMutation.timeNano)
-          && BigInt(parentMutation.timeNano) >= BigInt(root.queryMs) * 1_000_000n
-          && BigInt(parentMutation.timeNano) <= BigInt(root.terminal.timeNano);
-        const grace = !hasParentRecord && currentWrite ? EXECUTION_PARENT_WRITE_GRACE_MS : EXECUTION_PARENT_GRACE_MS;
-        if (Date.now() - firstSeen < grace) continue;
-      }
       entries.push(...events);
       for (const [toolKey] of pairs) delete state.tools![toolKey];
       state.executionsCompleted![execution.executionKey] = { digest, updatedMs: Date.now() };
@@ -553,23 +635,91 @@ export class DoubaoWorkInput extends BaseInput {
     }
   }
 
-  private readConversationGraph(conversationId: string, captureContent = false): Promise<Awaited<ReturnType<typeof readNativeGraph>>> {
-    return this.sessionsRoot
-      ? readNativeGraph(this.sessionsRoot, conversationId, captureContent)
-      : readNativeProfileGraph(this.userDataRoot!, conversationId, captureContent);
+  private readConversationGraph(conversationId: string, _captureContent = false, jobKey?: string, revalidate = false): Promise<NativeGraph | undefined> {
+    const resumed = jobKey && this.reconstructionJobs.get(jobKey);
+    if (resumed) return Promise.resolve(resumed.graph);
+    let graph = revalidate ? undefined : this.cycleGraphs.get(conversationId);
+    if (!graph) { graph = this.nativeReader.graph(conversationId, this.budget); this.cycleGraphs.set(conversationId, graph); }
+    return graph;
+  }
+
+  private executionDigest(execution: NativeExecution): string {
+    let digest = this.executionDigests.get(execution);
+    if (!digest) { digest = doubaoDigest(JSON.stringify(execution)); this.executionDigests.set(execution, digest); }
+    return digest;
+  }
+
+  private async reconstruct(key: string, conversation: string, content: NativeContent | undefined, actor: string,
+    queryMs: number, endNano: string, callIds: string[], scope: NativeAssistantRound['scope'], graph: NativeGraph, executions?: NativeExecution[]): Promise<NativeRoundReconstruction | undefined> {
+    if (!content) { this.reconstructionJobs.delete(key); return undefined; }
+    const version = JSON.stringify([content.sourceVersions?.[actor], actor, queryMs, endNano, callIds, scope]);
+    let job = this.reconstructionJobs.get(key);
+    if (job && job.version !== version) { this.reconstructionJobs.delete(key); throw new DoubaoWorkDeferred('source_refresh'); }
+    if (!job) {
+      const assignments = content.assignments[actor] ?? [];
+      const bytes = (content.sourceBytes?.[actor] ?? 0) + assignments.reduce((n, value) => n + Buffer.byteLength(value.text) * 2, 0) + 512 * 1024;
+      if (bytes > 32 * 1024 * 1024) { this.logger.warn('Doubao Work reconstruction content exceeds bounded cache', { reason: 'round_cache_capacity' }); return undefined; }
+      if (this.reconstructionJobs.size >= 4 || [...this.reconstructionJobs.values()].reduce((n, value) => n + value.bytes, bytes) > 32 * 1024 * 1024) throw new DoubaoWorkDeferred('round_queue');
+      const scoped: NativeContent = { calls: Object.fromEntries(Object.entries(content.calls).filter(([, value]) => value.actor === actor).map(([id, value]) => [id, { ...value }])),
+        assignments: { [actor]: assignments }, lastAnswers: { [actor]: content.lastAnswers[actor] }, transcripts: { [actor]: content.transcripts?.[actor] ?? [] },
+        transcriptOffsets: { [actor]: content.transcriptOffsets?.[actor] ?? 0 },
+        ...(content.sourceVersions?.[actor] === undefined ? {} : { sourceVersions: { [actor]: content.sourceVersions[actor] } }),
+        sourceBytes: { [actor]: content.sourceBytes?.[actor] ?? 0 } };
+      const current = assignments.filter(value => value.timeMs >= queryMs && value.timeMs <= Number(BigInt(endNano) / 1_000_000n));
+      if (content.findUserRows && current.length === 1) {
+        const fingerprint = nativeDemandFingerprint(current[0].text), indices = content.findUserRows(actor, fingerprint);
+        scoped.findUserRows = (who, key) => who === actor && key === fingerprint ? indices : undefined;
+      }
+      job = { version, conversation, bytes, updatedMs: Date.now(), steps: nativeRoundSteps(scoped, actor, queryMs, endNano, callIds, scope),
+        graph: { main: graph.main, edges: { ...graph.edges }, content: scoped }, executions: executions?.map(value => ({ ...value })) };
+      this.reconstructionJobs.set(key, job);
+    }
+    job.updatedMs = Date.now();
+    while (!this.budget.exhausted) {
+      const next = job.steps.next();
+      if (next.done) { this.reconstructionJobs.delete(key); return next.value; }
+      this.budget.record(next.value); await this.budget.yieldIfNeeded();
+    }
+    throw new DoubaoWorkDeferred('cycle_budget');
+  }
+
+  private defer(error: unknown): boolean {
+    if (!(error instanceof DoubaoWorkDeferred)) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (!code || !['EACCES', 'EPERM', 'EIO', 'EBUSY', 'ESTALE', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) return false;
+      if (!this.reportedIoErrors.has(code)) {
+        this.reportedIoErrors.add(code);
+        this.logger.warn('Doubao Work source I/O unavailable; preserving pending work', { code, reason: 'native_io_retry' });
+      }
+      error = new DoubaoWorkDeferred('native_io_retry');
+    }
+    const deferred = error as DoubaoWorkDeferred;
+    this.nativeDeferred = true;
+    this.logger.debug('Doubao Work telemetry work deferred', { reason: deferred.reason });
+    if (['cycle_budget', 'round_queue', 'source_refresh', 'source_backlog'].includes(deferred.reason) && !this.wakeup) {
+      this.wakeup = setTimeout(() => { this.wakeup = undefined; this.requestCollection(); }, 1000);
+      this.wakeup.unref();
+    }
+    return true;
   }
 }
 
 function fileIdentity(stat: { dev: number; ino: number }): string { return `${stat.dev}:${stat.ino}`; }
 
+function sameCursor(a: FileCursor | undefined, b: FileCursor): boolean {
+  return a?.identity === b.identity && a.offset === b.offset && a.anchor === b.anchor && a.skippingLine === b.skippingLine;
+}
+
 async function boundaryAnchor(
-  handle: Awaited<ReturnType<typeof fs.open>>, offset: number, runtime: InputRuntimeAccumulator | null,
+  handle: Awaited<ReturnType<typeof fs.open>>, offset: number, runtime: InputRuntimeAccumulator | null, budget?: DoubaoWorkBudget, finishing = false,
 ): Promise<string> {
   const length = Math.min(64, offset);
+  if (!length) return doubaoDigest('');
   const buffer = Buffer.alloc(length);
   const started = performance.now();
-  const { bytesRead } = await handle.read(buffer, 0, length, offset - length);
-  runtime?.observeRead(bytesRead, length, performance.now() - started);
+  const bytesRead = budget ? await budget.read(handle, buffer, length, offset - length, finishing)
+    : (await handle.read(buffer, 0, length, offset - length)).bytesRead;
+  if (!budget) runtime?.observeRead(bytesRead, length, performance.now() - started);
   if (bytesRead !== length) throw new Error('Doubao Work cursor boundary changed during read');
   return doubaoDigest(buffer.toString('hex'));
 }
@@ -578,7 +728,10 @@ function compact<T>(items: Record<string, T>, max: number, ttl: number, time: (v
   const before = Object.keys(items).length;
   const cutoff = Date.now() - ttl;
   for (const [key, value] of Object.entries(items)) if (time(value) < cutoff) delete items[key];
-  const oldest = Object.keys(items).sort((a, b) => time(items[a]) - time(items[b]));
-  for (const key of oldest.slice(0, Math.max(0, oldest.length - max))) delete items[key];
+  const keys = Object.keys(items);
+  if (keys.length > max) {
+    const oldest = keys.sort((a, b) => time(items[a]) - time(items[b]));
+    for (const key of oldest.slice(0, oldest.length - max)) delete items[key];
+  }
   return before - Object.keys(items).length;
 }

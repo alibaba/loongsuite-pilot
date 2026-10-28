@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, type DoubaoLogEvent, type DoubaoPendingTurn } from './doubao-work-log.js';
 import type { NativeGraph } from './doubao-work-native.js';
+import { independentNativeString } from './doubao-work-content.js';
 
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -31,7 +32,7 @@ export function parseNativeExecution(value: unknown): NativeExecution | undefine
   const e = (value as Record<string, unknown>).execution;
   if (!e || typeof e !== 'object' || Array.isArray(e)) return undefined;
   const row = e as Record<string, unknown>;
-  const string = (name: string, pattern = ID) => typeof row[name] === 'string' && pattern.test(row[name]) ? row[name] as string : undefined;
+  const string = (name: string, pattern = ID) => typeof row[name] === 'string' && pattern.test(row[name]) ? independentNativeString(row[name] as string) : undefined;
   const executionKey = string('executionKey', UUID), conversationId = string('conversationId', /^\d{1,30}$/);
   const queryMessageId = string('queryMessageId', UUID), agentId = string('agentId'), sandboxId = string('sandboxId');
   const agentType = row.agentType;
@@ -41,7 +42,7 @@ export function parseNativeExecution(value: unknown): NativeExecution | undefine
     || typeof startedAtMs !== 'number' || typeof endedAtMs !== 'number'
     || !Number.isSafeInteger(startedAtMs) || !Number.isSafeInteger(endedAtMs)
     || startedAtMs < MIN_MS || endedAtMs >= MAX_MS || endedAtMs <= startedAtMs) return undefined;
-  return { executionKey, conversationId, queryMessageId, agentId, agentType, sandboxId, startedAtMs, endedAtMs };
+  return { executionKey, conversationId, queryMessageId, agentId, agentType: independentNativeString(agentType) as NativeExecution['agentType'], sandboxId, startedAtMs, endedAtMs };
 }
 
 /** The client persists only executions with tracked file mutations. Scan only

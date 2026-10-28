@@ -6,7 +6,7 @@ import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { DoubaoWorkInput } from '../../../src/inputs/doubao-work/doubao-work-input.js';
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
-import * as executionReader from '../../../src/inputs/doubao-work/doubao-work-execution.js';
+import { DoubaoWorkNativeReader } from '../../../src/inputs/doubao-work/doubao-work-reader.js';
 
 class ProbeInput extends DoubaoWorkInput {
   constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
@@ -190,7 +190,7 @@ describe('Doubao Work passive client-message input', () => {
   it('caps native metadata scans independently of repeated log polls', async () => {
     const { stateStore, logs, sessionsRoot, snapshotRoot, file } = await setup();
     const input = new ProbeInput({ stateStore, logDir: logs, sessionsRoot, snapshotRoot, nativeScanIntervalMs: 10_000 });
-    const reader = vi.spyOn(executionReader, 'readNativeExecutions').mockResolvedValue([]);
+    const reader = vi.spyOn(DoubaoWorkNativeReader.prototype, 'executions').mockResolvedValue([]);
     const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
     await appendFile(file, doubaoLine('on_message_session_start', {}, 10) + doubaoLine('on_message_session_end'));
     await input.poll(); expect(reader).toHaveBeenCalledTimes(1);

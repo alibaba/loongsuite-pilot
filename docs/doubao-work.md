@@ -37,7 +37,7 @@ Contained children wait 30 seconds for parent metadata, extended to 120 seconds 
 
 ## Content and reliability
 
-Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. No history enumeration, authentication stores, cookies or snapshot file bodies are read. Unique assignments, native user delimiters and exact current tool IDs select the current outputs. LLM inputs may retain earlier visible messages in that conversation as context, without re-exporting old assistant rows as current LLMs. Native content fields and each round's input are limited to 64 KiB; old complete input messages may be removed. Reconstruction caps each owner at 64 assistant rounds and 512 KiB of expanded content, recording omitted counts. Adjacent duplicate tool-free final messages become one visible round.
+Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. The adapter does not enumerate history or read authentication stores or cookies. Business file bodies inside snapshots are not collected; the first metadata parse still reads the bounded snapshot JSON. Unique assignments, native user delimiters and exact current tool IDs select the current outputs. LLM inputs may retain earlier visible messages in that conversation as context, without re-exporting old assistant rows as current LLMs. Native content fields and each round's input are limited to 64 KiB; old complete input messages may be removed. Reconstruction caps each owner at 64 assistant rounds and 512 KiB of expanded content, recording omitted counts. Adjacent duplicate tool-free final messages become one visible round.
 
 The client's `skill://<name>?...` and expanded absolute `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` links are matched by Skill identity and label. Other instruction text must still agree; ambiguous delimiters, unrelated links and arbitrary paths are not fuzzy-matched. Original message content remains unchanged, without duplicating the assignment alongside its expanded user message.
 
@@ -47,7 +47,25 @@ A current assignment with a not-yet-persisted final row allows up to two seconds
 
 All content passes through InputManager's regular recursive masking before conversion. Each owning request or local TASK exports at most 64 local TOOL spans; `tool_observations_not_in_span` reports omitted observations, while collected canonical facts remain in JSONL. Partial, conflicting or nonpositive callback intervals are not completed observations.
 
-Native scans are bounded to one known conversation, 64 Agents, 2 MiB per file, 8 MiB total, ancestry depth 8. Snapshot scans separately cap 8 account directories, 128 executions/files and 8 MiB. Symlinks and directory escapes are rejected. Incremental logs retain complete-line offsets and fingerprints across restart, rotation, truncation and transient read failures. First start skips history. Per read/cycle limits are 1/8 MiB and 128 log files. Request/sandbox state is bounded to 512 records / 24 hours, pending tools to 4096 / 24 hours, completed IDs to 4096 / 7 days. Native scans run at most once per 10 seconds. End-to-end exactly-once is not promised.
+Background native scans cover one known conversation, 64 Agents and ancestry depth 8. Snapshot scans cap 8 account directories, 128 executions/files and 2 MiB per snapshot. Total trajectory size is no longer capped at 2 MiB; incremental limits are described below. Symlinks and directory escapes are rejected. Incremental logs retain complete-line offsets and fingerprints across restart, rotation, truncation and transient read failures. First start skips history. Per read/cycle limits are 1/8 MiB and 128 log files. Request/sandbox state is bounded to 512 records / 24 hours, pending tools to 4096 / 24 hours, completed IDs to 4096 / 7 days. Native scans run at most once per 10 seconds. End-to-end exactly-once is not promised.
+
+## Incremental processing and performance limits
+
+Logs, native sources and round reconstruction share an 8 MiB read allowance, 4096 decoded/reconstruction work units and a cooperative 50 ms target per cycle. Native reads use 64 KiB chunks and processing yields every 256 units. Exhaustion preserves progress for later cycles rather than returning empty evidence. File operations, individual JSON decodes and finalization can exceed this cooperative time target.
+
+Native parsing is reused by file identity, size and nanosecond modification/change markers. Unchanged sources require no body opens/reads. Appends verify first/tail anchors; rewrites, truncation, replacement or conflicting markers invalidate the cache. JSONL consumes complete lines only. Metadata times never supply semantic timestamps.
+
+Each actor retains a roughly 2 MiB recent body window with original source positions. Creation ancestry and bounded call indexes are maintained separately. Older input may be truncated; if the current demand delimiter has left the window, ownership is not guessed. Individual JSONL records remain limited to 2 MiB and call indexes to 4096 entries, with explicit degradation diagnostics.
+
+Native caches cap at 512 files and an estimated 64 MiB, expiring inactive entries after 15 minutes. Inactive conversations are evicted first, then the oldest active entry, protecting the current scan temporarily; a protected conversation that alone exceeds capacity degrades explicitly. Estimated cache bytes are not a process RSS guarantee. Completed snapshots retain execution metadata only, discarding body buffers.
+
+Round inputs use a byte-counted message window instead of repeatedly serializing all history. Up to four resumable jobs retain an estimated 32 MiB for 60 seconds, freezing validated source views while processing long current turns across cycles. Existing IDs, original row positions, 64 KiB inputs and 64-round/512 KiB output limits remain.
+
+Native bodies and reconstruction progress are memory-only. Restart rereads confirmed conversations cooperatively, using durable log cursors, pending state and deterministic completion IDs for recovery. Output queuing and checkpoint ordering are unchanged. Checkpoints are committed only when cursors, relationships, completions or TTL cleanup actually change; idle polls neither deep-copy nor rewrite state.
+
+The `Doubao Work native cache statistics` debug log reports cumulative body reads, parsed lines, hits, resets, evictions, estimated retained bytes and file counts. Runtime input metrics also include native reads; metadata queries still cost work. This base version deprecates and ignores `captureMessageContent`; the adapter preserves that behavior and regular recursive masking, without claiming content-off support.
+
+Run `node tests/performance/doubao-work-rounds.perf.mjs` for isolated 4k/8k/16k synthetic-history wall/CPU, timer-delay and RSS measurements. These measure collector reconstruction, not customer model response time.
 
 ## Configuration and acceptance
 

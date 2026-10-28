@@ -2,9 +2,10 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, type DoubaoPendingTurn, type DoubaoLogEvent, type DoubaoToolPair } from './doubao-work-log.js';
-import { parseNativeContent, type NativeContent } from './doubao-work-content.js';
+import { independentNativeString, parseNativeContent, type NativeContent } from './doubao-work-content.js';
 
-interface Edge { child: string; parent: string; callId: string; threadId: string }
+export interface NativeEdge { child: string; parent: string; callId: string; threadId: string }
+type Edge = NativeEdge;
 export interface NativeGraph { main: string; edges: Record<string, Edge>; content?: NativeContent }
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const MAX_AGENTS = 64;
@@ -38,6 +39,24 @@ export async function readNativeProfileGraph(userDataRoot: string, conversationI
   return matches.length === 1 ? readNativeGraph(matches[0], conversationId, captureContent) : undefined;
 }
 
+/** Consume an already decoded row once; retained links do not depend on the
+ * content window. Call/result identity remains mandatory after history trims.
+ */
+export function appendNativeGraphRow(main: string, actor: string, row: Record<string, any>, calls: Set<string>, edges: Record<string, NativeEdge>): boolean {
+  if (Array.isArray(row.tool_calls)) for (const call of row.tool_calls) {
+    if (call?.function?.name === 'create_agent' && typeof call.id === 'string' && ID.test(call.id)) calls.add(independentNativeString(call.id));
+  }
+  if (row.role !== 'tool' || !calls.has(row.tool_call_id) || typeof row.content !== 'string'
+    || !row.content.startsWith('create_agent ok\n')) return true;
+  const field = (name: string) => new RegExp(`^${name}: ([a-zA-Z0-9_-]+)$`, 'm').exec(row.content)?.[1];
+  const child = field('agent_id'), parent = field('parent_id'), threadId = field('thread_id');
+  if (!child || !ID.test(child) || child === actor || !threadId || !/^\d{1,30}$/.test(threadId)
+    || parent !== (actor === main ? 'main_agent' : actor)) return false;
+  const edge = { child: independentNativeString(child), parent: actor, callId: independentNativeString(row.tool_call_id), threadId: independentNativeString(threadId) };
+  if (edges[child] && JSON.stringify(edges[child]) !== JSON.stringify(edge)) return false;
+  edges[child] = edge; return true;
+}
+
 /** Only native create_agent call/result identities are retained. Neither agent
  * prose nor filesystem/assignment timestamps are execution boundaries. */
 export function parseNativeGraph(files: Record<string, string>): NativeGraph | undefined {
@@ -52,18 +71,7 @@ export function parseNativeGraph(files: Record<string, string>): NativeGraph | u
       let row;
       try { row = JSON.parse(line); } catch { return undefined; }
       if (!row || typeof row !== 'object') return undefined;
-      if (Array.isArray(row.tool_calls)) for (const call of row.tool_calls) {
-        if (call?.function?.name === 'create_agent' && typeof call.id === 'string' && ID.test(call.id)) calls.add(call.id);
-      }
-      if (row.role !== 'tool' || !calls.has(row.tool_call_id) || typeof row.content !== 'string'
-        || !row.content.startsWith('create_agent ok\n')) continue;
-      const field = (name: string) => new RegExp(`^${name}: ([a-zA-Z0-9_-]+)$`, 'm').exec(row.content)?.[1];
-      const child = field('agent_id'), parent = field('parent_id'), threadId = field('thread_id');
-      if (!child || !ID.test(child) || child === agent || !threadId || !/^\d{1,30}$/.test(threadId)
-        || parent !== (agent === mains[0] ? 'main_agent' : agent)) return undefined;
-      const edge = { child, parent: agent, callId: row.tool_call_id, threadId };
-      if (edges[child] && JSON.stringify(edges[child]) !== JSON.stringify(edge)) return undefined;
-      edges[child] = edge;
+      if (!appendNativeGraphRow(mains[0], agent, row, calls, edges)) return undefined;
     }
   }
   return { main: mains[0], edges };
