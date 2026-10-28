@@ -4,11 +4,12 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
-import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../types/index.js';
+import { ClientType, CollectionMethod, type AgentActivityEntry, type JsonValue } from '../../types/index.js';
 import { buildDoubaoTaskEvents, doubaoDigest, isDoubaoPresentationInspection, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
 import { buildNativeToolEvents, readNativeGraph, readNativeProfileGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, isUniqueNativeToolOwner, readNativeExecutions } from './doubao-work-execution.js';
 import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations } from './doubao-work-content.js';
+import { reconstructNativeRounds } from './doubao-work-rounds.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -389,6 +390,9 @@ export class DoubaoWorkInput extends BaseInput {
             if (io.input !== undefined && io.output === undefined && Date.now() - pending.updatedMs < 2_000) return;
             if (io.input !== undefined) complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];
             if (io.output !== undefined) complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: io.output }] }];
+            const reconstruction = reconstructNativeRounds(graph.content, graph.main, pending.queryMs,
+              pending.terminal.timeNano, pairs.map(pair => pair.start.tool!.id));
+            if (reconstruction) complete[0]['agent.doubao_work.assistant_rounds'] = reconstruction as unknown as JsonValue;
           }
         } catch {
           this.logger.warn('Doubao Work native content unavailable; emitting only confirmed request metadata');
@@ -508,6 +512,9 @@ export class DoubaoWorkInput extends BaseInput {
         delete event['gen_ai.agent.scope'];
       }
       events[0]['agent.doubao_work.tool_observations'] = observations;
+      const reconstruction = reconstructNativeRounds(graph.content, execution.agentId, root.queryMs,
+        (BigInt(execution.endedAtMs) * 1_000_000n).toString(), pairs.map(([, tool]) => tool.start!.tool!.id), 'local_execution_fragment');
+      if (reconstruction) events[0]['agent.doubao_work.assistant_rounds'] = reconstruction as unknown as JsonValue;
       if (io.input !== undefined) events[0]['agent.doubao_work.task_input'] = io.input;
       if (io.output !== undefined) events[0]['agent.doubao_work.task_output'] = io.output;
       if (io.input !== undefined) events[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: io.input }] }];

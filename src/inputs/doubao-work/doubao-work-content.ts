@@ -13,6 +13,8 @@ export interface NativeContent {
   calls: Record<string, NativeCallContent>;
   assignments: Record<string, NativeAssignment[]>;
   lastAnswers: Record<string, { index: number; text: string }>;
+  /** Original message order for visible assistant-round reconstruction. */
+  transcripts?: Record<string, Record<string, unknown>[]>;
 }
 
 function text(value: unknown): string | undefined {
@@ -25,10 +27,11 @@ function text(value: unknown): string | undefined {
  * The caller must pass the result through InputManager's normal masking path.
  */
 export function parseNativeContent(files: Record<string, string>, assignments: Record<string, string>): NativeContent | undefined {
-  const result: NativeContent = { calls: {}, assignments: {}, lastAnswers: {} };
+  const result: NativeContent = { calls: {}, assignments: {}, lastAnswers: {}, transcripts: {} };
   let count = 0;
   for (const [actor, content] of Object.entries(files)) {
     const rows = content.split('\n').filter(Boolean).map(line => JSON.parse(line));
+    result.transcripts![actor] = rows;
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       if (row.role === 'assistant' && Array.isArray(row.tool_calls)) {

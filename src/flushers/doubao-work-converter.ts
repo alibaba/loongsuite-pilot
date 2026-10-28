@@ -3,13 +3,15 @@ import { ROOT_CONTEXT, SpanKind, SpanStatusCode, TraceFlags, trace, type Attribu
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../types/index.js';
 import { doubaoDigest, doubaoRootAgentSpanId } from '../inputs/doubao-work/doubao-work-log.js';
+import { addDoubaoAssistantRounds, type RoundPlacement } from './doubao-work-round-converter.js';
 
 type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]> & { observationTracer?: Tracer };
 const PREFIX = 'loongsuite.doubao_work.';
 const OBSERVATION_CONTRACT = 'genai.observed-tools.v1';
 
 /** The current passive producer proves client requests and local tool facts.
- * It does not prove model requests, ReAct timing, or delegated invocations.
+ * Visible assistant batches supply content-first logical model rounds. Their
+ * times are estimated between source request/tool anchors, not model metrics.
  * Export evidenced local TOOL lifetimes under their real owner, as in OTel's
  * execute_tool convention. This is a partial observation contract, not Pilot's
  * complete ReAct topology: do not manufacture a STEP or LLM to fill that gap.
@@ -37,8 +39,12 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
       if (key === 'stopInvokeAgent' || key === 'stopEntry') {
         return (invocation: Parameters<ExtendedTelemetryHandler['stopInvokeAgent']>[0], endTime?: number) => {
           if (key === 'stopInvokeAgent' && invocation.span) {
-            if (options.observationTracer) toolSpanCount += addLocalToolSpans(invocation.span, records,
-              options.observationTracer, start.time_unix_nano as string, end.time_unix_nano as string, start);
+            if (options.observationTracer) {
+              const rounds = addDoubaoAssistantRounds(invocation.span, records, options.observationTracer,
+                start.time_unix_nano as string, end.time_unix_nano as string, start);
+              toolSpanCount += rounds.spanCount + addLocalToolSpans(invocation.span, records,
+                options.observationTracer, start.time_unix_nano as string, end.time_unix_nano as string, start, rounds.placements);
+            }
             else addRecordToolEvents(invocation.span, records);
           }
           const output = end['gen_ai.output.messages'];
@@ -52,7 +58,7 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
   });
   const result = convertEventLogToTrace(boundaries, { ...options, ...(wrapped ? { handler: wrapped } : {}) });
   return { ...result, spanCount: result.spanCount + toolSpanCount, warnings: [...result.warnings,
-    'Doubao trace uses the observed-tools contract: local TOOL/TASK boundaries are known; full model/ReAct/delegated invocation coverage is unavailable'] };
+    'Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable'] };
 }
 
 function validTime(value: unknown): value is string {
@@ -62,7 +68,8 @@ function validTime(value: unknown): value is string {
 /** Pair by identity, never by name/order. Inputs have already passed the
  * normal content/masking pipeline; no source content is re-read here.
  */
-function addLocalToolSpans(owner: Span, records: EventLogRecord[], tracer: Tracer, startNano: string, endNano: string, ownerRecord: EventLogRecord): number {
+function addLocalToolSpans(owner: Span, records: EventLogRecord[], tracer: Tracer, startNano: string, endNano: string, ownerRecord: EventLogRecord,
+  placements = new Map<string, RoundPlacement>()): number {
   const groups = new Map<string, { calls: EventLogRecord[]; results: EventLogRecord[] }>();
   for (const record of records) {
     const event = record['event.name'], id = record['gen_ai.tool.call.id'];
@@ -103,19 +110,23 @@ function addLocalToolSpans(owner: Span, records: EventLogRecord[], tracer: Trace
       [`${PREFIX}tool_boundary`]: 'client_received_to_execution_settled',
       [`${PREFIX}trace_completeness`]: 'local_tool_observation',
       'tool.result.status': result['tool.result.status'] as string,
+      ...(placements.has(id) ? { 'gen_ai.step.id': placements.get(id)!.stepId } : {}),
     };
     for (const key of ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id',
       'gen_ai.conversation.id', 'gen_ai.framework', `${PREFIX}native_decision_id`, `${PREFIX}local_executor_tool_name`]) {
       if (typeof call[key] === 'string') attributes[key] = call[key] as string;
     }
     if (typeof call['user.id'] === 'string') attributes['gen_ai.user.id'] = call['user.id'];
+    if (attributes['gen_ai.turn.id'] === undefined && typeof ownerRecord[`${PREFIX}root_turn_id`] === 'string') {
+      attributes['gen_ai.turn.id'] = ownerRecord[`${PREFIX}root_turn_id`] as string;
+    }
     const args = call['gen_ai.tool.call.arguments'], output = result['gen_ai.tool.call.result'];
     if (typeof args === 'string') attributes['gen_ai.tool.call.arguments'] = args;
     else if (args && typeof args === 'object' && !Array.isArray(args)) attributes['gen_ai.tool.call.arguments'] = JSON.stringify(args);
     if (typeof output === 'string') attributes['gen_ai.tool.call.result'] = output;
     const span = tracer.startSpan(`execute_tool ${name}`, {
       kind: SpanKind.INTERNAL, startTime: nanoTime(call.time_unix_nano as string), attributes,
-    }, trace.setSpanContext(ROOT_CONTEXT, parent));
+    }, trace.setSpanContext(ROOT_CONTEXT, placements.get(id)?.parent.spanContext() ?? parent));
     const generated = span.spanContext();
     Object.defineProperty(span, 'spanContext', { value: () => ({ ...generated, traceId: parent.traceId, spanId }), configurable: true });
     if (result['tool.result.status'] !== 'success') {
@@ -223,10 +234,11 @@ function convertLocalExecution(records: EventLogRecord[], options: Options) {
     toolRecords.push({ ...common, 'event.name': 'tool.call', time_unix_nano: item.startNano, 'gen_ai.tool.call.arguments': item.arguments },
       { ...common, 'event.name': 'tool.result', time_unix_nano: item.endNano, 'tool.result.status': item.status, 'gen_ai.tool.call.result': item.result });
   }
-  const toolSpanCount = addLocalToolSpans(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, start);
+  const rounds = addDoubaoAssistantRounds(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, start);
+  const toolSpanCount = addLocalToolSpans(span, toolRecords, options.observationTracer, start.time_unix_nano, end.time_unix_nano, start, rounds.placements);
   if (Array.isArray(observations)) span.setAttribute(`${PREFIX}tool_observations_not_in_span`, observations.length - toolSpanCount);
   span.end(nanoTime(end.time_unix_nano));
-  return { spanCount: 1 + toolSpanCount, traceIds: [traceId], warnings: [] };
+  return { spanCount: 1 + rounds.spanCount + toolSpanCount, traceIds: [traceId], warnings: [] };
 }
 
 function nanoTime(value: string): [number, number] {
@@ -245,6 +257,7 @@ export function enrichDoubaoClientRequest(records: AgentActivityEntry[], spans: 
   const previous = agent.spanContext().spanId;
   const id = doubaoRootAgentSpanId(agent.spanContext().traceId);
   const context = { ...agent.spanContext(), spanId: id };
+  const hasRounds = spans.some(span => span.attributes['gen_ai.span.kind'] === 'LLM');
   Object.defineProperty(agent, 'spanContext', { value: () => context, configurable: true });
   for (const span of spans) {
     if (span.parentSpanId === previous) Object.assign(span, { parentSpanId: id });
@@ -254,9 +267,12 @@ export function enrichDoubaoClientRequest(records: AgentActivityEntry[], spans: 
       endTime: { value: nanoTime(end.time_unix_nano), configurable: true },
       duration: { value: nanoTime((BigInt(end.time_unix_nano) - BigInt(start.time_unix_nano)).toString()), configurable: true },
     });
-    span.attributes['loongsuite.trace.contract'] = OBSERVATION_CONTRACT;
-    span.attributes[`${PREFIX}trace_completeness`] = 'client_request_and_local_observations';
-    span.attributes[`${PREFIX}unsupported_trace_layers`] = ['react', 'llm', 'cloud_tool_span', 'full_delegated_agent', 'out_of_request_local_execution_span'];
+    if (hasRounds) delete span.attributes['loongsuite.trace.contract'];
+    else span.attributes['loongsuite.trace.contract'] = OBSERVATION_CONTRACT;
+    span.attributes[`${PREFIX}trace_completeness`] = hasRounds ? 'client_request_and_assistant_rounds' : 'client_request_and_local_observations';
+    span.attributes[`${PREFIX}unsupported_trace_layers`] = hasRounds
+      ? ['provider_model_metadata', 'provider_usage', 'provider_timing', 'full_delegated_agent', 'out_of_request_local_execution_span']
+      : ['react', 'llm', 'cloud_tool_span', 'full_delegated_agent', 'out_of_request_local_execution_span'];
     span.attributes[`${PREFIX}observed_local_tool_calls`] = records.filter(record => record['event.name'] === 'tool.call').length;
     const firstOutput = records.find(record => record['event.name'] === 'other'
       && record[`${PREFIX}observation_scope`] === 'native_first_model_output');

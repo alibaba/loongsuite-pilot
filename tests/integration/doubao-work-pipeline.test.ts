@@ -185,13 +185,20 @@ it('captures current I/O and masks exact tool content before TOOL span serializa
       + doubaoToolLine({ tcid: 'current-call', name: 'Read' }, 100)
       + doubaoToolLine({ toolCallID: 'current-call', name: 'Read', phase: 'execution_settled', status: 'success' }, 200)
       + doubaoLine('on_message_session_end'));
-    await vi.waitFor(() => expect(spans).toHaveLength(3)); await manager.stopAll(); await output.flush();
+    await vi.waitFor(() => expect(spans).toHaveLength(7)); await manager.stopAll(); await output.flush();
     const events = await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8');
     const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT')!;
     expect(agent.attributes['gen_ai.input.messages']).toContain('CURRENT_INPUT');
     expect(agent.attributes['gen_ai.output.messages']).toContain('CURRENT_ANSWER');
     const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!;
-    expect(tool.parentSpanId).toBe(agent.spanContext().spanId);
+    const step = spans.find(span => span.spanContext().spanId === tool.parentSpanId)!;
+    expect(step.attributes['gen_ai.span.kind']).toBe('STEP');
+    expect(step.parentSpanId).toBe(agent.spanContext().spanId);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms[0].attributes['gen_ai.input.messages']).toContain('CURRENT_INPUT');
+    expect(llms[1].attributes['gen_ai.input.messages']).toContain('CURRENT_TOOL');
+    expect(llms[1].attributes['gen_ai.output.messages']).toContain('CURRENT_ANSWER');
     expect(tool.attributes['gen_ai.tool.call.result']).toContain('CURRENT_TOOL');
     expect(tool.attributes['gen_ai.tool.call.arguments']).toContain('synthetic-file');
     const canonicalCall = events.trim().split('\n').map(line => JSON.parse(line)).find(event => event['event.name'] === 'tool.call');

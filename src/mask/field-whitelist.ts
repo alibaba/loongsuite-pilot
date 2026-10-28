@@ -31,6 +31,7 @@ export const FIELDS_TO_MASK = new Set<string>([
   'agent.doubao_work.tool_observations',
   'agent.doubao_work.task_input',
   'agent.doubao_work.task_output',
+  'agent.doubao_work.assistant_rounds',
 
   'agent._cinput',
   'agent._ctext',
