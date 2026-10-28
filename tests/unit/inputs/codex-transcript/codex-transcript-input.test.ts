@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
-import { extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
-import { buildCodexTranscriptSegment } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
+import { createCodexTurnReducer, extractCodexPartialTurnWithBoundaries, extractCodexTranscriptMeta, extractCodexPartialTurn } from '../../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
+import { buildCodexTranscriptSegment, nextInputMessagesForStep } from '../../../../src/inputs/codex-transcript/codex-transcript-builder.js';
 import {
   CodexTranscriptInput,
   codexDefaultAllowedRootPaths,
@@ -17,6 +18,9 @@ import {
   type InputRuntimeDelta,
 } from '../../../../src/inputs/base/input-runtime-metrics.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
+import { CodexWorkBudget, type CodexWorkLimits } from '../../../../src/inputs/codex-transcript/codex-transcript-work-scheduler.js';
+import { CodexGuardedJsonlReadTask } from '../../../../src/inputs/codex-transcript/codex-transcript-reader.js';
+import { CodexTranscriptContinuation } from '../../../../src/inputs/codex-transcript/codex-transcript-continuation.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
@@ -320,6 +324,44 @@ async function createDormantInput(root: string): Promise<{
   return { input, entries, batches, sessionDir, wakeupDir, spanContextDir, stateStore };
 }
 
+async function createOwnerProbeInput(root: string, bytes = 96) {
+  const base = await createDormantInput(root);
+  class BoundedOwnerInput extends CodexTranscriptInput {
+    protected override createOwnerProbeBudget(runtime: InputRuntimeAccumulator | null): CodexWorkBudget {
+      return new CodexWorkBudget({ cycleReadBytes: bytes, fileCycleReadBytes: bytes, fileQuantumBytes: bytes,
+        maxReadChunkBytes: Math.min(32, bytes) }, runtime, () => 0);
+    }
+  }
+  const input = new BoundedOwnerInput({ stateStore: base.stateStore, sessionDir: base.sessionDir,
+    wakeupDir: base.wakeupDir, spanContextDir: base.spanContextDir, pollIntervalMs: 600_000 });
+  const entries: AgentActivityEntry[] = [];
+  const deltas: InputRuntimeDelta[] = [];
+  input.on('entries', batch => entries.push(...batch));
+  input.on('input-runtime-delta', delta => deltas.push(delta));
+  return { ...base, input, entries, deltas };
+}
+
+async function createGovernedInput(root: string, limits: Partial<CodexWorkLimits> = {}) {
+  const base = await createDormantInput(root);
+  const budgets: CodexWorkBudget[] = [];
+  class GovernedInput extends CodexTranscriptInput {
+    // 分轮断言由显式 runCycle 驱动，不让夹具写 Hook 触发额外周期。
+    protected override requestCollection(): void {}
+    protected override createOwnerProbeBudget(runtime: InputRuntimeAccumulator | null): CodexWorkBudget {
+      const budget = new CodexWorkBudget(limits, runtime, () => 0);
+      budgets.push(budget);
+      return budget;
+    }
+  }
+  const input = new GovernedInput({ stateStore: base.stateStore, sessionDir: base.sessionDir,
+    wakeupDir: base.wakeupDir, spanContextDir: base.spanContextDir, pollIntervalMs: 600_000 });
+  const entries: AgentActivityEntry[] = [];
+  const deltas: InputRuntimeDelta[] = [];
+  input.on('entries', batch => entries.push(...batch));
+  input.on('input-runtime-delta', delta => deltas.push(delta));
+  return { ...base, input, entries, deltas, budgets };
+}
+
 async function writeTranscript(sessionDir: string, text: string): Promise<string> {
   const transcript = path.join(sessionDir, '2026', '06', '24', 'rollout-session-1.jsonl');
   await fs.mkdir(path.dirname(transcript), { recursive: true });
@@ -400,7 +442,17 @@ function responsesForTurn(entries: AgentActivityEntry[], turnId: string): AgentA
 }
 
 async function processTranscriptOnce(input: CodexTranscriptInput, transcript: string): Promise<number> {
-  return (input as unknown as { processFile(filePath: string): Promise<number> }).processFile(transcript);
+  const internals = input as unknown as {
+    transcriptMetaByPath: Map<string, unknown>;
+    indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+    prepareDiscoveredForks(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
+    processFile(filePath: string): Promise<number>;
+  };
+  const paths = new Set([...internals.transcriptMetaByPath.keys(), transcript]);
+  const files = [...paths].map(filePath => ({ filePath, baselineOnStart: false }));
+  await internals.indexDiscoveredTranscriptOwners(files);
+  await internals.prepareDiscoveredForks(files);
+  return internals.processFile(transcript);
 }
 
 async function runInputCycle(input: CodexTranscriptInput): Promise<void> {
@@ -415,6 +467,1274 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('keeps an incremental reducer equivalent to one-shot extraction at every record boundary', () => {
+    const sources = completedTurn().trimEnd().split('\n').map((line, index) => ({
+      record: JSON.parse(line) as Record<string, unknown>, startOffset: index * 100, endOffset: (index + 1) * 100,
+    }));
+    const meta = extractCodexTranscriptMeta(sources[0]!.record);
+    const reducer = createCodexTurnReducer(meta, 'session-1', 'turn-1', { requireTerminal: false });
+    for (let index = 0; index < sources.length; index++) {
+      reducer.feed([sources[index]!]);
+      const actual = reducer.snapshot();
+      expect(actual).toEqual(extractCodexPartialTurnWithBoundaries(sources.slice(0, index + 1), meta, 'session-1', 'turn-1'));
+      // 外部候选的修改不能影响后续 feed 的 reasoning/tools 或安全边界。
+      actual?.turn.steps.forEach(step => { step.reasoning.length = 0; step.tools.length = 0; });
+    }
+    expect(reducer.parsedRecords).toBe(sources.length);
+    expect(reducer.snapshot()?.turn.steps.length).toBeGreaterThan(0);
+  });
+
+  it('keeps incremental full-context byte accounting identical to rebuilt contexts across UTF-8, escapes and overflow', () => {
+    const records = completedTurn().trimEnd().split('\n').map(line => JSON.parse(line));
+    const turn = extractCodexPartialTurn(records, extractCodexTranscriptMeta(records[0]), 'session-1', 'turn-1')!;
+    let context = buildCodexTranscriptSegment({ ...turn, steps: [] }, { includePrompt: false }).nextInputContext;
+    for (let index = 0; index < 14; index++) {
+      const step = { ...turn.steps[0]!, tools: [{ ...turn.steps[0]!.tools[0]!, callId: `utf8-${index}`,
+        output: '😀中"\\\n'.repeat(10_000) }] };
+      const delta = nextInputMessagesForStep(step);
+      const full = context.fullMessages ? [...context.fullMessages, ...delta] : undefined;
+      const expected = full && Buffer.byteLength(JSON.stringify(full)) <= 1024 * 1024 ? full : undefined;
+      const result = buildCodexTranscriptSegment({ ...turn, steps: [step] }, { includePrompt: false, inputContext: context });
+      const rebuilt = buildCodexTranscriptSegment({ ...turn, steps: [step] }, { includePrompt: false, inputContext: structuredClone(context) });
+      expect(result.nextInputContext).toEqual(rebuilt.nextInputContext);
+      expect(result.nextInputContext.fullMessages).toEqual(expected);
+      context = result.nextInputContext;
+    }
+    expect(context.fullMessages).toBeUndefined();
+  });
+
+  it('retains exactly one MiB of full context through an empty delta and drops it only after an actual overflow', () => {
+    const records = completedTurn().trimEnd().split('\n').map(line => JSON.parse(line));
+    const turn = extractCodexPartialTurn(records, extractCodexTranscriptMeta(records[0]), 'session-1', 'turn-1')!;
+    const message = { role: 'user', parts: [{ type: 'text', content: '😀中"\\\n' }] };
+    message.parts[0]!.content += 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify([message])));
+    const context = { hash: 'test-hash', delta: [], fullMessages: [message] };
+    const empty = buildCodexTranscriptSegment({ ...turn, steps: [{ ...turn.steps[0]!, tools: [] }] }, { includePrompt: false, inputContext: context });
+    expect(Buffer.byteLength(JSON.stringify(empty.nextInputContext.fullMessages))).toBe(1024 * 1024);
+    const overflow = buildCodexTranscriptSegment({ ...turn, steps: [turn.steps[0]!] }, { includePrompt: false, inputContext: empty.nextInputContext });
+    expect(overflow.nextInputContext.fullMessages).toBeUndefined();
+    expect(overflow.nextInputContext.delta).toEqual(nextInputMessagesForStep(turn.steps[0]!));
+  });
+
+  it('isolates inline continuation candidates without hydrating or leaking nested output mutations into the reducer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-inline-candidate-isolation-'));
+    tempDirs.push(root);
+    const text = completedTurn().trimEnd().split('\n').slice(0, 7).join('\n') + '\n';
+    const file = await writeTranscript(path.join(root, 'sessions'), text);
+    const stat = await fs.stat(file);
+    let offset = 0;
+    const sources = text.trimEnd().split('\n').map(line => {
+      const bytes = Buffer.from(line + '\n');
+      const startOffset = offset;
+      offset += bytes.length;
+      return { record: JSON.parse(line) as Record<string, unknown>, startOffset, endOffset: offset,
+        sha256: createHash('sha256').update(bytes).digest('hex') };
+    });
+    const meta = extractCodexTranscriptMeta(sources[0]!.record);
+    const options = { requireTerminal: false };
+    const work = new CodexTranscriptContinuation(file, 'inline-test', 0,
+      { inode: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }, 0, meta, 'turn-1', options, []);
+    work.feed(sources, stat.size);
+    const expected = work.snapshot()!;
+    const read = vi.fn(async () => { throw new Error('inline content must not be hydrated'); });
+    const materialized = await work.materialize(expected, read, options);
+    (materialized.extraction.turn.steps[0]!.tools[0]!.input as Record<string, JsonValue>).command = 'changed';
+    const message = materialized.extraction.turn.inputMessages[0] as { parts: Array<{ content: string }> };
+    message.parts[0]!.content = 'changed prompt';
+    expect(work.snapshot()).toEqual(expected);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('resumes a fixed normal startup baseline across restart without swallowing appended completion of its half-line', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-baseline-candidate-restart-'));
+    tempDirs.push(root);
+    const limits = { cycleReadBytes: 1024, fileCycleReadBytes: 1024, fileQuantumBytes: 256, maxReadChunkBytes: 64 };
+    const first = await createGovernedInput(root, limits);
+    const initial = completedTurn().trimEnd().split('\n').slice(0, 4).join('\n') + '\n'
+      + record('2026-06-24T06:00:03.000Z', 'event_msg', { type: 'padding', text: '中'.repeat(3000) }) + '\n'
+      + '{"type":"event_msg","payload":{"type":"padding","text":"half';
+    const file = await writeTranscript(first.sessionDir, initial);
+    try {
+      await first.input.start();
+      await runInputCycle(first.input);
+      const checkpoint = transcriptCheckpoint(first.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+      expect(checkpoint).toMatchObject({ scanOffset: 0, baselineRead: { mode: 'normal', activeTurn: { turnId: 'turn-1' } },
+        startupBaselineTarget: { size: Buffer.byteLength(initial) } });
+      expect(JSON.stringify(checkpoint)).not.toContain('中'.repeat(50));
+      await first.stateStore.save();
+    } finally { await first.input.stop(); }
+    const second = await createGovernedInput(root, limits);
+    const appended = ' done"}}\n' + [record('2026-06-24T06:00:10.000Z', 'event_msg', { type: 'agent_message', message: 'fresh answer' }),
+      record('2026-06-24T06:00:11.000Z', 'event_msg', tokenUsage(2, 1)),
+      record('2026-06-24T06:00:12.000Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'fresh answer' })].join('\n') + '\n';
+    await fs.appendFile(file, appended);
+    try {
+      await second.input.start();
+      for (let cycle = 0; cycle < 64 && responsesForTurn(second.entries, 'turn-1').length === 0; cycle++) await runInputCycle(second.input);
+      expect(responsesForTurn(second.entries, 'turn-1')).toHaveLength(1);
+      expect(transcriptCheckpoint(second.stateStore, file)).toMatchObject({ scanOffset: Buffer.byteLength(initial + appended), activeTurn: null });
+      expect(second.deltas.reduce((sum, delta) => sum + delta.rawInBytes, 0)).toBe(Buffer.byteLength(initial.slice(initial.lastIndexOf('\n') + 1) + appended));
+      for (const budget of [...first.budgets, ...second.budgets]) expect(budget.readBytes).toBeLessThanOrEqual(1024);
+    } finally { await second.input.stop(); }
+  });
+
+  it('keeps 500 cold 200 KiB owner summaries without rereading headers after full-meta overflow', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-meta-summary-overflow-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    const internals = data.input as unknown as { transcriptMetaCacheMaxBytes: number; transcriptMetaCacheBytes: number;
+      transcriptMetaByPath: Map<string, CodexTranscriptMeta>;
+      ownerProbes: Map<string, { completeMeta: CodexTranscriptMeta | null }> };
+    internals.transcriptMetaCacheMaxBytes = 2 * 1024 * 1024;
+    const files: string[] = [];
+    for (let index = 0; index < 500; index++) files.push(await writeTranscriptNamed(data.sessionDir, `rollout-cold-${index}.jsonl`,
+      record('2026-06-24T06:00:00.000Z', 'session_meta', { id: `cold-${index}`, model_provider: 'openai',
+        base_instructions: { text: 'x'.repeat(200 * 1024) } }) + '\n', { bootstrapFork: false }));
+    try {
+      await data.input.start();
+      for (let cycle = 0; cycle < 32 && files.some(file => transcriptCheckpoint(data.stateStore, file)?.startupBaselineTarget); cycle++) await runInputCycle(data.input);
+      await runInputCycle(data.input);
+      expect(files.some(file => transcriptCheckpoint(data.stateStore, file)?.startupBaselineTarget)).toBe(false);
+      expect(internals.transcriptMetaByPath.size).toBe(500);
+      for (const meta of internals.transcriptMetaByPath.values()) expect(meta.baseInstructions).toBeUndefined();
+      for (const owner of internals.ownerProbes.values()) expect(owner.completeMeta).toBeNull();
+      expect(internals.transcriptMetaCacheBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
+      const mark = data.deltas.length;
+      for (let cycle = 0; cycle < 10; cycle++) await runInputCycle(data.input);
+      expect(data.deltas.slice(mark).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+      expect(data.entries).toHaveLength(0);
+    } finally { await data.input.stop(); }
+  }, 30_000);
+
+  it('hydrates a full owner header larger than one MiB before building after full-cache eviction', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-full-meta-hydrate-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    const instructions = '完整指令 😀 ' + 'x'.repeat(2 * 1024 * 1024);
+    const tools = [{ name: 'custom', description: '完整工具' }];
+    const file = await writeTranscript(data.sessionDir, record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai', base_instructions: { text: instructions }, dynamic_tools: tools,
+    }) + '\n');
+    try {
+      await data.input.start();
+      await runInputCycle(data.input);
+      const internals = data.input as unknown as { transcriptMetaCacheMaxBytes: number; removeTranscriptMetaCacheEntry(file: string): void };
+      internals.transcriptMetaCacheMaxBytes = 1024;
+      internals.removeTranscriptMetaCacheEntry(file);
+      await fs.appendFile(file, simpleCompletedTurn('session-1', 'fresh-meta', 'prompt', 'response', 3, 2,
+        '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n');
+      for (let cycle = 0; cycle < 16 && responsesForTurn(data.entries, 'fresh-meta').length === 0; cycle++) await runInputCycle(data.input);
+      const request = data.entries.find(entry => entry['event.name'] === 'llm.request');
+      expect(request?.['gen_ai.system_instructions']).toEqual([{ type: 'text', content: instructions }]);
+      expect(request?.['gen_ai.tool.definitions']).toEqual(tools);
+      expect(responsesForTurn(data.entries, 'fresh-meta')).toHaveLength(1);
+      expect(data.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.hydrate ?? 0), 0)).toBeGreaterThan(2 * 1024 * 1024);
+    } finally { await data.input.stop(); }
+  }, 30_000);
+
+  it('resumes a 20 MiB ordinary record without rereading its prefix while small files finish', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-giant-fair-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const header = [record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'giant', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'diagnostic' })].join('\n') + '\n';
+    const body = record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'padding', body: 'x'.repeat(20 * 1024 * 1024) }) + '\n';
+    const text = header + body + simpleCompletedTurn('giant', 'giant-normal', 'prompt', 'response', 3, 1,
+      '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n';
+    const giant = await writeTranscriptNamed(data.sessionDir, 'rollout-0-giant.jsonl', text, { bootstrapFork: false });
+    const files = [giant];
+    for (let index = 0; index < 12; index++) files.push(await writeTranscriptNamed(data.sessionDir, `rollout-small-${index}.jsonl`,
+      simpleCompletedTurn(`small-${index}`, `small-normal-${index}`, 'small prompt', 'small response', 2, 1,
+        '2026-06-24T06:00:00.000Z').join('\n') + '\n', { bootstrapFork: false }));
+    await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, 'giant-normal')).toHaveLength(0);
+    for (let index = 0; index < 12; index++) expect(responsesForTurn(data.entries, `small-normal-${index}`)).toHaveLength(1);
+    expect(transcriptCheckpoint(data.stateStore, giant)).toMatchObject({ scanOffset: Buffer.byteLength(header),
+      activeTurn: null, scanProbe: { nextCompleteOffset: Buffer.byteLength(header), targetSize: Buffer.byteLength(text) } });
+    for (let cycle = 0; cycle < 8 && responsesForTurn(data.entries, 'giant-normal').length === 0; cycle++) await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, 'giant-normal')).toHaveLength(1);
+    expect(transcriptCheckpoint(data.stateStore, giant).scanOffset).toBe(Buffer.byteLength(text));
+    const totalSize = (await Promise.all(files.map(file => fs.stat(file)))).reduce((sum, stat) => sum + stat.size, 0);
+    expect(data.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.normal_scan ?? 0), 0)).toBe(totalSize);
+    expect(data.deltas.reduce((sum, delta) => sum + delta.rawInBytes, 0)).toBe(totalSize);
+    for (const budget of data.budgets) {
+      expect(budget.readBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+      expect(budget.readCalls).toBeLessThanOrEqual(128);
+      for (const file of files) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    }
+    await data.input.stop();
+  }, 30_000);
+
+  it('exports a complete 20 MiB tool result exactly once after ordinary scanning and recovery both defer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-large-tool-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const output = '完整正文 😀 ' + 'x'.repeat(20 * 1024 * 1024);
+    const text = completedTurnWithLargeToolOutput(output);
+    const file = await writeTranscript(data.sessionDir, text);
+    await runInputCycle(data.input);
+    expect(data.entries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(0);
+    for (let cycle = 0; cycle < 24 && Number(transcriptCheckpoint(data.stateStore, file).scanOffset) < Buffer.byteLength(text); cycle++) await runInputCycle(data.input);
+    const results = data.entries.filter(entry => entry['event.name'] === 'tool.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]!['gen_ai.tool.call.result']).toBe(output);
+    expect(responsesForTurn(data.entries, 'turn-1')).toHaveLength(2);
+    expect(transcriptCheckpoint(data.stateStore, file)).toMatchObject({ scanOffset: Buffer.byteLength(text), activeTurn: null });
+    for (const budget of data.budgets) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    const count = data.entries.length;
+    await runInputCycle(data.input);
+    expect(data.entries).toHaveLength(count);
+    await data.input.stop();
+  }, 30_000);
+
+  it('rebuilds a paused ordinary line once after restart and counts committed records only once', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-paused-restart-'));
+    tempDirs.push(root);
+    const limits = { cycleReadBytes: 1024, fileCycleReadBytes: 1024, fileQuantumBytes: 256, maxReadChunkBytes: 64 };
+    const first = await createGovernedInput(root, limits);
+    await first.input.start();
+    const header = [record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'diagnostic' })].join('\n') + '\n';
+    const text = header + record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'padding', body: '中'.repeat(3000) }) + '\n'
+      + simpleCompletedTurn('session-1', 'normal-restarted', 'prompt', 'response', 2, 1,
+        '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n';
+    const file = await writeTranscript(first.sessionDir, text);
+    await runInputCycle(first.input);
+    const before = transcriptCheckpoint(first.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+    expect(before).toMatchObject({ scanOffset: Buffer.byteLength(header), activeTurn: null,
+      scanProbe: { nextCompleteOffset: Buffer.byteLength(header), incompleteTail: false } });
+    expect(JSON.stringify(before)).not.toContain('中'.repeat(50));
+    await first.stateStore.save();
+    await first.input.stop();
+    const second = await createGovernedInput(root, limits);
+    await second.input.start();
+    for (let cycle = 0; cycle < 40 && responsesForTurn(second.entries, 'normal-restarted').length === 0; cycle++) await runInputCycle(second.input);
+    expect(responsesForTurn(second.entries, 'normal-restarted')).toHaveLength(1);
+    expect(transcriptCheckpoint(second.stateStore, file).scanOffset).toBe(Buffer.byteLength(text));
+    expect(second.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.normal_scan ?? 0), 0)).toBe(Buffer.byteLength(text) - before.scanOffset);
+    const deltas = [...first.deltas, ...second.deltas];
+    expect(deltas.reduce((sum, delta) => sum + delta.rawInBytes, 0)).toBe(Buffer.byteLength(text));
+    expect(deltas.reduce((sum, delta) => sum + delta.rawInRecords, 0)).toBe(9);
+    await runInputCycle(second.input);
+    expect(responsesForTurn(second.entries, 'normal-restarted')).toHaveLength(1);
+    await second.input.stop();
+  });
+
+  it('does not reread an unchanged ordinary half-line across cycles or restart and collects future records after its newline', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-eof-restart-'));
+    tempDirs.push(root);
+    const first = await createGovernedInput(root);
+    await first.input.start();
+    const header = [record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'diagnostic' })].join('\n') + '\n';
+    const tail = '{"type":"event_msg","payload":{"type":"padding","text":"中文';
+    const file = await writeTranscript(first.sessionDir, header + tail);
+    await runInputCycle(first.input);
+    expect(transcriptCheckpoint(first.stateStore, file)).toMatchObject({ scanOffset: Buffer.byteLength(header),
+      scanProbe: { incompleteTail: true, targetSize: Buffer.byteLength(header + tail) } });
+    const mark = first.deltas.length;
+    for (let cycle = 0; cycle < 5; cycle++) await runInputCycle(first.input);
+    expect(first.deltas.slice(mark).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    await first.stateStore.save();
+    await first.input.stop();
+    const second = await createGovernedInput(root);
+    await second.input.start();
+    await runInputCycle(second.input);
+    expect(second.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.normal_scan ?? 0), 0)).toBe(0);
+    const suffix = ' 😀"}}\r\n' + simpleCompletedTurn('session-1', 'after-half-line', 'prompt', 'response', 2, 1,
+      '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n';
+    await fs.appendFile(file, suffix);
+    for (let cycle = 0; cycle < 5 && responsesForTurn(second.entries, 'after-half-line').length === 0; cycle++) await runInputCycle(second.input);
+    expect(responsesForTurn(second.entries, 'after-half-line')).toHaveLength(1);
+    expect(transcriptCheckpoint(second.stateStore, file).scanOffset).toBe(Buffer.byteLength(header + tail + suffix));
+    expect([...first.deltas, ...second.deltas].reduce((sum, delta) => sum + delta.rawInBytes, 0)).toBe(Buffer.byteLength(header + tail + suffix));
+    await second.input.stop();
+  });
+
+  it('freezes a rewritten ordinary frontier and preserves its original evidence across restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-frontier-conflict-'));
+    tempDirs.push(root);
+    const first = await createGovernedInput(root);
+    await first.input.start();
+    const text = [record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+      record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'diagnostic' }),
+      record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'padding', body: 'x'.repeat(6000), marker: 'old' })].join('\n') + '\n';
+    const file = await writeTranscript(first.sessionDir, text);
+    await runInputCycle(first.input);
+    const before = transcriptCheckpoint(first.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+    const future = simpleCompletedTurn('session-1', 'unsafe-future', 'prompt', 'response', 2, 1,
+      '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n';
+    await fs.writeFile(file, text.replace('"old"', '"new"') + future);
+    await runInputCycle(first.input);
+    expect(first.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(first.stateStore, file)).toMatchObject({ scanOffset: before.scanOffset,
+      scanProbe: { anchors: before.scanProbe!.anchors, snapshot: before.scanProbe!.snapshot, conflict: { reason: 'fingerprint' } } });
+    await first.stateStore.save();
+    await first.input.stop();
+    const second = await createGovernedInput(root);
+    await second.input.start();
+    await runInputCycle(second.input);
+    expect(second.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(second.stateStore, file)).toMatchObject({ scanOffset: before.scanOffset,
+      scanProbe: { anchors: before.scanProbe!.anchors, conflict: { reason: 'fingerprint' } } });
+    expect(second.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.normal_scan ?? 0), 0)).toBe(0);
+    await second.input.stop();
+  });
+
+  it('prunes a scheduled file that disappears before its owner probe is created', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-discovery-race-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const file = path.join(data.sessionDir, 'rollout-missing.jsonl');
+    const internals = data.input as unknown as { discoverSessionFiles(): Promise<Array<{ filePath: string; baselineOnStart: boolean }>>;
+      businessScheduler: { size: number }; ownerProbes: Map<string, unknown> };
+    const discovery = vi.spyOn(internals, 'discoverSessionFiles').mockResolvedValueOnce([{ filePath: file, baselineOnStart: false }]);
+    try {
+      await runInputCycle(data.input);
+      expect(internals.ownerProbes.has(file)).toBe(false);
+      expect(internals.businessScheduler.size).toBe(1);
+      await runInputCycle(data.input);
+      expect(internals.businessScheduler.size).toBe(0);
+      expect(data.entries).toHaveLength(0);
+    } finally {
+      discovery.mockRestore();
+      await data.input.stop();
+    }
+  });
+
+  it('round-robins ordinary scans and fixed recoveries across 16 files under one small cycle budget', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-normal-budget-fair-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root, { cycleReadBytes: 4096, fileCycleReadBytes: 1024,
+      fileQuantumBytes: 256, maxReadChunkBytes: 128 });
+    await data.input.start();
+    const paths: string[] = [];
+    for (let index = 0; index < 16; index++) paths.push(await writeTranscriptNamed(data.sessionDir, `rollout-fair-${index}.jsonl`,
+      simpleCompletedTurn(`fair-${index}`, `normal-fair-${index}`, 'prompt', 'response', 2, 1,
+        '2026-06-24T06:00:00.000Z').join('\n') + '\n', { bootstrapFork: false }));
+    for (let cycle = 0; cycle < 64 && data.entries.filter(entry => entry['event.name'] === 'llm.response').length < 16; cycle++) await runInputCycle(data.input);
+    for (let index = 0; index < 16; index++) expect(responsesForTurn(data.entries, `normal-fair-${index}`)).toHaveLength(1);
+    const totalSize = (await Promise.all(paths.map(file => fs.stat(file)))).reduce((sum, stat) => sum + stat.size, 0);
+    expect(data.deltas.reduce((sum, delta) => sum + delta.rawInBytes, 0)).toBe(totalSize);
+    expect(data.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.normal_scan ?? 0), 0)).toBe(totalSize);
+    for (const budget of data.budgets) {
+      expect(budget.readBytes).toBeLessThanOrEqual(4096);
+      for (const file of paths) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(1024);
+    }
+    await data.input.stop();
+  });
+
+  it('locates owned work past a 20 MiB inherited record while serving small fork files first', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-giant-mixed-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, budgets, deltas } = await createGovernedInput(root);
+    await input.start();
+    const owner = 'giant-fork-owner';
+    const meta = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: owner, model_provider: 'openai', forked_from_id: 'ancestor',
+    });
+    const inherited = simpleCompletedTurn('ancestor', 'inherited-turn', 'copied prompt', 'copied response', 100, 10,
+      '2026-06-24T05:00:00.000Z');
+    inherited.splice(4, 0, record('2026-06-24T05:00:03.000Z', 'response_item', {
+      type: 'function_call_output', call_id: 'copied-huge', output: 'x'.repeat(20 * 1024 * 1024),
+    }));
+    const giant = await writeTranscriptNamed(sessionDir, 'rollout-0-giant.jsonl', [meta, ...inherited,
+      ...simpleCompletedTurn(owner, 'giant-owned-turn', 'fresh prompt', 'fresh response', 37, 7,
+        '2026-06-24T06:00:00.000Z').slice(1)].join('\n') + '\n', { bootstrapFork: false });
+    await writeWakeupMarker(path.join(root, 'wakeups'), owner, {
+      session_id: owner, initial_turn_id: 'giant-owned-turn', transcript_path: giant, hook_event: 'stop',
+    });
+    const paths = [giant];
+    for (let index = 0; index < 12; index++) {
+      const smallOwner = `small-owner-${index}`;
+      paths.push(await writeTranscriptNamed(sessionDir, `rollout-small-${index}.jsonl`, [
+        record('2026-06-24T06:00:00.000Z', 'session_meta', {
+          id: smallOwner, forked_from_id: 'ancestor', model_provider: 'openai',
+        }),
+        ...simpleCompletedTurn(smallOwner, `small-turn-${index}`, 'small prompt', 'small response', 1, 2,
+          '2026-06-24T06:00:00.000Z').slice(1),
+      ].join('\n') + '\n'));
+    }
+    await runInputCycle(input);
+    expect(responsesForTurn(entries, 'inherited-turn')).toHaveLength(0);
+    expect(responsesForTurn(entries, 'giant-owned-turn')).toHaveLength(0);
+    for (let index = 0; index < 12; index++) expect(responsesForTurn(entries, `small-turn-${index}`)).toHaveLength(1);
+    for (let cycle = 0; cycle < 5 && responsesForTurn(entries, 'giant-owned-turn').length === 0; cycle++) await runInputCycle(input);
+    expect(responsesForTurn(entries, 'giant-owned-turn')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'giant-owned-turn')[0]).toMatchObject({
+      'gen_ai.session.id': owner, 'gen_ai.usage.total_tokens': 44,
+    });
+    expect(responsesForTurn(entries, 'inherited-turn')).toHaveLength(0);
+    await runInputCycle(input);
+    expect(responsesForTurn(entries, 'giant-owned-turn')).toHaveLength(1);
+    for (const budget of budgets) {
+      expect(budget.readBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+      expect(budget.readCalls).toBeLessThanOrEqual(128);
+      for (const file of paths) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    }
+    const forkBytes = deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.fork_search ?? 0), 0);
+    expect(forkBytes).toBeGreaterThan(20 * 1024 * 1024);
+    expect(forkBytes).toBeLessThan(21 * 1024 * 1024);
+    await input.stop();
+  }, 30_000);
+
+  it('rebuilds a paused fork record after checkpoint reload without advancing the business floor', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-paused-restart-'));
+    tempDirs.push(root);
+    const limits = { cycleReadBytes: 1024, fileCycleReadBytes: 1024, fileQuantumBytes: 256, maxReadChunkBytes: 64 };
+    const first = await createGovernedInput(root, limits);
+    await first.input.start();
+    const owner = 'restart-fork-owner';
+    const text = [record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: owner, forked_from_id: 'ancestor', model_provider: 'openai', base_instructions: 'preserve instructions',
+    }), record('2026-06-24T05:00:00.000Z', 'turn_context', { turn_id: 'copied', model: 'gpt-5.5' }),
+    record('2026-06-24T05:00:01.000Z', 'event_msg', { type: 'copied_padding', body: 'x'.repeat(9000) }),
+    ...simpleCompletedTurn(owner, 'restarted-owned', 'restart prompt', 'restart response', 9, 3,
+      '2026-06-24T06:00:00.000Z').slice(1)].join('\n') + '\n';
+    const transcript = await writeTranscriptNamed(first.sessionDir, 'rollout-restart.jsonl', text);
+    await runInputCycle(first.input);
+    expect(first.entries).toHaveLength(0);
+    const checkpoint = transcriptCheckpoint(first.stateStore, transcript);
+    expect(checkpoint).toMatchObject({ scanOffset: 0, activeTurn: null, pendingTerminal: null,
+      forkBootstrap: { readProbe: { targetSize: Buffer.byteLength(text) } } });
+    const probe = (checkpoint.forkBootstrap as { readProbe: { nextCompleteOffset: number } }).readProbe;
+    expect(probe.nextCompleteOffset).toBeLessThan(Buffer.byteLength(text));
+    expect(first.stateStore.get(`codex-transcript:${transcript}`).lastOffset).toBe(0);
+    await first.stateStore.save();
+    expect((await fs.stat(path.join(root, 'input-state.json'))).size).toBeLessThan(16 * 1024);
+    await first.input.stop();
+    const restarted = await createGovernedInput(root, limits);
+    await restarted.input.start();
+    for (let cycle = 0; cycle < 30 && responsesForTurn(restarted.entries, 'restarted-owned').length === 0; cycle++) {
+      await runInputCycle(restarted.input);
+    }
+    expect(responsesForTurn(restarted.entries, 'restarted-owned')).toHaveLength(1);
+    await runInputCycle(restarted.input);
+    const oracleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-restart-oracle-'));
+    tempDirs.push(oracleRoot);
+    const oracle = await createDormantInput(oracleRoot);
+    const oracleFile = await writeTranscriptNamed(oracle.sessionDir, 'rollout-restart.jsonl', text);
+    await processTranscriptOnce(oracle.input, oracleFile);
+    const facts = (batch: AgentActivityEntry[]) => batch.map(entry => [entry['event.id'], entry['event.name'],
+      entry['gen_ai.session.id'], entry['gen_ai.step.id'], entry['gen_ai.usage.total_tokens'], entry['gen_ai.output.messages']]);
+    expect(facts([...first.entries, ...restarted.entries])).toEqual(facts(oracle.entries));
+    for (const budget of [...first.budgets, ...restarted.budgets]) expect(budget.readBytes).toBeLessThanOrEqual(1024);
+    await restarted.input.stop();
+  });
+
+  it('does not reread a static fork half-line and collects only after its boundary is completed', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-static-half-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root, { cycleReadBytes: 1024, fileCycleReadBytes: 1024,
+      fileQuantumBytes: 256, maxReadChunkBytes: 64 });
+    await data.input.start();
+    const owner = 'half-line-owner';
+    const head = record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: owner, forked_from_id: 'ancestor', model_provider: 'openai',
+    }) + '\n' + record('2026-06-24T05:00:00.000Z', 'turn_context', { turn_id: 'copied', model: 'gpt-5.5' }) + '\n';
+    const half = '{"type":"event_msg","payload":{"type":"padding","body":"' + 'x'.repeat(2000);
+    const transcript = await writeTranscriptNamed(data.sessionDir, 'rollout-half.jsonl', head + half, { bootstrapFork: false });
+    await writeWakeupMarker(data.wakeupDir, owner, { session_id: owner, initial_turn_id: 'half-owned',
+      transcript_path: transcript, hook_event: 'stop' });
+    for (let cycle = 0; cycle < 5; cycle++) await runInputCycle(data.input);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: 0,
+      forkBootstrap: { readProbe: { incompleteTail: true, nextCompleteOffset: Buffer.byteLength(head) } } });
+    const before = data.deltas.length;
+    for (let cycle = 0; cycle < 5; cycle++) await runInputCycle(data.input);
+    expect(data.deltas.slice(before).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    expect(data.entries).toHaveLength(0);
+    await fs.appendFile(transcript, '"}}\n' + simpleCompletedTurn(owner, 'half-owned', 'fresh', 'done', 2, 3,
+      '2026-06-24T06:00:00.000Z').slice(1).join('\n') + '\n');
+    for (let cycle = 0; cycle < 12 && responsesForTurn(data.entries, 'half-owned').length === 0; cycle++) await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, 'half-owned')).toHaveLength(1);
+    expect(responsesForTurn(data.entries, 'copied')).toHaveLength(0);
+    await data.input.stop();
+  });
+
+  it('freezes a rewritten fork frontier even when the owner header remains unchanged across restart and new Hook evidence', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-frontier-conflict-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const owner = 'frontier-owner';
+    const original = [record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: owner, forked_from_id: 'ancestor', model_provider: 'openai',
+    }), record('2026-06-24T05:00:00.000Z', 'turn_context', { turn_id: 'copied', model: 'gpt-5.5' }),
+    record('2026-06-24T05:00:01.000Z', 'event_msg', { type: 'padding', body: 'x'.repeat(6000), marker: 'old' })].join('\n') + '\n';
+    const transcript = await writeTranscriptNamed(data.sessionDir, 'rollout-frontier.jsonl', original, { bootstrapFork: false });
+    await runInputCycle(data.input);
+    const previous = transcriptCheckpoint(data.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+    await fs.writeFile(transcript, original.replace('"old"', '"new"') + simpleCompletedTurn(owner, 'conflicted-owned',
+      'new prompt', 'new response', 4, 5, '2026-06-24T06:00:00.000Z').slice(1).join('\n') + '\n');
+    await runInputCycle(data.input);
+    expect(data.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: 0, activeTurn: null,
+      forkBootstrap: { searchOffset: previous.forkBootstrap!.searchOffset, readProbe: { conflict: { reason: 'fingerprint' } } } });
+    const count = data.deltas.length;
+    await runInputCycle(data.input);
+    expect(data.deltas.slice(count).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    await data.stateStore.save();
+    await data.input.stop();
+    await writeWakeupMarker(data.wakeupDir, owner, { session_id: owner, initial_turn_id: 'conflicted-owned',
+      transcript_path: transcript, hook_event: 'stop' });
+    const restarted = await createGovernedInput(root);
+    await restarted.input.start();
+    await runInputCycle(restarted.input);
+    expect(restarted.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({ scanOffset: 0,
+      forkBootstrap: { readProbe: { conflict: { reason: 'fingerprint', retryCount: 1 } } } });
+    await restarted.input.stop();
+  });
+
+  it('resumes a 20 MiB owned baseline-tail across restart without emitting its historical prompt', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-baseline-giant-'));
+    tempDirs.push(root);
+    const first = await createGovernedInput(root);
+    const owner = 'baseline-giant-owner';
+    const history = [record('2026-06-24T06:00:00.000Z', 'session_meta', {
+      id: owner, forked_from_id: 'ancestor', model_provider: 'openai',
+    }), record('2026-06-24T06:00:01.000Z', 'turn_context', { turn_id: 'baseline-owned', model: 'gpt-5.5', cwd: '/tmp/project' }),
+    record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'task_started', turn_id: 'baseline-owned' }),
+    record('2026-06-24T06:00:03.000Z', 'response_item', {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text: 'historical prompt' }],
+    }), record('2026-06-24T06:00:04.000Z', 'event_msg', { type: 'padding', body: 'x'.repeat(20 * 1024 * 1024) })].join('\n') + '\n';
+    const transcript = await writeTranscriptNamed(first.sessionDir, 'rollout-baseline-giant.jsonl', history);
+    await first.input.start();
+    expect(first.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({ scanOffset: Buffer.byteLength(history),
+      activeTurn: null, forkBootstrap: { state: 'baseline-tail', tailCandidate: { turnId: 'baseline-owned' } } });
+    await first.stateStore.save();
+    await first.input.stop();
+    const restarted = await createGovernedInput(root);
+    await restarted.input.start();
+    for (let cycle = 0; cycle < 4 && transcriptCheckpoint(restarted.stateStore, transcript).forkBootstrap; cycle++) {
+      await runInputCycle(restarted.input);
+    }
+    await runInputCycle(restarted.input);
+    expect(restarted.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({ scanOffset: Buffer.byteLength(history),
+      activeTurn: { turnId: 'baseline-owned', startOffset: Buffer.byteLength(history), emittedPrompt: true } });
+    await fs.appendFile(transcript, [record('2026-06-24T06:00:05.000Z', 'event_msg', {
+      type: 'agent_message', message: 'fresh final', phase: 'final',
+    }), record('2026-06-24T06:00:06.000Z', 'event_msg', tokenUsage(5, 2)),
+    record('2026-06-24T06:00:07.000Z', 'event_msg', { type: 'task_complete', turn_id: 'baseline-owned', last_agent_message: 'fresh final' })].join('\n') + '\n');
+    await runInputCycle(restarted.input);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({
+      scanOffset: (await fs.stat(transcript)).size, activeTurn: null,
+    });
+    expect(responsesForTurn(restarted.entries, 'baseline-owned')).toHaveLength(1);
+    expect(JSON.stringify(restarted.entries)).not.toContain('historical prompt');
+    for (const budget of [...first.budgets, ...restarted.budgets]) {
+      expect(budget.fileReadBytes(transcript)).toBeLessThanOrEqual(16 * 1024 * 1024);
+      expect(budget.readBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    }
+    await restarted.input.stop();
+  }, 30_000);
+
+  it('retains a failed fork task while allowing another file to complete', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-fork-task-failure-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const files: string[] = [];
+    for (let index = 0; index < 2; index++) {
+      const owner = `failed-owner-${index}`;
+      files.push(await writeTranscriptNamed(data.sessionDir, `rollout-${index}.jsonl`, [
+        record('2026-06-24T06:00:00.000Z', 'session_meta', { id: owner, forked_from_id: 'ancestor', model_provider: 'openai' }),
+        ...simpleCompletedTurn(owner, `failed-turn-${index}`, 'prompt', 'response', 1, 2,
+          '2026-06-24T06:00:00.000Z').slice(1),
+      ].join('\n') + '\n'));
+    }
+    const errors = vi.fn();
+    data.input.on('collect-error', errors);
+    const failure = vi.spyOn(CodexGuardedJsonlReadTask.prototype, 'step').mockRejectedValueOnce(new Error('transient fork read'));
+    try {
+      await runInputCycle(data.input);
+      expect(errors).not.toHaveBeenCalled();
+      expect(responsesForTurn(data.entries, 'failed-turn-0')).toHaveLength(0);
+      expect(responsesForTurn(data.entries, 'failed-turn-1')).toHaveLength(1);
+      expect(transcriptCheckpoint(data.stateStore, files[0]!)).toMatchObject({ scanOffset: 0, activeTurn: null });
+      await runInputCycle(data.input);
+      expect(responsesForTurn(data.entries, 'failed-turn-0')).toHaveLength(1);
+      expect(responsesForTurn(data.entries, 'failed-turn-1')).toHaveLength(1);
+    } finally {
+      failure.mockRestore();
+      await data.input.stop();
+    }
+  });
+
+  it('fairly reconstructs evicted owner summaries under a tiny identity-index capacity without starving early paths', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-small-owner-capacity-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root, { maxWorkSteps: 1 });
+    Object.defineProperty(data.input, 'ownerIndexMaxBytes', { value: 5500 });
+    Object.defineProperty(data.input, 'transcriptMetaCacheMaxBytes', { value: 0 });
+    await data.input.start();
+    for (let index = 0; index < 20; index++) await writeTranscriptNamed(data.sessionDir, `rollout-cap-${String(index).padStart(2, '0')}.jsonl`,
+      simpleCompletedTurn(`cap-${index}`, `cap-turn-${index}`, 'prompt', 'response', 3, 2,
+        '2026-06-24T06:00:00Z').join('\n') + '\n', { bootstrapFork: false });
+    for (let cycle = 0; cycle < 80 && data.entries.filter(entry => entry['event.name'] === 'llm.response').length < 20; cycle++) {
+      await runInputCycle(data.input);
+      const snapshot = (data.input as unknown as { workMemorySnapshot(): { ownerIndexBytes: number } }).workMemorySnapshot();
+      expect(snapshot.ownerIndexBytes).toBeLessThanOrEqual(5500);
+    }
+    for (let index = 0; index < 20; index++) expect(responsesForTurn(data.entries, `cap-turn-${index}`)).toHaveLength(1);
+    expect(new Set(data.entries.map(entry => entry['event.id'])).size).toBe(data.entries.length);
+    await data.input.stop();
+  });
+
+  it('bounds the shared giant slot and drains mixed owner, pending, cold and live work across 64 files', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-joint-capacity-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const pendingFiles: string[] = [];
+    const allFiles: string[] = [];
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-27T00:00:00Z'));
+    try {
+      for (let index = 0; index < 64; index++) {
+        const sid = `joint-${index}`;
+        const head = record('2026-06-24T06:00:00Z', 'session_meta', { id: sid, model_provider: 'openai',
+          ...(index >= 48 ? { base_instructions: 'i'.repeat(200_000) } : {}) });
+        let text: string;
+        if (index < 16) text = [head, ...Array.from({ length: 16 }, () => record('2026-06-24T06:00:01Z', 'internal_annotation', { body: 'p'.repeat(1024 * 1024) }))].join('\n') + '\n';
+        else if (index < 32) text = Array.from({ length: 8 }, () => record('2026-06-24T06:00:01Z', 'internal_annotation', { body: 'o'.repeat(64 * 1024) })).join('\n') + '\n';
+        else if (index < 48) text = simpleCompletedTurn(sid, `joint-turn-${index}`, 'live prompt', 'live response', 4, 2,
+          '2026-06-24T06:00:00Z').join('\n') + '\n';
+        else text = head + '\n';
+        const file = await writeTranscriptNamed(data.sessionDir, `rollout-joint-${String(index).padStart(2, '0')}.jsonl`, text, { bootstrapFork: false });
+        allFiles.push(file);
+        if (index < 16) {
+          pendingFiles.push(file);
+          const stat = await fs.stat(file);
+          data.stateStore.update(`codex-transcript:${file}`, { lastOffset: stat.size, extra: { codexTranscript: {
+            inode: stat.ino, scanOffset: stat.size, ownerSessionMetaOffset: 0,
+            activeTurn: { turnId: 'retained', startOffset: 0, startedAtMs: Date.now(), emittedPrompt: false, emittedStepCount: 0 },
+            pendingTerminal: { turnId: 'retained', terminalEndOffset: stat.size, retryCount: 0 }, pendingFusion: null, pendingSubagent: null,
+          } } });
+        }
+      }
+      for (const mib of [20, 64]) {
+        const owner = `joint-giant-${mib}`;
+        const text = [record('2026-06-24T06:00:00Z', 'session_meta', { id: owner, forked_from_id: 'ancestor', model_provider: 'openai' }),
+          record('2026-06-24T05:00:00Z', 'turn_context', { turn_id: 'copied', model: 'gpt-5.5' }),
+          record('2026-06-24T05:00:01Z', 'internal_annotation', { body: 'g'.repeat(mib * 1024 * 1024) }),
+          ...simpleCompletedTurn(owner, owner, 'owned prompt', 'owned response', 5, 3, '2026-06-24T06:00:00Z').slice(1)].join('\n') + '\n';
+        const file = await writeTranscriptNamed(data.sessionDir, `rollout-giant-${mib}.jsonl`, text, { bootstrapFork: false });
+        allFiles.push(file);
+        await writeWakeupMarker(data.wakeupDir, owner, { session_id: owner, initial_turn_id: owner, transcript_path: file, hook_event: 'stop' });
+      }
+      const memory = () => (data.input as unknown as { workMemorySnapshot(): { pausedReaderBytes: number; giantReaderFiles: number } }).workMemorySnapshot();
+      let cycles = 0;
+      for (; cycles < 256; cycles++) {
+        await runInputCycle(data.input);
+        expect(memory().pausedReaderBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+        expect(memory().giantReaderFiles).toBeLessThanOrEqual(1);
+        for (const file of pendingFiles) {
+          const cp = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+          expect(cp.pendingTerminal).not.toBeNull();
+          expect(cp.pendingTerminal!.retryCount).toBeLessThanOrEqual(1);
+          expect(cp.activeTurn!.startOffset).toBe(0);
+        }
+        if (pendingFiles.every(file => (transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint).pendingTerminal?.retryCount === 1)
+          && responsesForTurn(data.entries, 'joint-giant-64').length === 1 && responsesForTurn(data.entries, 'joint-giant-20').length === 1) break;
+      }
+      expect(cycles, JSON.stringify({ memory: memory(), pending: pendingFiles.map(file => {
+        const cp = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+        return { file: path.basename(file), retry: cp.pendingTerminal?.retryCount,
+          reads: cp.recordReads?.map(read => ({ start: read.startOffset, end: read.endOffset, frontier: read.probe.nextCompleteOffset })) };
+      }), giant: (data.input as unknown as { giantReaderPath: string }).giantReaderPath })).toBeLessThan(256);
+      for (let index = 32; index < 48; index++) expect(responsesForTurn(data.entries, `joint-turn-${index}`)).toHaveLength(1);
+      expect(responsesForTurn(data.entries, 'copied')).toHaveLength(0);
+      expect(new Set(data.entries.map(entry => entry['event.id'])).size).toBe(data.entries.length);
+      for (const budget of data.budgets) {
+        expect(budget.readBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+        expect(budget.readCalls).toBeLessThanOrEqual(128);
+        for (const file of allFiles) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(16 * 1024 * 1024);
+      }
+      const before = data.deltas.length;
+      for (let cycle = 0; cycle < 3; cycle++) await runInputCycle(data.input);
+      expect(data.deltas.slice(before).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    } finally { clock.mockRestore(); await data.input.stop(); }
+  }, 60_000);
+
+  it('reclaims committed body refs over many waves while matching a per-prefix reconstruction oracle', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-continuation-ref-lifetime-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const lines = simpleCompletedTurn('session-1', 'turn-1', 'run many waves', 'unused', 1, 1, '2026-06-24T06:00:00Z').slice(0, 4);
+    const file = await writeTranscript(data.sessionDir, lines.join('\n') + '\n');
+    await runInputCycle(data.input);
+    const oracleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-ref-rebuild-oracle-'));
+    tempDirs.push(oracleRoot);
+    const oracle = await createDormantInput(oracleRoot);
+    const oracleFile = await writeTranscript(oracle.sessionDir, lines.join('\n') + '\n');
+    await processTranscriptOnce(oracle.input, oracleFile);
+    const compact = (value: unknown): unknown => {
+      if (typeof value === 'string') {
+        expect(value).not.toContain('\u0000codex:');
+        if (value.length > 4096) return { bytes: Buffer.byteLength(value), sha256: createHash('sha256').update(value).digest('hex') };
+      }
+      if (Array.isArray(value)) return value.map(compact);
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compact(item)]));
+      return value;
+    };
+    const facts = (entries: AgentActivityEntry[]) => entries.map(({ observed_time_unix_nano: _observed, ...entry }) => compact(entry));
+    const base = Date.parse('2026-06-24T06:00:00Z');
+    for (let wave = 0; wave < 80; wave++) {
+      const at = (offset: number) => new Date(base + (4 + wave * 3 + offset) * 1000).toISOString();
+      const batch = [record(at(0), 'response_item', { type: 'function_call', call_id: `wave-${wave}`, name: 'shell', arguments: '{"cmd":"check"}' }),
+        record(at(1), 'response_item', { type: 'function_call_output', call_id: `wave-${wave}`, output: 'body'.repeat(20_000) }),
+        record(at(2), 'event_msg', tokenUsage(100 + wave, 3))];
+      lines.push(...batch);
+      await fs.appendFile(file, batch.join('\n') + '\n');
+      await runInputCycle(data.input);
+      await fs.appendFile(oracleFile, batch.join('\n') + '\n');
+      (oracle.input as unknown as { continuations: Map<string, unknown> }).continuations.clear();
+      await processTranscriptOnce(oracle.input, oracleFile);
+      expect(data.entries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(wave + 1);
+      expect(facts(data.entries)).toEqual(facts(oracle.entries));
+      const work = (data.input as unknown as { continuations: Map<string, { estimatedBytes: number }> }).continuations.get(file);
+      expect(work).toBeDefined();
+      expect(work!.estimatedBytes).toBeLessThan(64 * 1024);
+    }
+    const terminal = record('2026-06-24T06:10:00Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-1', last_agent_message: 'done' });
+    lines.push(terminal);
+    await fs.appendFile(file, terminal + '\n');
+    await runInputCycle(data.input);
+    await fs.appendFile(oracleFile, terminal + '\n');
+    (oracle.input as unknown as { continuations: Map<string, unknown> }).continuations.clear();
+    await processTranscriptOnce(oracle.input, oracleFile);
+    // 所有业务字段都比较，大正文按完整长度与摘要比较，不泄漏正文到失败日志。
+    expect(facts(data.entries)).toEqual(facts(oracle.entries));
+    expect(data.entries).toHaveLength(oracle.entries.length);
+    expect(transcriptCheckpoint(data.stateStore, file)).toMatchObject({ activeTurn: null, pendingTerminal: null });
+    await data.input.stop();
+  }, 30_000);
+
+  it('rebuilds evicted unfinished continuations without losing bodies or advancing a semantic boundary before late tokens', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-continuation-capacity-rebuild-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    Object.defineProperty(data.input, 'continuationMaxBytes', { value: 4096 });
+    await data.input.start();
+    const head = simpleCompletedTurn('session-1', 'turn-1', '保留全部正文 😀', 'unused', 1, 1, '2026-06-24T06:00:00Z').slice(0, 4);
+    const file = await writeTranscript(data.sessionDir, head.join('\n') + '\n');
+    const internals = data.input as unknown as { continuations: Map<string, unknown>; workMemorySnapshot(): { continuationBytes: number } };
+    const bodies: string[] = [];
+    try {
+      await runInputCycle(data.input);
+      const startOffset = (transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint).activeTurn!.startOffset;
+      for (let wave = 0; wave < 12; wave++) {
+        const output = `完整工具结果 ${wave} 😀 ` + '内容'.repeat(30_000);
+        bodies.push(output);
+        const at = (second: number) => new Date(Date.parse('2026-06-24T06:00:00Z') + (4 + wave * 3 + second) * 1000).toISOString();
+        await fs.appendFile(file, [
+          record(at(0), 'response_item', { type: 'function_call', call_id: `evicted-${wave}`, name: 'shell', arguments: JSON.stringify({ command: `检查 ${wave}` }) }),
+          record(at(1), 'response_item', { type: 'function_call_output', call_id: `evicted-${wave}`, output }),
+        ].join('\n') + '\n');
+        await runInputCycle(data.input);
+        expect(internals.workMemorySnapshot().continuationBytes).toBeLessThanOrEqual(4096);
+        expect(internals.continuations.size).toBe(0);
+        expect(data.entries.filter(entry => entry['event.name'] === 'tool.call')).toHaveLength(0);
+        const cp = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+        expect(cp.activeTurn).toMatchObject({ startOffset, emittedStepCount: 0 });
+        expect(cp.scanOffset).toBe((await fs.stat(file)).size);
+        expect(JSON.stringify(cp)).not.toContain('内容'.repeat(50));
+      }
+      await fs.appendFile(file, [record('2026-06-24T06:01:00Z', 'event_msg', tokenUsage(123, 7)),
+        record('2026-06-24T06:01:01Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-1', last_agent_message: '完整结束' })].join('\n') + '\n');
+      for (let cycle = 0; cycle < 16 && data.entries.every(entry => entry['gen_ai.turn.end'] !== true); cycle++) await runInputCycle(data.input);
+      const calls = data.entries.filter(entry => entry['event.name'] === 'tool.call');
+      const results = data.entries.filter(entry => entry['event.name'] === 'tool.result');
+      expect(calls).toHaveLength(12);
+      expect(results.map(entry => entry['gen_ai.tool.call.result'])).toEqual(bodies);
+      expect(results.map(entry => entry['gen_ai.tool.call.id'])).toEqual(calls.map(entry => entry['gen_ai.tool.call.id']));
+      expect(data.entries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
+      expect(new Set(data.entries.map(entry => entry['event.id'])).size).toBe(data.entries.length);
+      expect(transcriptCheckpoint(data.stateStore, file)).toMatchObject({ activeTurn: null, pendingTerminal: null, recordReads: [] });
+      const before = data.deltas.length;
+      await runInputCycle(data.input);
+      expect(data.deltas.slice(before).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    } finally { await data.input.stop(); }
+  }, 30_000);
+
+  it('freezes a continuation when a large body ref changes outside sparse anchors before materialization', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-continuation-body-conflict-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const lines = completedTurnWithLargeToolOutput('x'.repeat(100_000)).trimEnd().split('\n');
+    const boundary = lines.findIndex(line => JSON.parse(line).payload?.type === 'token_count');
+    const prefix = lines.slice(0, boundary).join('\n') + '\n';
+    const file = await writeTranscript(data.sessionDir, prefix);
+    await runInputCycle(data.input);
+    const before = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+    const count = data.entries.length;
+    const handle = await fs.open(file, 'r+');
+    try { await handle.write(Buffer.from('y'), 0, 1, prefix.indexOf('x'.repeat(100)) + 50_000); }
+    finally { await handle.close(); }
+    await fs.appendFile(file, lines.slice(boundary).join('\n') + '\n');
+    await runInputCycle(data.input);
+    expect(data.entries).toHaveLength(count);
+    const after = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+    expect(after.activeTurn!.startOffset).toBe(before.activeTurn!.startOffset);
+    expect(after.recordReads?.some(state => state.probe.conflict?.reason === 'fingerprint')).toBe(true);
+    const deltaOffset = data.deltas.length;
+    await runInputCycle(data.input);
+    expect(data.deltas.slice(deltaOffset).reduce((sum, delta) => sum + delta.rawReadBytes, 0)).toBe(0);
+    expect(data.entries).toHaveLength(count);
+    await data.input.stop();
+  });
+
+  it('resumes a 20 MiB pending recovery without changing retry, dedupe or the fixed business cursor', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-budget-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    const lines = simpleCompletedTurn('session-1', 'pending-large', 'pending prompt', 'pending response', 12, 3,
+      '2026-06-24T06:00:00.000Z');
+    lines.splice(4, 0, record('2026-06-24T06:00:03.500Z', 'event_msg', { type: 'padding', body: 'x'.repeat(20 * 1024 * 1024) }));
+    const text = lines.join('\n') + '\n';
+    const transcript = await writeTranscript(data.sessionDir, text);
+    const inode = (await fs.stat(transcript)).ino;
+    const floor = Buffer.byteLength(text);
+    const active = { turnId: 'pending-large', startOffset: Buffer.byteLength(lines[0]! + '\n'),
+      startedAtMs: Date.parse('2026-06-24T06:00:01.000Z'), model: 'gpt-5.5', emittedPrompt: false, emittedStepCount: 0,
+      emittedStepRequestIds: [], emittedStepResponseIds: [], emittedToolCallIds: [], emittedToolResultIds: [] };
+    const pending = { turnId: active.turnId, terminalEndOffset: floor, retryCount: 4, lastAttemptAtMs: 123 };
+    data.stateStore.update(`codex-transcript:${transcript}`, { lastOffset: floor, extra: { codexTranscript: {
+      inode, scanOffset: floor, activeTurn: active, pendingTerminal: pending, ownerSessionMetaOffset: 0,
+      pendingFusion: null, pendingSubagent: null,
+    } } });
+    await runInputCycle(data.input);
+    expect(data.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: floor,
+      activeTurn: active, pendingTerminal: pending, recordReads: [{ startOffset: active.startOffset, endOffset: floor }] });
+    expect(data.stateStore.get(`codex-transcript:${transcript}`).lastOffset).toBe(floor);
+    for (let cycle = 0; cycle < 5 && responsesForTurn(data.entries, active.turnId).length === 0; cycle++) await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, active.turnId)).toHaveLength(1);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: floor, activeTurn: null, pendingTerminal: null, recordReads: [] });
+    const bytes = data.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.recovery ?? 0), 0);
+    expect(bytes).toBe(floor - active.startOffset);
+    for (const budget of data.budgets) expect(budget.fileReadBytes(transcript)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, active.turnId)).toHaveLength(1);
+    await data.input.stop();
+  }, 30_000);
+
+  it('preserves an ordinary scanned terminal transaction across budget exhaustion and restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-recovery-transaction-restart-'));
+    tempDirs.push(root);
+    const limits = { cycleReadBytes: 1024, fileCycleReadBytes: 1024, fileQuantumBytes: 256, maxReadChunkBytes: 64 };
+    // 首轮必须完整扫描 terminal，但剩余预算不足以完成 recovery。
+    const first = await createGovernedInput(root, { ...limits, cycleReadBytes: 8192, fileCycleReadBytes: 8192, fileQuantumBytes: 8192 });
+    await first.input.start();
+    const lines = simpleCompletedTurn('session-1', 'deferred-owned', 'new prompt', 'new response', 5, 2,
+      '2026-06-24T06:00:00.000Z');
+    lines.splice(4, 0, record('2026-06-24T06:00:03.500Z', 'event_msg', { type: 'padding', body: 'x'.repeat(5000) }));
+    const text = lines.join('\n') + '\n';
+    const transcript = await writeTranscript(first.sessionDir, text);
+    await runInputCycle(first.input);
+    expect(first.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(first.stateStore, transcript)).toMatchObject({ scanOffset: 0, activeTurn: null,
+      pendingTerminal: null, deferredScan: { endOffset: Buffer.byteLength(text), terminalTurnId: 'deferred-owned' } });
+    await first.stateStore.save();
+    expect((await fs.stat(path.join(root, 'input-state.json'))).size).toBeLessThan(16 * 1024);
+    await first.input.stop();
+    const restarted = await createGovernedInput(root, limits);
+    await restarted.input.start();
+    for (let cycle = 0; cycle < 15 && responsesForTurn(restarted.entries, 'deferred-owned').length === 0; cycle++) {
+      await runInputCycle(restarted.input);
+    }
+    expect(responsesForTurn(restarted.entries, 'deferred-owned')).toHaveLength(1);
+    const checkpoint = transcriptCheckpoint(restarted.stateStore, transcript);
+    expect(checkpoint).toMatchObject({ scanOffset: Buffer.byteLength(text), activeTurn: null, pendingTerminal: null, recordReads: [] });
+    expect(checkpoint.deferredScan).toBeUndefined();
+    await runInputCycle(restarted.input);
+    expect(responsesForTurn(restarted.entries, 'deferred-owned')).toHaveLength(1);
+    const committed = restarted.deltas.reduce((sum, delta) => sum + delta.rawInBytes, 0);
+    expect(committed).toBe(Buffer.byteLength(text));
+    await restarted.input.stop();
+  });
+
+  it('backs off complete unparseable pending attempts but does not reset on unrelated append-only growth', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-backoff-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    let now = 1000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const lines = [record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }),
+        record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'task_started', turn_id: 'unparseable' })];
+      const text = lines.join('\n') + '\n';
+      const transcript = await writeTranscript(data.sessionDir, text);
+      const startOffset = Buffer.byteLength(lines[0]! + '\n');
+      const endOffset = Buffer.byteLength(text);
+      const pending = { turnId: 'unparseable', terminalEndOffset: endOffset };
+      data.stateStore.update(`codex-transcript:${transcript}`, { lastOffset: endOffset, extra: { codexTranscript: {
+        inode: (await fs.stat(transcript)).ino, scanOffset: endOffset, ownerSessionMetaOffset: 0,
+        activeTurn: { turnId: pending.turnId, startOffset, startedAtMs: Date.parse('2026-06-24T06:00:01.000Z') },
+        pendingTerminal: pending, pendingFusion: null, pendingSubagent: null,
+      } } });
+      const warn = vi.fn();
+      (data.input as unknown as { logger: { warn: typeof warn } }).logger.warn = warn;
+      await runInputCycle(data.input);
+      expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ pendingTerminal: { retryCount: 1, nextRetryAtMs: 11_000 } });
+      const before = data.deltas.length;
+      for (let cycle = 0; cycle < 5; cycle++) await runInputCycle(data.input);
+      expect(data.deltas.slice(before).reduce((sum, delta) => sum + (delta.codexRead?.readBytes.recovery ?? 0), 0)).toBe(0);
+      await fs.appendFile(transcript, record('2026-06-24T06:01:00.000Z', 'event_msg', { type: 'diagnostic', body: 'unrelated growth' }) + '\n');
+      now = 10_000;
+      await runInputCycle(data.input);
+      expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: endOffset, pendingTerminal: { retryCount: 1, nextRetryAtMs: 11_000 } });
+      for (const [count, delay] of [[2, 20_000], [3, 40_000], [4, 80_000], [5, 160_000], [6, 300_000], [7, 300_000]]) {
+        const current = transcriptCheckpoint(data.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+        now = current.pendingTerminal!.nextRetryAtMs!;
+        await runInputCycle(data.input);
+        expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: endOffset,
+          pendingTerminal: { retryCount: count, nextRetryAtMs: now + delay, sourceRef: { startOffset, endOffset } } });
+      }
+      expect(warn).toHaveBeenCalledTimes(7);
+      const dependency = transcriptCheckpoint(data.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+      dependency.activeTurn!.model = 'changed-model';
+      data.stateStore.update(`codex-transcript:${transcript}`, { extra: { codexTranscript: dependency } });
+      now += 1;
+      await runInputCycle(data.input);
+      expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ pendingTerminal: {
+        retryCount: 8, backoffCount: 1, nextRetryAtMs: now + 10_000,
+      } });
+      expect(warn).toHaveBeenCalledTimes(8);
+      expect(data.entries).toHaveLength(0);
+    } finally {
+      clock.mockRestore();
+      await data.input.stop();
+    }
+  });
+
+  it('waits for the oversized input-context hydrate before changing committed step or exporting the next wave', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-context-budget-'));
+    tempDirs.push(root);
+    const first = await createGovernedInput(root);
+    await first.input.start();
+    const largeOutput = 'x'.repeat(1024 * 1024 + 1);
+    const lines = completedTurnWithLargeToolOutput(largeOutput).trimEnd().split('\n');
+    const tokenIndex = lines.findIndex(line => line.includes('"type":"token_count"'));
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, tokenIndex + 1).join('\n') + '\n');
+    await runInputCycle(first.input);
+    expect(responsesForTurn(first.entries, 'turn-1')).toHaveLength(1);
+    const before = transcriptCheckpoint(first.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+    expect(before.activeTurn?.inputContext?.delta).toBeUndefined();
+    const range = before.activeTurn!.inputContext!.deltaRange!;
+    await first.stateStore.save();
+    await first.input.stop();
+    await fs.appendFile(transcript, lines.slice(tokenIndex + 1).join('\n') + '\n');
+    const restarted = await createGovernedInput(root, { cycleReadBytes: 128 * 1024, fileCycleReadBytes: 128 * 1024,
+      fileQuantumBytes: 32 * 1024, maxReadChunkBytes: 16 * 1024 });
+    await restarted.input.start();
+    expect(restarted.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({ scanOffset: before.scanOffset,
+      activeTurn: { startOffset: before.activeTurn!.startOffset, emittedStepCount: 1, inputContext: before.activeTurn!.inputContext } });
+    for (let cycle = 0; cycle < 20 && responsesForTurn(restarted.entries, 'turn-1').length === 0; cycle++) await runInputCycle(restarted.input);
+    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(1);
+    const request = restarted.entries.find(entry => entry['event.name'] === 'llm.request')!;
+    expect(JSON.stringify(request['gen_ai.input.messages_delta'])).toContain(largeOutput);
+    const ownerRef = before.ownerProbe!.ownerRef!;
+    expect(restarted.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.hydrate ?? 0), 0))
+      .toBe(range.endOffset - range.startOffset + ownerRef.endOffset - ownerRef.startOffset);
+    await runInputCycle(restarted.input);
+    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(1);
+    await restarted.input.stop();
+  }, 30_000);
+
+  it('freezes a changed pending range using its full fingerprint without increasing parse retryCount across restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-fingerprint-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root);
+    await data.input.start();
+    let now = 1000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const header = record('2026-06-24T06:00:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }) + '\n';
+      const body = [record('2026-06-24T06:00:01.000Z', 'event_msg', { type: 'task_started', turn_id: 'pending-conflict' }),
+        record('2026-06-24T06:00:02.000Z', 'event_msg', { type: 'padding', head: 'x'.repeat(5000), marker: 'old', tail: 'y'.repeat(5000) })].join('\n') + '\n';
+      const transcript = await writeTranscript(data.sessionDir, header + body);
+      const endOffset = Buffer.byteLength(header + body);
+      data.stateStore.update(`codex-transcript:${transcript}`, { lastOffset: endOffset, extra: { codexTranscript: {
+        inode: (await fs.stat(transcript)).ino, scanOffset: endOffset, ownerSessionMetaOffset: 0,
+        activeTurn: { turnId: 'pending-conflict', startOffset: Buffer.byteLength(header), startedAtMs: 1 },
+        pendingTerminal: { turnId: 'pending-conflict', terminalEndOffset: endOffset }, pendingFusion: null, pendingSubagent: null,
+      } } });
+      await runInputCycle(data.input);
+      const before = transcriptCheckpoint(data.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+      const pending = before.pendingTerminal!;
+      expect(pending).toMatchObject({ retryCount: 1, sourceRef: { sha256: expect.any(String) } });
+      await fs.writeFile(transcript, (header + body).replace('"old"', '"new"'));
+      now = pending.nextRetryAtMs!;
+      await runInputCycle(data.input);
+      expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: endOffset,
+        pendingTerminal: pending, recordReads: [{ expectedRef: pending.sourceRef, probe: { conflict: { reason: 'fingerprint' } } }] });
+      expect(data.entries).toHaveLength(0);
+      await data.stateStore.save();
+      await data.input.stop();
+      const restarted = await createGovernedInput(root);
+      await restarted.input.start();
+      await runInputCycle(restarted.input);
+      expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({ scanOffset: endOffset, pendingTerminal: pending });
+      expect(restarted.deltas.reduce((sum, delta) => sum + (delta.codexRead?.readBytes.recovery ?? 0), 0)).toBe(0);
+      expect(restarted.entries).toHaveLength(0);
+      await restarted.input.stop();
+    } finally {
+      clock.mockRestore();
+      await data.input.stop();
+    }
+  });
+
+  it('round-robins simultaneous pending ranges under one shared byte budget', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pending-fair-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root, { cycleReadBytes: 4096, fileCycleReadBytes: 1024,
+      fileQuantumBytes: 256, maxReadChunkBytes: 128 });
+    await data.input.start();
+    const paths: string[] = [];
+    for (let index = 0; index < 16; index++) {
+      const lines = simpleCompletedTurn(`fair-session-${index}`, `fair-turn-${index}`, 'prompt', 'response', 2, 1,
+        '2026-06-24T06:00:00.000Z');
+      lines.splice(4, 0, record('2026-06-24T06:00:03.500Z', 'event_msg', { type: 'padding', body: 'x'.repeat(4000) }));
+      const text = lines.join('\n') + '\n';
+      const file = await writeTranscriptNamed(data.sessionDir, `rollout-fair-${index}.jsonl`, text, { bootstrapFork: false });
+      paths.push(file);
+      data.stateStore.update(`codex-transcript:${file}`, { lastOffset: Buffer.byteLength(text), extra: { codexTranscript: {
+        inode: (await fs.stat(file)).ino, scanOffset: Buffer.byteLength(text), ownerSessionMetaOffset: 0,
+        activeTurn: { turnId: `fair-turn-${index}`, startOffset: Buffer.byteLength(lines[0]! + '\n'), startedAtMs: 1 },
+        pendingTerminal: { turnId: `fair-turn-${index}`, terminalEndOffset: Buffer.byteLength(text), retryCount: 2 },
+        pendingFusion: null, pendingSubagent: null,
+      } } });
+    }
+    for (let cycle = 0; cycle < 64 && data.entries.filter(entry => entry['event.name'] === 'llm.response').length < 16; cycle++) {
+      await runInputCycle(data.input);
+      for (const file of paths) {
+        const checkpoint = transcriptCheckpoint(data.stateStore, file) as unknown as CodexTranscriptCheckpoint;
+        if (checkpoint.pendingTerminal) expect(checkpoint.pendingTerminal.retryCount).toBe(2);
+      }
+    }
+    for (let index = 0; index < 16; index++) expect(responsesForTurn(data.entries, `fair-turn-${index}`)).toHaveLength(1);
+    for (const budget of data.budgets) {
+      expect(budget.readBytes).toBeLessThanOrEqual(4096);
+      expect(budget.readCalls).toBeLessThanOrEqual(128);
+      for (const file of paths) expect(budget.fileReadBytes(file)).toBeLessThanOrEqual(1024);
+    }
+    await data.input.stop();
+  });
+
+  it('keeps the legacy parent fusion barrier unchanged while its fixed range is deferred', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-legacy-budget-'));
+    tempDirs.push(root);
+    const data = await createGovernedInput(root, { cycleReadBytes: 1024, fileCycleReadBytes: 1024,
+      fileQuantumBytes: 256, maxReadChunkBytes: 64 });
+    await data.input.start();
+    const lines = simpleCompletedTurn('session-1', 'legacy-parent', 'prompt', 'response', 2, 1,
+      '2026-06-24T06:00:00.000Z');
+    lines.splice(4, 0, record('2026-06-24T06:00:03.500Z', 'event_msg', { type: 'padding', body: 'x'.repeat(6000) }));
+    const text = lines.join('\n') + '\n';
+    const transcript = await writeTranscript(data.sessionDir, text);
+    const active = { turnId: 'legacy-parent', startOffset: Buffer.byteLength(lines[0]! + '\n'), startedAtMs: 1 };
+    const fusion = { turnId: active.turnId, parentThreadId: 'session-1', parentTraceId: 'parent-trace',
+      terminalEndOffset: Buffer.byteLength(text), children: [{ parentToolCallId: 'call', parentTraceId: 'parent-trace', spawnedAtMs: 1 }] };
+    data.stateStore.update(`codex-transcript:${transcript}`, { lastOffset: 0, extra: { codexTranscript: {
+      inode: (await fs.stat(transcript)).ino, scanOffset: 0, ownerSessionMetaOffset: 0, activeTurn: active,
+      pendingTerminal: null, pendingFusion: fusion, pendingSubagent: null,
+    } } });
+    await runInputCycle(data.input);
+    expect(data.entries).toHaveLength(0);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: 0,
+      activeTurn: active, pendingTerminal: null, pendingFusion: fusion });
+    for (let cycle = 0; cycle < 16 && responsesForTurn(data.entries, active.turnId).length === 0; cycle++) await runInputCycle(data.input);
+    expect(responsesForTurn(data.entries, active.turnId)).toHaveLength(1);
+    expect(transcriptCheckpoint(data.stateStore, transcript)).toMatchObject({ scanOffset: Buffer.byteLength(text), pendingFusion: null, activeTurn: null });
+    await data.input.stop();
+  });
+
+  it('does not collect inherited turns while their later owner is still being probed', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-owner-later-window-'));
+    tempDirs.push(root);
+    const { input, entries, deltas, sessionDir, wakeupDir, stateStore } = await createOwnerProbeInput(root);
+    const parent = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const child = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const inherited = simpleCompletedTurn(parent, 'inherited-turn', 'historical request', 'historical result', 10, 2,
+      '2026-06-24T06:00:00.000Z').slice(1);
+    const owner = record('2026-06-24T06:01:00.000Z', 'session_meta', {
+      id: child, model_provider: 'openai', forked_from_id: parent,
+    });
+    const owned = simpleCompletedTurn(child, 'owned-turn', 'new request', 'new result', 20, 3,
+      '2026-06-24T06:02:00.000Z').slice(1);
+    const text = [...inherited, owner, ...owned].join('\n') + '\n';
+    const transcript = await writeTranscriptNamed(sessionDir, `rollout-${child}.jsonl`, text, { bootstrapFork: false });
+    await writeWakeupMarker(wakeupDir, child, { session_id: child, initial_turn_id: 'owned-turn',
+      hook_event: 'stop', transcript_path: transcript, received_at: new Date().toISOString() });
+    await runInputCycle(input);
+    expect(entries).toHaveLength(0);
+    expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({ scanOffset: 0, activeTurn: null,
+      ownerSessionMetaOffset: null, ownerProbe: { kind: 'searching' } });
+    expect(deltas.at(-1)).toMatchObject({ rawInBytes: 0, codexRead: { readBytes: { normal_scan: 0, recovery: 0 } } });
+    for (let cycle = 0; cycle < 100 && responsesForTurn(entries, 'owned-turn').length === 0; cycle++) {
+      await runInputCycle(input);
+      expect(responsesForTurn(entries, 'inherited-turn')).toHaveLength(0);
+    }
+    expect(responsesForTurn(entries, 'owned-turn')).toHaveLength(1);
+    expect(responsesForTurn(entries, 'owned-turn')[0]).toMatchObject({ 'gen_ai.session.id': child,
+      'gen_ai.usage.input_tokens': 20, 'gen_ai.usage.output_tokens': 3 });
+    const count = entries.length;
+    await runInputCycle(input);
+    expect(entries).toHaveLength(count);
+  });
+
+  it('keeps the original startup baseline while delayed owner discovery spans later appends', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-owner-startup-watermark-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createOwnerProbeInput(root);
+    const historical = simpleCompletedTurn('session-1', 'historical-turn', 'old prompt', 'old result', 10, 2,
+      '2026-06-24T06:00:00.000Z').slice(1);
+    const initial = [...historical, record('2026-06-24T06:01:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai',
+    })].join('\n') + '\n';
+    const transcript = await writeTranscript(sessionDir, initial);
+    const baseline = vi.spyOn(input as unknown as { baselineFile(file: string, key: string, target?: number): Promise<void> }, 'baselineFile');
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({ scanOffset: 0,
+        startupBaselineTarget: { size: Buffer.byteLength(initial) }, ownerProbe: { kind: 'searching' } });
+      const fresh = simpleCompletedTurn('session-1', 'fresh-turn', 'fresh prompt', 'fresh result', 30, 4,
+        '2026-06-24T06:02:00.000Z').join('\n') + '\n';
+      await fs.appendFile(transcript, fresh);
+      for (let cycle = 0; cycle < 200 && responsesForTurn(entries, 'fresh-turn').length === 0; cycle++) await runInputCycle(input);
+      expect(responsesForTurn(entries, 'historical-turn')).toHaveLength(0);
+      expect(responsesForTurn(entries, 'fresh-turn')).toHaveLength(1);
+      expect(baseline).toHaveBeenCalledWith(transcript, `codex-transcript:${transcript}`, Buffer.byteLength(initial), expect.anything());
+      expect(transcriptCheckpoint(stateStore, transcript).startupBaselineTarget).toBeUndefined();
+    } finally {
+      await input.stop();
+      baseline.mockRestore();
+    }
+  });
+
+  it('restores an unfinished owner probe and startup target without replaying history or dropping later work', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-owner-checkpoint-restart-'));
+    tempDirs.push(root);
+    const first = await createOwnerProbeInput(root);
+    const initial = Array.from({ length: 30 }, () => record('2026-06-24T06:00:00.000Z', 'event_msg', { type: 'diagnostic' })).join('\n')
+      + '\n' + record('2026-06-24T06:01:00.000Z', 'session_meta', { id: 'session-1', model_provider: 'openai' }) + '\n';
+    const transcript = await writeTranscript(first.sessionDir, initial);
+    let probeOffset = 0;
+    try {
+      await first.input.start();
+      await runInputCycle(first.input);
+      const before = transcriptCheckpoint(first.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+      probeOffset = before.ownerProbe!.probe.nextCompleteOffset;
+      expect(probeOffset).toBeGreaterThan(0);
+      expect(before.scanOffset).toBe(0);
+      expect(before.startupBaselineTarget!.size).toBe(Buffer.byteLength(initial));
+      await first.stateStore.save();
+    } finally {
+      await first.input.stop();
+    }
+    const fresh = simpleCompletedTurn('session-1', 'after-restart', 'new prompt', 'new result', 40, 5,
+      '2026-06-24T06:02:00.000Z').join('\n') + '\n';
+    await fs.appendFile(transcript, fresh);
+    const second = await createOwnerProbeInput(root);
+    try {
+      await second.input.start();
+      await runInputCycle(second.input);
+      const restored = transcriptCheckpoint(second.stateStore, transcript) as unknown as CodexTranscriptCheckpoint;
+      expect(restored.ownerProbe!.probe.nextCompleteOffset).toBeGreaterThanOrEqual(probeOffset);
+      expect(restored.startupBaselineTarget!.size).toBe(Buffer.byteLength(initial));
+      expect(second.entries).toHaveLength(0);
+      for (let cycle = 0; cycle < 200 && responsesForTurn(second.entries, 'after-restart').length === 0; cycle++) await runInputCycle(second.input);
+      expect(responsesForTurn(second.entries, 'after-restart')).toHaveLength(1);
+      expect(second.entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
+      const count = second.entries.length;
+      await runInputCycle(second.input);
+      expect(second.entries).toHaveLength(count);
+    } finally {
+      await second.input.stop();
+    }
+  });
+
+  it('keeps terminal, legacy fusion and late audit ranges unchanged while owner discovery is deferred', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-owner-pending-gate-'));
+    tempDirs.push(root);
+    const base = await createDormantInput(root);
+    const historical = simpleCompletedTurn('session-1', 'pending-turn', 'old prompt', 'old result', 10, 2,
+      '2026-06-24T06:00:00.000Z').slice(1).join('\n') + '\n';
+    const transcript = await writeTranscript(base.sessionDir, historical + record('2026-06-24T06:01:00.000Z', 'session_meta', {
+      id: 'session-1', model_provider: 'openai',
+    }) + '\n');
+    const stat = await fs.stat(transcript);
+    const checkpoint: CodexTranscriptCheckpoint = { inode: stat.ino, scanOffset: Buffer.byteLength(historical),
+      activeTurn: { turnId: 'pending-turn', startOffset: 0, startedAtMs: Date.parse('2026-06-24T06:00:00.000Z'),
+        emittedPrompt: false, emittedStepCount: 0, emittedStepRequestIds: [], emittedStepResponseIds: [],
+        emittedToolCallIds: [], emittedToolResultIds: [], emittedAuditEventIds: [], subagentSpawns: [] },
+      pendingTerminal: { turnId: 'pending-turn', terminalEndOffset: Buffer.byteLength(historical), retryCount: 2, lastAttemptAtMs: 123 },
+      pendingFusion: { turnId: 'pending-turn', parentThreadId: 'session-1', parentTraceId: 'parent-trace',
+        terminalEndOffset: Buffer.byteLength(historical), children: [{ parentToolCallId: 'call', parentTraceId: 'parent-trace', spawnedAtMs: 1 }] },
+      pendingSubagent: null, ownerSessionMetaOffset: null };
+    base.stateStore.update(`codex-transcript:${transcript}`, { extra: { codexTranscript: checkpoint } });
+    base.stateStore.update('codex-transcript', { extra: { codexPendingAgentResults: [{ filePath: transcript, inode: stat.ino,
+      startOffset: 0, endOffset: 10, context: { 'gen_ai.session.id': 'session-1', 'event.id': 'late-audit' } }] } });
+    class BoundedOwnerInput extends CodexTranscriptInput {
+      protected override createOwnerProbeBudget(runtime: InputRuntimeAccumulator | null): CodexWorkBudget {
+        return new CodexWorkBudget({ cycleReadBytes: 96, fileCycleReadBytes: 96, fileQuantumBytes: 96, maxReadChunkBytes: 32 }, runtime, () => 0);
+      }
+    }
+    const input = new BoundedOwnerInput({ stateStore: base.stateStore, sessionDir: base.sessionDir, wakeupDir: base.wakeupDir,
+      spanContextDir: base.spanContextDir, pollIntervalMs: 600_000 });
+    const entries: AgentActivityEntry[] = [];
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('entries', batch => entries.push(...batch));
+    input.on('input-runtime-delta', delta => deltas.push(delta));
+    await runInputCycle(input);
+    const saved = transcriptCheckpoint(base.stateStore, transcript);
+    expect(saved.scanOffset).toBe(checkpoint.scanOffset);
+    expect(saved.activeTurn).toEqual(checkpoint.activeTurn);
+    expect(saved.pendingTerminal).toEqual(checkpoint.pendingTerminal);
+    expect(saved.pendingFusion).toEqual(checkpoint.pendingFusion);
+    expect(entries).toHaveLength(0);
+    expect(deltas.at(-1)!.codexRead!.readBytes.recovery).toBe(0);
+    expect(base.stateStore.get('codex-transcript').extra!.codexPendingAgentResults).toHaveLength(1);
+  });
+
+  it('freezes business progress after a detected rewrite and does not retry it on every poll', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-owner-source-conflict-'));
+    tempDirs.push(root);
+    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const deltas: InputRuntimeDelta[] = [];
+    input.on('input-runtime-delta', delta => deltas.push(delta));
+    const original = completedTurn();
+    const transcript = await writeTranscript(sessionDir, original);
+    await runInputCycle(input);
+    const count = entries.length;
+    const before = transcriptCheckpoint(stateStore, transcript);
+    const fresh = simpleCompletedTurn('session-1', 'later-turn', 'later request', 'later result', 20, 3,
+      '2026-06-24T06:02:00.000Z').join('\n') + '\n';
+    await fs.writeFile(transcript, ' ' + original.slice(1) + fresh);
+    await runInputCycle(input);
+    const blocked = transcriptCheckpoint(stateStore, transcript);
+    expect(entries).toHaveLength(count);
+    expect(blocked.scanOffset).toBe(before.scanOffset);
+    expect(blocked.activeTurn).toEqual(before.activeTurn);
+    expect(blocked.pendingTerminal).toEqual(before.pendingTerminal);
+    expect(blocked.ownerProbe).toMatchObject({ conflict: { reason: 'fingerprint', retryCount: 1 } });
+    await runInputCycle(input);
+    expect(deltas.at(-1)!.rawReadCalls).toBe(0);
+    expect(entries).toHaveLength(count);
+  });
+
   it('becomes available from a wakeup marker when the default session root is absent', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-availability-'));
     tempDirs.push(root);
@@ -558,8 +1878,13 @@ describe('CodexTranscriptInput', () => {
     await waitFor(() => deltas.length >= 1);
     await input.stop();
 
-    expect(deltas[0].rawReadCalls).toBe(0);
-    expect(deltas[0].rawReadBytes).toBe(0);
+    const startup = deltas.find(delta => delta.codexRead?.readBytes.baseline)!;
+    expect(startup.rawReadCalls).toBeGreaterThan(0);
+    expect(startup.rawInBytes).toBe(0);
+    expect(Object.values(startup.codexRead!.readBytes).reduce((sum, bytes) => sum + bytes, 0)).toBe(startup.rawReadBytes);
+    const idle = deltas.at(-1)!;
+    expect(idle.rawReadCalls).toBe(0);
+    expect(idle.rawReadBytes).toBe(0);
   });
 
   it('does not stat cold historical rollouts on the next default cycle', async () => {
@@ -669,8 +1994,10 @@ describe('CodexTranscriptInput', () => {
         runtime: InputRuntimeAccumulator,
       ): Promise<CodexTranscriptMeta | null>;
       transcriptMetaCacheByPath: Map<string, { fileSize: number }>;
+      indexDiscoveredTranscriptOwners(files: Array<{ filePath: string; baselineOnStart: boolean }>): Promise<void>;
     };
 
+    await internals.indexDiscoveredTranscriptOwners([{ filePath: transcript, baselineOnStart: false }]);
     await internals.recoverTurnSegment(transcript, checkpoint, Buffer.byteLength(turnText), true);
     expect(internals.transcriptMetaCacheByPath.get(transcript)?.fileSize).toBe(originalStat.size);
 
@@ -820,6 +2147,8 @@ describe('CodexTranscriptInput', () => {
     ]);
     expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([coldPath, hotPath]);
 
+    await fs.appendFile(candidatePath, simpleCompletedTurn('session-0003', 'active-cache-turn', 'prompt', 'response', 1, 2,
+      '2026-06-24T06:01:00.000Z').slice(1).join('\n') + '\n');
     await processTranscriptOnce(input, candidatePath);
     expect([...internals.transcriptMetaCacheByPath.keys()]).toEqual([hotPath, candidatePath]);
   });
@@ -919,6 +2248,10 @@ describe('CodexTranscriptInput', () => {
     const recordCount = transcriptText.trimEnd().split('\n').length;
     expect(firstRead.rawReadCalls).toBeGreaterThan(0);
     expect(firstRead.rawReadBytes).toBeGreaterThanOrEqual(firstRead.rawInBytes);
+    expect(Object.values(firstRead.codexRead!.readBytes).reduce((sum, bytes) => sum + bytes, 0)).toBe(firstRead.rawReadBytes);
+    expect(Object.values(firstRead.codexRead!.readCalls).reduce((sum, calls) => sum + calls, 0)).toBe(firstRead.rawReadCalls);
+    expect(firstRead.codexRead!.readBytes.normal_scan).toBeGreaterThan(0);
+    expect(firstRead.codexRead!.readBytes.recovery).toBeGreaterThan(0);
     expect(firstRead.rawInBytes).toBe(Buffer.byteLength(transcriptText));
     expect(firstRead.rawInRecords).toBe(recordCount);
     expect(firstRead.parseSuccessRecords).toBe(recordCount);
@@ -3300,7 +4633,8 @@ describe('CodexTranscriptInput', () => {
   it('limits terminal recovery per file cycle and resumes from the saved offset', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-terminal-budget-'));
     tempDirs.push(root);
-    const { input, entries, sessionDir, stateStore } = await createDormantInput(root);
+    const { input, entries, sessionDir, stateStore, budgets } = await createGovernedInput(root);
+    await input.start();
     const lines: string[] = [];
     for (let index = 0; index < 101; index++) {
       const turn = simpleCompletedTurn(
@@ -3312,15 +4646,17 @@ describe('CodexTranscriptInput', () => {
     const transcript = await writeTranscript(sessionDir, lines.join('\n') + '\n');
     const transcriptSize = (await fs.stat(transcript)).size;
 
-    await processTranscriptOnce(input, transcript);
+    await runInputCycle(input);
     expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(100);
     expect((transcriptCheckpoint(stateStore, transcript) as { scanOffset?: number }).scanOffset)
       .toBeLessThan(transcriptSize);
 
-    await processTranscriptOnce(input, transcript);
+    await runInputCycle(input);
     expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(101);
     expect((transcriptCheckpoint(stateStore, transcript) as { scanOffset?: number }).scanOffset)
       .toBe(transcriptSize);
+    for (const budget of budgets) expect(budget.fileReadBytes(transcript)).toBeLessThanOrEqual(16 * 1024 * 1024);
+    await input.stop();
   });
 
   it('skips copied history and emits new fork work in one cycle', async () => {
@@ -4590,6 +5926,7 @@ describe('CodexTranscriptInput', () => {
       expect(baselineSize).toBeGreaterThan(16 * 1024 * 1024);
 
       await first.input.start();
+      for (let cycle = 0; cycle < 8 && transcriptCheckpoint(first.stateStore, transcript).startupBaselineTarget; cycle++) await runInputCycle(first.input);
       const firstCheckpoint = transcriptCheckpoint(first.stateStore, transcript);
       expect(firstCheckpoint).toMatchObject({
         scanOffset: baselineSize,
@@ -4607,6 +5944,7 @@ describe('CodexTranscriptInput', () => {
 
       const restarted = await createDormantInput(root);
       await restarted.input.start();
+      for (let cycle = 0; cycle < 8 && transcriptCheckpoint(restarted.stateStore, transcript).forkBootstrap; cycle++) await runInputCycle(restarted.input);
       expect(restarted.entries).toHaveLength(0);
       expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({
         scanOffset: baselineSize,

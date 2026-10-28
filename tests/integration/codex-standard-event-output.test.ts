@@ -77,7 +77,7 @@ async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[
   await writeFile(file, records.map(([type, payload], i) => JSON.stringify({
     timestamp: new Date(Date.parse('2026-08-07T02:00:00Z') + i * 1000).toISOString(), type, payload,
   })).join('\n') + '\n');
-  await (input as unknown as { processFile(file: string): Promise<void> }).processFile(file);
+  await (input as unknown as { runCycle(): Promise<void> }).runCycle();
   const audit = collected.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke' || entry['event.name'] === 'gen_ai.agent.result');
   expect(audit.map(entry => entry['event.name'])).toEqual([
     'gen_ai.agent.invoke', 'gen_ai.agent.invoke', 'gen_ai.agent.result', 'gen_ai.agent.result',

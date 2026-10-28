@@ -8,7 +8,11 @@ import type {
   MaskConfig,
 } from '../types/index.js';
 import type { BaseInput } from '../inputs/base/base-input.js';
-import type { InputRuntimeDelta } from '../inputs/base/input-runtime-metrics.js';
+import {
+  cloneCodexReadMetrics, createCodexReadMetrics, mergeCodexReadMetrics,
+  resetCodexReadWindowMaxima,
+  type CodexReadMetrics, type InputRuntimeDelta,
+} from '../inputs/base/input-runtime-metrics.js';
 import type { BaseFlusher } from '../flushers/base-flusher.js';
 import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
@@ -27,6 +31,7 @@ import type { InterceptResultLinker } from './intercept-result-linker.js';
 const logger = createLogger('InputManager');
 
 export interface InputCounter {
+  codexRead?: CodexReadMetrics;
   /** Fixed, bounded source classification for this Input. */
   sourceKind: 'primary';
   /** Actual primary-source file read calls, including repeated scans. */
@@ -235,6 +240,10 @@ export class InputManager extends EventEmitter {
     counter.parseFailedRecords += count(delta.parseFailedRecords);
     counter.readDurationMs += duration(delta.readDurationMs);
     counter.processDurationMs += duration(delta.processDurationMs);
+    if (inputId === 'codex-transcript' && delta.codexRead) {
+      counter.codexRead ??= createCodexReadMetrics();
+      mergeCodexReadMetrics(counter.codexRead, delta.codexRead);
+    }
   }
 
   async startInput(id: string): Promise<void> {
@@ -316,7 +325,11 @@ export class InputManager extends EventEmitter {
   takeInputCounterSnapshot(): Map<string, InputCounter> {
     const snapshot = new Map<string, InputCounter>();
     for (const [id, counter] of this.counters) {
-      snapshot.set(id, { ...counter });
+      snapshot.set(id, {
+        ...counter,
+        ...(counter.codexRead ? { codexRead: cloneCodexReadMetrics(counter.codexRead) } : {}),
+      });
+      if (counter.codexRead) resetCodexReadWindowMaxima(counter.codexRead);
       counter.rawInMaxBatchBytes = 0;
       counter.rawInMaxRecordBytes = 0;
       counter.rawBacklogBytesMax = 0;

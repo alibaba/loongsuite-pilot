@@ -9,7 +9,7 @@ import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../
 import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
+import { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import {
   buildCodexTranscriptSegment,
   nextInputMessagesForStep,
@@ -48,12 +48,19 @@ import {
   type CodexExtractedTranscriptTurn,
   type CodexTranscriptTool,
   type CodexTranscriptSourceRecord,
+  type CodexTranscriptSourceRef,
 } from './codex-transcript-types.js';
 import { stringValue, timestampMs } from './codex-transcript-utils.js';
+import { CodexTranscriptContinuation } from './codex-transcript-continuation.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { CodexTranscriptOwnerProbe, codexOwnerSummary, parseCodexOwnerProbeState } from './codex-transcript-owner-probe.js';
+import { CodexWorkBudget, CodexWorkScheduler, type CodexFileWorkSlice, type CodexWorkStepResult } from './codex-transcript-work-scheduler.js';
+import { CodexGuardedJsonlReadTask, CodexJsonlReadTask, CodexRecordRangeReadTask, codexSourceSnapshot,
+  parseCodexJsonlProbeState, parseCodexRecordReadState, parseCodexSourceRef } from './codex-transcript-reader.js';
+import type { CodexJsonLine } from './codex-transcript-reader.js';
+import type { CodexTranscriptSourceSnapshot } from './codex-transcript-types.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
-const READ_CHUNK_SIZE = 1024 * 1024;
 const MAX_EMIT_BATCH_ENTRIES = 256;
 const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
@@ -96,12 +103,35 @@ interface CodexPendingAgentResult {
   endOffset: number;
   /** Only identity/trace metadata; result bodies are reread from the native range. */
   context: AgentActivityEntry;
+  sourceRef?: CodexTranscriptSourceRef;
+}
+
+class CodexReadPostponed extends Error {
+  constructor(readonly status: 'deferred' | 'waiting' | 'source-conflict') {
+    super(`Codex source read postponed: ${status}`);
+  }
+}
+
+interface ForkLocation {
+  startOffset: number | null;
+  nextOffset: number;
+  turnId?: string;
+  anchorKind?: 'initial-hook' | 'uuidv7' | 'terminal-recovery';
+  status: CodexWorkStepResult['status'];
+}
+
+interface ForkReadWork {
+  criteria: string;
+  reader: CodexGuardedJsonlReadTask;
+  located?: ForkLocation;
 }
 
 interface JsonLine {
   startOffset: number;
   endOffset: number;
   record: Record<string, unknown>;
+  sha256?: string;
+  headAnchor?: CodexJsonLine['headAnchor'];
 }
 
 interface SegmentRecoveryDiagnostics {
@@ -119,6 +149,7 @@ interface SegmentRecoveryDiagnostics {
 
 type SegmentRecoveryResult = {
   kind: 'unparseable';
+  sourceRef?: CodexTranscriptSourceRef;
   entries: [];
   consumedEndOffset: number;
   diagnostics: SegmentRecoveryDiagnostics;
@@ -131,6 +162,7 @@ type SegmentRecoveryResult = {
 };
 
 interface PendingRecoveryResult {
+  changed?: boolean;
   blocked: boolean;
   emittedCount: number;
   processedTerminalCount: number;
@@ -213,6 +245,36 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly rolloutIdleSnapshot = new Map<string, { ino: number; size: number; mtimeMs: number }>();
   private lastHistoricalRolloutStatAt = 0;
   private cachedDefaultRollout: { dirMtimes: Map<string, number>; files: string[] } | null = null;
+  private startupRuntime: InputRuntimeAccumulator | null = null;
+  private readonly ownerProbes = new Map<string, CodexTranscriptOwnerProbe>();
+  private readonly ownerSnapshots = new Map<string, CodexTranscriptSourceSnapshot>();
+  private readonly ownerScheduler = new CodexWorkScheduler();
+  private readonly ownerBlockedPaths = new Set<string>();
+  private cycleWorkBudget: CodexWorkBudget | null = null;
+  private readonly forkScheduler = new CodexWorkScheduler();
+  private readonly forkReaders = new Map<string, ForkReadWork>();
+  private readonly forkBlockedPaths = new Set<string>();
+  private readonly forkReadyPaths = new Set<string>();
+  private readonly forkTrackedPaths = new Set<string>();
+  private readonly recordReads = new Map<string, CodexRecordRangeReadTask>();
+  private readonly recordReadScheduler = new CodexWorkScheduler();
+  private readonly deferredBusinessPaths = new Set<string>();
+  private activeReadSlice: CodexFileWorkSlice | null = null;
+  private readonly clearedRecordReadPaths = new Set<string>();
+  private readonly normalScanReaders = new Map<string, CodexGuardedJsonlReadTask>();
+  private readonly baselineReaders = new Map<string, CodexGuardedJsonlReadTask>();
+  private readonly metaReaders = new Map<string, CodexJsonlReadTask>();
+  private readonly businessScheduler = new CodexWorkScheduler();
+  private readonly businessTrackedPaths = new Set<string>();
+  private readonly cycleTerminalCounts = new Map<string, number>();
+  private readonly cycleFailedPaths = new Set<string>();
+  private readonly continuations = new Map<string, CodexTranscriptContinuation>();
+  private readonly scanBatches = new Map<string, { startOffset: number; endOffset: number; items: CodexTranscriptSourceRecord[] }>();
+  private readonly continuationMaxBytes = 32 * 1024 * 1024;
+  private readonly ownerIndexMaxBytes = 16 * 1024 * 1024;
+  private readonly pausedReaderMaxBytes = 32 * 1024 * 1024;
+  private giantReaderPath: string | null = null;
+  private businessEmittedCount = 0;
 
   constructor(opts: CodexTranscriptInputOptions) {
     const processor = opts.multimodal?.processor ?? null;
@@ -236,7 +298,7 @@ export class CodexTranscriptInput extends BaseInput {
         && typeof record.startOffset === 'number' && Number.isSafeInteger(record.startOffset) && record.startOffset >= 0
         && typeof record.endOffset === 'number' && Number.isSafeInteger(record.endOffset) && record.endOffset > record.startOffset
         && context && typeof context['gen_ai.session.id'] === 'string' && typeof context['event.id'] === 'string') {
-        const result = record as unknown as CodexPendingAgentResult;
+        const result = { ...record, sourceRef: parseCodexSourceRef(record.sourceRef) } as unknown as CodexPendingAgentResult;
         this.pendingAgentResults.set(`${result.filePath}:${result.startOffset}`, result);
       }
     }
@@ -270,26 +332,30 @@ export class CodexTranscriptInput extends BaseInput {
     }
   }
 
+  protected override getInputRuntimeAccumulator(): InputRuntimeAccumulator | null {
+    return super.getInputRuntimeAccumulator() ?? this.startupRuntime;
+  }
+
   protected override async onStart(): Promise<void> {
+    const runtime = new InputRuntimeAccumulator();
+    runtime.enableCodexReadMetrics();
+    const startedAt = runtime.now();
+    this.startupRuntime = runtime;
+    try {
+      await this.initializeCodexInput();
+    } finally {
+      this.startupRuntime = null;
+      const delta = runtime.finish(runtime.now() - startedAt);
+      if (delta.rawReadCalls > 0 || delta.codexRead!.ownerBlockedFilesMax > 0) this.emit('input-runtime-delta', delta);
+    }
+  }
+
+  private async initializeCodexInput(): Promise<void> {
     this.subagentLinker.restore(this.stateStore.get(this.id).extra?.codexDelegations);
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
-    await this.indexDiscoveredTranscriptOwners(discovered);
-    for (const { filePath, baselineOnStart } of discovered) {
-      const key = this.stateKey(filePath);
-      const meta = this.transcriptMetaByPath.get(filePath);
-      const neededByPendingFusion = meta?.depth === 1
-        && meta.parentThreadId !== undefined
-        && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
-      if (baselineOnStart && !neededByPendingFusion && !this.readCheckpoint(key)) {
-        const hasCopiedPrefix = hasCopiedHistoryPrefix(meta);
-        if (hasCopiedPrefix) {
-          await this.parkForkBaseline(filePath, key);
-        } else {
-          await this.baselineFile(filePath, key);
-        }
-      }
-    }
+    await this.indexDiscoveredTranscriptOwners(discovered, undefined, true, false);
+    await this.scheduleDiscoveredFiles(discovered);
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
       fs.mkdir(this.spanContextDir, { recursive: true }),
@@ -315,9 +381,36 @@ export class CodexTranscriptInput extends BaseInput {
     this.multimodalUriCache.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
+    this.ownerScheduler.clear();
+    this.ownerProbes.clear();
+    this.ownerSnapshots.clear();
+    this.ownerBlockedPaths.clear();
+    this.forkScheduler.clear();
+    this.forkReaders.clear();
+    this.forkBlockedPaths.clear();
+    this.forkReadyPaths.clear();
+    this.forkTrackedPaths.clear();
+    this.recordReads.clear();
+    this.recordReadScheduler.clear();
+    this.deferredBusinessPaths.clear();
+    this.clearedRecordReadPaths.clear();
+    this.normalScanReaders.clear();
+    this.baselineReaders.clear();
+    this.metaReaders.clear();
+    this.continuations.clear();
+    this.scanBatches.clear();
+    this.transcriptMetaByPath.clear();
+    this.transcriptPathByThreadId.clear();
+    this.giantReaderPath = null;
+    this.businessScheduler.clear();
+    this.businessTrackedPaths.clear();
+    this.cycleTerminalCounts.clear();
+    this.activeReadSlice = null;
+    this.cycleWorkBudget = null;
   }
 
   protected override async collect(): Promise<AgentActivityEntry[]> {
+    this.getInputRuntimeAccumulator()?.enableCodexReadMetrics();
     await this.cleanupExpiredSpanContexts(Date.now());
     let emittedCount = 0;
     const discovered = await this.discoverSessionFiles();
@@ -326,22 +419,104 @@ export class CodexTranscriptInput extends BaseInput {
       if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
     }
     const skipPaths = this.historicalRolloutSkipPaths(discovered, Date.now());
-    await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+    await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, false, false);
     discovered.sort((left, right) => {
       const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
       return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
     });
+    emittedCount += await this.scheduleDiscoveredFiles(discovered, skipPaths);
+    emittedCount += await this.retryPendingAgentResults();
+    this.getInputRuntimeAccumulator()?.observeCodexWork({ sourceConflictFilesMax: new Set([
+      ...[...this.ownerProbes].filter(([, probe]) => probe.sourceConflict).map(([file]) => file),
+      ...[...this.forkReaders].filter(([, work]) => work.reader.sourceConflict).map(([file]) => file),
+      ...[...this.normalScanReaders].filter(([, reader]) => reader.sourceConflict).map(([file]) => file),
+      ...[...this.recordReads.values()].filter(task => task.sourceConflict).map(task => task.filePath),
+    ]).size });
+    this.reportSubagentLinks();
+    if (emittedCount > 0) this.logger.debug('cycle produced entries', { count: emittedCount });
+    return [];
+  }
+
+  private async scheduleDiscoveredFiles(discovered: DiscoveredSessionFile[], skipPaths: ReadonlySet<string> = new Set()): Promise<number> {
+    this.forkBlockedPaths.clear();
+    this.forkReadyPaths.clear();
+    this.deferredBusinessPaths.clear();
+    this.businessEmittedCount = 0;
+    this.cycleFailedPaths.clear();
+    const failedPaths = this.cycleFailedPaths;
     for (const { filePath } of discovered) {
       if (skipPaths.has(filePath)) continue;
-      emittedCount += await this.processFile(filePath);
+      this.businessTrackedPaths.add(filePath);
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const snapshot = this.ownerSnapshots.get(filePath);
+      const hot = checkpoint?.activeTurn || checkpoint?.pendingTerminal || checkpoint?.deferredScan
+        || (snapshot && !checkpoint?.startupBaselineTarget && (checkpoint?.scanOffset ?? 0) < snapshot.size);
+      this.businessScheduler.enqueue({ key: filePath, filePath, priority: hot ? 'hot' : 'cold',
+        eligible: () => !failedPaths.has(filePath) && (this.normalScanReaders.get(filePath)?.retryEligible ?? true)
+          && (this.baselineReaders.get(filePath)?.retryEligible ?? true)
+          && (!this.ownerProbes.get(filePath)?.sourceConflict || (!!this.ownerSnapshots.get(filePath)
+            && this.ownerProbes.get(filePath)!.eligible(this.ownerSnapshots.get(filePath)!)))
+          && (this.cycleTerminalCounts.get(filePath) ?? 0) < MAX_TERMINALS_PER_FILE_CYCLE,
+        step: async slice => {
+          try {
+          const before = this.readCheckpoint(this.stateKey(filePath));
+          const source = this.ownerSnapshots.get(filePath);
+          if (!source) return { status: 'waiting' };
+          const owner = this.ensureOwnerProbe(filePath, source);
+          if (!owner.readyFor(source)) {
+            let result: CodexWorkStepResult;
+            try { result = await owner.step(slice, source); }
+            catch (error) {
+              this.logger.warn('Codex owner probe failed; retaining its source range', { transcriptPath: filePath, error: String(error) });
+              return { status: 'waiting' };
+            }
+            this.publishReadyOwner(filePath, source);
+            if (!owner.readyFor(source)) return result;
+          }
+          const pendingBaseline = this.readCheckpoint(this.stateKey(filePath))?.startupBaselineTarget;
+          if (pendingBaseline) {
+            const meta = this.transcriptMetaByPath.get(filePath);
+            if (meta?.depth === 1 && meta.parentThreadId && this.hasLegacyPendingFusionForParent(meta.parentThreadId)) {
+              const current = this.readCheckpoint(this.stateKey(filePath))!;
+              current.startupBaselineTarget = undefined;
+              this.saveCheckpoint(this.stateKey(filePath), current);
+            } else if (hasCopiedHistoryPrefix(meta)) {
+              await this.parkForkBaseline(filePath, this.stateKey(filePath), pendingBaseline.size, slice);
+            } else {
+              await this.baselineFile(filePath, this.stateKey(filePath), pendingBaseline.size, slice);
+            }
+            if (this.readCheckpoint(this.stateKey(filePath))?.startupBaselineTarget) return { status: 'deferred', progressed: slice.readBytes > 0 };
+          }
+          const settled = this.readCheckpoint(this.stateKey(filePath));
+          if (settled && rolloutCaughtUp(settled, { ino: source.inode, size: source.size })) {
+            this.noteRolloutIdle(filePath, { ino: source.inode, size: source.size, mtimeMs: source.mtimeMs });
+            return { status: 'complete' };
+          }
+          let count: number;
+          try { count = await this.processFile(filePath, slice); }
+          catch (error) {
+            failedPaths.add(filePath);
+            this.logger.warn('Codex file task failed; retaining its source range', { transcriptPath: filePath, error: String(error) });
+            return { status: 'waiting' };
+          }
+          this.businessEmittedCount += count;
+          const after = this.readCheckpoint(this.stateKey(filePath));
+          const snapshot = this.ownerSnapshots.get(filePath);
+          if (!after || !snapshot || rolloutCaughtUp(after, { ino: snapshot.inode, size: snapshot.size })) return { status: 'complete' };
+          const progressed = count > 0 || after.scanOffset !== before?.scanOffset || slice.readBytes > 0;
+          return { status: progressed ? 'deferred' : 'waiting', progressed };
+          } finally {
+            if (slice.readBytes > 0) {
+              this.trimPausedReaders(filePath);
+              this.trimOwnerIndex(filePath);
+            }
+          }
+        },
+      });
     }
-    emittedCount += await this.retryPendingAgentResults();
-    this.reportSubagentLinks();
-    if (emittedCount > 0) {
-      this.logger.debug('cycle produced entries', { count: emittedCount });
-    }
-    return [];
+    if (this.cycleWorkBudget) await this.businessScheduler.run(this.cycleWorkBudget);
+    return this.businessEmittedCount;
   }
 
   /** Current parent/child assignments, including diagnostic-only confidence levels. */
@@ -380,11 +555,20 @@ export class CodexTranscriptInput extends BaseInput {
     return emittedCount;
   }
 
-  private async processFile(filePath: string): Promise<number> {
+  private async processFile(filePath: string, slice?: CodexFileWorkSlice): Promise<number> {
     const observed: { stat?: RolloutStatSnapshot } = {};
     try {
+      this.activeReadSlice = slice ?? (this.cycleWorkBudget ?? this.createOwnerProbeBudget(this.getInputRuntimeAccumulator())).fileSlice(filePath);
       return await this.scanRolloutFile(filePath, observed);
+    } catch (error) {
+      if (!(error instanceof CodexReadPostponed)) throw error;
+      this.deferredBusinessPaths.add(filePath);
+      return 0;
     } finally {
+      this.activeReadSlice = null;
+      this.scanBatches.delete(filePath);
+      this.trimContinuations();
+      this.trimPausedReaders(filePath);
       this.noteRolloutIdle(filePath, observed.stat);
     }
   }
@@ -457,11 +641,22 @@ export class CodexTranscriptInput extends BaseInput {
     }
     observed.stat = rolloutStatSnapshot(stat);
     const key = this.stateKey(filePath);
+    const ownerProbe = this.ownerProbes.get(filePath);
+    if (!ownerProbe?.readyFor(codexSourceSnapshot(stat)) || this.forkBlockedPaths.has(filePath)) return 0;
+    if (this.readCheckpoint(key)?.startupBaselineTarget) return 0;
     // onStart()/collect() index the current inode before processFile(). Keep
     // this lookup ahead of inode recovery: forkBootstrap is intentionally
     // cleared after owned data advances, while the owner meta remains the
     // durable proof that every replacement still starts with copied history.
     const indexedOwnerMeta = this.transcriptMetaByPath.get(filePath) ?? null;
+    const parentPath = indexedOwnerMeta?.parentThreadId ? this.transcriptPathByThreadId.get(indexedOwnerMeta.parentThreadId) : undefined;
+    if (parentPath && parentPath !== filePath) {
+      const parent = this.readCheckpoint(this.stateKey(parentPath));
+      if (this.ownerBlockedPaths.has(parentPath) || parent?.deferredScan || parent?.recordReads?.length) {
+        this.deferredBusinessPaths.add(filePath);
+        return 0;
+      }
+    }
     const hasIndexedCopiedPrefix = hasCopiedHistoryPrefix(indexedOwnerMeta);
     let checkpoint = this.readCheckpoint(key);
     let checkpointChanged = false;
@@ -518,15 +713,18 @@ export class CodexTranscriptInput extends BaseInput {
         return 0;
       }
     }
+    // 重启或 continuation 淘汰也不得绕开已经发现的完整正文范围冲突。
+    for (const state of checkpoint.recordReads ?? []) if (state.probe.conflict) {
+      await this.readRecordRange(filePath, state.startOffset, state.endOffset, state.reason, state.expectedRef);
+    }
     runtime?.observeBacklog(Math.max(0, stat.size - checkpoint.scanOffset));
     if (rolloutCaughtUp(checkpoint, stat)) return 0;
 
-    if (checkpoint.ownerSessionMetaOffset === null) {
-      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-        filePath,
-        stat.size,
-        runtime,
-      );
+    const resolution = ownerProbe.resolution;
+    if (resolution.kind === 'searching') return 0;
+    const resolvedOwnerOffset = resolution.kind === 'resolved' ? resolution.ownerOffset : null;
+    if (checkpoint.ownerSessionMetaOffset !== resolvedOwnerOffset) {
+      checkpoint.ownerSessionMetaOffset = resolvedOwnerOffset;
       checkpointChanged = true;
     }
     const ownerMetaCacheAccess: TranscriptMetaCacheAccess = (
@@ -552,10 +750,20 @@ export class CodexTranscriptInput extends BaseInput {
     const hasCopiedPrefix = hasCopiedHistoryPrefix(ownerMeta);
     if (
       hasCopiedPrefix
+      && !this.forkReadyPaths.has(filePath)
+      && !checkpoint.deferredScan
       && checkpoint.activeTurn === null
       && checkpoint.pendingTerminal === null
     ) {
-      const prepared = await this.prepareCopiedTranscript(filePath, stat.size, ownerMeta!, checkpoint);
+      let prepared: Awaited<ReturnType<CodexTranscriptInput['prepareCopiedTranscript']>>;
+      try {
+        prepared = await this.prepareCopiedTranscript(filePath, stat.size, ownerMeta!, checkpoint,
+          this.activeReadSlice ?? (this.cycleWorkBudget ?? this.createOwnerProbeBudget(runtime)).fileSlice(filePath));
+      } catch (error) {
+        this.logger.warn('Codex fork probe failed; retaining its source range', { transcriptPath: filePath, error: String(error) });
+        this.cycleFailedPaths.add(filePath);
+        return 0;
+      }
       checkpointChanged ||= prepared.changed;
       if (!prepared.ready) {
         this.saveCheckpoint(key, checkpoint);
@@ -566,7 +774,11 @@ export class CodexTranscriptInput extends BaseInput {
     const forkBootstrapAtOwnedScanStart = checkpoint.forkBootstrap;
     const ownedScanStartOffset = checkpoint.scanOffset;
     let emittedCount = 0;
-    let processedTerminalCount = 0;
+    let processedTerminalCount = this.cycleTerminalCounts.get(filePath) ?? 0;
+    const noteTerminal = (): void => {
+      processedTerminalCount++;
+      this.cycleTerminalCounts.set(filePath, processedTerminalCount);
+    };
     if (
       isDirectSubagent
       && checkpoint.pendingTerminal
@@ -579,7 +791,7 @@ export class CodexTranscriptInput extends BaseInput {
     ) {
       checkpoint.activeTurn = null;
       checkpoint.pendingTerminal = null;
-      processedTerminalCount++;
+      noteTerminal();
       checkpointChanged = true;
     }
     // Migrate retained legacy fusion ranges to independent lifecycle recovery.
@@ -587,7 +799,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (checkpoint.pendingSubagent) {
       const released = await this.releaseCapturedSubagentIndependently(filePath, checkpoint);
       emittedCount += released.emittedCount;
-      processedTerminalCount += released.processedTerminalCount;
+      for (let count = 0; count < released.processedTerminalCount; count++) noteTerminal();
       checkpointChanged = true;
       if (checkpoint.pendingSubagent) {
         this.saveCheckpoint(key, checkpoint);
@@ -597,7 +809,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (checkpoint.pendingFusion) {
       const released = await this.releaseParentFusionIndependently(filePath, checkpoint);
       emittedCount += released.emittedCount;
-      processedTerminalCount += released.processedTerminalCount;
+      for (let count = 0; count < released.processedTerminalCount; count++) noteTerminal();
       checkpointChanged = true;
     }
 
@@ -605,27 +817,35 @@ export class CodexTranscriptInput extends BaseInput {
 
     const hadPendingTerminal = checkpoint.pendingTerminal !== null;
     const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint);
-    checkpointChanged ||= hadPendingTerminal;
+    checkpointChanged ||= hadPendingTerminal && pendingResult.changed !== false;
     emittedCount += pendingResult.emittedCount;
-    processedTerminalCount += pendingResult.processedTerminalCount;
+    for (let count = 0; count < pendingResult.processedTerminalCount; count++) noteTerminal();
     if (pendingResult.blocked) {
       if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
       return emittedCount;
     }
 
     while (
-      checkpoint.scanOffset < stat.size
+      (checkpoint.deferredScan || checkpoint.scanOffset < stat.size)
       && processedTerminalCount < MAX_TERMINALS_PER_FILE_CYCLE
       && scannedBytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
+      && !this.activeReadSlice!.timeExpired
+      && !this.activeReadSlice!.quantumExpired
     ) {
       const scanStartOffset = checkpoint.scanOffset;
-      const scanEndOffset = Math.min(
-        stat.size,
-        scanStartOffset + (MAX_SCAN_BYTES_PER_FILE_CYCLE - scannedBytes),
-      );
-      let terminalTurnId: string | null = null;
-      let terminalEndOffset: number | null = null;
+      const scanEndOffset = stat.size;
+      const originalActive = checkpoint.activeTurn ? cloneActiveTurn(checkpoint.activeTurn) : null;
+      const originalOwnerOffset = checkpoint.ownerSessionMetaOffset;
+      const deferred = checkpoint.deferredScan;
+      if (deferred) {
+        checkpoint.activeTurn = deferred.activeTurn ? cloneActiveTurn(deferred.activeTurn) : null;
+        checkpoint.ownerSessionMetaOffset = deferred.ownerSessionMetaOffset;
+      }
+      let terminalTurnId: string | null = deferred?.terminalTurnId ?? null;
+      let terminalEndOffset: number | null = deferred?.terminalTurnId ? deferred.endOffset : null;
+      const scannedItems: CodexTranscriptSourceRecord[] = [];
       const processScannedLine = (line: JsonLine): void | false => {
+        scannedItems.push(line);
         const payload = asRecord(line.record.payload);
         if (!payload) return;
         if (line.record.type === 'session_meta') {
@@ -635,19 +855,7 @@ export class CodexTranscriptInput extends BaseInput {
             line,
           );
           checkpoint.ownerSessionMetaOffset = ownerSessionMetaOffset;
-          if (ownerSessionMetaOffset === line.startOffset) {
-            const meta = extractCodexTranscriptMeta(line.record);
-            if (meta) {
-              this.rememberTranscriptOwnerMeta(
-                filePath,
-                checkpoint.inode,
-                stat.size,
-                ownerSessionMetaOffset,
-                meta,
-              );
-              this.publishTranscriptOwnerMeta(filePath, meta);
-            }
-          }
+          // owner 的最终选择已由本轮探测确认，扫描回调只更新候选偏移。
           return;
         }
 
@@ -666,40 +874,45 @@ export class CodexTranscriptInput extends BaseInput {
         terminalEndOffset = line.endOffset;
         return false;
       };
-      let scan = await scanJsonLines(
-        filePath,
-        scanStartOffset,
-        scanEndOffset,
-        processScannedLine,
-        runtime,
-      );
-
-      // A single JSONL record may exceed the byte budget. Read far enough to
-      // consume one complete line so this file can make forward progress.
-      if (scan.nextOffset === scanStartOffset && scanEndOffset < stat.size) {
-        scan = await scanJsonLines(
-          filePath,
-          scanStartOffset,
-          stat.size,
-          line => {
-            processScannedLine(line);
-            return false;
-          },
-          runtime,
-        );
+      const reader = this.normalScanReader(filePath, checkpoint, codexSourceSnapshot(stat), scanEndOffset);
+      if (deferred && checkpoint.scanProbe) {
+        const validation = await reader.validate(this.activeReadSlice!, codexSourceSnapshot(stat));
+        checkpoint.scanProbe = reader.serialize();
+        checkpointChanged = true;
+        if (validation !== 'complete') {
+          checkpoint.activeTurn = originalActive;
+          checkpoint.ownerSessionMetaOffset = originalOwnerOffset;
+          break;
+        }
       }
-      if (scan.nextOffset === scanStartOffset) break;
+      const progress = deferred ? undefined : await reader.step(this.activeReadSlice!, codexSourceSnapshot(stat), processScannedLine,
+        true, undefined, true);
+      checkpoint.scanProbe = reader.serialize();
+      checkpointChanged = true;
+      if (progress?.status === 'source-conflict') {
+        checkpoint.activeTurn = originalActive;
+        checkpoint.ownerSessionMetaOffset = originalOwnerOffset;
+        break;
+      }
+      const scan = deferred ? { nextOffset: deferred.endOffset, records: deferred.records,
+        parseSuccessRecords: deferred.parseSuccessRecords, parseFailedRecords: deferred.parseFailedRecords,
+        maxRecordBytes: deferred.maxRecordBytes } : { nextOffset: progress!.nextOffset, ...reader!.lastStepStatistics };
+      if (scan.nextOffset === scanStartOffset) {
+        checkpoint.activeTurn = originalActive;
+        checkpoint.ownerSessionMetaOffset = originalOwnerOffset;
+        if (progress?.status === 'deferred') this.cycleWorkBudget?.noteDeferred(`normal_scan:${filePath}`);
+        break;
+      }
       checkpointChanged = true;
 
       const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
-      runtime?.observeCommittedBatch({
-        bytes: nextScanOffset - scanStartOffset,
-        records: scan.records,
-        parseSuccessRecords: scan.parseSuccessRecords,
-        parseFailedRecords: scan.parseFailedRecords,
-        maxRecordBytes: scan.maxRecordBytes,
-      });
-      scannedBytes += nextScanOffset - scanStartOffset;
+      if (!deferred) this.scanBatches.set(filePath, { startOffset: scanStartOffset, endOffset: nextScanOffset, items: scannedItems });
+      const commitScannedBatch = (): void => {
+        runtime?.observeCommittedBatch({ bytes: nextScanOffset - scanStartOffset, records: scan.records,
+          parseSuccessRecords: scan.parseSuccessRecords, parseFailedRecords: scan.parseFailedRecords, maxRecordBytes: scan.maxRecordBytes });
+        scannedBytes += nextScanOffset - scanStartOffset;
+        checkpoint.deferredScan = undefined;
+      };
       let blocked = false;
 
       if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
@@ -715,17 +928,26 @@ export class CodexTranscriptInput extends BaseInput {
             // Forked child rollouts contain copied parent history after their
             // owning session_meta. It must not become the child's pending turn.
             checkpoint.activeTurn = null;
-            processedTerminalCount++;
+            noteTerminal();
+            commitScannedBatch();
             checkpoint.scanOffset = nextScanOffset;
             continue;
           }
 
-          const recovered = await this.recoverTurnSegment(
-            filePath,
-            checkpoint,
-            nextScanOffset,
-            terminalTurnId !== null,
-          );
+          let recovered: SegmentRecoveryResult;
+          try {
+            recovered = await this.recoverTurnSegment(filePath, checkpoint, nextScanOffset, terminalTurnId !== null);
+          } catch (error) {
+            if (!(error instanceof CodexReadPostponed)) throw error;
+            this.deferredBusinessPaths.add(filePath);
+            checkpoint.deferredScan = { endOffset: nextScanOffset, terminalTurnId,
+              activeTurn: checkpoint.activeTurn ? cloneActiveTurn(checkpoint.activeTurn) : null,
+              ownerSessionMetaOffset: checkpoint.ownerSessionMetaOffset, records: scan.records,
+              parseSuccessRecords: scan.parseSuccessRecords, parseFailedRecords: scan.parseFailedRecords, maxRecordBytes: scan.maxRecordBytes };
+            checkpoint.activeTurn = originalActive;
+            checkpoint.ownerSessionMetaOffset = originalOwnerOffset;
+            break;
+          }
           emittedCount += this.emitEntryBatches(recovered.entries);
           if (
             recovered.kind !== 'unparseable'
@@ -740,7 +962,9 @@ export class CodexTranscriptInput extends BaseInput {
                 terminalTurnId,
                 nextScanOffset,
                 recovered.diagnostics.sourceRecordCount,
+                recovered.sourceRef,
               );
+              checkpoint.pendingTerminal.failureKey = this.pendingFailureKey(filePath, checkpoint, checkpoint.pendingTerminal);
               this.logger.warn('terminal Codex turn could not be parsed; retaining it for the next scan', {
                 transcriptPath: filePath,
                 turnId: terminalTurnId,
@@ -752,11 +976,12 @@ export class CodexTranscriptInput extends BaseInput {
             } else if (!checkpoint.pendingFusion) {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
-              processedTerminalCount++;
+              noteTerminal();
             }
         }
       }
 
+      commitScannedBatch();
       checkpoint.scanOffset = nextScanOffset;
       if (blocked || terminalTurnId === null) break;
     }
@@ -766,10 +991,25 @@ export class CodexTranscriptInput extends BaseInput {
       && checkpoint.scanOffset > ownedScanStartOffset
     ) {
       checkpoint.forkBootstrap = undefined;
+      this.forkReaders.delete(filePath);
       checkpointChanged = true;
     }
     if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
     return emittedCount;
+  }
+
+  private normalScanReader(
+    filePath: string, checkpoint: CodexTranscriptCheckpoint, snapshot: CodexTranscriptSourceSnapshot, targetSize: number,
+  ): CodexGuardedJsonlReadTask {
+    const generation = this.ownerProbes.get(filePath)!.sourceGeneration;
+    const startOffset = checkpoint.deferredScan?.endOffset ?? checkpoint.scanOffset;
+    let reader = this.normalScanReaders.get(filePath);
+    if (!reader || reader.sourceGeneration !== generation || reader.parsedOffset !== startOffset) {
+      reader = new CodexGuardedJsonlReadTask(filePath, snapshot, generation, 'normal_scan', startOffset,
+        checkpoint.scanProbe, checkpoint.ownerProbe?.anchors, targetSize);
+      this.normalScanReaders.set(filePath, reader);
+    }
+    return reader;
   }
 
   /**
@@ -786,15 +1026,31 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.pendingTerminal = null;
       return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     }
-    const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
+    const failureKey = this.pendingFailureKey(filePath, checkpoint, pending);
+    if (pending.failureKey === failureKey && pending.nextRetryAtMs !== undefined && Date.now() < pending.nextRetryAtMs) {
+      return { blocked: true, changed: false, emittedCount: 0, processedTerminalCount: 0 };
+    }
+    let recovered: SegmentRecoveryResult;
+    try {
+      recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
+    } catch (error) {
+      if (!(error instanceof CodexReadPostponed)) throw error;
+      this.deferredBusinessPaths.add(filePath);
+      return { blocked: true, changed: false, emittedCount: 0, processedTerminalCount: 0 };
+    }
     if (recovered.kind === 'unparseable') {
       const now = Date.now();
+      const backoffCount = pending.failureKey === failureKey ? (pending.backoffCount ?? pending.retryCount ?? 0) + 1 : 1;
       checkpoint.pendingTerminal = {
         ...pending,
         retryCount: (pending.retryCount ?? 0) + 1,
         firstPendingAtMs: pending.firstPendingAtMs ?? now,
         lastAttemptAtMs: now,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+        nextRetryAtMs: now + pendingRetryDelay(backoffCount),
+        backoffCount,
+        failureKey,
+        sourceRef: recovered.sourceRef ?? pending.sourceRef,
       };
       this.logger.warn('pending Codex terminal turn still could not be parsed; will retry', {
         transcriptPath: filePath,
@@ -831,12 +1087,38 @@ export class CodexTranscriptInput extends BaseInput {
       };
     }
     const runtime = this.getInputRuntimeAccumulator();
-    const records = await readJsonLines(
-      filePath,
-      activeTurn.startOffset,
-      endOffset,
-      runtime,
-    );
+    const expectedRef = checkpoint.pendingTerminal?.sourceRef;
+    const owner = this.ownerProbes.get(filePath)!;
+    const identity = JSON.stringify([checkpoint.inode, owner.sourceGeneration, owner.serialize().ownerRef?.sha256, activeTurn.turnId]);
+    let continuation = this.continuations.get(filePath);
+    if (continuation && (continuation.identity !== identity || continuation.startOffset !== activeTurn.startOffset || continuation.parsedOffset > endOffset)) {
+      this.continuations.delete(filePath); continuation = undefined;
+    }
+    const useContinuation = !checkpoint.pendingTerminal && !checkpoint.pendingFusion && !checkpoint.pendingSubagent
+      && (!terminal || !!continuation);
+    let records: { items: CodexTranscriptSourceRecord[]; sourceRef?: CodexTranscriptSourceRef };
+    if (useContinuation) {
+      const snapshot = codexSourceSnapshot(await fs.stat(filePath));
+      continuation ??= new CodexTranscriptContinuation(filePath, identity, owner.sourceGeneration, snapshot,
+        activeTurn.startOffset, owner.ownerMeta, activeTurn.turnId, { requireTerminal: false, ...this.partialTurnOptions(activeTurn, filePath) },
+        checkpoint.scanProbe?.anchors ?? owner.serialize().anchors);
+      this.continuations.set(filePath, continuation);
+      const validation = await continuation.guard.validate(this.activeReadSlice!, snapshot);
+      if (validation !== 'complete') throw new CodexReadPostponed(validation);
+      const batch = this.scanBatches.get(filePath);
+      if (batch && batch.startOffset <= continuation.parsedOffset && batch.endOffset === endOffset) {
+        continuation.feed(batch.items, endOffset);
+      } else if (continuation.parsedOffset < endOffset) {
+        const delta = await this.readRecordRange(filePath, continuation.parsedOffset, endOffset, 'recovery');
+        continuation.feed(delta.items, endOffset);
+      }
+      this.scanBatches.delete(filePath);
+      records = { items: [] };
+    } else {
+      continuation = undefined;
+      records = await this.readRecordRange(filePath, activeTurn.startOffset, endOffset, 'recovery',
+        expectedRef?.startOffset === activeTurn.startOffset && expectedRef.endOffset === endOffset ? expectedRef : undefined);
+    }
     let currentStat: Awaited<ReturnType<typeof fs.stat>> | null = null;
     try {
       currentStat = await fs.stat(filePath);
@@ -848,8 +1130,9 @@ export class CodexTranscriptInput extends BaseInput {
       ? this.cachedTranscriptOwnerMetaForCheckpoint(filePath, checkpoint, currentStat.size)
       : null;
     if (!meta && checkpoint.ownerSessionMetaOffset !== null) {
-      const metaRecord = await readJsonLineAt(filePath, checkpoint.ownerSessionMetaOffset, runtime);
-      meta = metaRecord ? extractCodexTranscriptMeta(metaRecord) : null;
+      if (currentStat?.ino !== checkpoint.inode) throw new CodexReadPostponed('waiting');
+      meta = await this.loadTranscriptOwnerMeta(filePath, checkpoint.inode, currentStat.size,
+        checkpoint.ownerSessionMetaOffset, runtime);
       if (meta) {
         if (
           currentStat?.ino === checkpoint.inode
@@ -867,17 +1150,31 @@ export class CodexTranscriptInput extends BaseInput {
         this.publishTranscriptOwnerMeta(filePath, meta);
       }
     }
-    const extraction = extractCodexPartialTurnWithBoundaries(
-      records.items,
-      meta,
-      sessionIdFromTranscriptPath(filePath),
-      activeTurn.turnId,
-      this.partialTurnOptions(activeTurn, filePath, attachmentParentThreadId ?? activeTurn.delegation?.parentThreadId ?? meta?.parentThreadId),
-    );
+    // 所有可能延期的源读取先完成，避免 extractor 的多模态处理及语义副作用提前发生。
+    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId);
+    const options = this.partialTurnOptions(activeTurn, filePath,
+      attachmentParentThreadId ?? activeTurn.delegation?.parentThreadId ?? meta?.parentThreadId);
+    let extraction = continuation ? continuation.snapshot() : extractCodexPartialTurnWithBoundaries(
+      records.items, meta, sessionIdFromTranscriptPath(filePath), activeTurn.turnId, options);
+    if (continuation && extraction) {
+      const hydrated = await continuation.materialize(extraction, async ref => {
+        const source = await this.readRecordRange(filePath, ref.startOffset, ref.endOffset, 'hydrate', ref);
+        const item = source.items[0];
+        if (!item) throw new CodexReadPostponed('waiting');
+        return item;
+      }, { requireTerminal: false, ...options }, terminal);
+      extraction = hydrated.extraction;
+      if (meta?.baseInstructions) extraction.turn.baseInstructions = meta.baseInstructions;
+      if (meta?.toolDefinitions !== undefined) extraction.turn.toolDefinitions = meta.toolDefinitions;
+      records.items = hydrated.items;
+    }
     const previouslyEmittedStepCount = activeTurn.emittedStepCount ?? 0;
     if (!extraction) {
+      this.continuations.delete(filePath);
+      this.clearRecordReads(filePath);
       return {
         kind: 'unparseable',
+        sourceRef: records.sourceRef,
         entries: [],
         consumedEndOffset: activeTurn.startOffset,
         diagnostics: emptySegmentRecoveryDiagnostics(records.items.length, previouslyEmittedStepCount),
@@ -902,7 +1199,6 @@ export class CodexTranscriptInput extends BaseInput {
     const committedTurn = closedStepCount === turn.steps.length
       ? turn
       : { ...turn, steps: turn.steps.slice(0, closedStepCount) };
-    const inputContext = await this.resolveInputContext(filePath, activeTurn, meta, attachmentParentThreadId);
     const built = buildCodexTranscriptSegment(committedTurn, {
       includePrompt: activeTurn.emittedPrompt !== true,
       startStepNumber: stepStart,
@@ -1050,6 +1346,9 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const parentSession = delegation?.parentThreadId ?? meta?.parentThreadId;
     if (parentSession && !this.workspacePolicy.allows({ 'gen_ai.session.id': parentSession }, this.agentType)) outputEntries = [];
+    if (terminal) this.continuations.delete(filePath);
+    else if (continuation && closedStepCount > 0) continuation.commit(closedStepCount, consumedEndOffset);
+    this.clearRecordReads(filePath);
     return {
       kind: outputEntries.length > 0 ? 'processed-emitted' : 'processed-empty',
       entries: outputEntries,
@@ -1057,6 +1356,114 @@ export class CodexTranscriptInput extends BaseInput {
       terminalStatus: turn.status,
       diagnostics,
     };
+  }
+
+  private trimContinuations(): void {
+    let bytes = [...this.continuations.values()].reduce((sum, work) => sum + work.estimatedBytes, 0);
+    for (const [filePath, work] of this.continuations) {
+      if (bytes <= this.continuationMaxBytes) break;
+      bytes -= work.estimatedBytes;
+      this.continuations.delete(filePath);
+    }
+  }
+
+  /** 暂停对象的估算预算不包含正在组装/输出的唯一巨大文件槽位。 */
+  private pausedReaders(): Map<string, { bytes: number; assembly: number; waiting: boolean; release: () => void }> {
+    const readers = new Map<string, { bytes: number; assembly: number; waiting: boolean; release: () => void }>();
+    const add = (file: string, bytes: number, assembly: number, waiting: boolean, release: () => void): void => {
+      const previous = readers.get(file);
+      readers.set(file, { bytes: bytes + (previous?.bytes ?? 0), assembly: Math.max(assembly, previous?.assembly ?? 0),
+        waiting: waiting && (previous?.waiting ?? true), release: () => { previous?.release(); release(); } });
+    };
+    for (const [file, probe] of this.ownerProbes) add(file, probe.bufferedBytes, probe.bufferedBytes,
+      !probe.eligible(this.ownerSnapshots.get(file) ?? probe.serialize().snapshot), () => probe.releaseBuffers());
+    for (const [file, reader] of [...this.normalScanReaders, ...this.baselineReaders]) {
+      add(file, reader.bufferedBytes, reader.bufferedBytes, reader.serialize().incompleteTail, () => reader.releaseBuffers());
+    }
+    for (const [file, work] of this.forkReaders) add(file, work.reader.bufferedBytes, work.reader.bufferedBytes,
+      work.reader.serialize().incompleteTail, () => work.reader.releaseBuffers());
+    for (const reader of this.metaReaders.values()) add(reader.filePath, reader.bufferedBytes, reader.bufferedBytes, false,
+      () => reader.releaseBuffers());
+    for (const task of this.recordReads.values()) add(task.filePath, task.bufferedBytes, task.assemblyBytes, false,
+      () => task.releaseBuffers());
+    return readers;
+  }
+
+  private allowReaderGrowth(filePath: string, bufferedBytes: number, requestedBytes: number): boolean {
+    const readers = this.pausedReaders();
+    const held = this.giantReaderPath ? readers.get(this.giantReaderPath) : undefined;
+    if (!held || (held.bytes === 0 && this.giantReaderPath !== filePath)) this.giantReaderPath = null;
+    const wantsGiant = bufferedBytes + requestedBytes > 2 * 1024 * 1024
+      || (readers.get(filePath)?.bytes ?? 0) + requestedBytes * 3 > this.pausedReaderMaxBytes;
+    if (wantsGiant && this.giantReaderPath && this.giantReaderPath !== filePath) {
+      if (!held?.waiting) return false;
+      // 静止半行让出槽位，但保留 EOF 和原校验依据；未追加时不会因此回读。
+      held.release();
+      this.giantReaderPath = null;
+    }
+    if (wantsGiant) this.giantReaderPath = filePath;
+    let bytes = [...readers].reduce((sum, [file, work]) => sum + (file === this.giantReaderPath ? 0 : work.bytes), 0);
+    for (const [file, work] of readers) {
+      if (bytes + requestedBytes * 3 <= this.pausedReaderMaxBytes) break;
+      if (file === filePath || file === this.giantReaderPath || work.bytes === 0) continue;
+      work.release(); bytes -= work.bytes;
+    }
+    return true;
+  }
+
+  private trimPausedReaders(currentFile?: string): void {
+    const readers = this.pausedReaders();
+    const giant = [...readers].filter(([, work]) => work.assembly > 2 * 1024 * 1024 || work.bytes > this.pausedReaderMaxBytes);
+    if (!this.giantReaderPath || !readers.get(this.giantReaderPath)?.bytes) this.giantReaderPath = giant[0]?.[0] ?? null;
+    let bytes = [...readers].reduce((sum, [file, work]) => sum + (file === this.giantReaderPath ? 0 : work.bytes), 0);
+    for (const [file, work] of readers) {
+      if (bytes <= this.pausedReaderMaxBytes) break;
+      if (file === this.giantReaderPath || file === currentFile) continue;
+      work.release(); bytes -= work.bytes;
+    }
+  }
+
+  private trimOwnerIndex(currentFile?: string): void {
+    const estimate = (file: string, probe: CodexTranscriptOwnerProbe): number =>
+      1024 + file.length * 4 + 2 * JSON.stringify(probe.ownerMeta).length;
+    let bytes = [...this.ownerProbes].reduce((sum, [file, probe]) => sum + estimate(file, probe), 0);
+    if (bytes <= this.ownerIndexMaxBytes && this.ownerProbes.size <= MAX_LINK_DESCRIPTORS) {
+      if (currentFile) {
+        const probe = this.ownerProbes.get(currentFile);
+        if (probe?.resolution.kind === 'searching') probe.releaseCompleteMeta();
+      }
+      return;
+    }
+    const ordered = [...this.ownerProbes].sort(([left], [right]) => {
+      const hot = (file: string): number => {
+        const checkpoint = this.readCheckpoint(this.stateKey(file));
+        return Number(file === currentFile) * 2 + Number(!!this.ownerProbes.get(file)?.bufferedBytes) * 4
+          + Number(!!(checkpoint?.activeTurn || checkpoint?.pendingTerminal || checkpoint?.pendingFusion || checkpoint?.pendingSubagent));
+      };
+      return hot(left) - hot(right);
+    });
+    for (const [file, probe] of ordered) {
+      if (bytes <= this.ownerIndexMaxBytes && this.ownerProbes.size <= MAX_LINK_DESCRIPTORS) break;
+      if (file === currentFile) continue;
+      bytes -= estimate(file, probe);
+      this.ownerProbes.delete(file);
+      this.transcriptMetaByPath.delete(file);
+      this.ownerBlockedPaths.add(file);
+    }
+    // searching 的候选完整正文也不在身份索引中长期持有。
+    for (const probe of this.ownerProbes.values()) if (probe.resolution.kind === 'searching') probe.releaseCompleteMeta();
+  }
+
+  private workMemorySnapshot(): { fullMetaBytes: number; ownerIndexBytes: number; continuationBytes: number;
+    pausedReaderBytes: number; giantReaderFiles: number; giantReaderBytes: number } {
+    const readers = this.pausedReaders();
+    return { fullMetaBytes: this.transcriptMetaCacheBytes,
+      ownerIndexBytes: [...this.ownerProbes].reduce((sum, [file, probe]) => sum + 1024 + file.length * 4
+        + 2 * JSON.stringify(probe.ownerMeta).length, 0),
+      continuationBytes: [...this.continuations.values()].reduce((sum, work) => sum + work.estimatedBytes, 0),
+      pausedReaderBytes: [...readers].reduce((sum, [file, work]) => sum + (file === this.giantReaderPath ? 0 : work.bytes), 0),
+      giantReaderFiles: [...readers].filter(([, work]) => work.assembly > 2 * 1024 * 1024 || work.bytes > this.pausedReaderMaxBytes).length,
+      giantReaderBytes: (this.giantReaderPath ? readers.get(this.giantReaderPath)?.bytes : 0) ?? 0 };
   }
 
   private async resolveInputContext(
@@ -1070,12 +1477,7 @@ export class CodexTranscriptInput extends BaseInput {
     const range = context.deltaRange;
     if (!range) return context;
 
-    const records = await readJsonLines(
-      filePath,
-      range.startOffset,
-      range.endOffset,
-      this.getInputRuntimeAccumulator(),
-    );
+    const records = await this.readRecordRange(filePath, range.startOffset, range.endOffset, 'hydrate');
     const previous = extractCodexPartialTurn(
       records.items.map(item => item.record),
       meta,
@@ -1095,6 +1497,84 @@ export class CodexTranscriptInput extends BaseInput {
     return { ...context, delta: nextInputMessagesForStep(lastStep) };
   }
 
+  private pendingFailureKey(filePath: string, checkpoint: CodexTranscriptCheckpoint, pending: CodexPendingTerminalTurn): string {
+    const owner = this.ownerProbes.get(filePath)?.serialize();
+    const active = checkpoint.activeTurn;
+    return crypto.createHash('sha256').update(JSON.stringify([checkpoint.inode, owner?.probe.sourceGeneration,
+      owner?.ownerRef?.sha256, active?.turnId, active?.startOffset, pending.terminalEndOffset, active?.model,
+      active?.cwd, active?.developerInstructions, active?.inputContext])).digest('hex');
+  }
+
+  private clearRecordReads(filePath: string): void {
+    this.clearedRecordReadPaths.add(filePath);
+    for (const [key, task] of this.recordReads) if (task.filePath === filePath && !task.sourceConflict) {
+      this.recordReads.delete(key);
+      this.recordReadScheduler.delete(key);
+    }
+  }
+
+  private async readRecordRange(filePath: string, startOffset: number, endOffset: number, reason: 'recovery' | 'hydrate',
+    expectedRef?: CodexTranscriptSourceRef): Promise<{ items: CodexJsonLine[]; nextOffset: number; sourceRef?: CodexTranscriptSourceRef }> {
+    if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
+    const stat = await fs.stat(filePath);
+    const snapshot = codexSourceSnapshot(stat);
+    const owner = this.ownerProbes.get(filePath);
+    if (!owner?.readyFor(snapshot)) throw new CodexReadPostponed('waiting');
+    const key = JSON.stringify([filePath, owner.sourceGeneration, reason, startOffset, endOffset, expectedRef?.sha256]);
+    let task = this.recordReads.get(key);
+    if (!task) {
+      const restored = this.readCheckpoint(this.stateKey(filePath))?.recordReads?.find(state => state.reason === reason
+        && state.startOffset === startOffset && state.endOffset === endOffset
+        && state.probe.snapshot.inode === snapshot.inode && state.probe.sourceGeneration === owner.sourceGeneration);
+      task = new CodexRecordRangeReadTask(filePath, startOffset, endOffset, snapshot, owner.sourceGeneration,
+        reason, restored, owner.serialize().anchors, expectedRef);
+      this.recordReads.set(key, task);
+    }
+    const slice = this.activeReadSlice?.filePath === filePath ? this.activeReadSlice
+      : (this.cycleWorkBudget ?? this.createOwnerProbeBudget(this.getInputRuntimeAccumulator())).fileSlice(filePath);
+    const result = slice.timeExpired ? { status: 'deferred' as const } : await task.step(slice, snapshot);
+    if (result.status !== 'complete') {
+      this.recordReadScheduler.enqueue({ key, filePath, priority: 'hot',
+        eligible: () => {
+          const current = this.ownerSnapshots.get(filePath);
+          const work = this.recordReads.get(key);
+          return !!current && !!work && work.retryEligible && work.sourceGeneration === this.ownerProbes.get(filePath)?.sourceGeneration
+            && !!this.ownerProbes.get(filePath)?.readyFor(current);
+        },
+        step: async nextSlice => {
+          const work = this.recordReads.get(key);
+          const current = this.ownerSnapshots.get(filePath);
+          if (!work || !current) return { status: 'waiting' };
+          try {
+            const result = await work.step(nextSlice, current);
+            const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+            if (checkpoint) this.saveCheckpoint(this.stateKey(filePath), checkpoint);
+            return { status: result.status === 'source-conflict' ? 'waiting' : result.status, progressed: nextSlice.readBytes > 0 };
+          } catch (error) {
+            this.logger.warn('Codex fixed recovery read failed; retaining its range', { transcriptPath: filePath, error: String(error) });
+            return { status: 'waiting' };
+          }
+        },
+      });
+      if (result.status === 'deferred') slice.budget.noteDeferred(key);
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      if (checkpoint) this.saveCheckpoint(this.stateKey(filePath), checkpoint);
+      if (result.status === 'source-conflict') this.getInputRuntimeAccumulator()?.observeCodexWork({ sourceConflictFilesMax: 1 });
+      throw new CodexReadPostponed(result.status);
+    }
+    return result;
+  }
+
+  private async drainRecordReads(): Promise<void> {
+    if (this.cycleWorkBudget) await this.recordReadScheduler.run(this.cycleWorkBudget);
+  }
+
+  private async preloadRecovery(filePath: string, active: CodexActiveTranscriptTurn | null, endOffset: number): Promise<void> {
+    if (!active) return;
+    await this.readRecordRange(filePath, active.startOffset, endOffset, 'recovery');
+    await this.resolveInputContext(filePath, active, this.ownerProbes.get(filePath)?.ownerMeta ?? null);
+  }
+
   private async registerSubagentOwnerMeta(
     filePath: string,
     inode: number,
@@ -1103,19 +1583,18 @@ export class CodexTranscriptInput extends BaseInput {
     cacheAccess: TranscriptMetaCacheAccess = 'active',
   ): Promise<void> {
     if (ownerSessionMetaOffset === null) return;
-    const indexedMeta = cacheAccess === 'active'
-      && !this.transcriptMetaCacheByPath.has(filePath)
-      ? this.transcriptMetaByPath.get(filePath)
-      : null;
+    const owner = this.ownerProbes.get(filePath);
+    const indexedMeta = owner?.ownerMeta;
     if (indexedMeta) {
-      this.rememberTranscriptOwnerMeta(
-        filePath,
-        inode,
-        fileSize,
-        ownerSessionMetaOffset,
-        indexedMeta,
-        'active',
-      );
+      const full = owner.completeMeta;
+      if (full) {
+        this.rememberTranscriptOwnerMeta(filePath, inode, fileSize, ownerSessionMetaOffset, full, cacheAccess);
+        owner.releaseCompleteMeta();
+      }
+      if (!full && !this.activeReadSlice && cacheAccess === 'active' && !this.transcriptMetaCacheByPath.has(filePath)) {
+        await this.loadTranscriptOwnerMeta(filePath, inode, fileSize, ownerSessionMetaOffset,
+          this.getInputRuntimeAccumulator(), cacheAccess);
+      }
       this.publishTranscriptOwnerMeta(filePath, indexedMeta);
       return;
     }
@@ -1130,10 +1609,96 @@ export class CodexTranscriptInput extends BaseInput {
     if (meta) this.publishTranscriptOwnerMeta(filePath, meta);
   }
 
+  protected createOwnerProbeBudget(runtime: InputRuntimeAccumulator | null): CodexWorkBudget {
+    return new CodexWorkBudget({}, runtime);
+  }
+
+  /** owner 与 fork 定位共享本周期预算；每个 dispatch 独立让出 2 MiB 量子。 */
+  private async prepareDiscoveredForks(files: DiscoveredSessionFile[], skipPaths?: ReadonlySet<string>): Promise<void> {
+    this.forkBlockedPaths.clear();
+    this.forkReadyPaths.clear();
+    const paths = new Set(files.map(file => file.filePath));
+    for (const filePath of new Set([...this.forkReaders.keys(), ...this.forkTrackedPaths])) if (!paths.has(filePath)) {
+      this.forkReaders.delete(filePath);
+      this.forkScheduler.delete(filePath);
+      this.forkTrackedPaths.delete(filePath);
+    }
+    for (const { filePath } of files) {
+      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+      const meta = this.transcriptMetaByPath.get(filePath);
+      const snapshot = this.ownerSnapshots.get(filePath);
+      if (skipPaths?.has(filePath) || !snapshot || this.ownerBlockedPaths.has(filePath)) continue;
+      if (!checkpoint || checkpoint.inode !== snapshot.inode || checkpoint.startupBaselineTarget
+        || checkpoint.activeTurn || checkpoint.pendingTerminal || checkpoint.deferredScan || !hasCopiedHistoryPrefix(meta)
+        || (checkpoint.scanOffset !== 0 && !checkpoint.forkBootstrap)) {
+        this.forkScheduler.delete(filePath);
+        this.forkReaders.delete(filePath);
+        this.forkTrackedPaths.delete(filePath);
+        continue;
+      }
+      this.forkBlockedPaths.add(filePath);
+      this.forkTrackedPaths.add(filePath);
+      this.forkScheduler.enqueue({ key: filePath, filePath,
+        priority: checkpoint.forkBootstrap?.state === 'baseline-search' || checkpoint.forkBootstrap?.state === 'baseline-tail' ? 'cold' : 'hot',
+        eligible: () => !this.ownerBlockedPaths.has(filePath) && !!this.ownerSnapshots.get(filePath)
+          && (this.forkReaders.get(filePath)?.reader.retryEligible ?? true),
+        step: async slice => {
+          const current = this.readCheckpoint(this.stateKey(filePath));
+          const source = this.ownerSnapshots.get(filePath);
+          const owner = this.transcriptMetaByPath.get(filePath);
+          if (!current || !source || !owner || !this.ownerProbes.get(filePath)?.readyFor(source)) return { status: 'waiting' };
+          const before = JSON.stringify(current);
+          try {
+            const prepared = await this.prepareCopiedTranscript(filePath, source.size, owner, current, slice);
+            if (prepared.changed && JSON.stringify(current) !== before) this.saveCheckpoint(this.stateKey(filePath), current);
+            if (prepared.ready) {
+              this.forkBlockedPaths.delete(filePath);
+              this.forkReadyPaths.add(filePath);
+            }
+            if (prepared.status === 'complete') this.forkTrackedPaths.delete(filePath);
+            return { status: prepared.status, progressed: slice.readBytes > 0 };
+          } catch (error) {
+            this.logger.warn('Codex fork probe failed; retaining its source range', { transcriptPath: filePath, error: String(error) });
+            return { status: 'waiting' };
+          }
+        },
+      });
+    }
+    if (this.cycleWorkBudget) await this.forkScheduler.run(this.cycleWorkBudget);
+    this.getInputRuntimeAccumulator()?.observeCodexWork({
+      sourceConflictFilesMax: new Set([
+        ...[...this.ownerProbes].filter(([, probe]) => probe.sourceConflict).map(([file]) => file),
+        ...[...this.forkReaders].filter(([, work]) => work.reader.sourceConflict).map(([file]) => file),
+      ]).size,
+    });
+  }
+
+  private async finishStartupBaselines(files: DiscoveredSessionFile[]): Promise<void> {
+    for (const { filePath } of files) {
+      const key = this.stateKey(filePath);
+      const checkpoint = this.readCheckpoint(key);
+      if (!checkpoint?.startupBaselineTarget || this.ownerBlockedPaths.has(filePath)) continue;
+      const meta = this.transcriptMetaByPath.get(filePath);
+      if (meta?.depth === 1 && meta.parentThreadId && this.hasLegacyPendingFusionForParent(meta.parentThreadId)) {
+        checkpoint.startupBaselineTarget = undefined;
+        this.saveCheckpoint(key, checkpoint);
+      } else if (hasCopiedHistoryPrefix(meta)) {
+        await this.parkForkBaseline(filePath, key, checkpoint.startupBaselineTarget.size);
+      } else {
+        await this.baselineFile(filePath, key, checkpoint.startupBaselineTarget.size);
+      }
+    }
+  }
+
   private async indexDiscoveredTranscriptOwners(
     files: DiscoveredSessionFile[],
     skipPaths?: ReadonlySet<string>,
+    startup = false,
+    runProbes = true,
   ): Promise<void> {
+    this.cycleWorkBudget = this.createOwnerProbeBudget(this.getInputRuntimeAccumulator());
+    this.cycleWorkBudget.allowBufferGrowth = (file, buffered, requested) => this.allowReaderGrowth(file, buffered, requested);
+    this.cycleTerminalCounts.clear();
     const kept = new Map<string, NonNullable<ReturnType<typeof extractCodexTranscriptMeta>>>();
     if (skipPaths) {
       for (const filePath of skipPaths) {
@@ -1143,41 +1708,120 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
-    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
+    this.ownerSnapshots.clear();
+    this.ownerBlockedPaths.clear();
+    const discoveredPaths = new Set(files.map(file => file.filePath));
+    this.pruneAbsentTranscriptMetaCache(discoveredPaths, Date.now());
+    for (const filePath of this.continuations.keys()) if (!discoveredPaths.has(filePath)) this.continuations.delete(filePath);
+    for (const filePath of this.forkReaders.keys()) if (!discoveredPaths.has(filePath)) this.forkReaders.delete(filePath);
+    for (const filePath of this.normalScanReaders.keys()) if (!discoveredPaths.has(filePath)) this.normalScanReaders.delete(filePath);
+    for (const filePath of this.baselineReaders.keys()) if (!discoveredPaths.has(filePath)) this.baselineReaders.delete(filePath);
+    // 调度队列还可能保留尚未开始扫描的文件，因此按旧发现集独立清理。
+    for (const filePath of this.businessTrackedPaths) if (!discoveredPaths.has(filePath)) {
+      this.businessScheduler.delete(filePath);
+      this.businessTrackedPaths.delete(filePath);
+    }
+    for (const [key, task] of this.recordReads) if (!discoveredPaths.has(task.filePath)) {
+      this.recordReads.delete(key);
+      this.recordReadScheduler.delete(key);
+    }
+    for (const filePath of this.ownerProbes.keys()) if (!discoveredPaths.has(filePath)) {
+      this.ownerProbes.delete(filePath);
+      this.ownerScheduler.delete(filePath);
+    }
     for (const [filePath, meta] of kept) {
       this.publishTranscriptOwnerMeta(filePath, meta);
     }
-    for (const { filePath } of files) {
+    for (const { filePath, baselineOnStart } of files) {
       if (skipPaths?.has(filePath)) continue;
+      this.ownerBlockedPaths.add(filePath);
       let stat;
-      try {
-        stat = await fs.stat(filePath);
-      } catch {
-        continue;
+      try { stat = await fs.stat(filePath); } catch { continue; }
+      const snapshot = codexSourceSnapshot(stat);
+      this.ownerSnapshots.set(filePath, snapshot);
+      const key = this.stateKey(filePath);
+      let checkpoint = this.readCheckpoint(key);
+      if (!checkpoint) {
+        checkpoint = { inode: stat.ino, scanOffset: 0, activeTurn: null, pendingTerminal: null,
+          pendingFusion: null, pendingSubagent: null, ownerSessionMetaOffset: null,
+          ...(startup && baselineOnStart ? { startupBaselineTarget: { inode: stat.ino, size: stat.size } } : {}) };
+        this.saveCheckpoint(key, checkpoint);
       }
-      const checkpoint = this.readCheckpoint(this.stateKey(filePath));
-      const ownerOffset = checkpoint?.inode === stat.ino
-        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          )
-        : await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          );
-      if (ownerOffset === null) continue;
-      const meta = await this.loadTranscriptOwnerMeta(
-        filePath,
-        stat.ino,
-        stat.size,
-        ownerOffset,
-        this.getInputRuntimeAccumulator(),
-        'discovery',
-      );
-      if (!meta) continue;
-      this.publishTranscriptOwnerMeta(filePath, meta);
+      // 未缓存的身份只在其公平工作单元被选中时重建，容量溢出不按目录排序反复丢弃同一前缀。
+      this.ownerScheduler.enqueue({
+        key: filePath, filePath, priority: checkpoint.activeTurn || checkpoint.pendingTerminal || checkpoint.pendingFusion || checkpoint.pendingSubagent ? 'hot' : 'cold',
+        eligible: () => {
+          const current = this.ownerSnapshots.get(filePath);
+          const probe = this.ownerProbes.get(filePath);
+          return !!current && (!probe || probe.inode !== current.inode || probe.eligible(current));
+        },
+        step: async slice => {
+          try {
+            const current = this.ownerSnapshots.get(filePath)!;
+            const result = await this.ensureOwnerProbe(filePath, current).step(slice, current);
+            this.publishReadyOwner(filePath, current);
+            this.trimPausedReaders(filePath);
+            this.trimOwnerIndex(filePath);
+            return result;
+          }
+          catch (error) {
+            this.logger.warn('Codex owner probe failed; retaining its source range', { transcriptPath: filePath, error: String(error) });
+            return { status: 'waiting' };
+          }
+        },
+      });
+    }
+    if (runProbes) await this.ownerScheduler.run(this.cycleWorkBudget);
+    for (const [filePath, snapshot] of this.ownerSnapshots) this.publishReadyOwner(filePath, snapshot);
+    this.trimOwnerIndex();
+    this.getInputRuntimeAccumulator()?.observeCodexWork({
+      ownerBlockedFilesMax: this.ownerBlockedPaths.size,
+      sourceConflictFilesMax: [...this.ownerProbes.values()].filter(probe => probe.sourceConflict).length,
+    });
+  }
+
+  private ensureOwnerProbe(filePath: string, snapshot: CodexTranscriptSourceSnapshot): CodexTranscriptOwnerProbe {
+    const previous = this.ownerProbes.get(filePath);
+    if (previous?.inode === snapshot.inode) return previous;
+    const checkpoint = this.readCheckpoint(this.stateKey(filePath))!;
+    const restored = checkpoint.ownerProbe?.probe.inode === snapshot.inode ? checkpoint.ownerProbe : undefined;
+    const cached = this.transcriptMetaCacheByPath.get(filePath);
+    const probe = new CodexTranscriptOwnerProbe(filePath, snapshot, restored,
+      cached?.inode === snapshot.inode && cached.ownerSessionMetaOffset === restored?.probe.candidateOwnerOffset ? cached.meta : null,
+      undefined, (previous?.sourceGeneration ?? checkpoint.ownerProbe?.probe.sourceGeneration ?? -1) + 1);
+    this.ownerProbes.set(filePath, probe);
+    return probe;
+  }
+
+  private publishReadyOwner(filePath: string, snapshot: CodexTranscriptSourceSnapshot): void {
+    const probe = this.ownerProbes.get(filePath);
+    if (!probe) return;
+    const key = this.stateKey(filePath);
+    const checkpoint = this.readCheckpoint(key)!;
+    const state = probe.serialize();
+    const resolution = probe.resolution;
+    if (probe.readyFor(snapshot)) {
+      this.ownerBlockedPaths.delete(filePath);
+      const meta = probe.completeMeta;
+      if (meta && resolution.kind === 'resolved') {
+        const cached = this.transcriptMetaCacheByPath.get(filePath);
+        if (cached && reusableCachedTranscriptMeta(cached, snapshot.inode, snapshot.size, resolution.ownerOffset)
+          && cached.estimatedBytes === estimateCachedTranscriptMetaBytes(filePath, meta)) {
+          cached.meta = meta;
+          cached.fileSize = snapshot.size;
+          cached.lastSeenAtMs = Date.now();
+        } else {
+          this.rememberTranscriptOwnerMeta(filePath, snapshot.inode, snapshot.size, resolution.ownerOffset, meta, 'discovery');
+        }
+        probe.releaseCompleteMeta();
+      }
+      if (probe.ownerMeta) this.publishTranscriptOwnerMeta(filePath, probe.ownerMeta);
+      if (checkpoint.inode === snapshot.inode) checkpoint.ownerSessionMetaOffset = resolution.kind === 'resolved' ? resolution.ownerOffset : null;
+    }
+    if (JSON.stringify(checkpoint.ownerProbe) !== JSON.stringify(state)
+      || this.readCheckpoint(key)!.ownerSessionMetaOffset !== checkpoint.ownerSessionMetaOffset) {
+      checkpoint.ownerProbe = state;
+      this.saveCheckpoint(key, checkpoint);
     }
   }
 
@@ -1202,8 +1846,30 @@ export class CodexTranscriptInput extends BaseInput {
     if (cached) this.removeTranscriptMetaCacheEntry(filePath);
     if (ownerSessionMetaOffset < 0 || ownerSessionMetaOffset >= fileSize) return null;
 
-    const record = await readJsonLineAt(filePath, ownerSessionMetaOffset, runtime);
-    const meta = record ? extractCodexTranscriptMeta(record) : null;
+    const owner = this.ownerProbes.get(filePath);
+    const slice = this.activeReadSlice?.filePath === filePath ? this.activeReadSlice
+      : this.createOwnerProbeBudget(runtime ?? null).fileSlice(filePath);
+    let meta: CodexTranscriptMeta | null = null;
+    if (owner && this.activeReadSlice) {
+      const snapshot = codexSourceSnapshot(await fs.stat(filePath));
+      if (!owner.readyFor(snapshot)) throw new CodexReadPostponed('waiting');
+      const result = await owner.hydrateCompleteMeta(slice);
+      if (result.status !== 'complete') throw new CodexReadPostponed(result.status);
+      meta = owner.completeMeta;
+      owner.releaseCompleteMeta();
+    } else {
+      // 内部独立读取同样使用预算；生产恢复始终经过上面的 ownerRef 完整校验。
+      const key = JSON.stringify([filePath, inode, fileSize, ownerSessionMetaOffset]);
+      let reader = this.metaReaders.get(key);
+      if (!reader) {
+        reader = new CodexJsonlReadTask(filePath, ownerSessionMetaOffset, fileSize, 'hydrate', inode, true);
+        this.metaReaders.set(key, reader);
+      }
+      const result = await reader.step(slice, line => { meta = extractCodexTranscriptMeta(line.record); return false; });
+      if (result.status === 'deferred') throw new CodexReadPostponed('deferred');
+      this.metaReaders.delete(key);
+      if (result.status === 'source-conflict') throw new CodexReadPostponed('source-conflict');
+    }
     if (!meta) return null;
     this.rememberTranscriptOwnerMeta(
       filePath,
@@ -1315,7 +1981,7 @@ export class CodexTranscriptInput extends BaseInput {
     ) {
       this.transcriptPathByThreadId.delete(previous.threadId);
     }
-    this.transcriptMetaByPath.set(filePath, meta);
+    this.transcriptMetaByPath.set(filePath, codexOwnerSummary(meta));
     this.transcriptPathByThreadId.set(meta.threadId, filePath);
     // Linker descriptors have an independent eviction policy. Re-register on
     // every publish, including cache hits, so metadata and linkage cannot drift.
@@ -1357,6 +2023,7 @@ export class CodexTranscriptInput extends BaseInput {
     const pending = checkpoint.pendingFusion;
     if (!pending) return { emittedCount: 0, processedTerminalCount: 0 };
 
+    await this.preloadRecovery(filePath, checkpoint.activeTurn, pending.terminalEndOffset);
     checkpoint.scanOffset = Math.max(checkpoint.scanOffset, pending.terminalEndOffset);
     checkpoint.pendingFusion = null;
     this.logger.info('migrating legacy Codex parent fusion checkpoint to independent turn recovery', {
@@ -1378,7 +2045,9 @@ export class CodexTranscriptInput extends BaseInput {
         pending.turnId,
         pending.terminalEndOffset,
         recovered.diagnostics.sourceRecordCount,
+        recovered.sourceRef,
       );
+      checkpoint.pendingTerminal.failureKey = this.pendingFailureKey(filePath, checkpoint, checkpoint.pendingTerminal);
       return { emittedCount: 0, processedTerminalCount: 0 };
     }
 
@@ -1394,6 +2063,7 @@ export class CodexTranscriptInput extends BaseInput {
   ): Promise<{ emittedCount: number; processedTerminalCount: number }> {
     const captured = checkpoint.pendingSubagent;
     if (!captured) return { emittedCount: 0, processedTerminalCount: 0 };
+    await this.preloadRecovery(filePath, captured.activeTurn, captured.terminalEndOffset);
     const childThreadId = this.transcriptMetaByPath.get(filePath)?.threadId ?? sessionIdFromTranscriptPath(filePath);
     this.subagentLinker.registerSpawns([{
       parentThreadId: captured.parentThreadId,
@@ -1704,7 +2374,8 @@ export class CodexTranscriptInput extends BaseInput {
     fileSize: number,
     ownerMeta: CodexTranscriptMeta,
     checkpoint: CodexTranscriptCheckpoint,
-  ): Promise<{ ready: boolean; changed: boolean }> {
+    slice: CodexFileWorkSlice,
+  ): Promise<{ ready: boolean; changed: boolean; status: CodexWorkStepResult['status'] }> {
     // A newly discovered live fork must not enter the normal scanner until its
     // first positively-owned turn is located.
     if (checkpoint.scanOffset === 0 && checkpoint.forkBootstrap === undefined) {
@@ -1715,10 +2386,9 @@ export class CodexTranscriptInput extends BaseInput {
     }
 
     const current = checkpoint.forkBootstrap;
-    if (!current) return { ready: true, changed: false };
+    if (!current) return { ready: true, changed: false, status: 'complete' };
     if (current.state === 'baseline-tail') {
-      const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return this.rebuildForkBaselineTail(filePath, checkpoint, slice);
     }
 
     // Prefer the lifecycle Hook's exact initial turn. UUIDv7 causality is the
@@ -1731,6 +2401,7 @@ export class CodexTranscriptInput extends BaseInput {
         initialTurnId: marker.initialTurnId,
         ...(marker.recoveryTurnId ? { recoveryTurnId: marker.recoveryTurnId } : {}),
         searchOffset: 0,
+        readProbe: bootstrap.readProbe,
       };
     } else if (
       marker?.recoveryTurnId
@@ -1742,6 +2413,7 @@ export class CodexTranscriptInput extends BaseInput {
         // The terminal evidence may lie before an EOF reached by an earlier
         // evidence-free UUID probe, so restart that probe from the beginning.
         searchOffset: bootstrap.initialTurnId ? bootstrap.searchOffset : 0,
+        readProbe: bootstrap.readProbe,
       };
     }
 
@@ -1758,24 +2430,16 @@ export class CodexTranscriptInput extends BaseInput {
     checkpoint.forkBootstrap = bootstrap;
     const searchedNewBytes = bootstrap.searchOffset < fileSize;
 
-    const located = await findTurnStartOffset(
-      filePath,
-      ownerMeta.threadId,
-      bootstrap.initialTurnId,
-      bootstrap.recoveryTurnId,
-      bootstrap.searchOffset,
-      fileSize,
-      this.getInputRuntimeAccumulator(),
-    );
+    const located = await this.findTurnStartOffset(filePath, ownerMeta.threadId, bootstrap, slice);
     if (located.startOffset === null) {
       checkpoint.forkBootstrap = {
-        state: bootstrap.state,
-        ...(bootstrap.initialTurnId ? { initialTurnId: bootstrap.initialTurnId } : {}),
-        ...(bootstrap.recoveryTurnId ? { recoveryTurnId: bootstrap.recoveryTurnId } : {}),
+        ...bootstrap,
         searchOffset: located.nextOffset,
+        readProbe: this.forkReaders.get(filePath)!.reader.serialize(),
       };
       if (
-        located.nextOffset >= fileSize
+        located.status === 'waiting' && !checkpoint.forkBootstrap.readProbe?.incompleteTail
+        && located.nextOffset >= fileSize
         && searchedNewBytes
         && !bootstrap.initialTurnId
         && uuidV7TimestampMs(ownerMeta.threadId) === undefined
@@ -1787,7 +2451,7 @@ export class CodexTranscriptInput extends BaseInput {
           searchedBytes: located.nextOffset,
         });
       }
-      return { ready: false, changed: true };
+      return { ready: false, changed: true, status: located.status };
     }
 
     if (located.anchorKind === 'initial-hook' || located.anchorKind === 'uuidv7') {
@@ -1808,8 +2472,7 @@ export class CodexTranscriptInput extends BaseInput {
         ownedStartOffset: located.startOffset,
         baselineOffset: previousScanOffset,
       });
-      const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return this.rebuildForkBaselineTail(filePath, checkpoint, slice);
     }
 
     checkpoint.scanOffset = Math.max(previousScanOffset, located.startOffset);
@@ -1821,6 +2484,7 @@ export class CodexTranscriptInput extends BaseInput {
           ...(bootstrap.initialTurnId ? { initialTurnId: bootstrap.initialTurnId } : {}),
           ...(bootstrap.recoveryTurnId ? { recoveryTurnId: bootstrap.recoveryTurnId } : {}),
           searchOffset: located.startOffset,
+          readProbe: this.forkReaders.get(filePath)!.reader.serialize(),
         }
       : undefined;
     this.logger.info('anchored fork/subagent rollout at its first owned turn', {
@@ -1835,51 +2499,76 @@ export class CodexTranscriptInput extends BaseInput {
     });
     const startHookOnly = previousScanOffset < located.startOffset
       && (marker?.hookEvent === 'user-prompt-submit' || marker?.hookEvent === 'subagent-start');
-    return { ready: !startHookOnly, changed: true };
+    return { ready: !startHookOnly, changed: true, status: 'complete' };
   }
 
-  private async parkForkBaseline(
-    filePath: string,
-    key: string,
-  ): Promise<void> {
-    let stat;
-    try {
-      stat = await fs.stat(filePath);
-    } catch {
-      return;
+  private forkReadWork(filePath: string, bootstrap: CodexForkBootstrap, targetSize: number, criteria: string): ForkReadWork {
+    const snapshot = this.ownerSnapshots.get(filePath)!;
+    const owner = this.ownerProbes.get(filePath)!;
+    const key = JSON.stringify([snapshot.inode, owner.sourceGeneration, criteria]);
+    const existing = this.forkReaders.get(filePath);
+    if (existing?.criteria === key && (existing.reader.parsedOffset === bootstrap.searchOffset
+      || existing.located?.startOffset === bootstrap.searchOffset)) return existing;
+    const work: ForkReadWork = { criteria: key, reader: new CodexGuardedJsonlReadTask(filePath, snapshot,
+      owner.sourceGeneration, bootstrap.state === 'baseline-tail' ? 'baseline' : 'fork_search', bootstrap.searchOffset,
+      bootstrap.readProbe ?? existing?.reader.serialize(), owner.serialize().anchors, targetSize) };
+    this.forkReaders.set(filePath, work);
+    return work;
+  }
+
+  private async findTurnStartOffset(filePath: string, ownerThreadId: string, bootstrap: CodexForkBootstrap,
+    slice: CodexFileWorkSlice): Promise<ForkLocation> {
+    const snapshot = this.ownerSnapshots.get(filePath)!;
+    const work = this.forkReadWork(filePath, bootstrap, snapshot.size,
+      JSON.stringify(['search', ownerThreadId, bootstrap.initialTurnId, bootstrap.initialTurnId ? null : bootstrap.recoveryTurnId]));
+    if (work.located) {
+      const validated = await work.reader.validate(slice, snapshot);
+      if (validated === 'complete') return work.located;
+      return { startOffset: null, nextOffset: work.reader.parsedOffset,
+        status: validated === 'deferred' ? 'deferred' : 'waiting' };
     }
-    const runtime = this.getInputRuntimeAccumulator();
-    const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size, runtime);
-    const ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-      filePath,
-      scanOffset,
-      runtime,
-    );
-    this.saveCheckpoint(key, {
-      inode: stat.ino,
-      scanOffset,
-      activeTurn: null,
-      pendingTerminal: null,
-      pendingFusion: null,
-      pendingSubagent: null,
-      ownerSessionMetaOffset,
-      forkBootstrap: {
-        state: 'baseline-search',
-        searchOffset: 0,
-      },
+    let located: ForkLocation | undefined;
+    const ownerTimestamp = uuidV7TimestampMs(ownerThreadId);
+    const result = await work.reader.step(slice, snapshot, line => {
+      const payload = asRecord(line.record.payload);
+      const turnId = payload && turnIdForStart(line.record, payload);
+      if (!turnId) return;
+      let anchorKind: ForkLocation['anchorKind'];
+      if (bootstrap.initialTurnId) {
+        if (turnId === bootstrap.initialTurnId) anchorKind = 'initial-hook';
+      } else {
+        const candidateTimestamp = uuidV7TimestampMs(turnId);
+        if (ownerTimestamp !== undefined && candidateTimestamp !== undefined && candidateTimestamp >= ownerTimestamp) anchorKind = 'uuidv7';
+        else if (turnId === bootstrap.recoveryTurnId) anchorKind = 'terminal-recovery';
+      }
+      if (!anchorKind) return;
+      located = { startOffset: line.startOffset, nextOffset: line.endOffset, turnId, anchorKind, status: 'complete' };
+      return false;
     });
+    if (located && result.status === 'complete') {
+      work.located = located;
+      return located;
+    }
+    return { startOffset: null, nextOffset: result.nextOffset,
+      status: result.status === 'deferred' ? 'deferred' : 'waiting' };
+  }
+
+  private async parkForkBaseline(filePath: string, key: string, targetSize?: number, slice?: CodexFileWorkSlice): Promise<void> {
+    await this.readBaseline(filePath, key, 'fork', targetSize, slice);
   }
 
   private async rebuildForkBaselineTail(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
-  ): Promise<boolean> {
+    slice: CodexFileWorkSlice,
+  ): Promise<{ ready: boolean; changed: boolean; status: CodexWorkStepResult['status'] }> {
     const bootstrap = checkpoint.forkBootstrap;
-    if (!bootstrap || bootstrap.state !== 'baseline-tail') return true;
+    if (!bootstrap || bootstrap.state !== 'baseline-tail') return { ready: true, changed: false, status: 'complete' };
 
     const baselineEnd = checkpoint.scanOffset;
     const searchOffset = boundedSearchOffset(bootstrap.searchOffset, baselineEnd);
-    const scanEnd = Math.min(baselineEnd, searchOffset + MAX_SCAN_BYTES_PER_FILE_CYCLE);
+    bootstrap.searchOffset = searchOffset;
+    const work = this.forkReadWork(filePath, bootstrap, baselineEnd, `tail:${baselineEnd}`);
     let candidate = bootstrap.tailCandidate
       ? cloneActiveTurn(bootstrap.tailCandidate)
       : null;
@@ -1902,28 +2591,19 @@ export class CodexTranscriptInput extends BaseInput {
       if (terminalTurnIdFor(line.record, payload) === candidate?.turnId) candidate = null;
     };
 
-    const runtime = this.getInputRuntimeAccumulator();
-    let scan = await scanJsonLines(filePath, searchOffset, scanEnd, processLine, runtime);
-    if (scan.nextOffset === searchOffset && scanEnd < baselineEnd) {
-      scan = await scanJsonLines(
-        filePath,
-        searchOffset,
-        baselineEnd,
-        line => {
-          processLine(line);
-          return false;
-        },
-        runtime,
-      );
+    const scan = await work.reader.step(slice, this.ownerSnapshots.get(filePath)!, processLine, false);
+    if (scan.status === 'source-conflict') {
+      checkpoint.forkBootstrap = { ...bootstrap, readProbe: work.reader.serialize() };
+      return { ready: false, changed: true, status: 'waiting' };
     }
-
-    if (scan.nextOffset < baselineEnd) {
+    if (scan.status !== 'complete' || scan.nextOffset < baselineEnd) {
       checkpoint.forkBootstrap = {
         ...bootstrap,
         searchOffset: scan.nextOffset,
+        readProbe: work.reader.serialize(),
         ...(candidate ? { tailCandidate: candidate } : { tailCandidate: undefined }),
       };
-      return false;
+      return { ready: false, changed: true, status: scan.status === 'deferred' ? 'deferred' : 'waiting' };
     }
 
     if (candidate) {
@@ -1931,53 +2611,68 @@ export class CodexTranscriptInput extends BaseInput {
       checkpoint.activeTurn = candidate;
     }
     checkpoint.forkBootstrap = undefined;
-    return true;
+    this.forkReaders.delete(filePath);
+    return { ready: true, changed: true, status: 'complete' };
   }
 
-  private async baselineFile(filePath: string, key: string): Promise<void> {
+  private async baselineFile(filePath: string, key: string, targetSize?: number, slice?: CodexFileWorkSlice): Promise<void> {
+    await this.readBaseline(filePath, key, 'normal', targetSize, slice);
+  }
+
+  private async readBaseline(filePath: string, key: string, mode: 'normal' | 'fork', targetSize?: number,
+    slice?: CodexFileWorkSlice): Promise<void> {
     let stat;
-    try {
-      stat = await fs.stat(filePath);
-    } catch {
-      return;
+    try { stat = await fs.stat(filePath); } catch { return; }
+    const snapshot = codexSourceSnapshot(stat);
+    const owner = this.ownerProbes.get(filePath);
+    if (!owner?.readyFor(snapshot)) return;
+    const checkpoint = this.readCheckpoint(key)!;
+    const startup = checkpoint.startupBaselineTarget;
+    const limit = startup?.inode === snapshot.inode ? startup.size : targetSize !== undefined && checkpoint.inode === snapshot.inode
+      ? targetSize : snapshot.size;
+    checkpoint.startupBaselineTarget = { inode: snapshot.inode, size: limit };
+    const restored = checkpoint.baselineRead?.mode === mode && checkpoint.baselineRead.probe.snapshot.inode === snapshot.inode
+      ? checkpoint.baselineRead : undefined;
+    let reader = this.baselineReaders.get(filePath);
+    if (!reader || reader.sourceGeneration !== owner.sourceGeneration || reader.serialize().targetSize !== limit) {
+      reader = new CodexGuardedJsonlReadTask(filePath, snapshot, owner.sourceGeneration, 'baseline',
+        restored?.probe.nextCompleteOffset ?? 0, restored?.probe, owner.serialize().anchors, limit);
+      this.baselineReaders.set(filePath, reader);
     }
-    let ownerSessionMetaOffset: number | null = null;
-    let activeTurn: CodexActiveTranscriptTurn | null = null;
-    const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
+    let activeTurn = restored?.activeTurn ? cloneActiveTurn(restored.activeTurn) : null;
+    let ownerSessionMetaOffset = restored?.ownerSessionMetaOffset ??
+      (owner.resolution.kind === 'resolved' ? owner.resolution.ownerOffset : null);
+    const work = slice ?? this.activeReadSlice ?? this.cycleWorkBudget!.fileSlice(filePath);
+    const progress = await reader.step(work, snapshot, line => {
+      if (mode === 'fork') return;
       const payload = asRecord(line.record.payload);
       if (!payload) return;
       if (line.record.type === 'session_meta') {
-        ownerSessionMetaOffset = selectOwnerSessionMetaOffset(
-          filePath,
-          ownerSessionMetaOffset,
-          line,
-        );
+        ownerSessionMetaOffset = selectOwnerSessionMetaOffset(filePath, ownerSessionMetaOffset, line);
         return;
       }
       const turnId = turnIdForStart(line.record, payload);
       if (turnId && (!activeTurn || activeTurn.turnId !== turnId)) {
         activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()), true);
       }
-      if (turnId && activeTurn?.turnId === turnId) {
-        updateActiveTurnMetadata(activeTurn, line.record, payload);
-        return;
-      }
-      const terminalTurnId = terminalTurnIdFor(line.record, payload);
-      if (terminalTurnId === activeTurn?.turnId) {
-        activeTurn = null;
-      }
-    }, this.getInputRuntimeAccumulator());
-    const baselineActiveTurn = activeTurn as CodexActiveTranscriptTurn | null;
-    if (baselineActiveTurn) baselineActiveTurn.startOffset = nextOffset;
-    this.saveCheckpoint(key, {
-      inode: stat.ino,
-      scanOffset: nextOffset,
-      activeTurn: baselineActiveTurn,
-      pendingTerminal: null,
-      pendingFusion: null,
-      pendingSubagent: null,
-      ownerSessionMetaOffset,
-    });
+      if (turnId && activeTurn) { updateActiveTurnMetadata(activeTurn, line.record, payload); return; }
+      if (terminalTurnIdFor(line.record, payload) === activeTurn?.turnId) activeTurn = null;
+    }, false);
+    if (progress.status === 'deferred' || progress.status === 'source-conflict') {
+      checkpoint.baselineRead = { mode, probe: reader.serialize(),
+        activeTurn: progress.status === 'source-conflict' ? restored?.activeTurn ?? null : activeTurn,
+        ownerSessionMetaOffset: progress.status === 'source-conflict' ? restored?.ownerSessionMetaOffset ?? null : ownerSessionMetaOffset };
+      this.saveCheckpoint(key, checkpoint);
+      return;
+    }
+    // 原启动水位落在半行内时只取其之前的完整行，不吞掉启动后的补齐字节。
+    const candidate = activeTurn as CodexActiveTranscriptTurn | null;
+    if (candidate) candidate.startOffset = progress.nextOffset;
+    this.baselineReaders.delete(filePath);
+    this.normalScanReaders.delete(filePath);
+    this.saveCheckpoint(key, { inode: snapshot.inode, scanOffset: progress.nextOffset, startupBaselineTarget: undefined,
+      activeTurn: mode === 'fork' ? null : candidate, pendingTerminal: null, pendingFusion: null, pendingSubagent: null,
+      ownerSessionMetaOffset, ...(mode === 'fork' ? { forkBootstrap: { state: 'baseline-search' as const, searchOffset: 0 } } : {}) });
   }
 
   private async discoverSessionFiles(): Promise<DiscoveredSessionFile[]> {
@@ -2163,6 +2858,10 @@ export class CodexTranscriptInput extends BaseInput {
           ...(typeof pending.firstPendingAtMs === 'number' ? { firstPendingAtMs: pending.firstPendingAtMs } : {}),
           ...(typeof pending.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: pending.lastAttemptAtMs } : {}),
           ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
+          ...(typeof pending.nextRetryAtMs === 'number' && Number.isFinite(pending.nextRetryAtMs) ? { nextRetryAtMs: pending.nextRetryAtMs } : {}),
+          ...(typeof pending.failureKey === 'string' ? { failureKey: pending.failureKey } : {}),
+          ...(Number.isSafeInteger(pending.backoffCount) && Number(pending.backoffCount) >= 0 ? { backoffCount: Number(pending.backoffCount) } : {}),
+          ...(parseCodexSourceRef(pending.sourceRef) ? { sourceRef: parseCodexSourceRef(pending.sourceRef) } : {}),
         }
       : null;
     const fusion = asRecord(value.pendingFusion);
@@ -2217,6 +2916,18 @@ export class CodexTranscriptInput extends BaseInput {
       // so recover them through the normal independent terminal path.
       pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
     }
+    const deferred = asRecord(value.deferredScan);
+    const deferredScan = deferred && Number.isSafeInteger(deferred.endOffset) && Number(deferred.endOffset) >= value.scanOffset
+      && (deferred.terminalTurnId === null || typeof deferred.terminalTurnId === 'string')
+      && (deferred.ownerSessionMetaOffset === null || typeof deferred.ownerSessionMetaOffset === 'number')
+      && ['records', 'parseSuccessRecords', 'parseFailedRecords', 'maxRecordBytes'].every(key => Number.isSafeInteger(deferred[key]) && Number(deferred[key]) >= 0)
+      ? { endOffset: Number(deferred.endOffset), terminalTurnId: deferred.terminalTurnId as string | null,
+        activeTurn: parseActiveTranscriptTurn(deferred.activeTurn), ownerSessionMetaOffset: deferred.ownerSessionMetaOffset as number | null,
+        records: Number(deferred.records), parseSuccessRecords: Number(deferred.parseSuccessRecords),
+        parseFailedRecords: Number(deferred.parseFailedRecords), maxRecordBytes: Number(deferred.maxRecordBytes) } : undefined;
+    const parsedScanProbe = parseCodexJsonlProbeState(value.scanProbe);
+    const scanProbe = parsedScanProbe?.snapshot.inode === value.inode
+      && parsedScanProbe.nextCompleteOffset === (deferredScan?.endOffset ?? value.scanOffset) ? parsedScanProbe : undefined;
     const bootstrapRecord = asRecord(value.forkBootstrap);
     const bootstrapTailCandidate = parseActiveTranscriptTurn(bootstrapRecord?.tailCandidate);
     const bootstrapState = bootstrapRecord?.state === 'baseline-tail'
@@ -2238,6 +2949,7 @@ export class CodexTranscriptInput extends BaseInput {
       ? {
           state: bootstrapState,
           searchOffset: bootstrapRecord.searchOffset,
+          readProbe: parseCodexJsonlProbeState(bootstrapRecord.readProbe),
           ...(typeof bootstrapRecord.initialTurnId === 'string'
             ? { initialTurnId: bootstrapRecord.initialTurnId }
             : typeof bootstrapRecord.turnId === 'string'
@@ -2267,17 +2979,49 @@ export class CodexTranscriptInput extends BaseInput {
         : null,
       ...(forkBootstrap ? { forkBootstrap } : {}),
       ...(typeof value.firstOwnedTurnId === 'string' ? { firstOwnedTurnId: value.firstOwnedTurnId } : {}),
+      ownerProbe: parseCodexOwnerProbeState(value.ownerProbe),
+      ...(asRecord(value.baselineRead) && ['normal', 'fork'].includes(String(asRecord(value.baselineRead)!.mode))
+        && parseCodexJsonlProbeState(asRecord(value.baselineRead)!.probe)
+        ? { baselineRead: { mode: asRecord(value.baselineRead)!.mode as 'normal' | 'fork',
+          probe: parseCodexJsonlProbeState(asRecord(value.baselineRead)!.probe)!,
+          activeTurn: parseActiveTranscriptTurn(asRecord(value.baselineRead)!.activeTurn),
+          ownerSessionMetaOffset: typeof asRecord(value.baselineRead)!.ownerSessionMetaOffset === 'number'
+            ? asRecord(value.baselineRead)!.ownerSessionMetaOffset as number : null } } : {}),
+      ...(deferredScan ? { deferredScan } : {}),
+      ...(scanProbe ? { scanProbe } : {}),
+      recordReads: Array.isArray(value.recordReads) ? value.recordReads.slice(0, 4).flatMap(state => {
+        const parsed = parseCodexRecordReadState(state);
+        return parsed ? [parsed] : [];
+      }) : [],
+      ...(asRecord(value.startupBaselineTarget)
+        && typeof asRecord(value.startupBaselineTarget)!.inode === 'number'
+        && Number.isSafeInteger(asRecord(value.startupBaselineTarget)!.size)
+        && Number(asRecord(value.startupBaselineTarget)!.size) >= 0
+        ? { startupBaselineTarget: value.startupBaselineTarget as { inode: number; size: number } } : {}),
     };
   }
 
   private saveCheckpoint(key: string, checkpoint: CodexTranscriptCheckpoint): void {
     this.saveDelegationState();
     const current = this.stateStore.get(key);
+    const filePath = key.slice(this.id.length + 1);
+    const ownerProbe = this.ownerProbes.get(filePath)?.serialize() ?? checkpoint.ownerProbe;
+    const previous = asRecord(current.extra?.codexTranscript);
+    const readStates = new Map((this.clearedRecordReadPaths.has(filePath) ? [] : checkpoint.recordReads ?? [])
+      .map(state => [JSON.stringify([state.reason, state.startOffset, state.endOffset]), state]));
+    this.clearedRecordReadPaths.delete(filePath);
+    for (const task of this.recordReads.values()) if (task.filePath === filePath) {
+      readStates.set(JSON.stringify([task.reason, task.startOffset, task.endOffset]), task.serialize());
+    }
+    const recordReads = [...readStates.values()].filter(state => state.probe.snapshot.inode === checkpoint.inode).slice(-4);
+    const persisted = { ...checkpoint, recordReads, ...(ownerProbe ? { ownerProbe } : {}),
+      ...(!('startupBaselineTarget' in checkpoint) && previous?.startupBaselineTarget
+        ? { startupBaselineTarget: previous.startupBaselineTarget as { inode: number; size: number } } : {}) };
     this.stateStore.update(key, {
       lastOffset: checkpoint.scanOffset,
       extra: {
         ...(current.extra ?? {}),
-        codexTranscript: checkpoint,
+        codexTranscript: persisted,
       },
     });
   }
@@ -2296,8 +3040,11 @@ export class CodexTranscriptInput extends BaseInput {
   ): void {
     const key = `${filePath}:${source.startOffset}`;
     if (this.pendingAgentResults.has(key)) return;
+    const sha256 = 'sha256' in source && typeof source.sha256 === 'string' ? source.sha256 : undefined;
     this.pendingAgentResults.set(key, { filePath, inode, startOffset: source.startOffset, endOffset: source.endOffset,
-      context: codexResultIdentityContext(context) });
+      context: codexResultIdentityContext(context),
+      ...(sha256 ? { sourceRef: { inode, sourceGeneration: this.ownerProbes.get(filePath)?.sourceGeneration ?? 0,
+        startOffset: source.startOffset, endOffset: source.endOffset, sha256 } } : {}) });
     trimOldestMap(this.pendingAgentResults, MAX_LINK_DESCRIPTORS);
   }
 
@@ -2311,6 +3058,8 @@ export class CodexTranscriptInput extends BaseInput {
     let changed = false;
     let unavailable = false;
     for (const [key, pending] of this.pendingAgentResults) {
+      if (this.ownerBlockedPaths.has(pending.filePath) || this.forkBlockedPaths.has(pending.filePath)
+        || !this.ownerProbes.has(pending.filePath)) { unavailable = true; continue; }
       if (!this.workspacePolicy.allows({ 'gen_ai.session.id': pending.context['gen_ai.session.id'],
         cwd: pending.context['agent.codex.cwd'] }, this.agentType)) {
         this.pendingAgentResults.delete(key);
@@ -2319,8 +3068,18 @@ export class CodexTranscriptInput extends BaseInput {
       }
       let stat: Awaited<ReturnType<typeof fs.stat>>;
       try { stat = await fs.stat(pending.filePath); } catch { unavailable = true; continue; }
-      if (stat.ino !== pending.inode || stat.size < pending.endOffset) { unavailable = true; continue; }
-      const records = await readJsonLines(pending.filePath, pending.startOffset, pending.endOffset, this.getInputRuntimeAccumulator());
+      if (stat.ino !== pending.inode || stat.size < pending.endOffset
+        || !this.ownerProbes.get(pending.filePath)!.readyFor(codexSourceSnapshot(stat))) { unavailable = true; continue; }
+      let records: Awaited<ReturnType<CodexTranscriptInput['readRecordRange']>>;
+      try {
+        records = await this.readRecordRange(pending.filePath, pending.startOffset, pending.endOffset, 'recovery', pending.sourceRef);
+      } catch (error) {
+        if (!(error instanceof CodexReadPostponed)) throw error;
+        unavailable = true;
+        continue;
+      }
+      this.clearRecordReads(pending.filePath);
+      if (!pending.sourceRef && records.sourceRef) { pending.sourceRef = records.sourceRef; changed = true; }
       if (records.items.length !== 1) { unavailable = true; continue; }
       const session = pending.context['gen_ai.session.id'];
       let unresolved = false;
@@ -2382,6 +3141,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** blob→uri with per-transcript replay cache. */
   private blobToUri(transcriptPath: string, cwd?: string, attachmentParentThreadId?: string): BlobToUriFn {
     return (params) => {
+      if (this.ownerProbes.get(transcriptPath)?.resolution.kind === 'searching') return null;
       const meta = this.transcriptMetaByPath.get(transcriptPath);
       if (!this.workspacePolicy.allows({
         // Match the event session identity, including child rollout threads.
@@ -2430,7 +3190,15 @@ function rolloutCaughtUp(
 ): boolean {
   return checkpoint.inode === stat.ino
     && checkpoint.scanOffset >= stat.size
-    && checkpoint.ownerSessionMetaOffset !== null
+    && (checkpoint.ownerSessionMetaOffset !== null
+      || (checkpoint.ownerProbe?.kind === 'absent-at-watermark' && checkpoint.ownerProbe.probe.nextCompleteOffset >= stat.size))
+    && checkpoint.ownerProbe?.kind !== 'searching'
+    && !checkpoint.ownerProbe?.conflict
+    && checkpoint.startupBaselineTarget === undefined
+    && checkpoint.baselineRead === undefined
+    && checkpoint.deferredScan === undefined
+    && !checkpoint.scanProbe?.conflict
+    && !checkpoint.recordReads?.some(state => state.probe.conflict)
     && checkpoint.activeTurn === null
     && checkpoint.pendingTerminal === null
     && checkpoint.pendingFusion === null
@@ -2594,247 +3362,6 @@ async function canonicalDirectoryPath(directoryPath: string): Promise<string> {
   }
 }
 
-async function readJsonLines(
-  filePath: string,
-  startOffset: number,
-  endOffset: number,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<{
-  items: JsonLine[];
-  nextOffset: number;
-}> {
-  if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
-  const items: JsonLine[] = [];
-  const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
-    items.push(line);
-  }, runtime);
-  return { items, nextOffset };
-}
-
-async function lastCompleteJsonlOffset(
-  filePath: string,
-  fileSize: number,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<number> {
-  if (fileSize <= 0) return 0;
-  const handle = await fs.open(filePath, 'r');
-  try {
-    const lastByte = Buffer.alloc(1);
-    const lastByteReadStartedAt = runtime?.now();
-    const lastByteRead = await handle.read(lastByte, 0, 1, fileSize - 1);
-    if (runtime && lastByteReadStartedAt !== undefined) {
-      runtime.observeRead(lastByteRead.bytesRead, 1, runtime.now() - lastByteReadStartedAt);
-    }
-    if (lastByteRead.bytesRead === 1 && lastByte[0] === 0x0a) {
-      return fileSize;
-    }
-    let position = fileSize;
-    while (position > 0) {
-      const length = Math.min(READ_CHUNK_SIZE, position);
-      position -= length;
-      const chunk = Buffer.alloc(length);
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(chunk, 0, length, position);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, length, runtime.now() - readStartedAt);
-      }
-      if (bytesRead <= 0) break;
-      const newline = chunk.subarray(0, bytesRead).lastIndexOf(0x0a);
-      if (newline >= 0) return position + newline + 1;
-    }
-    return 0;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function scanJsonLines(
-  filePath: string,
-  startOffset: number,
-  endOffset: number,
-  onLine: (line: JsonLine) => void | false | Promise<void | false>,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<{
-  nextOffset: number;
-  records: number;
-  parseSuccessRecords: number;
-  parseFailedRecords: number;
-  maxRecordBytes: number;
-}> {
-  if (endOffset <= startOffset) {
-    return {
-      nextOffset: startOffset,
-      records: 0,
-      parseSuccessRecords: 0,
-      parseFailedRecords: 0,
-      maxRecordBytes: 0,
-    };
-  }
-  const handle = await fs.open(filePath, 'r');
-  try {
-    let nextOffset = startOffset;
-    let position = startOffset;
-    let pending = Buffer.alloc(0);
-    let pendingStartOffset = startOffset;
-    let records = 0;
-    let parseSuccessRecords = 0;
-    let parseFailedRecords = 0;
-    let maxRecordBytes = 0;
-
-    while (position < endOffset) {
-      const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
-      const chunk = Buffer.alloc(length);
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(chunk, 0, length, position);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, length, runtime.now() - readStartedAt);
-      }
-      if (bytesRead <= 0) break;
-      position += bytesRead;
-
-      const data = pending.length > 0
-        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
-        : chunk.subarray(0, bytesRead);
-      const dataStartOffset = pendingStartOffset;
-      let cursor = 0;
-      while (cursor < data.length) {
-        const newline = data.indexOf(0x0a, cursor);
-        if (newline < 0) break;
-        const text = data.subarray(cursor, newline).toString('utf8').trim();
-        if (text) {
-          records++;
-          maxRecordBytes = Math.max(maxRecordBytes, newline - cursor + 1);
-          try {
-            const record: unknown = JSON.parse(text);
-            if (record && typeof record === 'object' && !Array.isArray(record)) {
-              parseSuccessRecords++;
-              const keepGoing = await onLine({
-                startOffset: dataStartOffset + cursor,
-                endOffset: dataStartOffset + newline + 1,
-                record: record as Record<string, unknown>,
-              });
-              if (keepGoing === false) {
-                nextOffset = dataStartOffset + newline + 1;
-                return {
-                  nextOffset,
-                  records,
-                  parseSuccessRecords,
-                  parseFailedRecords,
-                  maxRecordBytes,
-                };
-              }
-            } else {
-              parseFailedRecords++;
-            }
-          } catch {
-            // Invalid completed lines are ignored but their bytes are consumed.
-            parseFailedRecords++;
-          }
-        }
-        nextOffset = dataStartOffset + newline + 1;
-        cursor = newline + 1;
-      }
-
-      pending = cursor < data.length ? Buffer.from(data.subarray(cursor)) : Buffer.alloc(0);
-      pendingStartOffset = dataStartOffset + cursor;
-    }
-
-    return {
-      nextOffset,
-      records,
-      parseSuccessRecords,
-      parseFailedRecords,
-      maxRecordBytes,
-    };
-  } finally {
-    await handle.close();
-  }
-}
-
-async function findOwnerSessionMetaOffset(
-  filePath: string,
-  endOffset: number,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<number | null> {
-  let ownerOffset: number | null = null;
-  let sawSessionMeta = false;
-  await scanJsonLines(filePath, 0, endOffset, line => {
-    if (line.record.type !== 'session_meta') {
-      // Codex writes the owning meta and any copied fork metadata as a header.
-      // Stop before scanning the potentially large inherited conversation.
-      return sawSessionMeta ? false : undefined;
-    }
-    sawSessionMeta = true;
-    ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
-    return undefined;
-  }, runtime);
-  return ownerOffset;
-}
-
-type ForkAnchorKind = 'initial-hook' | 'uuidv7' | 'terminal-recovery';
-
-/** Locate the first positively-owned turn of a forked rollout in one bounded window. */
-async function findTurnStartOffset(
-  filePath: string,
-  ownerThreadId: string,
-  initialTurnId: string | undefined,
-  recoveryTurnId: string | undefined,
-  startOffset: number,
-  fileSize: number,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<{
-  startOffset: number | null;
-  nextOffset: number;
-  turnId?: string;
-  anchorKind?: ForkAnchorKind;
-}> {
-  let turnStartOffset: number | null = null;
-  let matchedTurnId: string | undefined;
-  let anchorKind: ForkAnchorKind | undefined;
-  const safeStart = boundedSearchOffset(startOffset, fileSize);
-  const scanEnd = Math.min(fileSize, safeStart + MAX_SCAN_BYTES_PER_FILE_CYCLE);
-  const ownerTimestamp = uuidV7TimestampMs(ownerThreadId);
-  const { nextOffset } = await scanJsonLines(filePath, safeStart, scanEnd, line => {
-    const payload = asRecord(line.record.payload);
-    if (!payload) return undefined;
-    const candidateTurnId = turnIdForStart(line.record, payload);
-    if (!candidateTurnId) return undefined;
-
-    if (initialTurnId && candidateTurnId === initialTurnId) {
-      turnStartOffset = line.startOffset;
-      matchedTurnId = candidateTurnId;
-      anchorKind = 'initial-hook';
-      return false;
-    }
-    if (initialTurnId) return undefined;
-
-    const candidateTimestamp = uuidV7TimestampMs(candidateTurnId);
-    if (
-      ownerTimestamp !== undefined
-      && candidateTimestamp !== undefined
-      && candidateTimestamp >= ownerTimestamp
-    ) {
-      turnStartOffset = line.startOffset;
-      matchedTurnId = candidateTurnId;
-      anchorKind = 'uuidv7';
-      return false;
-    }
-    if (recoveryTurnId && candidateTurnId === recoveryTurnId) {
-      turnStartOffset = line.startOffset;
-      matchedTurnId = candidateTurnId;
-      anchorKind = 'terminal-recovery';
-      return false;
-    }
-    return undefined;
-  }, runtime);
-  return {
-    startOffset: turnStartOffset,
-    nextOffset,
-    ...(matchedTurnId ? { turnId: matchedTurnId } : {}),
-    ...(anchorKind ? { anchorKind } : {}),
-  };
-}
-
 function boundedSearchOffset(value: number, fileSize: number): number {
   if (!Number.isFinite(value) || value < 0 || value > fileSize) return 0;
   return Math.trunc(value);
@@ -2850,41 +3377,6 @@ function selectOwnerSessionMetaOffset(
   const rolloutThreadId = sessionIdFromTranscriptPath(filePath);
   if (meta.threadId === rolloutThreadId) return line.startOffset;
   return currentOffset ?? line.startOffset;
-}
-
-async function readJsonLineAt(
-  filePath: string,
-  offset: number,
-  runtime?: InputRuntimeAccumulator | null,
-): Promise<Record<string, unknown> | null> {
-  const handle = await fs.open(filePath, 'r');
-  try {
-    const chunks: Buffer[] = [];
-    let position = offset;
-    for (let attempt = 0; attempt < 16; attempt++) {
-      const buffer = Buffer.alloc(64 * 1024);
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, buffer.length, runtime.now() - readStartedAt);
-      }
-      if (bytesRead === 0) break;
-      const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
-      chunks.push(buffer.subarray(0, newline >= 0 ? newline : bytesRead));
-      if (newline >= 0) {
-        try {
-          const record = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          return record && typeof record === 'object' && !Array.isArray(record) ? record : null;
-        } catch {
-          return null;
-        }
-      }
-      position += bytesRead;
-    }
-    return null;
-  } finally {
-    await handle.close();
-  }
 }
 
 function turnIdForStart(record: Record<string, unknown>, payload: Record<string, unknown>): string | null {
@@ -3077,7 +3569,10 @@ function uuidV7TimestampMs(value: string): number | undefined {
 }
 
 function cloneActiveTurn(activeTurn: CodexActiveTranscriptTurn): CodexActiveTranscriptTurn {
-  return structuredClone(activeTurn);
+  // builder 把上下文视为不可变值：提交只替换整个引用，不修改旧消息或 delta。
+  // 回滚副本仍隔离可变的去重/委派状态，但不重复深拷贝已提交的大消息上下文。
+  const { inputContext, ...mutable } = activeTurn;
+  return { ...structuredClone(mutable), ...(inputContext ? { inputContext: { ...inputContext } } : {}) };
 }
 
 function codexTurnEndMarker(
@@ -3128,10 +3623,15 @@ function serializedEntryBytes(entry: AgentActivityEntry): number {
   }
 }
 
+function pendingRetryDelay(retryCount: number): number {
+  return Math.min(300_000, 10_000 * 2 ** Math.min(5, Math.max(0, retryCount - 1)));
+}
+
 function newPendingTerminal(
   turnId: string,
   terminalEndOffset: number,
   sourceRecordCount: number,
+  sourceRef?: CodexTranscriptSourceRef,
 ): CodexPendingTerminalTurn {
   const now = Date.now();
   return {
@@ -3140,6 +3640,9 @@ function newPendingTerminal(
     retryCount: 1,
     firstPendingAtMs: now,
     lastAttemptAtMs: now,
+    nextRetryAtMs: now + pendingRetryDelay(1),
+    backoffCount: 1,
+    ...(sourceRef ? { sourceRef } : {}),
     sourceRecordCount,
   };
 }

@@ -152,13 +152,30 @@ interface StepEnvelope {
   lastCumulativeTokenTotal?: number;
 }
 
+export interface CodexTurnReducer {
+  feed(records: CodexTranscriptSourceRecord[]): void;
+  snapshot(): CodexPartialTurnExtraction | null;
+  commit(stepCount: number, consumedEndOffset: number): void;
+  readonly parsedRecords: number;
+  /** 仅供内部容量回收检查，包含未出现在部分 snapshot 的活动 envelope。 */
+  retainedState(): unknown;
+}
+
 function extractCodexTurn(
-  records: CodexTranscriptSourceRecord[],
-  meta: CodexTranscriptMeta | null,
-  fallbackSessionId: string,
-  expectedTurnId: string,
-  opts: {
+  records: CodexTranscriptSourceRecord[], meta: CodexTranscriptMeta | null,
+  fallbackSessionId: string, expectedTurnId: string, opts: CodexTurnReducerOptions,
+): CodexPartialTurnExtraction | null {
+  const reducer = createCodexTurnReducer(meta, fallbackSessionId, expectedTurnId, opts);
+  reducer.feed(records);
+  return reducer.snapshot();
+}
+
+export type CodexRetainedContentKind = 'prompt' | 'reasoning' | 'final' | 'input-message' | 'tool-input' | 'tool-output';
+
+export interface CodexTurnReducerOptions {
     requireTerminal: boolean;
+    retainText?: (value: string | undefined, source: CodexTranscriptSourceRecord, kind: CodexRetainedContentKind) => string | undefined;
+    retainValue?: (value: JsonValue | null | undefined, source: CodexTranscriptSourceRecord, kind: CodexRetainedContentKind, role?: string) => JsonValue | null | undefined;
     blobToUri?: BlobToUriFn;
     uploadMode?: MultimodalUploadMode;
     startedAtMs?: number;
@@ -167,8 +184,15 @@ function extractCodexTurn(
     model?: string;
     cwd?: string;
     developerInstructions?: string;
-  },
-): CodexPartialTurnExtraction | null {
+}
+
+export function createCodexTurnReducer(
+  meta: CodexTranscriptMeta | null, fallbackSessionId: string, expectedTurnId: string,
+  opts: CodexTurnReducerOptions,
+): CodexTurnReducer {
+  let parsedRecords = 0;
+  let firstOffset: number | undefined;
+  let lastSource: CodexTranscriptSourceRecord | undefined;
   let currentTurnId = opts.requireTerminal ? '' : expectedTurnId;
   let startedAtMs = opts.startedAtMs ?? 0;
   let terminalAtMs = 0;
@@ -240,7 +264,8 @@ function extractCodexTurn(
   // TypeScript cannot infer mutations made by beginStep/flushCurrentStep through
   // their closures, so read the mutable step through an explicitly typed getter.
   const activeStep = (): StepEnvelope | null => currentStep;
-  const appendPrompt = (value: string | undefined): void => {
+  const appendPrompt = (text: string | undefined, source: CodexTranscriptSourceRecord): void => {
+    const value = opts.retainText?.(text, source, 'prompt') ?? text;
     if (!value || promptParts.includes(value)) return;
     promptParts.push(value);
     prompt = promptParts.join('\n');
@@ -249,7 +274,12 @@ function extractCodexTurn(
     if (timestamp > 0) lastActivityAtMs = timestamp;
   };
 
+  const feed = (records: CodexTranscriptSourceRecord[]): void => {
   for (const source of records) {
+    if (sawTerminal) break;
+    parsedRecords++;
+    firstOffset ??= source.startOffset;
+    lastSource = { startOffset: source.startOffset, endOffset: source.endOffset, record: {} };
     const record = source.record;
     const payload = asRecord(record.payload);
     if (!payload) continue;
@@ -292,7 +322,7 @@ function extractCodexTurn(
 
     if (record.type === 'event_msg') {
       if (payload.type === 'user_message') {
-        appendPrompt(stringValue(payload.message));
+        appendPrompt(stringValue(payload.message), source);
         sawSubmittedUserMessage = true;
         markActivity(timestamp);
         continue;
@@ -300,7 +330,8 @@ function extractCodexTurn(
       if (payload.type === 'agent_message') {
         const active = activeStep();
         if (active && stepToolsComplete(active.step)) flushCurrentStep();
-        const message = stringValue(payload.message);
+        const text = stringValue(payload.message);
+        const message = opts.retainText?.(text, source, 'reasoning') ?? text;
         if (message) {
           const next = beginStep(lastActivityAtMs || timestamp, source);
           touchStep(next, source);
@@ -385,7 +416,8 @@ function extractCodexTurn(
         status = 'completed';
         sawTerminal = true;
         terminalAtMs = timestamp;
-        finalText = stringValue(payload.last_agent_message);
+        const text = stringValue(payload.last_agent_message);
+        finalText = opts.retainText?.(text, source, 'final') ?? text;
         break;
       }
       if (payload.type === 'turn_aborted' && stringValue(payload.turn_id) === expectedTurnId) {
@@ -411,10 +443,11 @@ function extractCodexTurn(
         (!meta.agentPath || !recipient || recipient === meta.agentPath)
         && (!messageTurnId || messageTurnId === expectedTurnId)
       ) {
-        const message = transcriptInputMessage('user', payload.content);
+        const rawMessage = transcriptInputMessage('user', payload.content);
+        const message = opts.retainValue ? opts.retainValue(rawMessage, source, 'input-message', 'user') : rawMessage;
         if (message) {
           inputMessages.push(message);
-          appendPrompt(extractMessageText(payload.content));
+          appendPrompt(extractMessageText(payload.content), source);
           sawSubmittedUserMessage = true;
           markActivity(timestamp);
         }
@@ -432,23 +465,25 @@ function extractCodexTurn(
         step.responseId ??= stringValue(payload.id);
         step.responseAtMs = timestamp;
         step.hasResponseEvidence = true;
-        const message = extractMessageText(payload.content);
+        const text = extractMessageText(payload.content);
+        const message = opts.retainText?.(text, source, 'reasoning') ?? text;
         if (message && step.reasoning[step.reasoning.length - 1] !== message) {
           step.reasoning.push(message);
         }
       } else if (role) {
         // Input entry: user / non-assistant roles → gen_ai.input.messages
-        const message = transcriptInputMessage(
+        const rawMessage = transcriptInputMessage(
           role,
           payload.content,
           multimodalUploadIncludesInput(uploadMode) ? blobToUri : undefined,
           timestamp,
           source.startOffset,
         );
+        const message = opts.retainValue ? opts.retainValue(rawMessage, source, 'input-message', role) : rawMessage;
         if (message) {
           inputMessages.push(message);
           if (role === 'user') {
-            appendPrompt(extractMessageText(payload.content));
+            appendPrompt(extractMessageText(payload.content), source);
           }
         }
         markActivity(timestamp);
@@ -492,6 +527,7 @@ function extractCodexTurn(
           : call.startedAtMs;
         step.hasResponseEvidence = true;
       }
+      if (opts.retainValue) call.input = opts.retainValue(call.input, source, 'tool-input') ?? undefined;
       step.tools.push(call);
       toolSteps.set(call.callId, envelope);
       markActivity(call.completedAtMs ?? timestamp);
@@ -513,47 +549,58 @@ function extractCodexTurn(
     const tool = step.tools.find(candidate => candidate.callId === toolOutput.callId);
     if (!tool) continue;
     tool.completedAtMs = timestamp;
-    tool.output = toolOutput.output;
+    tool.output = opts.retainValue ? opts.retainValue(toolOutput.output, source, 'tool-output') ?? undefined : toolOutput.output;
     step.completedAtMs = Math.max(step.completedAtMs, timestamp);
     touchStep(envelope, source);
     markActivity(timestamp);
   }
 
-  if (opts.requireTerminal && (!status || !terminalAtMs)) return null;
+  }
 
-  const finalActiveStep = activeStep();
-  if (finalActiveStep && stepToolsComplete(finalActiveStep.step)) flushCurrentStep();
+  const snapshot = (): CodexPartialTurnExtraction | null => {
+  if (opts.requireTerminal && (!status || !terminalAtMs)) return null;
+  // snapshot 只投影候选，不关闭仍在接收工具结果或迟到 usage 的活动 envelope。
+  const envelopes = stepEnvelopes.map(copyEnvelope);
+  let active = activeStep() ? copyEnvelope(activeStep()!) : null;
+  const appendActive = (force = false): void => {
+    if (!active) return;
+    const step = active.step;
+    if (force || step.reasoning.length > 0 || step.tools.length > 0 || step.finalText) {
+      active.lastCumulativeTokenTotal = lastCumulativeTokenTotal;
+      envelopes.push(active);
+    }
+    active = null;
+  };
+  if (active && stepToolsComplete(active.step)) appendActive();
+  let projectedTerminalAtMs = terminalAtMs;
   if (!status && !opts.requireTerminal) {
-    if (stepEnvelopes.length === 0 && !prompt) return null;
-    terminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
-    status = 'completed';
+    if (envelopes.length === 0 && !prompt) return null;
+    projectedTerminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
   } else if (status === 'completed') {
-    let terminalEnvelope = activeStep() ?? stepEnvelopes.at(-1) ?? null;
+    let terminalEnvelope = active ?? envelopes.at(-1) ?? null;
     if (!terminalEnvelope) {
-      const terminalSource = records.at(-1) ?? {
-        startOffset: 0,
-        endOffset: 0,
-        record: {},
+      terminalEnvelope = {
+        step: { startedAtMs: lastActivityAtMs || startedAtMs || terminalAtMs, responseAtMs: terminalAtMs,
+          hasResponseEvidence: false, completedAtMs: terminalAtMs, reasoning: [], tools: [] },
+        sourceRange: { startOffset: lastSource?.startOffset ?? 0, endOffset: lastSource?.endOffset ?? 0 },
+        llmClosed: false, followedByAnotherWave: false,
       };
-      terminalEnvelope = beginStep(lastActivityAtMs || startedAtMs || terminalAtMs, terminalSource);
-      terminalEnvelope.step.responseAtMs = terminalAtMs;
+      active = terminalEnvelope;
     }
-    if (terminalEnvelope) {
-      const step = terminalEnvelope.step;
-      if (finalText) {
-        if (step.reasoning[step.reasoning.length - 1] === finalText) step.reasoning.pop();
-        step.finalText = finalText;
-      }
-      step.completedAtMs = terminalAtMs;
-      if (terminalEnvelope === activeStep()) flushCurrentStep(true);
+    const step = terminalEnvelope.step;
+    if (finalText) {
+      if (step.reasoning.at(-1) === finalText) step.reasoning.pop();
+      step.finalText = finalText;
     }
-  } else if (activeStep()) {
-    activeStep()!.step.completedAtMs = terminalAtMs;
-    flushCurrentStep();
+    step.completedAtMs = terminalAtMs;
+    if (terminalEnvelope === active) appendActive(true);
+  } else if (active) {
+    active.step.completedAtMs = terminalAtMs;
+    appendActive();
   }
 
   const resolvedStatus = status ?? 'completed';
-  const steps = stepEnvelopes.map(envelope => envelope.step);
+  const steps = envelopes.map(envelope => envelope.step);
   const promptReady = Boolean(
     prompt
     && (sawSubmittedUserMessage || steps.length > 0 || sawTerminal),
@@ -564,32 +611,70 @@ function extractCodexTurn(
     provider: meta?.provider ?? 'openai',
     model,
     status: resolvedStatus,
-    startedAtMs: startedAtMs || terminalAtMs,
-    terminalAtMs,
+    startedAtMs: startedAtMs || projectedTerminalAtMs,
+    terminalAtMs: projectedTerminalAtMs,
     ...(prompt ? { prompt } : {}),
     promptReady,
-    inputMessages,
+    inputMessages: [...inputMessages],
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),
     ...(meta?.toolDefinitions !== undefined ? { toolDefinitions: meta.toolDefinitions } : {}),
     steps,
-    unmatchedTokenUsages,
+    unmatchedTokenUsages: [...unmatchedTokenUsages],
   };
   const committedEnvelopes = sawTerminal
-    ? stepEnvelopes
-    : leadingIncrementallyCommittableSteps(stepEnvelopes);
+    ? envelopes
+    : leadingIncrementallyCommittableSteps(envelopes);
   const committedTail = committedEnvelopes.at(-1);
   return {
     turn,
     committedStepCount: committedEnvelopes.length,
     committedStepRanges: committedEnvelopes.map(envelope => ({ ...envelope.sourceRange })),
-    consumedEndOffset: committedTail?.sourceRange.endOffset ?? records[0]?.startOffset ?? 0,
+    consumedEndOffset: committedTail?.sourceRange.endOffset ?? firstOffset ?? 0,
     ...(committedTail ? { nextStepStartedAtMs: committedTail.step.completedAtMs } : {}),
     ...(committedTail?.lastCumulativeTokenTotal !== undefined
       ? { lastCumulativeTokenTotal: committedTail.lastCumulativeTokenTotal }
       : {}),
   };
+  };
+  const commit = (stepCount: number, consumedEndOffset: number): void => {
+    if (!Number.isSafeInteger(stepCount) || stepCount < 0 || stepCount > stepEnvelopes.length) throw new RangeError('invalid reducer commit');
+    const removed = new Set(stepEnvelopes.splice(0, stepCount));
+    for (const [callId, envelope] of toolSteps) if (removed.has(envelope)) {
+      toolSteps.delete(callId); webSearchStarts.delete(callId); webSearchEnds.delete(callId);
+    }
+    firstOffset = consumedEndOffset;
+    prompt = undefined; promptParts.length = 0; inputMessages.length = 0;
+    unmatchedTokenUsages.length = 0;
+  };
+  return { feed, snapshot, commit, get parsedRecords() { return parsedRecords; },
+    retainedState: () => ({ prompt, promptParts, inputMessages, stepEnvelopes, currentStep,
+      finalText, developerInstructions, unmatchedTokenUsages }) };
+}
+
+export function codexContentFromSource(
+  source: CodexTranscriptSourceRecord, kind: CodexRetainedContentKind, opts: CodexTurnReducerOptions, role?: string,
+): JsonValue | null | undefined {
+  const payload = asRecord(source.record.payload);
+  if (!payload) return undefined;
+  const timestamp = timestampMs(source.record, Date.now());
+  if (kind === 'final') return stringValue(payload.last_agent_message);
+  if (kind === 'prompt' || kind === 'reasoning') return source.record.type === 'event_msg'
+    ? stringValue(payload.message) : extractMessageText(payload.content);
+  if (kind === 'input-message') return transcriptInputMessage(role ?? stringValue(payload.role) ?? 'user', payload.content,
+    multimodalUploadIncludesInput(opts.uploadMode ?? (opts.blobToUri ? 'all' : 'none')) ? opts.blobToUri : undefined,
+    timestamp, source.startOffset);
+  if (kind === 'tool-input') return transcriptToolCall(stringValue(payload.type), payload, timestamp)?.input;
+  return transcriptToolOutput(stringValue(payload.type), payload,
+    multimodalUploadIncludesInput(opts.uploadMode ?? (opts.blobToUri ? 'all' : 'none')) ? opts.blobToUri : undefined,
+    timestamp, source.startOffset)?.output;
+}
+
+function copyEnvelope(envelope: StepEnvelope): StepEnvelope {
+  return { ...envelope, sourceRange: { ...envelope.sourceRange },
+    step: { ...envelope.step, reasoning: [...envelope.step.reasoning],
+      tools: envelope.step.tools.map(tool => ({ ...tool })) } };
 }
 
 function leadingIncrementallyCommittableSteps(envelopes: StepEnvelope[]): StepEnvelope[] {

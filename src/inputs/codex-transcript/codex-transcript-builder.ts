@@ -11,6 +11,8 @@ import type {
 
 const MAX_INPUT_MESSAGES_BYTES = 1024 * 1024;
 const INITIAL_INPUT_HASH = crypto.createHash('sha256').update('').digest('hex').slice(0, 32);
+// builder 生成的上下文数组在提交后不可变；弱引用字节账本不持有或持久化正文。
+const fullInputMessageBytes = new WeakMap<JsonValue[], number>();
 
 export interface CodexTranscriptBuildOptions {
   includePrompt?: boolean;
@@ -157,8 +159,16 @@ function contextFromMessages(
   const fullMessages = previousFullMessages === undefined
     ? undefined
     : [...previousFullMessages, ...delta];
-  const retainFullMessages = fullMessages !== undefined
-    && Buffer.byteLength(JSON.stringify(fullMessages), 'utf8') <= MAX_INPUT_MESSAGES_BYTES;
+  let retainFullMessages = false;
+  if (fullMessages !== undefined) {
+    // 重启/外部上下文首次按完整 JSON 计量；后续只计算新 delta、括号和分隔逗号。
+    const previousBytes = fullInputMessageBytes.get(previousFullMessages!)
+      ?? Buffer.byteLength(JSON.stringify(previousFullMessages), 'utf8');
+    const bytes = previousBytes + Buffer.byteLength(JSON.stringify(delta), 'utf8') - 2
+      + (previousFullMessages!.length > 0 && delta.length > 0 ? 1 : 0);
+    retainFullMessages = bytes <= MAX_INPUT_MESSAGES_BYTES;
+    if (retainFullMessages) fullInputMessageBytes.set(fullMessages, bytes);
+  }
   return {
     hash: hashInputMessages(previousHash, delta),
     delta,

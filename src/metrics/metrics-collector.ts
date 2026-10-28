@@ -8,6 +8,10 @@ import { checkProcessLiveness, UPDATER_PROCESS_PATTERNS } from '../utils/pid-uti
 import { createLogger } from '../utils/logger.js';
 import type { ProcessLiveness } from '../utils/pid-utils.js';
 import type { AgentsConfig, SlsEndpoint } from '../types/index.js';
+import {
+  cloneCodexReadMetrics, codexReadMetricFields,
+  type CodexReadMetrics, type CodexReadMetricFields,
+} from '../inputs/base/input-runtime-metrics.js';
 
 const logger = createLogger('MetricsCollector');
 
@@ -127,7 +131,7 @@ export interface AgentFlowMetrics extends L2Identity {
 }
 
 /** One bounded, payload-free row per running or active Input. */
-export interface InputFlowMetrics extends L2Identity {
+export interface InputFlowMetrics extends L2Identity, CodexReadMetricFields {
   type: 'input';
   agent: string;
   input_name: string;
@@ -243,6 +247,7 @@ export interface FlusherStats {
  * measured at the flushers.
  */
 export interface InputStats {
+  codexRead?: CodexReadMetrics;
   sourceKind: 'primary';
   rawReadCalls: number;
   rawReadBytes: number;
@@ -343,6 +348,7 @@ interface FlowTotals {
 }
 
 interface InputRuntimeTotals extends FlowTotals {
+  codexRead?: CodexReadMetrics;
   rawReadCalls: number;
   rawReadBytes: number;
   rawInRecords: number;
@@ -688,7 +694,12 @@ export class MetricsCollector {
         inBytes: delta(stats.inBytes, base.inBytes),
         failedEvents: delta(stats.outFailed, base.outFailed),
       };
+      const reasonMetrics = inputId === 'codex-transcript' && stats.codexRead
+        ? codexReadMetricFields(stats.codexRead, base.codexRead)
+        : {};
       this.l2InputDetailBaseline.set(inputId, {
+        ...(inputId === 'codex-transcript' && stats.codexRead
+          ? { codexRead: cloneCodexReadMetrics(stats.codexRead) } : {}),
         rawReadCalls: stats.rawReadCalls,
         rawReadBytes: stats.rawReadBytes,
         rawInRecords: stats.rawInRecords,
@@ -705,7 +716,8 @@ export class MetricsCollector {
       const carriedWindowData = Object.values(flow).some(value => value > 0)
         || stats.rawInMaxBatchBytes > 0
         || stats.rawInMaxRecordBytes > 0
-        || stats.rawBacklogBytesMax > 0;
+        || stats.rawBacklogBytesMax > 0
+        || Object.values(reasonMetrics).some(value => Number(value) > 0);
       if (!stats.running && !carriedWindowData) continue;
 
       rows.push({
@@ -729,6 +741,7 @@ export class MetricsCollector {
         in_events: String(flow.inEvents),
         in_bytes: String(flow.inBytes),
         failed_events: String(flow.failedEvents),
+        ...reasonMetrics,
       });
     }
     return rows;

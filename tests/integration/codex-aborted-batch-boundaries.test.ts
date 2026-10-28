@@ -91,8 +91,12 @@ describe('aborted Codex child turn batches', () => {
       session_id: session, turn_id: turn, initial_turn_id: turn, transcript_path: transcript,
       hook_event: 'subagent-stop', received_at: new Date().toISOString(),
     }));
-    await (input as unknown as { runCycle(): Promise<void> }).runCycle();
-    await queue;
+    // 正文校验和完整恢复共享工作时间片；延期后继续驱动原范围，不能假定一轮读穿。
+    for (let cycle = 0; cycle < 32; cycle++) {
+      await (input as unknown as { runCycle(): Promise<void> }).runCycle();
+      await queue;
+      if (batches.flat().some(entry => entry['gen_ai.turn.end'] === true)) break;
+    }
     expect(batches.length).toBeGreaterThan(1);
     expect(batches.slice(0, -1).flat().every(entry => entry['gen_ai.turn.end'] !== true)).toBe(true);
     expect(batches.flat().filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { InputManager } from '../../../src/core/input-manager.js';
+import { InputRuntimeAccumulator } from '../../../src/inputs/base/input-runtime-metrics.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
 import {
   buildTestEntry,
@@ -132,6 +133,31 @@ describe('InputManager', () => {
   });
 
   describe('registerInput and event dispatch (T030)', () => {
+    it('deeply snapshots Codex reason sums and resets only window maxima', () => {
+      const input = new StubInput('codex-transcript');
+      manager.registerInput(input as any);
+      const first = new InputRuntimeAccumulator();
+      first.observeRead(20, 32, 1, 'owner_probe');
+      first.observeCodexWork({ ownerBlockedFilesMax: 4, budgetDeferredTasks: 2 });
+      input.emit('input-runtime-delta', first.finish(1));
+      const snapshot = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(snapshot.codexRead).toMatchObject({ ownerBlockedFilesMax: 4, budgetDeferredTasks: 2 });
+      expect(manager.getInputCounters().get(input.id)!.codexRead!.ownerBlockedFilesMax).toBe(0);
+      const second = new InputRuntimeAccumulator();
+      second.observeRead(10, 16, 1, 'recovery');
+      second.observeCodexWork({ ownerBlockedFilesMax: 1 });
+      input.emit('input-runtime-delta', second.finish(1));
+      const next = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(next.rawReadBytes).toBe(30);
+      expect(next.codexRead!.readBytes).toMatchObject({ owner_probe: 20, recovery: 10 });
+      expect(next.codexRead!.ownerBlockedFilesMax).toBe(1);
+      expect(snapshot.codexRead!.readBytes.recovery).toBe(0);
+      const other = new StubInput('unrelated-input');
+      manager.registerInput(other as any);
+      other.emit('input-runtime-delta', first.finish(1));
+      expect(manager.getInputCounters().get(other.id)).not.toHaveProperty('codexRead');
+    });
+
     it('counts raw input independently from normalized entry emission', () => {
       const input = new StubInput('raw-input');
       manager.registerInput(input as any);

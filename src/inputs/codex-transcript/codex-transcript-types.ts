@@ -95,6 +95,10 @@ export interface CodexPendingTerminalTurn {
   firstPendingAtMs?: number;
   lastAttemptAtMs?: number;
   sourceRecordCount?: number;
+  nextRetryAtMs?: number;
+  backoffCount?: number;
+  failureKey?: string;
+  sourceRef?: CodexTranscriptSourceRef;
 }
 
 interface CodexForkBootstrapBase {
@@ -104,6 +108,8 @@ interface CodexForkBootstrapBase {
   recoveryTurnId?: string;
   /** How far the append-only rollout has been searched for an owned turn. */
   searchOffset: number;
+  /** 独立完整行探测证据；未提交的半行正文只保留在内存中。 */
+  readProbe?: CodexJsonlProbeState;
 }
 
 /** First-owned-turn bootstrap for a fork/subagent rollout. */
@@ -120,8 +126,78 @@ export type CodexForkBootstrap = CodexForkBootstrapBase & (
     }
 );
 
+export interface CodexOwnerMetaProbe {
+  inode: number;
+  sourceGeneration: number;
+  targetSize: number;
+  nextCompleteOffset: number;
+  candidateOwnerOffset: number | null;
+  sawSessionMeta: boolean;
+  headerClosed: boolean;
+}
+
+export type CodexOwnerResolution =
+  | { kind: 'searching'; probe: CodexOwnerMetaProbe }
+  | { kind: 'resolved'; ownerOffset: number; verifiedThroughOffset: number }
+  | { kind: 'absent-at-watermark'; verifiedThroughOffset: number };
+
+export interface CodexOwnerProbeState {
+  kind: 'searching' | 'resolved' | 'absent-at-watermark';
+  probe: CodexOwnerMetaProbe;
+  snapshot: CodexTranscriptSourceSnapshot;
+  anchors: CodexTranscriptContentAnchor[];
+  ownerRef?: CodexTranscriptSourceRef;
+  conflict?: {
+    reason: 'identity' | 'truncated' | 'fingerprint' | 'short-read';
+    retryCount: number;
+    nextRetryAtMs: number;
+  };
+}
+
+export interface CodexJsonlProbeState {
+  sourceGeneration: number;
+  snapshot: CodexTranscriptSourceSnapshot;
+  targetSize: number;
+  nextCompleteOffset: number;
+  incompleteTail: boolean;
+  anchors: CodexTranscriptContentAnchor[];
+  conflict?: CodexOwnerProbeState['conflict'];
+}
+
+export interface CodexRecordReadState extends CodexTranscriptSourceRange {
+  reason: 'recovery' | 'hydrate';
+  probe: CodexJsonlProbeState;
+  expectedRef?: CodexTranscriptSourceRef;
+}
+
+export interface CodexDeferredTranscriptScan {
+  endOffset: number;
+  terminalTurnId: string | null;
+  activeTurn: CodexActiveTranscriptTurn | null;
+  ownerSessionMetaOffset: number | null;
+  records: number;
+  parseSuccessRecords: number;
+  parseFailedRecords: number;
+  maxRecordBytes: number;
+}
+
+export interface CodexBaselineReadState {
+  mode: 'normal' | 'fork';
+  probe: CodexJsonlProbeState;
+  activeTurn: CodexActiveTranscriptTurn | null;
+  ownerSessionMetaOffset: number | null;
+}
+
 export interface CodexTranscriptCheckpoint {
   inode: number;
+  baselineRead?: CodexBaselineReadState;
+  ownerProbe?: CodexOwnerProbeState;
+  startupBaselineTarget?: { inode: number; size: number };
+  /** 独立读取事务不携带正文，也不代表业务消费。 */
+  recordReads?: CodexRecordReadState[];
+  deferredScan?: CodexDeferredTranscriptScan;
+  /** 普通扫描的固定观察前沿；半行及校验证据不提升业务消费水位。 */
+  scanProbe?: CodexJsonlProbeState;
   /** No-replay floor and next byte for normal event collection. Never rewound by fork probing. */
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
@@ -195,12 +271,31 @@ export interface CodexTranscriptStep {
 export interface CodexTranscriptSourceRecord {
   startOffset: number;
   endOffset: number;
+  sha256?: string;
   record: Record<string, unknown>;
 }
 
 export interface CodexTranscriptSourceRange {
   startOffset: number;
   endOffset: number;
+}
+
+/** Stat fields choose the validation path; they never prove prefix immutability. */
+export interface CodexTranscriptSourceSnapshot {
+  inode: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+/** SHA-256 of the exact raw byte range, including any JSONL newline bytes. */
+export interface CodexTranscriptContentAnchor extends CodexTranscriptSourceRange {
+  sha256: string;
+}
+
+export interface CodexTranscriptSourceRef extends CodexTranscriptContentAnchor {
+  inode: number;
+  sourceGeneration: number;
 }
 
 /**

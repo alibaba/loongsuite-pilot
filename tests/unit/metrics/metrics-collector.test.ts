@@ -5,6 +5,9 @@ import * as os from 'node:os';
 import { MetricsCollector } from '../../../src/metrics/metrics-collector.js';
 import type { DataflowSnapshot } from '../../../src/metrics/metrics-collector.js';
 import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+import {
+  CODEX_READ_REASONS, createCodexReadMetrics, resetCodexReadWindowMaxima,
+} from '../../../src/inputs/base/input-runtime-metrics.js';
 
 const fsMockState: {
   blockAccessSync: boolean;
@@ -281,6 +284,47 @@ describe('MetricsCollector', () => {
   });
 
   describe('collectL2', () => {
+    it('publishes optional read reasons in the existing Input row without duplicating ingress', () => {
+      const codexRead = createCodexReadMetrics();
+      codexRead.readBytes.owner_probe = 20;
+      codexRead.readCalls.owner_probe = 1;
+      codexRead.budgetDeferredTasks = 2;
+      codexRead.ownerBlockedFilesMax = 3;
+      const stats = inputEntry('codex', { codexRead, rawReadBytes: 20, rawReadCalls: 1, inEvents: 4, inBytes: 100 });
+      const snapshot = buildSnapshot({ inputs: new Map([
+        ['codex-transcript', stats], ['qoder-trace', inputEntry('qoder')],
+      ]) });
+      const first = collector.collectL2(snapshot)!;
+      const row = first.inputs.find(input => input.input_name === 'codex-transcript')!;
+      expect(first.inputs).toHaveLength(2);
+      expect(row).toMatchObject({
+        raw_read_bytes_owner_probe: '20', raw_read_bytes: '20', in_events: '4',
+        owner_blocked_files_max: '3', budget_deferred_tasks: '2',
+      });
+      expect(first.inputs.find(input => input.input_name === 'qoder-trace')).not.toHaveProperty('raw_read_bytes_owner_probe');
+      expect(row).not.toHaveProperty('read_reason');
+      resetCodexReadWindowMaxima(codexRead);
+      codexRead.readBytes.recovery = 10;
+      codexRead.readCalls.recovery = 1;
+      codexRead.ownerBlockedFilesMax = 1;
+      stats.rawReadBytes = 30;
+      stats.rawReadCalls = 2;
+      const next = collector.collectL2(snapshot)!.inputs.find(input => input.input_name === 'codex-transcript')!;
+      expect(next).toMatchObject({ raw_read_bytes_owner_probe: '0', raw_read_bytes_recovery: '10', in_events: '0', owner_blocked_files_max: '1' });
+      expect(CODEX_READ_REASONS.reduce((sum, reason) => sum + Number(next[`raw_read_bytes_${reason}`]), 0)).toBe(Number(next.raw_read_bytes));
+      expect(CODEX_READ_REASONS.reduce((sum, reason) => sum + Number(next[`raw_read_calls_${reason}`]), 0)).toBe(Number(next.raw_read_calls));
+    });
+
+    it('retains diagnostics-only windows for stopped Codex inputs', () => {
+      const codexRead = createCodexReadMetrics();
+      codexRead.budgetDeferredTasks = 1;
+      const snapshot = buildSnapshot({ inputs: new Map([
+        ['codex-transcript', inputEntry('codex', { codexRead, running: false })],
+      ]) });
+      expect(collector.collectL2(snapshot)!.inputs[0]!.budget_deferred_tasks).toBe('1');
+      expect(collector.collectL2(snapshot)).toBeNull();
+    });
+
     function pipelineSnapshot(): DataflowSnapshot {
       const inputs = new Map<string, any>();
       // Two inputs owned by the same agent — they must roll up into one entry.
