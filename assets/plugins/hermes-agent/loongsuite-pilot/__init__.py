@@ -43,6 +43,7 @@ MAX_PENDING_INPUT_RECORDS = 128
 MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
+LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS = 5_000_000_000
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
@@ -62,6 +63,7 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+_LEGACY_SYSTEM_INSTRUCTIONS = contextvars.ContextVar("pilot_hermes_legacy_system", default=None)
 
 
 def _stream_api_for_agent(agent: Any) -> Optional[Dict[str, Any]]:
@@ -544,6 +546,91 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
         if len(parts) >= MAX_PARTS:
             break
     return parts[:MAX_PARTS]
+
+
+def _clear_legacy_system_instructions() -> None:
+    try:
+        _LEGACY_SYSTEM_INSTRUCTIONS.set(None)
+    except Exception:
+        pass
+
+
+def _install_legacy_system_observer() -> None:
+    """Read 4.16 chat instructions at its native request-builder boundary.
+
+    That release's synchronous pre_api_request hook omits request.body. Keep
+    only bounded text parts in the caller's context, never the conversation,
+    credentials or tool definitions. Other releases keep their native hooks.
+    """
+    try:
+        import hermes_cli
+        if (getattr(hermes_cli, "__version__", None),
+                getattr(hermes_cli, "__release_date__", None)) != ("0.10.0", "2026.4.16"):
+            return
+        module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+        owner = getattr(module, "AIAgent", None)
+        original = getattr(owner, "_build_api_kwargs", None)
+        if not callable(original):
+            return
+        if hasattr(original, "_pilot_legacy_system_context"):
+            # Rediscovery must hand the existing wrapper the new module's state.
+            original._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+            original._pilot_legacy_system_extract = _system_instructions
+            return
+        parameters = inspect.signature(original).parameters
+        if (list(parameters) != ["self", "api_messages"]
+                or any(p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD
+                       for p in parameters.values())):
+            return
+
+        @functools.wraps(original)
+        def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                observed._pilot_legacy_system_context.set(None)
+            except Exception:
+                pass
+            # Native results and exceptions must retain their original behavior.
+            body = original(agent, *args, **kwargs)
+            try:
+                session_id = getattr(agent, "session_id", None)
+                if (isinstance(session_id, str) and session_id
+                        and getattr(agent, "api_mode", None) == "chat_completions"
+                        # 4.16 rewrites this body after the builder in ASCII recovery.
+                        and not getattr(agent, "_force_ascii_payload", False)):
+                    parts = observed._pilot_legacy_system_extract({"body": body})
+                    if parts:
+                        observed._pilot_legacy_system_context.set(
+                            (session_id, time.monotonic_ns(), parts))
+            except Exception:
+                pass
+            return body
+
+        observed._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+        observed._pilot_legacy_system_extract = _system_instructions
+        owner._build_api_kwargs = observed
+    except Exception:
+        pass
+
+
+def _request_system_instructions(payload: Dict[str, Any]) -> List[Dict[str, str]]:
+    pending = None
+    try:
+        pending = _LEGACY_SYSTEM_INSTRUCTIONS.get()
+    except Exception:
+        pass
+    finally:
+        _clear_legacy_system_instructions()
+    # Even a blank/malformed native request is authoritative; don't replace it.
+    if "request" in payload:
+        return _system_instructions(payload.get("request"))
+    try:
+        if (pending and pending[0] == payload.get("session_id")
+                and payload.get("api_mode") == "chat_completions"
+                and 0 <= time.monotonic_ns() - pending[1] <= LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS):
+            return pending[2]
+    except Exception:
+        pass
+    return []
 
 
 def _skill_attributes(
@@ -1418,6 +1505,7 @@ def _handle_on_session_start(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
+    _install_legacy_system_observer()
     _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -1475,7 +1563,7 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
             "provider": payload.get("provider"),
             "model": payload.get("model"),
             "tool_definitions": _tool_definitions(payload.get("request")),
-            "system_instructions": _system_instructions(payload.get("request")),
+            "system_instructions": _request_system_instructions(payload),
         },
         "post": {},
     }
@@ -1737,6 +1825,9 @@ _HANDLERS: Dict[str, Callable[[int, Dict[str, Any]], None]] = {
 def _safe_callback(hook_name: str) -> Callable[..., None]:
     def callback(**kwargs: Any) -> None:
         try:
+            if hook_name in ("pre_llm_call", "post_llm_call", "api_request_error",
+                             "on_session_end", "on_session_finalize"):
+                _clear_legacy_system_instructions()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:

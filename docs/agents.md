@@ -4,6 +4,21 @@ English | [简体中文](zh-CN/agents.md)
 
 Use this guide to choose which AI coding agents Pilot should collect from and configure collection and masking.
 
+## Hermes system instructions
+
+Pilot collects `gen_ai.system_instructions` from Hermes' native provider-request
+Hook when available. Hermes 0.10.0 (`v2026.4.16`) omits that payload; for its
+OpenAI-compatible `chat_completions` requests, Pilot observes the native request
+builder to capture the assembled system and developer instructions, including
+temporary instructions that are absent from the session database.
+
+This compatibility path covers only that exact Hermes release and API mode.
+Other old releases, incompatible builders and 4.16's ASCII error-recovery rewrite
+omit the optional field. Tool definitions still require the native request
+payload. Update Pilot's plugin and restart Hermes to activate the compatibility
+path; the Hermes version can stay unchanged. Existing masking applies before
+Pilot exports the instructions.
+
 ## Hermes TTFT
 
 For Hermes OpenAI-compatible streaming chat completions, Pilot records
