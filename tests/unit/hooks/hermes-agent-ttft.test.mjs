@@ -81,9 +81,9 @@ def payload(session, count=1):
             "api_request_id": session + "-api-" + str(count), "api_call_count": count,
             "model": "fixture-model", "provider": "fixture-provider", "platform": "cli"}
 
-def begin(session, start=100, count=1):
+def begin(session, start=100, count=1, **input_fields):
     clock.value = start
-    ctx.hooks["pre_api_request"](**payload(session, count))
+    ctx.hooks["pre_api_request"](**payload(session, count), **input_fields)
 
 def end(session, count=1, error=False):
     if error:
@@ -141,7 +141,8 @@ def slow_writer(records):
     assert release_writer.wait(3), 'test writer timed out'
     original_writer(records)
 plugin._write_records = slow_writer
-writer = threading.Thread(target=lambda: begin('other-session', start=110))
+# Supply actual input so this request enters I/O rather than input staging.
+writer = threading.Thread(target=lambda: begin('other-session', start=110, user_message='other request'))
 writer.start()
 assert writer_entered.wait(2)
 result, errors = [], []
