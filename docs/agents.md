@@ -13,12 +13,12 @@ instructions for OpenAI Chat Completions, Anthropic Messages, OpenAI Responses
 and Bedrock Converse. This includes temporary instructions absent from the session
 database. Google Gemini uses the OpenAI-compatible route in that Hermes release.
 
-Newer Hermes versions also expose native `system_prompt` or `request_messages`
-fields. When their request serializer explicitly truncates system text, Pilot uses them to
-restore matching content within its existing 32,768-character per-part capture limit.
-Complete request bodies remain authoritative; no legacy wrapper runs on newer Hermes.
-Recovery requires matching uncapped text in the same Hook; otherwise capture keeps
-the native bounded payload.
+For newer Hermes, Pilot reads the same call's native structured fields: system
+and developer roles in `request_messages` for chat/Gemini, then `system_prompt`,
+with `request.body` as a compatibility fallback. It does not search message text,
+parse truncation markers or compare text prefixes. The existing 32,768-character
+per-part limit still applies; newer Hermes receives no legacy method wrappers.
+When uncapped native fields are absent, capture retains the visible request body.
 
 Capture follows Anthropic OAuth conversion, Responses normalization and the ASCII
 error-recovery rewrite. This compatibility path covers only that exact Hermes

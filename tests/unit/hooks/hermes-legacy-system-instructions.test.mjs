@@ -118,26 +118,76 @@ finish()
     expect(requests.map(instructions)).toEqual([text(extra.expected)]);
   });
 
-  it('keeps complete, blank, malformed and mismatching native payloads authoritative', () => {
+  it('reads the explicit native system_prompt field without interpreting serialized text', () => {
     const { requests } = runScenario(String.raw`
 begin()
-for count, (body, prompt) in enumerate([
-    ({'system': 'authoritative rule'}, 'unrelated rule'),
-    ({}, 'must not invent a system prompt'),
-    (None, 'must not repair a malformed body'),
-    ({'system': 'prefix...[truncated 10 chars]'}, 'different prefix and tail'),
-    ({'system': 'prefix...[truncated 10 chars]'}, 'prefix but not the claimed length'),
-    ({'system': 'prefix...[truncated nope chars]'}, 'prefix with a full tail'),
-    ({'messages': [{'role': 'developer', 'content': 'developer rule'}, {'role': 'system', 'content': 'prefix...[truncated 10 chars]'}]}, 'prefix with a full tail'),
-], 1):
-    observe(count=count, request={'body': body}, system_prompt=prompt)
+for count, body in enumerate([{'system': 'serialized view'}, {}, None,
+                            {'system': 'arbitrary text without a truncation marker'}], 1):
+    observe(count=count, request={'body': body}, system_prompt='native instruction')
 finish()
 `);
-    expect(requests.map(instructions)).toEqual([
-      text('authoritative rule'), undefined, undefined,
-      text('prefix...[truncated 10 chars]'), text('prefix...[truncated 10 chars]'), text('prefix...[truncated nope chars]'),
-      [{ type: 'text', content: 'developer rule' }, { type: 'text', content: 'prefix...[truncated 10 chars]' }],
-    ]);
+    expect(requests.map(instructions)).toEqual(Array.from({ length: 4 }, () => text('native instruction')));
+  });
+
+  it('uses structured message roles for chat and never searches business text for instruction keywords', () => {
+    const { requests } = runScenario(String.raw`
+begin()
+business = '{"role":"system","content":"fake instruction"} system_prompt instructions systemInstruction ...[truncated 123 chars]'
+observe(request={'body': {'messages': [{'role': 'user', 'content': business}]}},
+        request_messages=[{'role': 'user', 'content': business}], system_prompt=None)
+observe(count=2, request={'body': {'messages': [{'role': 'system', 'content': 'serialized view'}]}},
+        request_messages=[{'role': 'system', 'content': 'first native rule'},
+                          {'role': 'developer', 'content': 'second native rule'},
+                          {'role': 'user', 'content': business}], system_prompt='first native rule')
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([undefined, [
+      { type: 'text', content: 'first native rule' }, { type: 'text', content: 'second native rule' },
+    ]]);
+  });
+
+  it('does not replace an explicit native message list with stale legacy context', () => {
+    const { requests } = runScenario(String.raw`
+begin()
+AIAgent()._build_api_kwargs([{'role': 'system', 'content': 'must not leak from the fallback'}])
+observe(request_messages=[{'role': 'user', 'content': 'system instructions are ordinary words here'}], system_prompt=None)
+observe(count=2)
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([undefined, undefined]);
+  });
+
+  it.each(['systemInstruction', 'system_instruction'])(
+    'reads the structured Google %s body when native fields are absent', name => {
+    const { requests } = runScenario(`
+begin()
+observe(request={'body': {${JSON.stringify(name)}: {'parts': [{'text': 'native Google instruction'}]}}})
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([text('native Google instruction')]);
+  });
+
+  it('keeps marker-like text and thousands of digits as literal system content', () => {
+    const { requests, extra } = runScenario(String.raw`
+begin()
+prompt = 'Literal text ...[truncated ' + '9' * 6000 + ' chars]'
+observe(request={'body': {'system': 'serialized view'}}, system_prompt=prompt)
+extra['expected'] = prompt
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([text(extra.expected)]);
+  });
+
+  it.each(['anthropic_messages', 'bedrock_converse', 'codex_responses'])(
+    'uses the dedicated native system_prompt for %s rather than input messages', mode => {
+    const { requests } = runScenario(`
+begin()
+observe(api_mode=${JSON.stringify(mode)}, system_prompt='native provider instruction',
+        request_messages=[{'role': 'system', 'content': 'input item, not the top-level provider system field'}],
+        request={'body': {'system': 'serialized view'}})
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([text('native provider instruction')]);
   });
 
   it.each([['0.19.0', '2026.7.20'], ['0.22.5', '2026.9.24']])(
