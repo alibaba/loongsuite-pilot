@@ -79,6 +79,8 @@
 
 Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留微秒，Windows 保留毫秒。`listeners.doubao-work.logDir` 可指定其他只读源目录；输出 `dataDir` 独立。
 
+`logDir` 只覆盖日志读取和监听目录；原生会话与 `coding/snapshot` 仍从平台默认的豆包数据目录读取，不从自定义日志目录向上推导。Agent 检测使用同一平台路径解析，Windows 同样遵循 `LOCALAPPDATA`。
+
 ```json
 {
   "agents": { "doubao-work": { "enabled": true } },

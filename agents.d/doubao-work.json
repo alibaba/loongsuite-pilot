@@ -4,8 +4,7 @@
   "deployMode": "detection-only",
   "detection": {
     "paths": [
-      "~/Library/Application Support/DoubaoWork/sdk_storage/log",
-      "~/AppData/Local/DoubaoWork/User Data/sdk_storage/log"
+      "$DOUBAO_WORK_DATA/sdk_storage/log"
     ],
     "commands": []
   },

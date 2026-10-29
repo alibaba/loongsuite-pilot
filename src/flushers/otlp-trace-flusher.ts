@@ -1085,6 +1085,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && typeof localExecution === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(localExecution)) {
       return { source: 'turn_id', value: localExecution, key: `doubao-local-execution:${localExecution}` };
     }
+    const traceId = entry['trace_id'] as string | undefined;
+    // The client can reuse chat_session_id. The producer trace identity also
+    // includes queryMs, conversation and source scope; preserve that identity.
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && traceId && VALID_TRACE_ID_RE.test(traceId)) {
+      return { source: 'trace_id', value: traceId, key: `doubao-request:${traceId}` };
+    }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
       if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
@@ -1095,7 +1101,6 @@ export class OtlpTraceFlusher extends BaseFlusher {
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
 
-    const traceId = entry['trace_id'] as string | undefined;
     if (traceId && VALID_TRACE_ID_RE.test(traceId)) {
       return { source: 'trace_id', value: traceId, key: `trace:${traceId}` };
     }

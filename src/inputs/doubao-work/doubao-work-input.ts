@@ -1,7 +1,6 @@
 import * as fs from 'node:fs/promises';
 import { watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
-import { homedir } from 'node:os';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry, type JsonValue } from '../../types/index.js';
@@ -13,6 +12,7 @@ import { nativeDemandFingerprint, nativeRoundSteps, type NativeAssistantRound, t
 import { checkpointDraft } from './doubao-work-state.js';
 import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
 import { DoubaoWorkNativeReader } from './doubao-work-reader.js';
+import { resolveDoubaoWorkPaths } from '../../utils/doubao-work-paths.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -88,11 +88,12 @@ export class DoubaoWorkInput extends BaseInput {
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
-    this.logDir = opts.logDir ? path.resolve(opts.logDir) : DoubaoWorkInput.defaultLogDir();
+    const defaults = resolveDoubaoWorkPaths();
+    this.logDir = opts.logDir ? path.resolve(opts.logDir) : defaults.logDir;
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
     this.sessionsRoot = opts.sessionsRoot;
-    this.userDataRoot = this.logDir ? path.resolve(this.logDir, '../..') : undefined;
-    this.snapshotRoot = opts.snapshotRoot ?? (this.logDir ? path.resolve(this.logDir, '../../coding/snapshot') : undefined);
+    this.userDataRoot = defaults.userDataRoot;
+    this.snapshotRoot = opts.snapshotRoot ?? defaults.snapshotRoot;
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
     this.workLimits = opts.workBudget;
     this.nativeReader = new DoubaoWorkNativeReader({ sessionsRoot: this.sessionsRoot, userDataRoot: this.userDataRoot,
@@ -100,13 +101,7 @@ export class DoubaoWorkInput extends BaseInput {
   }
 
   static defaultLogDir(): string | undefined {
-    if (process.platform === 'win32') {
-      const local = process.env.LOCALAPPDATA || path.win32.join(homedir(), 'AppData', 'Local');
-      return path.win32.join(local, 'DoubaoWork', 'User Data', 'sdk_storage', 'log');
-    }
-    return process.platform === 'darwin'
-      ? path.join(homedir(), 'Library', 'Application Support', 'DoubaoWork', 'sdk_storage', 'log')
-      : undefined;
+    return resolveDoubaoWorkPaths().logDir;
   }
 
   static getWatchPaths(logDir = DoubaoWorkInput.defaultLogDir()): string[] {

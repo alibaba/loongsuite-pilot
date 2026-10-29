@@ -76,6 +76,8 @@ Run `node tests/performance/doubao-work-rounds.perf.mjs` for isolated 4k/8k/16k 
 
 Windows falls back to `~/AppData/Local`; macOS retains microsecond and Windows millisecond source precision. Optional `listeners.doubao-work.logDir` overrides the read-only source, independently of output `dataDir`.
 
+`logDir` only overrides log reading and watching. Native sessions and `coding/snapshot` remain under the platform's default Doubao data directory; they are never inferred from a custom log directory's ancestors. Agent detection uses the same platform path resolution, including `LOCALAPPDATA` on Windows.
+
 ```json
 {
   "agents": { "doubao-work": { "enabled": true } },
