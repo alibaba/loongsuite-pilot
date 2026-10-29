@@ -88,7 +88,7 @@ finish()
   });
 
   it.each([
-    ['0.16.0', '2026.6.5'], ['0.19.0', '2026.7.20'], ['0.10.0', '2026.4.17'],
+    ['0.16.0', '2026.6.5'], ['0.19.0', '2026.7.20'], ['0.22.5', '2026.9.24'], ['0.10.0', '2026.4.17'],
   ])('keeps %s / %s on native collection', (version, releaseDate) => {
     const { requests, extra } = runScenario(`
 hermes.__version__, hermes.__release_date__ = ${JSON.stringify(version)}, ${JSON.stringify(releaseDate)}
@@ -99,6 +99,79 @@ finish()
 `);
     expect(extra.unwrapped).toBe(true);
     expect(requests.map(instructions)).toEqual([text('native instruction')]);
+  });
+
+  it.each(['messages', 'system', 'instructions', 'systemInstruction'])(
+    'recovers an explicitly truncated native %s prompt from the same Hook without wrapping modern Hermes', shape => {
+    const { requests, extra } = runScenario(`
+hermes.__version__, hermes.__release_date__ = '0.22.5', '2026.9.24'
+begin()
+prompt = 'native identity ' * 600 + ' final temporary instruction'
+short = prompt[:8000] + f'...[truncated {len(prompt) - 8000} chars]'
+body = {'messages': [{'role': 'system', 'content': short}]} if ${JSON.stringify(shape)} == 'messages' else {${JSON.stringify(shape)}: ({'parts': [{'text': short}]} if ${JSON.stringify(shape)} == 'systemInstruction' else short)}
+observe(request={'body': body}, system_prompt=prompt)
+extra['expected'] = prompt
+extra['unwrapped'] = AIAgent._build_api_kwargs is native
+finish()
+`);
+    expect(extra.unwrapped).toBe(true);
+    expect(requests.map(instructions)).toEqual([text(extra.expected)]);
+  });
+
+  it('keeps complete, blank, malformed and mismatching native payloads authoritative', () => {
+    const { requests } = runScenario(String.raw`
+begin()
+for count, (body, prompt) in enumerate([
+    ({'system': 'authoritative rule'}, 'unrelated rule'),
+    ({}, 'must not invent a system prompt'),
+    (None, 'must not repair a malformed body'),
+    ({'system': 'prefix...[truncated 10 chars]'}, 'different prefix and tail'),
+    ({'system': 'prefix...[truncated 10 chars]'}, 'prefix but not the claimed length'),
+    ({'system': 'prefix...[truncated nope chars]'}, 'prefix with a full tail'),
+    ({'messages': [{'role': 'developer', 'content': 'developer rule'}, {'role': 'system', 'content': 'prefix...[truncated 10 chars]'}]}, 'prefix with a full tail'),
+], 1):
+    observe(count=count, request={'body': body}, system_prompt=prompt)
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([
+      text('authoritative rule'), undefined, undefined,
+      text('prefix...[truncated 10 chars]'), text('prefix...[truncated 10 chars]'), text('prefix...[truncated nope chars]'),
+      [{ type: 'text', content: 'developer rule' }, { type: 'text', content: 'prefix...[truncated 10 chars]' }],
+    ]);
+  });
+
+  it.each([['0.19.0', '2026.7.20'], ['0.22.5', '2026.9.24']])(
+    'uses the native request_messages field for long chat/Gemini instructions on %s', (version, releaseDate) => {
+    const { requests, extra } = runScenario(`
+hermes.__version__, hermes.__release_date__ = ${JSON.stringify(version)}, ${JSON.stringify(releaseDate)}
+begin()
+prompt = 'native identity ' * 600 + ' final temporary instruction'
+short = prompt[:8000] + f'...[truncated {len(prompt) - 8000} chars]'
+observe(request={'body': {'messages': [{'role': 'system', 'content': short}]}}, request_messages=[{'role': 'system', 'content': prompt}, {'role': 'user', 'content': 'must stay in business input'}])
+extra['expected'] = prompt
+extra['unwrapped'] = AIAgent._build_api_kwargs is native
+finish()
+`);
+    expect(extra.unwrapped).toBe(true);
+    expect(requests.map(instructions)).toEqual([text(extra.expected)]);
+  });
+
+  it('recovers native truncated previews and text blocks within the existing content bound', () => {
+    const { requests, extra } = runScenario(String.raw`
+begin()
+observe(request={'_truncated': True, 'original_type': 'dict', 'preview': 'native capped body'}, system_prompt='full native instruction')
+observe(count=2, request={'body': {'system': [{'type': 'text', 'text': 'stable'}, {'type': 'text', 'text': 'prefix...[truncated 10 chars]'}]}}, system_prompt=[{'type': 'text', 'text': 'stable'}, {'type': 'text', 'text': 'prefix0123456789'}])
+prompt = 'x' * 40000
+observe(count=3, request={'body': {'system': 'x' * 8000 + '...[truncated 32000 chars]'}}, system_prompt=prompt)
+extra['bounded'] = plugin._truncate(prompt)
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([
+      text('full native instruction'),
+      [{ type: 'text', content: 'stable' }, { type: 'text', content: 'prefix0123456789' }],
+      text(extra.bounded),
+    ]);
+    expect(extra.bounded.length).toBeLessThan(33_000);
   });
 
   it('rejects an incompatible builder signature without affecting host collection', () => {

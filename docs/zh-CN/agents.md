@@ -12,6 +12,12 @@ Responses 规范化方法，补采主对话中 OpenAI Chat Completions、Anthrop
 OpenAI Responses 和 Bedrock Converse 的系统指令，包括未写入 session 数据库的临时
 指令。该版本的 Google Gemini 使用 OpenAI 兼容接口，也复用此路径。
 
+新版 Hermes 还提供原生 `system_prompt` 或 `request_messages` 字段。请求序列化明确
+截断系统文本时，Pilot 用同次 Hook 的这些字段补回匹配的内容，继续遵守每段
+32,768 字符的采集上限。
+完整请求正文仍优先；新版不会启用旧版方法包装。
+同次 Hook 缺少可匹配的完整文本时，保留原生有界内容。
+
 采集使用 Anthropic OAuth 转换后的文本、Responses 规范化后的文本，并匹配 ASCII
 错误恢复时的字符改写。此兼容路径只覆盖上述准确版本；方法签名不兼容时省略该可选
 字段。辅助模型调用不扩展采集，工具定义仍依赖原生请求正文。

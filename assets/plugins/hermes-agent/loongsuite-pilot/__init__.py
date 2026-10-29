@@ -10,6 +10,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import secrets
 import socket
 import sys
@@ -517,9 +518,8 @@ def _text_parts(value: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
 def _system_instructions(request: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
     """Extract the system prompt from a provider request body.
 
-    Hermes never replays system messages through conversation_history, so the
-    request body built for the provider is the only place the prompt is
-    observable. Shapes differ per provider: Anthropic/Bedrock keep it in a
+    Hermes never replays system messages through conversation_history. Shapes
+    differ per provider: Anthropic/Bedrock keep the prompt in a
     top-level "system" field, Responses uses top-level "instructions", Gemini
     nests it under systemInstruction.parts, and OpenAI-compatible providers
     carry it as leading system/developer messages.
@@ -640,7 +640,29 @@ def _request_system_instructions(payload: Dict[str, Any]) -> List[Dict[str, str]
         _clear_legacy_system_instructions()
     # Even a blank/malformed native request is authoritative; don't replace it.
     if "request" in payload:
-        return _system_instructions(payload.get("request"))
+        request = payload.get("request")
+        parts = _system_instructions(request)
+        native_parts = _text_parts(payload.get("system_prompt"))
+        if not native_parts or len(native_parts) != len(parts):
+            native_parts = _system_instructions(
+                {"body": {"messages": payload.get("request_messages")}}) or native_parts
+        # Modern Hermes caps each request-body string at 8,000 characters, but
+        # exposes uncapped prompt/message fields in the same Hook. Repair only
+        # explicit truncation with matching text; keep ordinary request bodies first.
+        if isinstance(request, dict) and request.get("_truncated") is True and "body" not in request:
+            return native_parts
+        if not parts or len(native_parts) != len(parts):
+            return parts
+        for part, native_part in zip(parts, native_parts):
+            if part == native_part:
+                continue
+            match = re.fullmatch(r"(.*)\.\.\.\[truncated (\d+) chars\]", part["content"], re.DOTALL)
+            content = native_part["content"]
+            if (not match or not content.startswith(match.group(1))
+                    or (len(content) <= MAX_CONTENT_CHARS
+                        and len(content) != len(match.group(1)) + int(match.group(2)))):
+                return parts
+        return native_parts
     try:
         if (pending and pending[0] == payload.get("session_id")
                 and pending[1] == payload.get("api_mode")

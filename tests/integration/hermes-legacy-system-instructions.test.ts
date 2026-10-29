@@ -9,7 +9,7 @@ import { InputManager } from '../../src/core/input-manager.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
 
-describe('Hermes 4.16 system instruction masking and trace flow', () => {
+describe('Hermes system instruction masking and trace flow', () => {
   const temporaryDirectories: string[] = [];
   afterEach(async () => {
     for (const directory of temporaryDirectories.splice(0)) {
@@ -17,15 +17,25 @@ describe('Hermes 4.16 system instruction masking and trace flow', () => {
     }
   });
 
-  it.each(['chat_completions', 'anthropic_messages', 'bedrock_converse', 'codex_responses'])(
-    'masks legacy %s instructions before export and preserves them on LLM spans', async mode => {
+  it.each(['chat_completions', 'anthropic_messages', 'bedrock_converse', 'codex_responses']
+    .flatMap(mode => [{ mode, modern: false }, { mode, modern: true }]))(
+    'masks $mode instructions (modern=$modern) before export and preserves them on LLM spans', async ({ mode, modern }) => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-hermes-legacy-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({ userId: 'fixture-user' }));
     const fakeKey = 'sk-' + 'a'.repeat(48);
-    const prompt = `Follow the synthetic rule with ${fakeKey}`;
+    const prefix = modern ? 'native identity '.repeat(600) : '';
+    const prompt = `${prefix}Follow the synthetic rule with ${fakeKey}`;
     const driver = await fs.readFile('tests/helpers/hermes-legacy-system-driver.py', 'utf8');
-    const scenario = `
+    const scenario = modern ? `
+hermes.__version__, hermes.__release_date__ = '0.22.5', '2026.9.24'
+begin()
+prompt = ${JSON.stringify(prompt)}
+short = prompt[:8000] + f'...[truncated {len(prompt) - 8000} chars]'
+body = {'messages': [{'role': 'system', 'content': short}]} if ${JSON.stringify(mode)} == 'chat_completions' else {('instructions' if ${JSON.stringify(mode)} == 'codex_responses' else 'system'): short}
+observe(request={'body': body}, system_prompt=prompt)
+finish()
+` : `
 begin()
 request(AIAgent(api_mode=${JSON.stringify(mode)}), ${JSON.stringify(prompt)})
 finish()
@@ -63,7 +73,7 @@ finish()
     const requests = records.filter(r => r['event.name'] === 'llm.request');
     expect(requests).toHaveLength(1);
     expect(requests[0]['gen_ai.system_instructions']).toEqual([
-      { type: 'text', content: 'Follow the synthetic rule with [APIKEY_MASKED]' },
+      { type: 'text', content: `${prefix}Follow the synthetic rule with [APIKEY_MASKED]` },
     ]);
     expect(JSON.stringify(records)).not.toContain(fakeKey);
     expect(JSON.stringify(requests[0]['gen_ai.input.messages'])).not.toContain('synthetic rule');
