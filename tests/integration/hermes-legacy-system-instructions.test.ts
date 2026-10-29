@@ -17,7 +17,8 @@ describe('Hermes 4.16 system instruction masking and trace flow', () => {
     }
   });
 
-  it('masks observed legacy instructions before export and preserves them on converted LLM spans', async () => {
+  it.each(['chat_completions', 'anthropic_messages', 'bedrock_converse', 'codex_responses'])(
+    'masks legacy %s instructions before export and preserves them on LLM spans', async mode => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-hermes-legacy-flow-'));
     temporaryDirectories.push(root);
     await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({ userId: 'fixture-user' }));
@@ -26,7 +27,7 @@ describe('Hermes 4.16 system instruction masking and trace flow', () => {
     const driver = await fs.readFile('tests/helpers/hermes-legacy-system-driver.py', 'utf8');
     const scenario = `
 begin()
-request(AIAgent(), ${JSON.stringify(prompt)})
+request(AIAgent(api_mode=${JSON.stringify(mode)}), ${JSON.stringify(prompt)})
 finish()
 `;
     const run = spawnSync('python3', ['-c', driver + scenario,

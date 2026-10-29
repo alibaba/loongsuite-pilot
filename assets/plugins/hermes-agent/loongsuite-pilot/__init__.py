@@ -482,7 +482,7 @@ def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
     return output
 
 
-def _text_parts(value: Any) -> List[Dict[str, str]]:
+def _text_parts(value: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
     """Normalize a provider text payload (str / block list / nested parts) into text parts."""
     if isinstance(value, str):
         blocks: List[Any] = [value]
@@ -506,12 +506,15 @@ def _text_parts(value: Any) -> List[Dict[str, str]]:
                 text = block.get("content")
         else:
             text = None
+        if isinstance(text, str) and ascii_only:
+            # Match 4.16's last-resort payload rewrite before bounding the text.
+            text = text.encode("ascii", errors="ignore").decode("ascii")
         if isinstance(text, str) and text.strip():
             parts.append({"type": "text", "content": _truncate(text)})
     return parts
 
 
-def _system_instructions(request: Any) -> List[Dict[str, str]]:
+def _system_instructions(request: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
     """Extract the system prompt from a provider request body.
 
     Hermes never replays system messages through conversation_history, so the
@@ -529,7 +532,7 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
 
     for key in ("system", "instructions", "systemInstruction", "system_instruction"):
         if key in body:
-            parts = _text_parts(body.get(key))
+            parts = _text_parts(body.get(key), ascii_only)
             if parts:
                 return parts
 
@@ -542,7 +545,7 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
             continue
         if message.get("role") not in ("system", "developer"):
             continue
-        parts.extend(_text_parts(message.get("content")))
+        parts.extend(_text_parts(message.get("content"), ascii_only))
         if len(parts) >= MAX_PARTS:
             break
     return parts[:MAX_PARTS]
@@ -556,7 +559,7 @@ def _clear_legacy_system_instructions() -> None:
 
 
 def _install_legacy_system_observer() -> None:
-    """Read 4.16 chat instructions at its native request-builder boundary.
+    """Read 4.16 instructions after native provider request conversion.
 
     That release's synchronous pre_api_request hook omits request.body. Keep
     only bounded text parts in the caller's context, never the conversation,
@@ -569,45 +572,60 @@ def _install_legacy_system_observer() -> None:
             return
         module = sys.modules.get("run_agent") or sys.modules.get("__main__")
         owner = getattr(module, "AIAgent", None)
-        original = getattr(owner, "_build_api_kwargs", None)
-        if not callable(original):
-            return
-        if hasattr(original, "_pilot_legacy_system_context"):
-            # Rediscovery must hand the existing wrapper the new module's state.
-            original._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
-            original._pilot_legacy_system_extract = _system_instructions
-            return
-        parameters = inspect.signature(original).parameters
-        if (list(parameters) != ["self", "api_messages"]
-                or any(p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD
-                       for p in parameters.values())):
-            return
 
-        @functools.wraps(original)
-        def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
-            try:
-                observed._pilot_legacy_system_context.set(None)
-            except Exception:
-                pass
-            # Native results and exceptions must retain their original behavior.
-            body = original(agent, *args, **kwargs)
-            try:
-                session_id = getattr(agent, "session_id", None)
-                if (isinstance(session_id, str) and session_id
-                        and getattr(agent, "api_mode", None) == "chat_completions"
-                        # 4.16 rewrites this body after the builder in ASCII recovery.
-                        and not getattr(agent, "_force_ascii_payload", False)):
-                    parts = observed._pilot_legacy_system_extract({"body": body})
-                    if parts:
-                        observed._pilot_legacy_system_context.set(
-                            (session_id, time.monotonic_ns(), parts))
-            except Exception:
-                pass
-            return body
+        def observe(original: Callable, modes: tuple) -> Callable:
+            @functools.wraps(original)
+            def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+                try:
+                    observed._pilot_legacy_system_context.set(None)
+                except Exception:
+                    pass
+                # Native results and exceptions retain their original behavior.
+                body = original(agent, *args, **kwargs)
+                try:
+                    session_id = getattr(agent, "session_id", None)
+                    mode = getattr(agent, "api_mode", None)
+                    if isinstance(session_id, str) and session_id and mode in modes:
+                        parts = observed._pilot_legacy_system_extract(
+                            {"body": body},
+                            ascii_only=bool(getattr(agent, "_force_ascii_payload", False)))
+                        if parts:
+                            observed._pilot_legacy_system_context.set(
+                                (session_id, mode, time.monotonic_ns(), parts))
+                except Exception:
+                    pass
+                return body
 
-        observed._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
-        observed._pilot_legacy_system_extract = _system_instructions
-        owner._build_api_kwargs = observed
+            observed._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+            observed._pilot_legacy_system_extract = _system_instructions
+            return observed
+
+        # Responses preflight can replace/normalize instructions after building.
+        # The other three modes finish provider conversion in the builder.
+        for name, names, modes in (
+            ("_build_api_kwargs", ["self", "api_messages"],
+             ("chat_completions", "anthropic_messages", "bedrock_converse")),
+            ("_preflight_codex_api_kwargs", ["self", "api_kwargs", "allow_stream"],
+             ("codex_responses",)),
+        ):
+            original = getattr(owner, name, None)
+            if not callable(original):
+                continue
+            if hasattr(original, "_pilot_legacy_system_context"):
+                # Rediscovery hands existing wrappers the new module's state.
+                original._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+                original._pilot_legacy_system_extract = _system_instructions
+                continue
+            parameters = inspect.signature(original).parameters
+            values = list(parameters.values())
+            if (list(parameters) != names
+                    or any(p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD
+                           for p in values[:2])
+                    or (len(values) == 3 and (
+                        values[2].kind != inspect.Parameter.KEYWORD_ONLY
+                        or values[2].default is not False))):
+                continue
+            setattr(owner, name, observe(original, modes))
     except Exception:
         pass
 
@@ -625,9 +643,9 @@ def _request_system_instructions(payload: Dict[str, Any]) -> List[Dict[str, str]
         return _system_instructions(payload.get("request"))
     try:
         if (pending and pending[0] == payload.get("session_id")
-                and payload.get("api_mode") == "chat_completions"
-                and 0 <= time.monotonic_ns() - pending[1] <= LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS):
-            return pending[2]
+                and pending[1] == payload.get("api_mode")
+                and 0 <= time.monotonic_ns() - pending[2] <= LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS):
+            return pending[3]
     except Exception:
         pass
     return []

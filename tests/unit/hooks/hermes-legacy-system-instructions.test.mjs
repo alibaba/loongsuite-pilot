@@ -138,17 +138,18 @@ finish()
     expect(requests.map(instructions)).toEqual([undefined, undefined]);
   });
 
-  it('refreshes the observer after plugin reload without stacking wrappers', () => {
-    const { requests, extra } = runScenario(String.raw`
+  it.each(['chat_completions', 'codex_responses'])('refreshes the %s observer after reload without stacking wrappers', mode => {
+    const { requests, extra } = runScenario(`
 begin()
-agent = AIAgent()
+agent = AIAgent(api_mode=${JSON.stringify(mode)})
 request(agent, 'before reload')
 finish()
-wrapped = AIAgent._build_api_kwargs
+method = '_preflight_codex_api_kwargs' if agent.api_mode == 'codex_responses' else '_build_api_kwargs'
+wrapped = getattr(AIAgent, method)
 plugin, ctx = load_plugin()
 begin('resumed-session')
-extra['same_wrapper'] = AIAgent._build_api_kwargs is wrapped
-agent = AIAgent('resumed-session')
+extra['same_wrapper'] = getattr(AIAgent, method) is wrapped
+agent = AIAgent('resumed-session', api_mode=${JSON.stringify(mode)})
 request(agent, 'after reload')
 extra['native_calls'] = agent.calls
 finish('resumed-session')
@@ -189,11 +190,102 @@ finish()
     expect(requests.map(instructions)).toEqual([undefined, undefined, undefined]);
   });
 
-  it.each(['anthropic_messages', 'codex_responses', 'ascii-recovery'])('omits unverified legacy %s instructions', (mode) => {
+  it.each(['chat_completions', 'anthropic_messages', 'bedrock_converse', 'codex_responses'])(
+    'captures assembled %s instructions, including ASCII recovery', mode => {
+    const { requests, extra } = runScenario(`
+begin()
+agent = AIAgent(api_mode=${JSON.stringify(mode)})
+request(agent, 'cached identity + 临时规则', 1)
+agent._force_ascii_payload = True
+request(agent, 'cached identity + 临时规则', 2)
+request(agent, '纯中文', 3)
+extra['native_calls'] = agent.calls
+extra['preflight_calls'] = agent.preflight_calls
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([
+      text('cached identity + 临时规则'),
+      text(mode === 'codex_responses' ? 'cached identity +' : 'cached identity + '),
+      mode === 'codex_responses' ? text('fixture default identity') : undefined,
+    ]);
+    expect(extra).toEqual({ native_calls: 3, preflight_calls: mode === 'codex_responses' ? 3 : 0 });
+  });
+
+  it.each([
+    ['  final rule  ', 'final rule'], ['   ', 'fixture default identity'],
+    [null, 'fixture default identity'], [42, '42'],
+  ])('observes Responses instructions after native normalization of %j', (override, expected) => {
+    const { requests, extra } = runScenario(`
+begin()
+agent = AIAgent(api_mode='codex_responses')
+agent.request_overrides = json.loads(${JSON.stringify(JSON.stringify({ instructions: override }))})
+body = request(agent, 'replaced rule')
+extra['final_instructions'] = body['instructions']
+extra['preflight_calls'] = agent.preflight_calls
+finish()
+`);
+    expect(instructions(requests[0])).toEqual(text(expected));
+    expect(extra).toEqual({ final_instructions: expected, preflight_calls: 1 });
+  });
+
+  it('does not capture Responses before preflight or reuse a failed preflight', () => {
+    const { requests, extra } = runScenario(String.raw`
+begin()
+agent = AIAgent(api_mode='codex_responses')
+agent._build_api_kwargs([{'role': 'system', 'content': 'before preflight'}])
+observe(api_mode=agent.api_mode)
+agent._preflight_codex_api_kwargs({'instructions': 'not reused after failure'})
+native_error = ValueError('native preflight failed')
+try:
+    agent._preflight_codex_api_kwargs(native_error)
+except ValueError as error:
+    extra['same_error'] = error is native_error
+observe(count=2, api_mode=agent.api_mode)
+finish()
+`);
+    expect(extra.same_error).toBe(true);
+    expect(requests.map(instructions)).toEqual([undefined, undefined]);
+  });
+
+  it('isolates protocol switches within the same session and rejects a mismatched hook mode', () => {
+    const { requests } = runScenario(String.raw`
+begin()
+agent = AIAgent(api_mode='anthropic_messages')
+agent._build_api_kwargs([{'role': 'system', 'content': 'wrong protocol'}])
+observe(api_mode='bedrock_converse')
+request(agent, 'anthropic rule', 2)
+agent.api_mode = 'codex_responses'
+request(agent, 'responses rule', 3)
+agent.api_mode = 'chat_completions'
+request(agent, 'chat rule', 4)
+finish()
+`);
+    expect(requests.map(instructions)).toEqual([
+      undefined, text('anthropic rule'), text('responses rule'), text('chat rule'),
+    ]);
+  });
+
+  it('rejects an incompatible Responses preflight without reporting its initial builder value', () => {
+    const { requests, extra } = runScenario(String.raw`
+def incompatible(self, api_kwargs, allow_stream=False):
+    return dict(api_kwargs, instructions='unsupported preflight')
+AIAgent._preflight_codex_api_kwargs = incompatible
+begin()
+extra['unwrapped'] = AIAgent._preflight_codex_api_kwargs is incompatible
+agent = AIAgent(api_mode='codex_responses')
+body = agent._build_api_kwargs([{'role': 'system', 'content': 'must not report'}])
+agent._preflight_codex_api_kwargs(body)
+observe(api_mode=agent.api_mode)
+finish()
+`);
+    expect(extra.unwrapped).toBe(true);
+    expect(requests.map(instructions)).toEqual([undefined]);
+  });
+
+  it('omits unsupported legacy API modes', () => {
     const { requests } = runScenario(`
 begin()
-agent = AIAgent(api_mode=${JSON.stringify(mode === 'ascii-recovery' ? 'chat_completions' : mode)})
-agent._force_ascii_payload = ${mode === 'ascii-recovery' ? 'True' : 'False'}
+agent = AIAgent(api_mode='unsupported')
 request(agent, 'Unicode 系统指令')
 finish()
 `);
@@ -215,6 +307,19 @@ extra['native_system_length'] = len(body['messages'][0]['content'])
     expect(instructions(requests[0])[0].content.length).toBeLessThan(33_000);
     expect(requests[0]).not.toHaveProperty('gen_ai.tool.definitions');
     expect(JSON.stringify(requests)).not.toContain('builder-only-user-marker');
+  });
+
+  it('applies ASCII recovery before truncation without changing the native rewrite', () => {
+    const { requests, extra } = runScenario(String.raw`
+begin()
+agent = AIAgent(api_mode='anthropic_messages')
+agent._force_ascii_payload = True
+body = request(agent, '中' * 100000 + ' final ASCII rule')
+extra['native_system'] = body['system']
+finish()
+`);
+    expect(extra.native_system).toBe(' final ASCII rule');
+    expect(instructions(requests[0])).toEqual(text(extra.native_system));
   });
 
   it('leaves native results intact when observing the body fails', () => {

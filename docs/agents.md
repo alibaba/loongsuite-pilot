@@ -7,14 +7,16 @@ Use this guide to choose which AI coding agents Pilot should collect from and co
 ## Hermes system instructions
 
 Pilot collects `gen_ai.system_instructions` from Hermes' native provider-request
-Hook when available. Hermes 0.10.0 (`v2026.4.16`) omits that payload; for its
-OpenAI-compatible `chat_completions` requests, Pilot observes the native request
-builder to capture the assembled system and developer instructions, including
-temporary instructions that are absent from the session database.
+Hook when available. Hermes 0.10.0 (`v2026.4.16`) omits that payload; Pilot observes
+its native request builder and Responses preflight to capture main-conversation
+instructions for OpenAI Chat Completions, Anthropic Messages, OpenAI Responses
+and Bedrock Converse. This includes temporary instructions absent from the session
+database. Google Gemini uses the OpenAI-compatible route in that Hermes release.
 
-This compatibility path covers only that exact Hermes release and API mode.
-Other old releases, incompatible builders and 4.16's ASCII error-recovery rewrite
-omit the optional field. Tool definitions still require the native request
+Capture follows Anthropic OAuth conversion, Responses normalization and the ASCII
+error-recovery rewrite. This compatibility path covers only that exact Hermes
+release; incompatible method signatures omit the optional field. Auxiliary model
+calls are not expanded, and tool definitions still require the native request
 payload. Update Pilot's plugin and restart Hermes to activate the compatibility
 path; the Hermes version can stay unchanged. Existing masking applies before
 Pilot exports the instructions.
