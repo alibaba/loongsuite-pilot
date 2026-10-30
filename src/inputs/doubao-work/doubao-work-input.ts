@@ -12,7 +12,7 @@ import { nativeDemandFingerprint, nativeRoundSteps, type NativeAssistantRound, t
 import { checkpointDraft } from './doubao-work-state.js';
 import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
 import { DoubaoWorkNativeReader } from './doubao-work-reader.js';
-import { resolveDoubaoWorkPaths } from '../../utils/doubao-work-paths.js';
+import { resolveDoubaoWorkPaths, type DoubaoClient } from '../../utils/doubao-work-paths.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -30,6 +30,7 @@ interface PendingTurn extends DoubaoPendingTurn { startObserved: boolean; termin
 interface PendingTool { start?: DoubaoLogEvent; end?: DoubaoLogEvent; conflict?: boolean; updatedMs: number }
 interface Checkpoint {
   schema: 1;
+  client?: DoubaoClient;
   sinceMs: number;
   files: Record<string, FileCursor>;
   pending: Record<string, PendingTurn>;
@@ -47,6 +48,7 @@ interface Checkpoint {
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions {
+  client?: DoubaoClient;
   logDir?: string; sessionsRoot?: string; snapshotRoot?: string;
   /** Native metadata has no watcher. Limit scans independently of log wakeups. */
   nativeScanIntervalMs?: number;
@@ -59,6 +61,7 @@ export class DoubaoWorkInput extends BaseInput {
   readonly id = 'doubao-work';
   readonly agentType = ClientType.DoubaoWork;
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
+  private readonly client: DoubaoClient;
   private readonly logDir: string | undefined;
   private readonly scope: string;
   private readonly sessionsRoot: string | undefined;
@@ -88,7 +91,8 @@ export class DoubaoWorkInput extends BaseInput {
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
-    const defaults = resolveDoubaoWorkPaths();
+    this.client = opts.client ?? 'doubao-work';
+    const defaults = resolveDoubaoWorkPaths(this.client);
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : defaults.logDir;
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
     this.sessionsRoot = opts.sessionsRoot;
@@ -97,21 +101,24 @@ export class DoubaoWorkInput extends BaseInput {
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
     this.workLimits = opts.workBudget;
     this.nativeReader = new DoubaoWorkNativeReader({ sessionsRoot: this.sessionsRoot, userDataRoot: this.userDataRoot,
-      snapshotRoot: this.snapshotRoot, diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
+      snapshotRoot: this.snapshotRoot, sessionNamespace: defaults.sessionNamespace,
+      diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
   }
 
-  static defaultLogDir(): string | undefined {
-    return resolveDoubaoWorkPaths().logDir;
+  static defaultLogDir(client?: DoubaoClient): string | undefined {
+    return resolveDoubaoWorkPaths(client).logDir;
   }
 
-  static getWatchPaths(logDir = DoubaoWorkInput.defaultLogDir()): string[] {
-    return logDir ? [logDir] : [];
+  static getWatchPaths(logDir?: string, client?: DoubaoClient): string[] {
+    const directory = logDir ?? DoubaoWorkInput.defaultLogDir(client);
+    return directory ? [directory] : [];
   }
 
-  static async checkAvailability(logDir = DoubaoWorkInput.defaultLogDir()): Promise<boolean> {
-    if (!logDir) return false;
+  static async checkAvailability(logDir?: string, client?: DoubaoClient): Promise<boolean> {
+    const directory = logDir ?? DoubaoWorkInput.defaultLogDir(client);
+    if (!directory) return false;
     try {
-      return (await fs.readdir(logDir, { withFileTypes: true }))
+      return (await fs.readdir(directory, { withFileTypes: true }))
         .some(entry => entry.isFile() && FILE_PATTERN.test(entry.name));
     } catch { return false; }
   }
@@ -167,14 +174,17 @@ export class DoubaoWorkInput extends BaseInput {
       this.warnedFileLimit = true;
       this.logger.warn('Doubao Work source file limit reached; only newest files are read', { limit: MAX_FILES });
     }
-    const saved = this.getState().extra?.doubaoWork as Checkpoint | undefined;
-    if (saved && saved.schema !== 1) {
+    const stored = this.getState().extra?.doubaoWork as Checkpoint | undefined;
+    if (stored && stored.schema !== 1) {
       this.logger.warn('Unsupported Doubao Work checkpoint schema; preserving state');
       return [];
     }
+    // Legacy checkpoints belong to Work. Never carry pending identities or log
+    // offsets into the other product when the listener selection changes.
+    const saved = stored && (stored.client ?? 'doubao-work') === this.client ? stored : undefined;
     // Baseline all existing files once. New rotations are subsequently read from byte zero.
     if (!saved) {
-      this.baselineState ??= { state: { schema: 1, sinceMs: Date.now(), files: {}, pending: {}, completed: {} }, names, index: 0 };
+      this.baselineState ??= { state: { schema: 1, client: this.client, sinceMs: Date.now(), files: {}, pending: {}, completed: {} }, names, index: 0 };
       const baseline = this.baselineState, initial = baseline.state;
       for (; baseline.index < baseline.names.length; baseline.index++) {
         const name = baseline.names[baseline.index];

@@ -1867,15 +1867,17 @@ export class Orchestrator extends EventEmitter {
 
     // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
     const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoClient = listenerCfg['doubao-work']?.client;
     const doubaoWorkInput = new DoubaoWorkInput({
       stateStore: this.stateStore,
       logDir: doubaoLogDir,
+      client: doubaoClient,
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
     });
     this.inputManager.registerInput(doubaoWorkInput);
     entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
-      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir),
-      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir),
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir, doubaoClient),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir, doubaoClient),
       enabled: () => this.isAgentGatedEnabled('doubao-work')
         && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
       pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,

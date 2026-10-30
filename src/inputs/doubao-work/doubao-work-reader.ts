@@ -34,6 +34,7 @@ interface Source {
 }
 export interface NativeReaderOptions {
   sessionsRoot?: string; userDataRoot?: string; snapshotRoot?: string;
+  sessionNamespace?: '.doubao' | '.doubaowork';
   maxCacheBytes?: number; maxFiles?: number; ttlMs?: number;
   diagnostic?: (reason: string) => void;
 }
@@ -175,7 +176,7 @@ export class DoubaoWorkNativeReader {
     if (profiles.length > 16 || profiles.some(x => !x.isDirectory() || x.isSymbolicLink())) return undefined;
     const matches: string[] = [];
     for (const profile of profiles) {
-      const sessions = path.join(root, profile.name, '.doubaowork/agent_mode/workspace/.sessions');
+      const sessions = path.join(root, profile.name, this.options.sessionNamespace ?? '.doubaowork', 'agent_mode/workspace/.sessions');
       try { await safeDirectory(path.join(sessions, conversation), root); matches.push(sessions); }
       catch (error) { if (!missing(error)) throw error; }
     }

@@ -23,7 +23,9 @@ describe.each(['darwin', 'win32'] as const)('Doubao definition paths on %s', tar
     try {
       const defs = await loader.load();
       const expected = DoubaoWorkInput.defaultLogDir()!.replace(/\\/g, '/');
-      expect(defs[0].detection.paths.map(p => p.replace(/\\/g, '/'))).toEqual([expected]);
+      expect(defs[0].detection.paths.map(p => p.replace(/\\/g, '/'))).toEqual([
+        expected, DoubaoWorkInput.defaultLogDir('doubao')!.replace(/\\/g, '/'),
+      ]);
       if (target === 'win32') {
         expect(expected).toBe(path.win32.join(overridden ? 'D:\\Synthetic Local' : path.win32.join(homedir(), 'AppData', 'Local'),
           'DoubaoWork', 'User Data', 'sdk_storage', 'log').replace(/\\/g, '/'));

@@ -532,6 +532,20 @@ describe('Orchestrator', () => {
       } finally { await orch.stop(); }
     });
 
+    it('uses the selected Doubao App root for both input and discovery', async () => {
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, client: 'doubao' };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      try {
+        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir: string; userDataRoot: string };
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        expect(input.userDataRoot.replace(/\\/g, '/')).toMatch(/\/Doubao(?:\/User Data)?$/);
+        expect(detection?.watchPaths).toEqual([input.logDir]);
+        expect(input.logDir.replace(/\\/g, '/')).toContain('/Doubao/');
+      } finally { await orch.stop(); }
+    });
+
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));
