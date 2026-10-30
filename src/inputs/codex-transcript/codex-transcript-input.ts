@@ -64,6 +64,7 @@ const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
+const MAX_CACHED_INCOMPLETE_TAILS = 2048;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
@@ -107,6 +108,21 @@ interface JsonLine {
   startOffset: number;
   endOffset: number;
   record: Record<string, unknown>;
+}
+
+interface IncompleteJsonlTail {
+  startOffset: number;
+  endOffset: number;
+  /** Small end-of-prefix witness for append validation; never retain the body. */
+  anchor: string;
+}
+
+interface CachedIncompleteJsonlTail extends IncompleteJsonlTail {
+  inode: number;
+  device: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  fileSize: number;
 }
 
 interface SegmentRecoveryDiagnostics {
@@ -198,6 +214,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly multimodalProcessor: MultimodalProcessor | null;
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
+  private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
   private wakeupWatcher: FSWatcher | null = null;
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -318,6 +335,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
+    this.incompleteTails.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
   }
@@ -625,6 +643,10 @@ export class CodexTranscriptInput extends BaseInput {
       && processedTerminalCount < MAX_TERMINALS_PER_FILE_CYCLE
       && scannedBytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
     ) {
+      // Physical newline discovery is speculative, separate from the durable
+      // complete-line checkpoint. Unchanged tails require no content reads;
+      // appends are searched only beyond the previously inspected prefix.
+      if (!await this.incompleteTailReady(filePath, checkpoint.scanOffset, stat, runtime)) break;
       const scanStartOffset = checkpoint.scanOffset;
       const scanEndOffset = Math.min(
         stat.size,
@@ -694,6 +716,24 @@ export class CodexTranscriptInput extends BaseInput {
           },
           runtime,
         );
+      }
+      if (scan.incompleteTail?.endOffset === stat.size) {
+        const current = await fs.stat(filePath);
+        if (sameFileVersion(stat, current)) {
+          this.incompleteTails.delete(filePath);
+          this.incompleteTails.set(filePath, {
+            ...scan.incompleteTail,
+            inode: stat.ino,
+            device: stat.dev,
+            mtimeMs: stat.mtimeMs,
+            ctimeMs: stat.ctimeMs,
+            fileSize: stat.size,
+          });
+          // Bound metadata even when many abandoned sessions have partial tails.
+          if (this.incompleteTails.size > MAX_CACHED_INCOMPLETE_TAILS) {
+            this.incompleteTails.delete(this.incompleteTails.keys().next().value!);
+          }
+        }
       }
       if (scan.nextOffset === scanStartOffset) break;
       checkpointChanged = true;
@@ -777,6 +817,60 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
     return emittedCount;
+  }
+
+  private async incompleteTailReady(
+    filePath: string,
+    startOffset: number,
+    stat: fsSync.Stats,
+    runtime: InputRuntimeAccumulator | null,
+  ): Promise<boolean> {
+    const tail = this.incompleteTails.get(filePath);
+    if (!tail) return true;
+    this.incompleteTails.delete(filePath);
+    if (
+      tail.startOffset !== startOffset || tail.inode !== stat.ino || tail.device !== stat.dev
+      || stat.size < tail.fileSize
+      || (stat.size === tail.fileSize && (stat.mtimeMs !== tail.mtimeMs || stat.ctimeMs !== tail.ctimeMs))
+    ) return true;
+    if (stat.size === tail.endOffset) {
+      if (stat.mtimeMs !== tail.mtimeMs || stat.ctimeMs !== tail.ctimeMs) return true;
+      this.incompleteTails.set(filePath, tail);
+      return false;
+    }
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const read = async (position: number, length: number): Promise<Buffer> => {
+        const chunk = Buffer.alloc(length);
+        const started = runtime?.now();
+        const { bytesRead } = await handle.read(chunk, 0, length, position);
+        if (runtime && started !== undefined) runtime.observeRead(bytesRead, length, runtime.now() - started);
+        return chunk.subarray(0, bytesRead);
+      };
+      const anchorBytes = tail.anchor.length / 2;
+      const anchor = await read(tail.endOffset - anchorBytes, anchorBytes);
+      if (anchor.toString('hex') !== tail.anchor) return true;
+      let position = tail.endOffset;
+      let last = anchor;
+      const searchEnd = Math.min(stat.size, position + MAX_SCAN_BYTES_PER_FILE_CYCLE);
+      while (position < searchEnd) {
+        const chunk = await read(position, Math.min(READ_CHUNK_SIZE, searchEnd - position));
+        if (chunk.length === 0) return true;
+        if (chunk.includes(0x0a)) return true;
+        position += chunk.length;
+        last = chunk.length >= 64 ? chunk.subarray(-64) : Buffer.concat([last, chunk]).subarray(-64);
+      }
+      if (sameFileVersion(stat, await handle.stat())) {
+        this.incompleteTails.set(filePath, {
+          ...tail, endOffset: position, anchor: last.toString('hex'),
+          mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+          fileSize: stat.size,
+        });
+      }
+      return false;
+    } finally {
+      await handle.close();
+    }
   }
 
   /**
@@ -2670,6 +2764,7 @@ async function scanJsonLines(
   parseSuccessRecords: number;
   parseFailedRecords: number;
   maxRecordBytes: number;
+  incompleteTail?: IncompleteJsonlTail;
 }> {
   if (endOffset <= startOffset) {
     return {
@@ -2690,6 +2785,7 @@ async function scanJsonLines(
     let parseSuccessRecords = 0;
     let parseFailedRecords = 0;
     let maxRecordBytes = 0;
+    let tailAnchor = '';
 
     while (position < endOffset) {
       const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
@@ -2701,6 +2797,7 @@ async function scanJsonLines(
       }
       if (bytesRead <= 0) break;
       position += bytesRead;
+      tailAnchor = chunk.subarray(Math.max(0, bytesRead - 64), bytesRead).toString('hex');
 
       let cursor = 0;
       const chunkStartOffset = position - bytesRead;
@@ -2784,10 +2881,22 @@ async function scanJsonLines(
       parseSuccessRecords,
       parseFailedRecords,
       maxRecordBytes,
+      ...(position > pendingStartOffset ? {
+        incompleteTail: {
+          startOffset: pendingStartOffset,
+          endOffset: position,
+          anchor: tailAnchor,
+        },
+      } : {}),
     };
   } finally {
     await handle.close();
   }
+}
+
+function sameFileVersion(a: fsSync.Stats, b: fsSync.Stats): boolean {
+  return a.ino === b.ino && a.dev === b.dev && a.size === b.size
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
 
 async function findOwnerSessionMetaOffset(

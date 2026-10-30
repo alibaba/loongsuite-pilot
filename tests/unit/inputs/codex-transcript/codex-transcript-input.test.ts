@@ -415,6 +415,84 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('does not reread static tails, scans only appended bytes, and preserves split UTF-8 on completion', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-tail-continuation-'));
+    tempDirs.push(root);
+    const { input, sessionDir, entries, stateStore } = await createDormantInput(root);
+    const output = 'x'.repeat(32 * 1024 * 1024) + '界';
+    const lines = completedTurnWithLargeToolOutput(output).trimEnd().split('\n');
+    const prefix = lines.slice(0, 5).join('\n') + '\n';
+    const body = Buffer.from(lines[5]!);
+    const split = body.indexOf(Buffer.from('界')) + 1;
+    const transcript = await writeTranscript(sessionDir, prefix);
+    await fs.appendFile(transcript, body.subarray(0, split));
+    await processTranscriptOnce(input, transcript);
+    await processTranscriptOnce(input, transcript);
+    const start = Buffer.byteLength(prefix);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(start);
+    const measure = async (): Promise<number> => {
+      const runtime = new InputRuntimeAccumulator();
+      (input as unknown as { activeRuntimeAccumulator: InputRuntimeAccumulator }).activeRuntimeAccumulator = runtime;
+      await processTranscriptOnce(input, transcript);
+      return runtime.finish(0).rawReadBytes;
+    };
+    for (let i = 0; i < 5; i++) expect(await measure()).toBe(0);
+    // Finish the multibyte character and JSON body without publishing LF.
+    await fs.appendFile(transcript, body.subarray(split));
+    expect(await measure()).toBeLessThanOrEqual(64 + body.length - split);
+    expect(await measure()).toBe(0);
+    await fs.appendFile(transcript, '\t');
+    expect(await measure()).toBeLessThanOrEqual(65);
+    expect(await measure()).toBe(0);
+    // Large nonterminal appends retain a physical cursor across scan budgets.
+    await fs.appendFile(transcript, Buffer.alloc(17 * 1024 * 1024, 0x20));
+    expect(await measure()).toBeLessThanOrEqual(16 * 1024 * 1024 + 64);
+    expect(await measure()).toBeLessThanOrEqual(1024 * 1024 + 64);
+    expect(await measure()).toBe(0);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(start);
+    await stateStore.save();
+    const restarted = await createDormantInput(root);
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript).scanOffset).toBe(start);
+    expect(restarted.entries).toEqual([]);
+    await fs.appendFile(transcript, '\n' + lines.slice(6).join('\n') + '\n');
+    for (let i = 0; i < 3; i++) await processTranscriptOnce(restarted.input, transcript);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({
+      scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
+    });
+    const results = [...entries, ...restarted.entries].filter(e => e['event.name'] === 'tool.result');
+    expect(results).toHaveLength(1);
+    expect(JSON.stringify(results[0])).toContain(output);
+    expect(new Set([...entries, ...restarted.entries].map(e => e['event.id'])).size)
+      .toBe(entries.length + restarted.entries.length);
+  });
+
+  it.each(['same-size', 'shorter', 'regrown', 'new-inode'] as const)('invalidates an incomplete-tail hint after %s replacement', async kind => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-tail-replacement-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore } = await createDormantInput(root);
+    const prefix = completedTurn();
+    const partial = '{"padding":"' + 'x'.repeat(1024);
+    const transcript = await writeTranscript(sessionDir, prefix + partial);
+    await processTranscriptOnce(input, transcript);
+    await processTranscriptOnce(input, transcript);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(Buffer.byteLength(prefix));
+    const oldStat = await fs.stat(transcript);
+    const length = kind === 'same-size' ? partial.length : kind === 'shorter' ? 128 : partial.length + 256;
+    const replacement = JSON.stringify({ padding: 'y'.repeat(length - 15) }) + '\n';
+    expect(Buffer.byteLength(replacement)).toBe(length);
+    if (kind === 'new-inode') {
+      await fs.writeFile(transcript + '.replacement', prefix + replacement);
+      await fs.rename(transcript + '.replacement', transcript);
+    } else {
+      await fs.writeFile(transcript, prefix + replacement);
+    }
+    // Force a distinct modification time even on filesystems with coarse clocks.
+    await fs.utimes(transcript, oldStat.atime, new Date(oldStat.mtimeMs + 1000));
+    await processTranscriptOnce(input, transcript);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe((await fs.stat(transcript)).size);
+  });
+
   it('quarantines a completed oversized record, preserves its incomplete tail, and resumes after restart', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-oversized-record-'));
     tempDirs.push(root);
