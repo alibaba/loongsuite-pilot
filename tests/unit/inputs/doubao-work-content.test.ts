@@ -39,6 +39,17 @@ describe('Doubao native I/O and decision identity', () => {
     expect(nativeTaskContent(superseded, actor, DOUBAO_EPOCH, nano(3000), ['call-one'])).toEqual({});
   });
 
+  it('retains literal current I/O with a same-time native reminder only when the user delimiter proves the demand', () => {
+    const task = assignment(-3000, 'OLD_REQUEST') + assignment(10, 'USER_REQUEST')
+      + assignment(10, '<system-reminder>\nSubagent finished.\n</system-reminder>');
+    const current = [{ role: 'user', content: 'USER_REQUEST' }, ...rows];
+    const content = parseNativeContent({ [actor]: lines(current) }, { [actor]: task })!;
+    expect(nativeTaskContent(content, actor, DOUBAO_EPOCH, nano(3000), ['call-one']))
+      .toEqual({ input: 'USER_REQUEST', output: 'FINAL_ANSWER' });
+    const absent = parseNativeContent({ [actor]: lines(rows) }, { [actor]: task })!;
+    expect(nativeTaskContent(absent, actor, DOUBAO_EPOCH, nano(3000), ['call-one'])).toEqual({});
+  });
+
   it('retains one native decision ID for parallel calls, with exact call/result identity and names', () => {
     const source = [
       { role: 'assistant', tool_calls: [

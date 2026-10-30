@@ -7,7 +7,7 @@ import { ClientType, CollectionMethod, type AgentActivityEntry, type JsonValue }
 import { buildDoubaoTaskEvents, doubaoDigest, isDoubaoPresentationInspection, parseDoubaoLogLine, type DoubaoPendingTurn, type DoubaoLogEvent } from './doubao-work-log.js';
 import { buildNativeToolEvents, type NativeGraph } from './doubao-work-native.js';
 import { buildNativeExecutionEvents, isUniqueNativeToolOwner, type NativeExecution } from './doubao-work-execution.js';
-import { enrichNativeToolEvents, nativeTaskContent, nativeToolObservations, type NativeContent } from './doubao-work-content.js';
+import { enrichNativeToolEvents, nativeCurrentAssignment, nativeTaskContent, nativeToolObservations, type NativeContent } from './doubao-work-content.js';
 import { nativeDemandFingerprint, nativeRoundSteps, type NativeAssistantRound, type NativeRoundReconstruction } from './doubao-work-rounds.js';
 import { checkpointDraft } from './doubao-work-state.js';
 import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
@@ -698,10 +698,12 @@ export class DoubaoWorkInput extends BaseInput {
         transcriptOffsets: { [actor]: content.transcriptOffsets?.[actor] ?? 0 },
         ...(content.sourceVersions?.[actor] === undefined ? {} : { sourceVersions: { [actor]: content.sourceVersions[actor] } }),
         sourceBytes: { [actor]: content.sourceBytes?.[actor] ?? 0 } };
-      const current = assignments.filter(value => value.timeMs >= queryMs && value.timeMs <= Number(BigInt(endNano) / 1_000_000n));
-      if (content.findUserRows && current.length === 1) {
-        const fingerprint = nativeDemandFingerprint(current[0].text), indices = content.findUserRows(actor, fingerprint);
-        scoped.findUserRows = (who, key) => who === actor && key === fingerprint ? indices : undefined;
+      const current = nativeCurrentAssignment(content, actor, queryMs, Number(BigInt(endNano) / 1_000_000n));
+      if (content.findUserRows && current) {
+        const fingerprint = nativeDemandFingerprint(current.text), indices = content.findUserRows(actor, fingerprint);
+        const emptyFingerprint = nativeDemandFingerprint(''), emptyIndices = content.findUserRows(actor, emptyFingerprint);
+        scoped.findUserRows = (who, key) => who !== actor ? undefined
+          : key === fingerprint ? indices : key === emptyFingerprint ? emptyIndices : undefined;
       }
       job = { version, conversation, bytes, updatedMs: Date.now(), steps: nativeRoundSteps(scoped, actor, queryMs, endNano, callIds, scope),
         graph: { main: graph.main, edges: { ...graph.edges }, content: scoped }, executions: executions?.map(value => ({ ...value })) };
