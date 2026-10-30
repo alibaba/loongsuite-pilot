@@ -90,6 +90,16 @@ async function writeJsonlFile(dir: string, filename: string, records: Record<str
   await fs.writeFile(path.join(dir, filename), content);
 }
 
+/**
+ * Simulate log retention dropping a closed day's segment: move it out of the
+ * scanned output directory instead of deleting it.
+ */
+async function retireSegment(dir: string, filename: string): Promise<void> {
+  const retiredDir = path.join(dir, '..', 'retired');
+  await fs.mkdir(retiredDir, { recursive: true });
+  await fs.rename(path.join(dir, filename), path.join(retiredDir, filename));
+}
+
 describe('MetricsSummaryWriter', () => {
   let tmpDir: string;
 
@@ -668,5 +678,114 @@ describe('MetricsSummaryWriter', () => {
     const foobar = repos.find((r: { repo: string }) => r.repo === 'foo/bar');
     expect(foobar.sessions).toBe(1);
     expect(foobar.events).toBe(2);
+  });
+
+  it('keeps model shares in multi-day ranges after the raw segment is retired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-30T12:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+
+    await writeJsonlFile(outputDir, 'claude-code-2026-07-30.jsonl', [
+      makeLlmResponse({
+        'gen_ai.request.model': 'claude-opus-4-6',
+        'gen_ai.usage.input_tokens': '800',
+        'gen_ai.usage.output_tokens': '200',
+        'gen_ai.usage.cache_read.input_tokens': '600',
+        'gen_ai.usage.cache_creation.input_tokens': '0',
+        'gen_ai.usage.total_tokens': '1000',
+      }),
+      makeLlmResponse({
+        'gen_ai.request.model': 'claude-sonnet-4-6',
+        'gen_ai.usage.input_tokens': '400',
+        'gen_ai.usage.output_tokens': '100',
+        'gen_ai.usage.cache_read.input_tokens': '0',
+        'gen_ai.usage.cache_creation.input_tokens': '0',
+        'gen_ai.usage.total_tokens': '500',
+      }),
+    ]);
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    // Roll over to the next day and remove yesterday's segment, mimicking log retention.
+    vi.setSystemTime(new Date('2026-07-31T09:00:00'));
+    await retireSegment(outputDir, 'claude-code-2026-07-30.jsonl');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.modelShares).toEqual([]);
+
+    const models = summary.ranges.sevenDays.modelShares;
+    expect(models.length).toBe(2);
+    const opus = models.find((m: { model: string }) => m.model === 'claude-opus-4-6');
+    expect(opus.totalTokens).toBe(1000);
+    expect(opus.inputTokens).toBe(800);
+    expect(opus.cacheReadTokens).toBe(600);
+    const sonnet = models.find((m: { model: string }) => m.model === 'claude-sonnet-4-6');
+    expect(sonnet.totalTokens).toBe(500);
+    expect(summary.ranges.sevenDays.totalTokens).toBe(1500);
+  });
+
+  it('keeps agent, provider and repo shares in multi-day ranges after the raw segment is retired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-30T12:00:00'));
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+
+    await writeJsonlFile(outputDir, 'claude-code-2026-07-30.jsonl', [
+      makeLlmRequest({
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.session.id': 's1',
+        'gen_ai.provider.name': 'anthropic',
+        'git.repo': 'sls/loongsuite-pilot',
+      }),
+      makeLlmResponse({
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.session.id': 's1',
+        'gen_ai.provider.name': 'anthropic',
+        'git.repo': 'sls/loongsuite-pilot',
+        'gen_ai.usage.total_tokens': '1000',
+      }),
+      makeToolCall({
+        'gen_ai.agent.type': 'claude-code',
+        'gen_ai.session.id': 's1',
+        'git.repo': 'sls/loongsuite-pilot',
+      }),
+    ]);
+    await writeJsonlFile(outputDir, 'codex-2026-07-30.jsonl', [
+      makeLlmRequest({ 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': 's2', 'gen_ai.provider.name': 'openai' }),
+      makeLlmResponse({
+        'gen_ai.agent.type': 'codex',
+        'gen_ai.session.id': 's2',
+        'gen_ai.provider.name': 'openai',
+        'gen_ai.usage.total_tokens': '500',
+      }),
+    ]);
+
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    vi.setSystemTime(new Date('2026-07-31T09:00:00'));
+    await retireSegment(outputDir, 'claude-code-2026-07-30.jsonl');
+    await retireSegment(outputDir, 'codex-2026-07-30.jsonl');
+    await new MetricsSummaryWriter(tmpDir, makeConfig()).refresh();
+
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    const range = summary.ranges.sevenDays;
+    expect(range.totalEvents).toBe(5);
+
+    const claude = range.agentShares.find((a: { agentType: string }) => a.agentType === 'claude-code');
+    expect(claude.events).toBe(3);
+    expect(claude.sessions).toBe(1);
+    expect(claude.tokens).toBe(1000);
+    const codex = range.agentShares.find((a: { agentType: string }) => a.agentType === 'codex');
+    expect(codex.events).toBe(2);
+    expect(codex.tokens).toBe(500);
+
+    const anthropic = range.providerShares.find((p: { provider: string }) => p.provider === 'anthropic');
+    expect(anthropic.totalTokens).toBe(1000);
+    const openai = range.providerShares.find((p: { provider: string }) => p.provider === 'openai');
+    expect(openai.totalTokens).toBe(500);
+
+    const repo = range.repoShares.find((r: { repo: string }) => r.repo === 'sls/loongsuite-pilot');
+    expect(repo.events).toBe(3);
+    expect(repo.sessions).toBe(1);
   });
 });

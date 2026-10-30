@@ -105,6 +105,33 @@ interface DayDigest {
   requests: number;
   toolCalls: number;
   events: number;
+  /**
+   * Per-dimension breakdowns, persisted so that multi-day ranges keep their
+   * model / agent / provider / repository distribution after the raw JSONL
+   * segments are dropped by log retention. Optional: digests written by older
+   * versions do not carry them and are still readable.
+   */
+  modelTokens?: Record<string, ModelTokenDigest>;
+  agentStats?: Record<string, AgentDigest>;
+  providerTokens?: Record<string, number>;
+  repoStats?: Record<string, RepoDigest>;
+}
+
+interface ModelTokenDigest {
+  total: number;
+  input: number;
+  cacheRead: number;
+}
+
+interface AgentDigest {
+  sessions: number;
+  events: number;
+  tokens: number;
+}
+
+interface RepoDigest {
+  sessions: number;
+  events: number;
 }
 
 interface DigestFile {
@@ -541,7 +568,7 @@ export class MetricsSummaryWriter {
 
   private dayStatsToDigest(stats: DayStats, existing?: DayDigest): DayDigest {
     if (existing && stats.events === 0) return existing;
-    return {
+    const digest: DayDigest = {
       tokens: (existing?.tokens ?? 0) + stats.tokens,
       inputTokens: (existing?.inputTokens ?? 0) + stats.inputTokens,
       outputTokens: (existing?.outputTokens ?? 0) + stats.outputTokens,
@@ -552,6 +579,20 @@ export class MetricsSummaryWriter {
       toolCalls: (existing?.toolCalls ?? 0) + stats.toolCalls,
       events: (existing?.events ?? 0) + stats.events,
     };
+
+    // Persist the per-dimension breakdowns as well, otherwise every range
+    // wider than one day comes back with empty modelShares / agentShares /
+    // providerShares / repoShares once the raw JSONL is gone.
+    const modelTokens = mergeModelDigests(existing?.modelTokens, stats.modelTokens);
+    if (modelTokens) digest.modelTokens = modelTokens;
+    const agentStats = mergeAgentDigests(existing?.agentStats, stats.agentStats);
+    if (agentStats) digest.agentStats = agentStats;
+    const providerTokens = mergeProviderDigests(existing?.providerTokens, stats.providerTokens);
+    if (providerTokens) digest.providerTokens = providerTokens;
+    const repoStats = mergeRepoDigests(existing?.repoStats, stats.repoStats);
+    if (repoStats) digest.repoStats = repoStats;
+
+    return digest;
   }
 
   private pruneDigest(digest: DigestFile, today: string): void {
@@ -678,6 +719,35 @@ export class MetricsSummaryWriter {
         totalRequests += d.requests;
         totalToolCalls += d.toolCalls;
         totalEvents += d.events;
+
+        // Replay the persisted breakdowns of an already-closed day so that
+        // 7-day / 30-day ranges keep their distribution, not just the totals.
+        for (const [model, data] of Object.entries(d.modelTokens ?? {})) {
+          const m = modelMap.get(model) ?? { total: 0, input: 0, cacheRead: 0 };
+          m.total += data.total;
+          m.input += data.input;
+          m.cacheRead += data.cacheRead;
+          modelMap.set(model, m);
+        }
+
+        for (const [agentType, data] of Object.entries(d.agentStats ?? {})) {
+          const a = agentMap.get(agentType) ?? { sessions: 0, events: 0, tokens: 0 };
+          a.sessions += data.sessions;
+          a.events += data.events;
+          a.tokens += data.tokens;
+          agentMap.set(agentType, a);
+        }
+
+        for (const [provider, tokens] of Object.entries(d.providerTokens ?? {})) {
+          providerMap.set(provider, (providerMap.get(provider) ?? 0) + tokens);
+        }
+
+        for (const [repo, data] of Object.entries(d.repoStats ?? {})) {
+          const r = repoMap.get(repo) ?? { sessions: 0, events: 0 };
+          r.sessions += data.sessions;
+          r.events += data.events;
+          repoMap.set(repo, r);
+        }
       }
     }
 
@@ -1007,6 +1077,74 @@ function formatDate(d: Date): string {
     String(d.getMonth() + 1).padStart(2, '0'),
     String(d.getDate()).padStart(2, '0'),
   ].join('-');
+}
+
+function mergeModelDigests(
+  existing: Record<string, ModelTokenDigest> | undefined,
+  live: Map<string, { total: number; input: number; cacheRead: number }>,
+): Record<string, ModelTokenDigest> | undefined {
+  if (!existing && live.size === 0) return undefined;
+  const merged: Record<string, ModelTokenDigest> = {};
+  for (const [model, data] of Object.entries(existing ?? {})) {
+    merged[model] = { total: data.total, input: data.input, cacheRead: data.cacheRead };
+  }
+  for (const [model, data] of live) {
+    const current = merged[model] ?? { total: 0, input: 0, cacheRead: 0 };
+    current.total += data.total;
+    current.input += data.input;
+    current.cacheRead += data.cacheRead;
+    merged[model] = current;
+  }
+  return merged;
+}
+
+function mergeAgentDigests(
+  existing: Record<string, AgentDigest> | undefined,
+  live: Map<string, { sessions: Set<string>; events: number; tokens: number }>,
+): Record<string, AgentDigest> | undefined {
+  if (!existing && live.size === 0) return undefined;
+  const merged: Record<string, AgentDigest> = {};
+  for (const [agentType, data] of Object.entries(existing ?? {})) {
+    merged[agentType] = { sessions: data.sessions, events: data.events, tokens: data.tokens };
+  }
+  for (const [agentType, data] of live) {
+    const current = merged[agentType] ?? { sessions: 0, events: 0, tokens: 0 };
+    current.sessions += data.sessions.size;
+    current.events += data.events;
+    current.tokens += data.tokens;
+    merged[agentType] = current;
+  }
+  return merged;
+}
+
+function mergeProviderDigests(
+  existing: Record<string, number> | undefined,
+  live: Map<string, number>,
+): Record<string, number> | undefined {
+  if (!existing && live.size === 0) return undefined;
+  const merged: Record<string, number> = { ...(existing ?? {}) };
+  for (const [provider, tokens] of live) {
+    merged[provider] = (merged[provider] ?? 0) + tokens;
+  }
+  return merged;
+}
+
+function mergeRepoDigests(
+  existing: Record<string, RepoDigest> | undefined,
+  live: Map<string, { sessions: Set<string>; events: number }>,
+): Record<string, RepoDigest> | undefined {
+  if (!existing && live.size === 0) return undefined;
+  const merged: Record<string, RepoDigest> = {};
+  for (const [repo, data] of Object.entries(existing ?? {})) {
+    merged[repo] = { sessions: data.sessions, events: data.events };
+  }
+  for (const [repo, data] of live) {
+    const current = merged[repo] ?? { sessions: 0, events: 0 };
+    current.sessions += data.sessions.size;
+    current.events += data.events;
+    merged[repo] = current;
+  }
+  return merged;
 }
 
 function buildModelShares(
