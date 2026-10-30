@@ -1,7 +1,7 @@
 {
-  "dashboardName": "loongsuite-pilot-ai-coding-events",
-  "displayName": "LoongSuite Pilot AI Coding 事件洞察",
-  "description": "只基于 AI Coding 事件事实表的使用、Token、模型、Skill、Tool 与集中度洞察。",
+  "dashboardName": "loongsuite-pilot-agent-events",
+  "displayName": "LoongSuite Pilot Agent 事件洞察",
+  "description": "只基于 Agent 事件事实表的使用、Token、模型、Skill、Tool 与集中度洞察。",
   "attribute": {
     "type": "grid",
     "remark": "按spec重新生成并发布事件报表",
