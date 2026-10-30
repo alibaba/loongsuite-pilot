@@ -4,6 +4,25 @@
 
 本文说明如何选择 Pilot 要采集哪些 AI Coding Agent，以及配置采集和数据脱敏。
 
+## Hermes 系统提示词
+
+Hermes 原生请求 Hook 提供正文时，Pilot 从中采集 `gen_ai.system_instructions`。
+Hermes 0.10.0（`v2026.4.16`）的 Hook 不提供正文；Pilot 观察该版本原生请求构建和
+Responses 规范化方法，补采主对话中 OpenAI Chat Completions、Anthropic Messages、
+OpenAI Responses 和 Bedrock Converse 的系统指令，包括未写入 session 数据库的临时
+指令。该版本的 Google Gemini 使用 OpenAI 兼容接口，也复用此路径。
+
+新版直接读取同次请求的原生结构化字段：chat/Gemini 优先取 `request_messages`
+中 role 为 system/developer 的消息，其次取 `system_prompt`，最后兼容 `request.body`。
+不搜索正文关键词、不解析截断标记、不比较文本前缀。继续遵守每段 32,768 字符的
+采集上限，新版不会启用旧版方法包装。原生完整字段缺失时保留可见请求正文。
+
+采集使用 Anthropic OAuth 转换后的文本、Responses 规范化后的文本，并匹配 ASCII
+错误恢复时的字符改写。此兼容路径只覆盖上述准确版本；方法签名不兼容时省略该可选
+字段。辅助模型调用不扩展采集，工具定义仍依赖原生请求正文。
+更新 Pilot 插件并重启 Hermes 即可激活，Hermes 版本可以保留。指令输出前仍经过
+Pilot 的统一脱敏流程。
+
 ## Hermes TTFT
 
 对于 Hermes 的 OpenAI 兼容流式 Chat Completions 请求，Pilot 从

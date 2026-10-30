@@ -4,6 +4,30 @@ English | [简体中文](zh-CN/agents.md)
 
 Use this guide to choose which AI coding agents Pilot should collect from and configure collection and masking.
 
+## Hermes system instructions
+
+Pilot collects `gen_ai.system_instructions` from Hermes' native provider-request
+Hook when available. Hermes 0.10.0 (`v2026.4.16`) omits that payload; Pilot observes
+its native request builder and Responses preflight to capture main-conversation
+instructions for OpenAI Chat Completions, Anthropic Messages, OpenAI Responses
+and Bedrock Converse. This includes temporary instructions absent from the session
+database. Google Gemini uses the OpenAI-compatible route in that Hermes release.
+
+For newer Hermes, Pilot reads the same call's native structured fields: system
+and developer roles in `request_messages` for chat/Gemini, then `system_prompt`,
+with `request.body` as a compatibility fallback. It does not search message text,
+parse truncation markers or compare text prefixes. The existing 32,768-character
+per-part limit still applies; newer Hermes receives no legacy method wrappers.
+When uncapped native fields are absent, capture retains the visible request body.
+
+Capture follows Anthropic OAuth conversion, Responses normalization and the ASCII
+error-recovery rewrite. This compatibility path covers only that exact Hermes
+release; incompatible method signatures omit the optional field. Auxiliary model
+calls are not expanded, and tool definitions still require the native request
+payload. Update Pilot's plugin and restart Hermes to activate the compatibility
+path; the Hermes version can stay unchanged. Existing masking applies before
+Pilot exports the instructions.
+
 ## Hermes TTFT
 
 For Hermes OpenAI-compatible streaming chat completions, Pilot records
