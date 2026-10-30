@@ -121,7 +121,7 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.turn.id` | string | Recommended | 一次用户请求到 Agent 最终响应的轮次 ID。 |
 | `gen_ai.step.id` | string | Recommended | 一次 ReAct 循环或 Agent 中间步骤。 |
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
-| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder` 或 `qoder-work`。 |
+| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder`、`qoder-app` 或 `qoder-work`。 |
 | `gen_ai.agent.id` | string | Recommended | Agent 运行实例 ID。 |
 | `gen_ai.agent.parent.id` | string | 有可靠来源时 Recommended | 当前工作的上游 Agent 身份，不替代 invocation。 |
 | `gen_ai.agent.peer.id` | string | 有可靠来源时 Recommended | 本次 invoke/result 的直接交互 Agent。 |
@@ -174,6 +174,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.current_root` | string | Recommended | Git 顶层目录，仅当工作目录是 git 仓库时推断得出。 |
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
+
+Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`；Stop Hook 明确提供 `parent_business_info.product=app` 的新桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型，`gen_ai.agent.system` 均为 `qoder`。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别宿主标记时保留原分类，不根据路径或进程名猜测。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
