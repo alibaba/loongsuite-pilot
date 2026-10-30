@@ -11,27 +11,34 @@
 - **查询时间**：SLS 查询接口和各 chartQuery 使用相同时间窗口。
 - **SQL 表名**：含连字符的 Logstore 名使用双引号包裹，例如 `"agent-event"`。
 
-| logical source | logstore | 用途 | 查询时间 |
+逻辑数据源（logical source）是报表 spec 在 `data.sources` 中引用的一类业务数据。Agent 根据这个名称选择实际数据表；例如 `agent_events` 对应下表中的两张应用事件表，查询时合并读取。
+
+| 逻辑数据源（spec 引用名） | 实际表 / Logstore | 用途：能回答什么问题 | 查询时间 |
 |---|---|---|---|
-| `ai_coding_events` | `agent-event` + `agent-event-webtracking` | 同字段契约、不同写入链路的应用事实，合并读取 | `__time__`，Unix 秒 |
-| `intent_events` | `audit-event` | 普通与风险意图的识别结果；按事件名限定范围 | `__time__`，Unix 秒 |
-| `incident_events` | `incident-event` | 经过关联、过滤或提升的高保真风险 | `__time__`，Unix 秒 |
-| `dept_roster` | 客户提供，例如 `department` | 可选组织维表；不属于事件 schema | 由客户确认快照有效期 |
+| `agent_events` | `agent-event` + `agent-event-webtracking` | 谁在使用 Agent、用了哪些模型和工具，以及 Token 消耗和缓存命中率如何。 | `__time__`，Unix 秒 |
+| `intent_events` | `audit-event` | 用户希望 Agent 完成什么工作，普通需求与风险意图分别有哪些、各有多少。 | `__time__`，Unix 秒 |
+| `incident_events` | `incident-event` | 发现了哪些风险、涉及哪些用户或会话、风险数量如何变化，以及证据在哪里。 | `__time__`，Unix 秒 |
+| `dept_roster` | 客户提供，例如 `department` | 补充员工与团队归属；结合事件统计团队使用人数、覆盖率，以及在册但未产生日志的员工。 | 由客户确认快照有效期 |
+
+读取说明：`agent_events` 合并两路字段契约相同的应用事实；`intent_events` 只读取 `audit-event` 中的意图事件，具体事件名见其字段说明。`dept_roster` 是可选的客户扩展，需要确认员工标识映射、组织归属和快照有效期。
 
 `ebpf-event` 是独立的运行时观测来源，应用 Token 报表使用上述两张应用事实表。
 
 ## Source Composition
 
-| 分析范围 | 所需数据源 | 可支持的指标 |
+按要回答的问题选择数据源；跨来源关联的身份键、预聚合和统计口径见各 Source 章节。
+
+| 想回答的问题 | 所需数据源 | 分析方式 |
 |---|---|---|
-| 应用行为与用量 | `ai_coding_events` | 事件、活跃用户、Session、模型响应、Token、缓存、Tool、Skill |
-| 意图与风险 | `intent_events` / `incident_events`；按需关联应用事实 | 意图分类、风险分布、关联证据及对应的已观测用量 |
-| 组织与人群分析 | 事实源 + `dept_roster` 或客户自定义外表 | 在册人数、使用覆盖率、未使用员工、部门层级、团队筛选及部门用量 |
-| 其他业务维度 | 事实源 + 客户提供的外表 | 按用户、应用、项目等映射到客户业务维度，指标范围由外表契约确定 |
+| Agent 的使用规模和用量如何变化？ | `agent_events` | 统计活跃用户、模型与工具使用、Token 消耗、缓存命中率和时间趋势 |
+| 不同用户意图对应多少 Token 消耗？ | `agent_events` + `intent_events` | 将意图标签关联到会话用量，再比较不同意图对应的已观测消耗 |
+| 出现风险的用户或会话消耗了多少 Token？ | `agent_events` + `incident_events` | 分别汇总用量和风险，再关联查看；保留未匹配的数据和关联覆盖情况 |
+| 各业务团队有多少人在用，哪些在册员工尚未产生日志？ | `agent_events` + `dept_roster` | 用花名册确定统计人群，再关联事件，计算团队使用人数、覆盖率和用量 |
+| 如何按客户的项目或其他业务分类统计？ | 事实源 + 客户提供的外表 | 用客户映射表补充业务分类，按确认的归属关系统计 |
 
 事件事实只能给出已观测用户及行为；在册员工、姓名、部门和业务归属由外表补充。外表关联能力独立于事实 schema，具体表名、关联键、唯一性及有效期在接入时绑定。报表名称、TopN、筛选项和布局放在场景 spec 中。
 
-## Source: ai_coding_events
+## Source: agent_events
 
 每条记录对应一次 Agent 行为事件。模型调用、工具调用和会话行为通过 `event.name` 区分；`user.id` 表示发起请求的用户，具体标识形式由接入方式决定。
 

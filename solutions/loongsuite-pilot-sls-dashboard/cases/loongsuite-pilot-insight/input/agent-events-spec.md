@@ -1,18 +1,18 @@
 ---
 output: dashboard
 dashboard:
-  name: loongsuite-pilot-ai-coding-events
-  displayName: "LoongSuite Pilot AI Coding 事件洞察"
+  name: loongsuite-pilot-agent-events
+  displayName: "LoongSuite Pilot Agent 事件洞察"
   defaultTimeRange: "-604800s"
   layout: grid
 data:
   sources:
-    - ai_coding_events
+    - agent_events
 ---
 
-# LoongSuite Pilot AI Coding 事件洞察
+# LoongSuite Pilot Agent 事件洞察
 
-本报表只分析 `ai_coding_events` 事实表，不依赖 `dept_roster`、`department`、`dept_user` 或客户自定义外表。
+本报表只分析 `agent_events` 事实表，不依赖 `dept_roster`、`department`、`dept_user` 或客户自定义外表。
 
 全盘公共口径：
 

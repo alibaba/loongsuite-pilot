@@ -4,7 +4,7 @@
 
 ## Skill 路由
 
-- LoongSuite Pilot / AI Coding Agent 报表需求默认使用 `.agents/skills/loongsuite-pilot-insight`。
+- LoongSuite Pilot / AI Agent 报表需求默认使用 `.agents/skills/loongsuite-pilot-insight`。
 - 通用 SLS dashboard 结构、图表配方、发布规则和 HTML 预览能力来自 `.agents/skills/sls-dashboard-builder`。
 - `sls-dashboard-builder` 必须保持通用，不写入 LoongSuite Pilot 业务 schema、公共 CTE、脚本或报表产物。
 
