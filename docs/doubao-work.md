@@ -39,7 +39,9 @@ Contained children wait 30 seconds for parent metadata, extended to 120 seconds 
 
 Read only the exact fresh conversation in up to 16 `Default` / `Profile N` directories; duplicate profile matches remain ambiguous. The adapter does not enumerate history or read authentication stores or cookies. Business file bodies inside snapshots are not collected; the first metadata parse still reads the bounded snapshot JSON. Unique assignments, native user delimiters and exact current tool IDs select the current outputs. LLM inputs may retain earlier visible messages in that conversation as context, without re-exporting old assistant rows as current LLMs. Native content fields and each round's input are limited to 64 KiB; old complete input messages may be removed. Reconstruction caps each owner at 64 assistant rounds and 512 KiB of expanded content, recording omitted counts. Adjacent duplicate tool-free final messages become one visible round.
 
-The client's `skill://<name>?...` and expanded absolute `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` links are matched by Skill identity and label. Other instruction text must still agree; ambiguous delimiters, unrelated links and arbitrary paths are not fuzzy-matched. Original message content remains unchanged, without duplicating the assignment alongside its expanded user message.
+The client's `skill://<name>?...` and expanded absolute `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` or App `.doubao/...` links are matched by Skill identity and label. Other instruction text must still agree; ambiguous delimiters, unrelated links and arbitrary paths are not fuzzy-matched. Original message content remains unchanged, without duplicating the assignment alongside its expanded user message.
+
+On reuse, complete leading native `system-reminder` blocks and their blank separators are normalized only for assignment/user-row matching. A separate reminder sharing the demand timestamp is ignored only beside one actual demand with a visible matching user delimiter. Multiple real demands, a reminder-shaped user message, missing reused delimiters and malformed blocks still prevent reconstruction. Captured input/output, row positions, round IDs, tool ownership and source times are not rewritten.
 
 Requests lacking a source terminal remain pending; navigation, first output and collection time never manufacture completion. Bounded completion scans rotate with a persisted cursor, so incomplete requests or invalid terminals cannot starve later complete requests, including after restart.
 
@@ -75,6 +77,12 @@ Run `node tests/performance/doubao-work-rounds.perf.mjs` for isolated 4k/8k/16k 
 | Windows | `%LOCALAPPDATA%/DoubaoWork/User Data/sdk_storage/log/saman_YYYY.MMDD.N.log` |
 
 Windows falls back to `~/AppData/Local`; macOS retains microsecond and Windows millisecond source precision. Optional `listeners.doubao-work.logDir` overrides the read-only source, independently of output `dataDir`.
+
+For the Doubao App's work mode, explicitly select `listeners.doubao-work.client: "doubao"`. The default `"doubao-work"` retains the existing Work source. One collector configuration selects one product. App roots are `~/Library/Application Support/Doubao` on macOS and `%LOCALAPPDATA%/Doubao/User Data` on Windows; its native namespace is `.doubao`, while Work uses `.doubaowork`. The selection binds logs, native sessions and snapshots together without deriving native paths from a log override. On 2026-10-30, the App's work mode was exercised with real macOS and Windows clients, covering tools, menu-selected Skills, parallel/background subagents and reuse. This validates the tested work-mode source variant; ordinary chat and complete provider telemetry remain outside the supported scope.
+
+Finish the old client's requests before changing selection and restarting the collector. A product switch baselines existing logs for the newly selected product instead of inheriting the other product's pending records or replaying its history. Legacy checkpoints without a client marker remain Work checkpoints. Ordinary chat mode may expose request boundaries without a work trajectory; this cannot provide reconstructed LLM messages or input/output.
+
+Set the listener below to `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }` for the App, without a `logDir` override. An invalid client value disables only this listener and logs a warning.
 
 `logDir` only overrides log reading and watching. Native sessions and `coding/snapshot` remain under the platform's default Doubao data directory; they are never inferred from a custom log directory's ancestors. Agent detection uses the same platform path resolution, including `LOCALAPPDATA` on Windows.
 

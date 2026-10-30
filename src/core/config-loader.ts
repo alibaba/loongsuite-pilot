@@ -139,6 +139,7 @@ export interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
     logDir?: string;
+    client?: 'doubao-work' | 'doubao';
   }>;
 
   retention?: {
@@ -837,7 +838,13 @@ function buildListenersConfig(
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
         ...(key === 'doubao-work' && typeof val.logDir === 'string' && val.logDir.trim()
           ? { logDir: path.resolve(resolveHome(val.logDir.trim())) } : {}),
+        ...(key === 'doubao-work' && (val.client === 'doubao' || val.client === 'doubao-work')
+          ? { client: val.client } : {}),
       };
+      if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
+        logger.warn('Invalid Doubao client; disabling this listener');
+        result[key].enabled = false;
+      }
     }
   }
 

@@ -47,7 +47,9 @@
 
 本次需求必须在源请求窗口中唯一；复用时结合原生 user 分隔记录及精确工具 ID 选择本次输出。LLM 输入可以保留同一会话此前的可见历史作为上下文，但不会把历史 assistant 输出再次生成为本次 LLM。原始内容字段最多 64 KiB；每轮输入最多 64 KiB，超出时移除最早完整消息。每个所属请求 / 本地执行最多 64 个 assistant 轮次，展开内容合计最多 512 KiB，超限记录省略数量。相邻重复的无工具最终答复只保留一个可见轮次。
 
-原生 Skill 引用从 `skill://<name>?...` 展开为该客户端 `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` 的绝对路径时，以 Skill 标识和标签识别等价需求。其他指令文字仍须相同，歧义分隔记录拒绝匹配；不进行任意路径、链接或模糊文本匹配。实际消息内容不改写，也不重复追加原始需求和展开后的 user 消息。
+原生 Skill 引用从 `skill://<name>?...` 展开为该客户端 `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` 或 App 的 `.doubao/...` 绝对路径时，以 Skill 标识和标签识别等价需求。其他指令文字仍须相同，歧义分隔记录拒绝匹配；不进行任意路径、链接或模糊文本匹配。实际消息内容不改写，也不重复追加原始需求和展开后的 user 消息。
+
+复用时，只在需求与 user 记录的匹配键中归一化完整的原生 `system-reminder` 前缀及其空行分隔。独立提醒与唯一真实需求共用时间戳，且可见 user 分隔记录能匹配该需求时，才忽略该提醒。多条真实需求、用户自己提交的提醒形式消息、缺失复用分隔记录或不完整提醒仍拒绝重建。实际输入输出、源记录位置、round ID、工具归属和源时间不改写。
 
 缺少源结束事件的请求保留 pending，不以会话切换、首输出或采集时间补造结束。完成扫描有界轮转并保存游标；未收口请求及无效结束元数据不会阻塞后续已结束请求，collector 重启后仍继续公平扫描。
 
@@ -78,6 +80,12 @@
 | Windows | `%LOCALAPPDATA%/DoubaoWork/User Data/sdk_storage/log/saman_YYYY.MMDD.N.log` |
 
 Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留微秒，Windows 保留毫秒。`listeners.doubao-work.logDir` 可指定其他只读源目录；输出 `dataDir` 独立。
+
+豆包 App 的工作模式复用同一 `doubao-work` 采集器，需显式设置 `listeners.doubao-work.client: "doubao"`；默认值 `"doubao-work"` 保持原来的豆包工作路径。一套 collector 配置只选择一个产品，不同时合并两个客户端。豆包 App 在 macOS 使用 `~/Library/Application Support/Doubao`，Windows 路径选择为 `%LOCALAPPDATA%/Doubao/User Data`，会话目录使用 `.doubao/agent_mode/workspace/.sessions`；豆包工作使用 `.doubaowork`。客户端选择同时绑定日志、会话和快照根，不通过日志目录推断。2026-10-30 已用真实 macOS、Windows App 验证工作模式的工具、菜单 Skill、并行与后台子 Agent 及复用。这仅证明已测试的工作模式数据源兼容性；普通聊天和完整提供商遥测仍不在支持范围内。
+
+切换客户端前等待旧任务收口并重启 collector；切换后的 checkpoint 会重新基线化该产品的现有日志，只采集之后的新请求，不沿用另一产品的待配对记录或回放它的历史。旧版无客户端标记的 checkpoint 仍按豆包工作解释。普通“对话”模式不保证产生工作模式原生 trajectory，可能仅采到请求边界，无法据此生成 LLM 或补出输入输出。
+
+测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会禁用该 listener 并记录警告，其他 Agent 不受影响。
 
 `logDir` 只覆盖日志读取和监听目录；原生会话与 `coding/snapshot` 仍从平台默认的豆包数据目录读取，不从自定义日志目录向上推导。Agent 检测使用同一平台路径解析，Windows 同样遵循 `LOCALAPPDATA`。
 
