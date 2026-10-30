@@ -1,4 +1,5 @@
 import { doubaoDigest, type DoubaoToolPair } from './doubao-work-log.js';
+import { nativeDemandFingerprint, nativeDemandKey, nativeReminderOnly } from './doubao-work-demand.js';
 
 const MAX_CONTENT_BYTES = 64 * 1024;
 const MAX_CALLS = 4096;
@@ -94,6 +95,25 @@ export function appendNativeContentRow(result: NativeContent, actor: string, row
   return true;
 }
 
+/** A completion notification can reuse the native demand timestamp. Ignore it
+ * only beside one actual demand with a visible matching user delimiter. A
+ * reminder-shaped user message or multiple actual demands remain ambiguous. */
+export function nativeCurrentAssignment(content: NativeContent, actor: string, queryMs: number, endMs: number): NativeAssignment | undefined {
+  const current = (content.assignments[actor] ?? []).filter(item => item.timeMs >= queryMs && item.timeMs <= endMs);
+  if (current.length === 1) return current[0];
+  const demands = current.filter(item => !nativeReminderOnly(item.text));
+  if (demands.length !== 1 || current.some(item => item.timeMs !== demands[0].timeMs)) return undefined;
+  const hasUser = (value: string) => {
+    const indexed = content.findUserRows?.(actor, nativeDemandFingerprint(value));
+    const key = indexed === undefined ? nativeDemandKey(value) : undefined;
+    return indexed === undefined
+      ? content.transcripts?.[actor]?.some(row => row.role === 'user' && typeof row.content === 'string'
+        && row.content.length <= MAX_CONTENT_BYTES && nativeDemandKey(row.content) === key)
+      : indexed.length > 0;
+  };
+  return hasUser(demands[0].text) && !hasUser('') ? demands[0] : undefined;
+}
+
 /** A unique native assignment in this request window plus exact tool IDs is
  * required for reuse. Future assignments, an old tail, or ambiguity omit I/O.
  */
@@ -102,15 +122,14 @@ export function nativeTaskContent(content: NativeContent | undefined, actor: str
   const endMs = Number(BigInt(endNano) / 1_000_000n);
   const assignments = content.assignments[actor] ?? [];
   if (assignments.some(item => item.timeMs > endMs)) return {};
-  const current = assignments.filter(item => item.timeMs >= queryMs && item.timeMs <= endMs);
-  const bodies = [...new Set(current.map(item => item.text))];
-  if (bodies.length !== 1) return {};
+  const current = nativeCurrentAssignment(content, actor, queryMs, endMs);
+  if (!current) return {};
   const answer = content.lastAnswers[actor];
   const results = callIds.map(id => content.calls[id]).filter(call => call?.actor === actor && call.resultIndex !== undefined);
   const freshTail = results.length > 0
     ? answer && results.every(call => call.resultIndex! < answer.index)
     : assignments.length === 1;
-  return { input: bodies[0], ...(answer && freshTail ? { output: answer.text } : {}) };
+  return { input: current.text, ...(answer && freshTail ? { output: answer.text } : {}) };
 }
 
 /** Attach only the exact call's native content; Windows callback "Bash" may

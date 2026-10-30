@@ -36,6 +36,8 @@ describe('visible assistant-round reconstruction', () => {
   it.each([
     '/Users/synthetic/Library/Application Support/DoubaoWork/Profile 2/.doubaowork/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md',
     'C:\\Users\\synthetic\\AppData\\Local\\DoubaoWork\\User Data\\Profile 3\\.doubaowork\\agent_mode\\workspace\\.skills\\doubao-human-signal\\SKILL.md',
+    '/Users/synthetic/Library/Application Support/Doubao/Profile 2/.doubao/agent_mode/workspace/.skills/doubao-human-signal/SKILL.md',
+    'C:\\Users\\synthetic\\AppData\\Local\\Doubao\\User Data\\Default\\.doubao\\agent_mode\\workspace\\.skills\\doubao-human-signal\\SKILL.md',
   ])('matches an expanded native Skill link without duplicating the user input (%s)', skillPath => {
     const demand = '[去AI味](skill://doubao-human-signal?type=2&id=123)\nRead then Write.';
     const expanded = `[去AI味](<${skillPath}>)\nRead then Write.`;
@@ -98,6 +100,46 @@ describe('visible assistant-round reconstruction', () => {
     expect(rebuilt.rounds[0].inputMessages.at(-1)!.parts[0].content).toBe('CURRENT');
     expect(rebuilt.rounds[0].inputMessages[0].parts[0].content).toBe('OLD');
     expect(rebuilt.rounds.flatMap(round => round.callIds)).toEqual(['new']);
+  });
+
+  it('keeps a uniquely delimited reused demand when a same-time native completion reminder is appended', () => {
+    const rows = [assistant(['old']), result('old'), final, { role: 'user', content: 'CURRENT' }, assistant(['new']), result('new'), final];
+    const tasks = assignment('OLD', -30_000) + assignment('CURRENT');
+    const clean = reconstructNativeRounds(content(rows, tasks), actor, DOUBAO_EPOCH, end, ['new']);
+    const augmented = content(rows, tasks + assignment('<system-reminder>\n<subagent-result>completed</subagent-result>\n</system-reminder>'));
+    expect(reconstructNativeRounds(augmented, actor, DOUBAO_EPOCH, end, ['new'])).toEqual(clean);
+    expect(clean?.rounds).toHaveLength(2);
+  });
+
+  it('matches the client-removed reminder prefix without changing visible input or source IDs', () => {
+    const demand = '\n\nCURRENT';
+    const rows = [{ role: 'user', content: demand }, assistant(['new']), result('new'), final];
+    const wrapped = '<system-reminder>\nNative execution mode: synthetic.\n</system-reminder>' + demand;
+    const rebuilt = reconstructNativeRounds(content(rows, assignment(wrapped)), actor, DOUBAO_EPOCH, end, ['new'])!;
+    const clean = reconstructNativeRounds(content(rows, assignment(demand)), actor, DOUBAO_EPOCH, end, ['new'])!;
+    expect(rebuilt?.rounds).toHaveLength(2);
+    expect(rebuilt).toEqual(clean);
+    expect(rebuilt.rounds[0].inputMessages).toEqual([{ role: 'user', parts: [{ type: 'text', content: demand }] }]);
+  });
+
+  it.each([
+    assignment('CURRENT') + assignment('ANOTHER_REAL_DEMAND'),
+    assignment('CURRENT') + assignment('CURRENT'),
+    assignment('CURRENT') + assignment('<system-reminder>completed</system-reminder>', 11),
+    assignment('CURRENT') + assignment('<system-reminder>unfinished'),
+    assignment('CURRENT') + assignment('<system-reminder>completed</system-reminder>\nALSO A REAL DEMAND'),
+  ])('does not relax actual demand ambiguity or malformed reminder boundaries (%s)', tasks => {
+    const rows = [{ role: 'user', content: 'CURRENT' }, assistant(['new']), result('new'), final];
+    expect(reconstructNativeRounds(content(rows, tasks), actor, DOUBAO_EPOCH, end, ['new'])).toBeUndefined();
+  });
+
+  it('does not discard a reminder-shaped user message or infer an absent reused delimiter', () => {
+    const reminder = '<system-reminder>completed</system-reminder>';
+    const tasks = assignment('CURRENT') + assignment(reminder);
+    const literal = [{ role: 'user', content: 'CURRENT' }, assistant(['old']), result('old'),
+      { role: 'user', content: reminder }, assistant(['new']), result('new'), final];
+    expect(reconstructNativeRounds(content(literal, tasks), actor, DOUBAO_EPOCH, end, ['new'])).toBeUndefined();
+    expect(reconstructNativeRounds(content([assistant(['new']), result('new'), final], assignment('OLD', -30_000) + tasks), actor, DOUBAO_EPOCH, end, ['new'])).toBeUndefined();
   });
 
   it('does not guess a missing reused-request delimiter or an unrelated call', () => {

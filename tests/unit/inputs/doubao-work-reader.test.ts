@@ -40,6 +40,31 @@ async function drain(reader: DoubaoWorkNativeReader, conversation = cid, bytes =
 }
 
 describe('bounded incremental Doubao native sources', () => {
+  it('preserves reused round IDs across appended same-time reminders, cold restart and unchanged cache reads', async () => {
+    const { sessionsRoot } = await fixture();
+    const demand = '\n\nCURRENT';
+    const rows = [{ role: 'user', content: 'OLD' }, { role: 'assistant', content: 'OLD_ANSWER' },
+      { role: 'user', content: demand },
+      { role: 'assistant', tool_calls: [{ id: 'reuse-read', function: { name: 'Read', arguments: { file_path: 'synthetic.txt' } } }] },
+      { role: 'tool', tool_call_id: 'reuse-read', content: 'CURRENT_RESULT' }, { role: 'assistant', content: 'CURRENT_ANSWER' }];
+    const tasks = assignment('OLD', DOUBAO_EPOCH - 1000)
+      + assignment('<system-reminder>\nSynthetic execution mode.\n</system-reminder>' + demand);
+    const file = await save(sessionsRoot, cid, rows, tasks);
+    const reader = new DoubaoWorkNativeReader({ sessionsRoot });
+    const end = (BigInt(DOUBAO_EPOCH + 3000) * 1_000_000n).toString();
+    const before = reconstructNativeRounds((await drain(reader))?.content, actor, DOUBAO_EPOCH, end, ['reuse-read']);
+    expect(before?.rounds).toHaveLength(2);
+    await fs.appendFile(path.join(path.dirname(file), 'assignment.md'), assignment('<system-reminder>\nSynthetic completion.\n</system-reminder>'));
+    const updated = await drain(reader);
+    expect(reconstructNativeRounds(updated?.content, actor, DOUBAO_EPOCH, end, ['reuse-read'])).toEqual(before);
+    const restarted = await drain(new DoubaoWorkNativeReader({ sessionsRoot }));
+    expect(reconstructNativeRounds(restarted?.content, actor, DOUBAO_EPOCH, end, ['reuse-read'])).toEqual(before);
+    const prior = reader.stats();
+    await drain(reader);
+    expect(reader.stats().bodyReadBytes).toBe(prior.bodyReadBytes);
+    expect(reader.stats().parsedRows).toBe(prior.parsedRows);
+  });
+
   it('shares the exact decoded content and performs no body reads or parsing for unchanged sources', async () => {
     const { sessionsRoot } = await fixture();
     const rows = [{ role: 'assistant', content: 'plan', tool_calls: [{ id: 'read-one', function: { name: 'Read', arguments: { file_path: 'synthetic.txt' } } }] },
