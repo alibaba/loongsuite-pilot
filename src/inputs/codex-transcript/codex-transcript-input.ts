@@ -8,6 +8,7 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
+import { createLogger } from '../../utils/logger.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import {
@@ -54,6 +55,10 @@ import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
+// Bound retained bytes before Buffer -> string conversion. Completed records
+// above this limit are explicitly quarantined; the native rollout is untouched.
+const MAX_JSONL_RECORD_BYTES = 128 * 1024 * 1024;
+const jsonlLogger = createLogger('CodexTranscriptInput');
 const MAX_EMIT_BATCH_ENTRIES = 256;
 const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
@@ -2679,7 +2684,7 @@ async function scanJsonLines(
   try {
     let nextOffset = startOffset;
     let position = startOffset;
-    let pending = Buffer.alloc(0);
+    let pending: Buffer[] = [];
     let pendingStartOffset = startOffset;
     let records = 0;
     let parseSuccessRecords = 0;
@@ -2697,29 +2702,59 @@ async function scanJsonLines(
       if (bytesRead <= 0) break;
       position += bytesRead;
 
-      const data = pending.length > 0
-        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
-        : chunk.subarray(0, bytesRead);
-      const dataStartOffset = pendingStartOffset;
       let cursor = 0;
-      while (cursor < data.length) {
-        const newline = data.indexOf(0x0a, cursor);
+      const chunkStartOffset = position - bytesRead;
+      while (cursor < bytesRead) {
+        const newline = chunk.subarray(0, bytesRead).indexOf(0x0a, cursor);
+        const partEnd = newline < 0 ? bytesRead : newline;
+        const recordBytes = chunkStartOffset + partEnd - pendingStartOffset;
+        if (recordBytes <= MAX_JSONL_RECORD_BYTES) {
+          pending.push(chunk.subarray(cursor, partEnd));
+        } else {
+          // Keep only offsets while seeking the newline: never retain, decode,
+          // or parse an unbounded record, including a fully persisted one.
+          pending = [];
+        }
         if (newline < 0) break;
-        const text = data.subarray(cursor, newline).toString('utf8').trim();
-        if (text) {
+        const lineEndOffset = chunkStartOffset + newline + 1;
+        if (recordBytes > MAX_JSONL_RECORD_BYTES) {
           records++;
-          maxRecordBytes = Math.max(maxRecordBytes, newline - cursor + 1);
+          parseFailedRecords++;
+          maxRecordBytes = Math.max(maxRecordBytes, recordBytes + 1);
+          jsonlLogger.warn('Codex JSONL record exceeds size limit; quarantined in source transcript', {
+            fileId: crypto.createHash('sha256').update(filePath).digest('hex').slice(0, 16),
+            startOffset: pendingStartOffset,
+            endOffset: lineEndOffset,
+            recordBytes,
+            maxRecordBytes: MAX_JSONL_RECORD_BYTES,
+            reason: 'record-too-large',
+          });
+        } else {
+          // Concatenate once per completed line, rather than copying the whole
+          // accumulated prefix for every 1 MiB read (quadratic for large lines).
+          const data = pending.length === 1 ? pending[0]! : Buffer.concat(pending, recordBytes);
+          pending = [];
+          // Conversion itself can throw, so it belongs inside the parse guard.
           try {
+            const text = data.toString('utf8').trim();
+            if (!text) {
+              nextOffset = lineEndOffset;
+              pendingStartOffset = lineEndOffset;
+              cursor = newline + 1;
+              continue;
+            }
+            records++;
+            maxRecordBytes = Math.max(maxRecordBytes, recordBytes + 1);
             const record: unknown = JSON.parse(text);
             if (record && typeof record === 'object' && !Array.isArray(record)) {
               parseSuccessRecords++;
               const keepGoing = await onLine({
-                startOffset: dataStartOffset + cursor,
-                endOffset: dataStartOffset + newline + 1,
+                startOffset: pendingStartOffset,
+                endOffset: lineEndOffset,
                 record: record as Record<string, unknown>,
               });
               if (keepGoing === false) {
-                nextOffset = dataStartOffset + newline + 1;
+                nextOffset = lineEndOffset;
                 return {
                   nextOffset,
                   records,
@@ -2736,12 +2771,11 @@ async function scanJsonLines(
             parseFailedRecords++;
           }
         }
-        nextOffset = dataStartOffset + newline + 1;
+        pending = [];
+        nextOffset = lineEndOffset;
+        pendingStartOffset = lineEndOffset;
         cursor = newline + 1;
       }
-
-      pending = cursor < data.length ? Buffer.from(data.subarray(cursor)) : Buffer.alloc(0);
-      pendingStartOffset = dataStartOffset + cursor;
     }
 
     return {

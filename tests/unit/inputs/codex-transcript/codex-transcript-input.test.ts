@@ -415,6 +415,84 @@ function transcriptCheckpoint(
 }
 
 describe('CodexTranscriptInput', () => {
+  it('quarantines a completed oversized record, preserves its incomplete tail, and resumes after restart', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-oversized-record-'));
+    tempDirs.push(root);
+    const { input, sessionDir, entries, stateStore } = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const prefix = lines.slice(0, 6).join('\n') + '\n';
+    const transcript = await writeTranscript(sessionDir, prefix);
+    const giantStart = Buffer.byteLength(prefix);
+    const handle = await fs.open(transcript, 'a');
+    try {
+      await handle.write('{"type":"event_msg","payload":{"type":"item_completed","padding":"');
+      const chunk = Buffer.alloc(1024 * 1024, 0x78);
+      for (let i = 0; i < 129; i++) await handle.write(chunk);
+      await handle.write('"}}');
+    } finally {
+      await handle.close();
+    }
+    // No newline: even an over-limit tail must not become committed input.
+    await processTranscriptOnce(input, transcript);
+    await processTranscriptOnce(input, transcript);
+    expect(transcriptCheckpoint(stateStore, transcript).scanOffset).toBe(giantStart);
+
+    await fs.appendFile(transcript, '\n' + lines.slice(6).join('\n') + '\n');
+    const size = (await fs.stat(transcript)).size;
+    const runtime = new InputRuntimeAccumulator();
+    (input as unknown as { activeRuntimeAccumulator: InputRuntimeAccumulator }).activeRuntimeAccumulator = runtime;
+    for (let i = 0; i < 4 && transcriptCheckpoint(stateStore, transcript).scanOffset !== size; i++) {
+      await processTranscriptOnce(input, transcript);
+    }
+    expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+      scanOffset: size, activeTurn: null, pendingTerminal: null,
+    });
+    expect(runtime.finish(0).parseFailedRecords).toBe(1);
+    expect(entries.some(entry => entry['event.name'] === 'tool.result')).toBe(true);
+    const baselineRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-oversized-control-'));
+    tempDirs.push(baselineRoot);
+    const baseline = await createDormantInput(baselineRoot);
+    const control = await writeTranscript(baseline.sessionDir, completedTurn());
+    await processTranscriptOnce(baseline.input, control);
+    // Only the ignored FileChange diagnostic is quarantined. Audit events,
+    // token accounting and terminal completion must match the small control.
+    expect(entries.map(entry => [entry['event.name'], entry['gen_ai.usage.input_tokens'], entry['gen_ai.usage.output_tokens']]))
+      .toEqual(baseline.entries.map(entry => [entry['event.name'], entry['gen_ai.usage.input_tokens'], entry['gen_ai.usage.output_tokens']]));
+
+    await stateStore.save();
+    const restarted = await createDormantInput(root);
+    const idleRuntime = new InputRuntimeAccumulator();
+    (restarted.input as unknown as { activeRuntimeAccumulator: InputRuntimeAccumulator }).activeRuntimeAccumulator = idleRuntime;
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(idleRuntime.finish(0).rawReadBytes).toBe(0);
+    expect(restarted.entries).toEqual([]);
+    // The native source remains intact for explicit offline recovery.
+    expect((await fs.stat(transcript)).size).toBe(size);
+  });
+
+  it('still parses complete records larger than the scan budget with linear buffer assembly', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-large-record-linear-'));
+    tempDirs.push(root);
+    const { input, sessionDir, stateStore, entries } = await createDormantInput(root);
+    const output = '界'.repeat(6 * 1024 * 1024);
+    const transcript = await writeTranscript(sessionDir, completedTurnWithLargeToolOutput(output));
+    const concat = vi.spyOn(Buffer, 'concat');
+    try {
+      for (let i = 0; i < 4; i++) await processTranscriptOnce(input, transcript);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
+      });
+      const result = entries.find(entry => entry['event.name'] === 'tool.result');
+      expect(JSON.stringify(result)).toContain(output);
+      // Count concatenated byte volume, not timing: catches per-chunk prefix
+      // copying deterministically while allowing bounded recovery rereads.
+      const copied = concat.mock.calls.reduce((sum, [buffers]) => sum + buffers.reduce((n, b) => n + b.length, 0), 0);
+      expect(copied).toBeLessThan(5 * (await fs.stat(transcript)).size);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
   it('becomes available from a wakeup marker when the default session root is absent', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-marker-availability-'));
     tempDirs.push(root);
