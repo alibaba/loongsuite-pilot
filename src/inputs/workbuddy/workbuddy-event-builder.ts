@@ -95,6 +95,9 @@ export async function buildWorkBuddyEvents(
   let requestStartMs: number | undefined;
   let cwd: string | undefined;
   let lastResponse: AgentActivityEntry | undefined;
+  let turnActivity = false;
+  let lastActivityRecord: WorkBuddyRecord | undefined;
+  let lastBoundaryRecord: WorkBuddyRecord | undefined;
 
   const push = async (entry: AgentActivityEntry, source: WorkBuddyRecord) => {
     if (cwd) {
@@ -107,37 +110,92 @@ export async function buildWorkBuddyEvents(
 
   const closeInterruptedTurn = async (boundarySource: WorkBuddyRecord): Promise<boolean> => {
     const boundaryTimestamp = timestampMs(boundarySource);
-    if (firstStep || !lastResponse || boundaryTimestamp === undefined) return false;
+    if (boundaryTimestamp === undefined) return false;
 
-    lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
-    lastResponse['gen_ai.turn.end'] = true;
-    const messages = lastResponse['gen_ai.output.messages'];
-    if (Array.isArray(messages)) {
-      for (const message of messages) {
-        if (message && typeof message === 'object' && !Array.isArray(message)) {
-          message.finish_reason = 'cancelled';
+    if (lastResponse) {
+      lastResponse['gen_ai.response.finish_reasons'] = ['cancelled'];
+      lastResponse['gen_ai.turn.end'] = true;
+      const messages = lastResponse['gen_ai.output.messages'];
+      if (Array.isArray(messages)) {
+        for (const message of messages) {
+          if (message && typeof message === 'object' && !Array.isArray(message)) {
+            message.finish_reason = 'cancelled';
+          }
         }
       }
+
+      for (const [callId, tool] of tools) {
+        if (tool.step.turnId !== turnId) continue;
+        const result = baseEntry(
+          'tool.result',
+          boundarySource,
+          opts.sessionId,
+          tool.step,
+          `tool-result:${callId}`,
+          boundaryTimestamp,
+        );
+        result['gen_ai.tool.name'] = tool.toolName;
+        result['gen_ai.tool.call.id'] = callId;
+        result['tool.result.status'] = 'cancelled';
+        const durationMs = boundaryTimestamp - tool.callTimestamp;
+        if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
+        await push(result, boundarySource);
+        tools.delete(callId);
+      }
+      lastResponse = undefined;
+      turnActivity = false;
+      lastActivityRecord = undefined;
+      return true;
     }
 
-    for (const [callId, tool] of tools) {
-      if (tool.step.turnId !== turnId) continue;
-      const result = baseEntry(
-        'tool.result',
-        boundarySource,
-        opts.sessionId,
-        tool.step,
-        `tool-result:${callId}`,
-        boundaryTimestamp,
-      );
-      result['gen_ai.tool.name'] = tool.toolName;
-      result['gen_ai.tool.call.id'] = callId;
-      result['tool.result.status'] = 'cancelled';
-      const durationMs = boundaryTimestamp - tool.callTimestamp;
-      if (durationMs > 0) result['gen_ai.tool.call.duration'] = durationMs;
-      await push(result, boundarySource);
-      tools.delete(callId);
+    if (!turnActivity || !lastActivityRecord) return false;
+
+    // Fast-cancelled turn: the model produced reasoning (or started a tool wave)
+    // but no llm.response was sealed before the interruption. Emit a minimal
+    // cancelled request/response pair so the user prompt and any reasoning are
+    // not silently dropped with the whole turn.
+    const anchor = lastActivityRecord;
+    const step = stepContext(anchor, opts.sessionId, turnId, stepOrdinal + 1);
+    const requestTimestamp = requestStartMs ?? timestampMs(anchor) ?? boundaryTimestamp;
+    const request = baseEntry(
+      'llm.request',
+      anchor,
+      opts.sessionId,
+      step,
+      `request:${step.stepId}`,
+      requestTimestamp,
+    );
+    request['gen_ai.request.id'] = step.requestId;
+    if (step.requestModel) request['gen_ai.request.model'] = step.requestModel;
+    request['gen_ai.turn.start'] = true;
+    if (pendingDelta.length > 0) request['gen_ai.input.messages_delta'] = pendingDelta;
+
+    const response = baseEntry(
+      'llm.response',
+      boundarySource,
+      opts.sessionId,
+      step,
+      `response:${sourceId(anchor)}:cancelled`,
+      boundaryTimestamp,
+    );
+    response['gen_ai.response.id'] = responseSourceId(anchor);
+    if (step.responseModel) response['gen_ai.response.model'] = step.responseModel;
+    response['gen_ai.response.finish_reasons'] = ['cancelled'];
+    response['gen_ai.turn.end'] = true;
+    if (reasoningParts.length > 0) {
+      response['gen_ai.output.messages'] = [{
+        role: 'assistant',
+        parts: reasoningParts,
+        finish_reason: 'cancelled',
+      }];
     }
+    applyUsage(response, anchor);
+
+    await push(request, anchor);
+    await push(response, boundarySource);
+    pendingDelta = [];
+    turnActivity = false;
+    lastActivityRecord = undefined;
     return true;
   };
 
@@ -251,8 +309,21 @@ export async function buildWorkBuddyEvents(
 
   for (let index = 0; index < records.length; index++) {
     const record = records[index];
+    if (
+      record.type === 'message'
+      && record.role === 'assistant'
+      && record.status === 'incomplete'
+      && record.providerData?.skipRun === true
+    ) {
+      // WorkBuddy writes an internal "Interrupted by user" assistant marker when
+      // a run is cancelled. The record itself stays skipped as noise, but it is
+      // the most precise cancel boundary available, so seal the open turn here.
+      await closeInterruptedTurn(record);
+      continue;
+    }
     if (isInternalRecord(record)) continue;
     if (typeof record.cwd === 'string' && record.cwd.length > 0) cwd = record.cwd;
+    lastBoundaryRecord = record;
 
     if (record.type === 'message' && record.role === 'user') {
       await closeInterruptedTurn(record);
@@ -262,6 +333,8 @@ export async function buildWorkBuddyEvents(
       firstStep = true;
       turnId = stringValue(record.id) ?? stableId(opts.sessionId, `turn:${turnOrdinal}:${record.timestamp ?? index}`);
       lastResponse = undefined;
+      turnActivity = false;
+      lastActivityRecord = undefined;
       const message = toMessage(record, 'user');
       pendingDelta = message.parts.length > 0 ? [message] : [];
       reasoningParts = [];
@@ -272,12 +345,16 @@ export async function buildWorkBuddyEvents(
     }
 
     if (record.type === 'reasoning') {
+      turnActivity = true;
+      lastActivityRecord = record;
       reasoningParts.push(...toReasoningParts(record));
       reasoningStartMs = earliestTimestamp(reasoningStartMs, timestampMs(record));
       continue;
     }
 
     if (record.type === 'function_call') {
+      turnActivity = true;
+      lastActivityRecord = record;
       const wave = collectFunctionCallWave(records, index, record);
       if (!wave.complete) break;
       await emitToolWave(record, wave.calls);
@@ -335,6 +412,8 @@ export async function buildWorkBuddyEvents(
         await closeInterruptedTurn(record);
         continue;
       }
+      turnActivity = true;
+      lastActivityRecord = record;
       const wave = collectFunctionCallWave(records, index + 1, record);
       if (wave.calls.length > 0) {
         if (!wave.complete) break;
@@ -394,7 +473,17 @@ export async function buildWorkBuddyEvents(
       reasoningStartMs = undefined;
       requestStartMs = responseTimestamp;
       firstStep = false;
+      turnActivity = false;
+      lastActivityRecord = undefined;
     }
+  }
+
+  // The batch only reaches the builder behind a stable Stop boundary, so its end
+  // is a real turn boundary. Seal a turn left unsealed here — otherwise the last
+  // llm.response would stay on finish_reasons=['tool_call'] forever when a run
+  // was cancelled without a following user message in the same batch.
+  if (lastBoundaryRecord !== undefined) {
+    await closeInterruptedTurn(lastBoundaryRecord);
   }
 
   return built;
