@@ -1,0 +1,6643 @@
+{
+  "schema": 1,
+  "date": "2026-10-30",
+  "mainCommit": "f84e3881958b39c5c7cbe8a035f50ccd80a25783",
+  "fixedCommit": "bb326bf1bf0cf64bb0a64fed7ebddd38fb0815f2",
+  "environment": {
+    "os": "macOS arm64",
+    "logicalCpus": 15,
+    "memoryGiB": 48,
+    "node": "v22.22.2",
+    "pollIntervalMs": 10000,
+    "sampleIntervalMs": 5000,
+    "sink": "local loopback only",
+    "executionOrder": [
+      "main",
+      "fixed"
+    ]
+  },
+  "workload": {
+    "kind": "Actual Qwen three-turn coding seed replay plus separate synthetic faults",
+    "model": "qwen3.8-max",
+    "modelExecutionsDuringCollectorComparison": 0,
+    "realSeedTurns": 3,
+    "realSeedToolCalls": 38,
+    "steadyReplaySessions": 246,
+    "warmupReplaySessions": 1,
+    "expectedEventsPerReplay": 167,
+    "offeredEventsPerSecond": 16.7,
+    "giantRecordContentMiB": 544,
+    "unterminatedTailContentMiB": 32,
+    "plannedSteadySecondsEach": 2460
+  },
+  "pairVerification": {
+    "identicalEventIdSet": true,
+    "differingEventBodies": 0,
+    "missingFromMain": 0,
+    "missingFromFixed": 0
+  },
+  "variants": {
+    "main": {
+      "actualSteadySeconds": 2460.401032958984,
+      "cpuMeanPercent": 104.08409302697198,
+      "cpuP95Percent": 146.08731266639975,
+      "cpuPeakPercent": 170.707739868181,
+      "rssPeakMiB": 12793.109375,
+      "rssP95MiB": 12372.15625,
+      "logicalReadSteadyBytes": 36082325022,
+      "publishedSteadySessions": 246,
+      "expectedRealEvents": 41249,
+      "realOutputEvents": 41249,
+      "steadyRealOutputEvents": 40383,
+      "steadyEventsPerSecond": 16.413177957185972,
+      "eventTypes": {
+        "other": 1482,
+        "agent.input": 741,
+        "llm.request": 10127,
+        "llm.response": 10127,
+        "tool.call": 9386,
+        "tool.result": 9386
+      },
+      "duplicateRealEventIds": 0,
+      "eventLatencyMs": {
+        "p50": 55048.7890625,
+        "p95": 88657.09204101562,
+        "p99": 95921.86303710938,
+        "max": 113072.20703125
+      },
+      "toolLatencyMs": {
+        "p50": 55050.7890625,
+        "p95": 88656.09204101562,
+        "p99": 95921.86303710938,
+        "max": 113071.20703125
+      },
+      "stringLimitErrors": 58,
+      "sampleCount": 516,
+      "validLongMeasurement": true,
+      "realCompletenessPassed": true,
+      "outputProbeCoveragePassed": true,
+      "isolationPassed": true,
+      "instrumentationPassed": true,
+      "exit": 0,
+      "guard": null,
+      "totalProcessSeconds": 2596.7598310546873,
+      "wholeRunRealEventsPerSecond": 15.884795931723307,
+      "readByScenario": {
+        "real": {
+          "bytes": 357165410,
+          "calls": 2205
+        },
+        "unfinished": {
+          "bytes": 2818580352,
+          "calls": 2744
+        },
+        "giant": {
+          "bytes": 32710363135,
+          "calls": 31250
+        }
+      },
+      "nativeWindows": [
+        {
+          "window": 1,
+          "relativeStartSeconds": 528.8149230957031,
+          "relativeEndSeconds": 1128.8179230957032,
+          "l1WindowMs": 600003,
+          "l2WindowMs": 600176,
+          "cpuPercent": 106.8,
+          "rawReadBytes": 9010043234,
+          "rawInBytes": 15856214,
+          "rawInRecords": 17574,
+          "readAmplification": 568.2342098813753
+        },
+        {
+          "window": 2,
+          "relativeStartSeconds": 1128.757923095703,
+          "relativeEndSeconds": 1728.8179230957032,
+          "l1WindowMs": 600060,
+          "l2WindowMs": 600321,
+          "cpuPercent": 99.57,
+          "rawReadBytes": 7736431082,
+          "rawInBytes": 16129597,
+          "rawInRecords": 17877,
+          "readAmplification": 479.6419329013614
+        },
+        {
+          "window": 3,
+          "relativeStartSeconds": 1728.775923095703,
+          "relativeEndSeconds": 2328.817923095703,
+          "l1WindowMs": 600042,
+          "l2WindowMs": 599682,
+          "cpuPercent": 105.55,
+          "rawReadBytes": 9015874506,
+          "rawInBytes": 16949746,
+          "rawInRecords": 18786,
+          "readAmplification": 531.9179712781537
+        }
+      ],
+      "consecutiveNativeWindows": 3,
+      "egress": {
+        "allowedRemoteFetch": 0,
+        "deniedConnections": 0,
+        "redirectedFetch": 1
+      },
+      "series": [
+        {
+          "minute": 0.16157,
+          "cpuPercent": 0.06801,
+          "rssMiB": 8927.3125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.24578,
+          "cpuPercent": 150.24995,
+          "rssMiB": 9718.21875,
+          "logicalReadMiBPerSecond": 53.90605
+        },
+        {
+          "minute": 0.32942,
+          "cpuPercent": 121.18844,
+          "rssMiB": 9270.5,
+          "logicalReadMiBPerSecond": 16.93581
+        },
+        {
+          "minute": 0.41452,
+          "cpuPercent": 108.28545,
+          "rssMiB": 12010.67188,
+          "logicalReadMiBPerSecond": 10.57714
+        },
+        {
+          "minute": 0.49915,
+          "cpuPercent": 106.68428,
+          "rssMiB": 11640.26562,
+          "logicalReadMiBPerSecond": 9.4512
+        },
+        {
+          "minute": 0.58423,
+          "cpuPercent": 99.56516,
+          "rssMiB": 11610.9375,
+          "logicalReadMiBPerSecond": 7.05236
+        },
+        {
+          "minute": 0.66902,
+          "cpuPercent": 101.04333,
+          "rssMiB": 12286.71875,
+          "logicalReadMiBPerSecond": 7.27323
+        },
+        {
+          "minute": 0.75432,
+          "cpuPercent": 100.81732,
+          "rssMiB": 11932.25,
+          "logicalReadMiBPerSecond": 6.64363
+        },
+        {
+          "minute": 0.8405,
+          "cpuPercent": 95.95785,
+          "rssMiB": 11703.9375,
+          "logicalReadMiBPerSecond": 5.60776
+        },
+        {
+          "minute": 0.92387,
+          "cpuPercent": 55.90925,
+          "rssMiB": 9006.67188,
+          "logicalReadMiBPerSecond": 2.95883
+        },
+        {
+          "minute": 1.00718,
+          "cpuPercent": 14.0061,
+          "rssMiB": 3945.67188,
+          "logicalReadMiBPerSecond": 11.99134
+        },
+        {
+          "minute": 1.09095,
+          "cpuPercent": 158.44748,
+          "rssMiB": 9975.46875,
+          "logicalReadMiBPerSecond": 42.97791
+        },
+        {
+          "minute": 1.17508,
+          "cpuPercent": 121.80465,
+          "rssMiB": 10912.40625,
+          "logicalReadMiBPerSecond": 15.84839
+        },
+        {
+          "minute": 1.25978,
+          "cpuPercent": 114.25339,
+          "rssMiB": 10267.4375,
+          "logicalReadMiBPerSecond": 12.39652
+        },
+        {
+          "minute": 1.34327,
+          "cpuPercent": 106.59341,
+          "rssMiB": 10932.64062,
+          "logicalReadMiBPerSecond": 9.18333
+        },
+        {
+          "minute": 1.42738,
+          "cpuPercent": 106.10876,
+          "rssMiB": 12069.39062,
+          "logicalReadMiBPerSecond": 7.92555
+        },
+        {
+          "minute": 1.51147,
+          "cpuPercent": 101.5685,
+          "rssMiB": 11987.21875,
+          "logicalReadMiBPerSecond": 6.93829
+        },
+        {
+          "minute": 1.59513,
+          "cpuPercent": 98.88056,
+          "rssMiB": 12176.75,
+          "logicalReadMiBPerSecond": 5.97609
+        },
+        {
+          "minute": 1.67858,
+          "cpuPercent": 99.93157,
+          "rssMiB": 11736.17188,
+          "logicalReadMiBPerSecond": 5.99165
+        },
+        {
+          "minute": 1.76192,
+          "cpuPercent": 67.86321,
+          "rssMiB": 8270.09375,
+          "logicalReadMiBPerSecond": 2.99969
+        },
+        {
+          "minute": 1.84535,
+          "cpuPercent": 19.77985,
+          "rssMiB": 1936.75,
+          "logicalReadMiBPerSecond": 23.0395
+        },
+        {
+          "minute": 1.92947,
+          "cpuPercent": 160.03519,
+          "rssMiB": 9350.34375,
+          "logicalReadMiBPerSecond": 36.51763
+        },
+        {
+          "minute": 2.01345,
+          "cpuPercent": 119.4278,
+          "rssMiB": 12081.76562,
+          "logicalReadMiBPerSecond": 14.28917
+        },
+        {
+          "minute": 2.09727,
+          "cpuPercent": 107.20086,
+          "rssMiB": 12226.5625,
+          "logicalReadMiBPerSecond": 9.54511
+        },
+        {
+          "minute": 2.18343,
+          "cpuPercent": 106.76396,
+          "rssMiB": 12212.375,
+          "logicalReadMiBPerSecond": 8.50964
+        },
+        {
+          "minute": 2.26813,
+          "cpuPercent": 102.51705,
+          "rssMiB": 12001.51562,
+          "logicalReadMiBPerSecond": 7.08351
+        },
+        {
+          "minute": 2.35395,
+          "cpuPercent": 99.73038,
+          "rssMiB": 11975.42188,
+          "logicalReadMiBPerSecond": 6.41014
+        },
+        {
+          "minute": 2.43872,
+          "cpuPercent": 99.47366,
+          "rssMiB": 12041.82812,
+          "logicalReadMiBPerSecond": 6.68391
+        },
+        {
+          "minute": 2.52308,
+          "cpuPercent": 98.82009,
+          "rssMiB": 12030.125,
+          "logicalReadMiBPerSecond": 5.92719
+        },
+        {
+          "minute": 2.60643,
+          "cpuPercent": 84.68531,
+          "rssMiB": 3947.26562,
+          "logicalReadMiBPerSecond": 4.79917
+        },
+        {
+          "minute": 2.68985,
+          "cpuPercent": 34.09906,
+          "rssMiB": 4546.40625,
+          "logicalReadMiBPerSecond": 30.55868
+        },
+        {
+          "minute": 2.77318,
+          "cpuPercent": 151.41747,
+          "rssMiB": 11325.60938,
+          "logicalReadMiBPerSecond": 31.59775
+        },
+        {
+          "minute": 2.8579,
+          "cpuPercent": 123.63482,
+          "rssMiB": 11516.25,
+          "logicalReadMiBPerSecond": 15.93529
+        },
+        {
+          "minute": 2.94238,
+          "cpuPercent": 109.72694,
+          "rssMiB": 12693.45312,
+          "logicalReadMiBPerSecond": 10.8542
+        },
+        {
+          "minute": 3.02605,
+          "cpuPercent": 105.74906,
+          "rssMiB": 12273.65625,
+          "logicalReadMiBPerSecond": 8.56606
+        },
+        {
+          "minute": 3.11165,
+          "cpuPercent": 102.2289,
+          "rssMiB": 12327.48438,
+          "logicalReadMiBPerSecond": 7.39833
+        },
+        {
+          "minute": 3.19503,
+          "cpuPercent": 102.18962,
+          "rssMiB": 10998.09375,
+          "logicalReadMiBPerSecond": 6.79663
+        },
+        {
+          "minute": 3.27865,
+          "cpuPercent": 101.40879,
+          "rssMiB": 12064.79688,
+          "logicalReadMiBPerSecond": 6.97489
+        },
+        {
+          "minute": 3.36225,
+          "cpuPercent": 123.51389,
+          "rssMiB": 5109.04688,
+          "logicalReadMiBPerSecond": 36.59991
+        },
+        {
+          "minute": 3.44595,
+          "cpuPercent": 154.00157,
+          "rssMiB": 9477.26562,
+          "logicalReadMiBPerSecond": 30.2635
+        },
+        {
+          "minute": 3.52938,
+          "cpuPercent": 124.65611,
+          "rssMiB": 8746.1875,
+          "logicalReadMiBPerSecond": 15.98248
+        },
+        {
+          "minute": 3.61273,
+          "cpuPercent": 115.28481,
+          "rssMiB": 9688.65625,
+          "logicalReadMiBPerSecond": 12.39708
+        },
+        {
+          "minute": 3.69633,
+          "cpuPercent": 114.34557,
+          "rssMiB": 8552.82812,
+          "logicalReadMiBPerSecond": 11.1642
+        },
+        {
+          "minute": 3.77982,
+          "cpuPercent": 111.02226,
+          "rssMiB": 9227.32812,
+          "logicalReadMiBPerSecond": 9.58235
+        },
+        {
+          "minute": 3.86357,
+          "cpuPercent": 109.19604,
+          "rssMiB": 10038.85938,
+          "logicalReadMiBPerSecond": 8.95521
+        },
+        {
+          "minute": 3.94693,
+          "cpuPercent": 41.2777,
+          "rssMiB": 143.3125,
+          "logicalReadMiBPerSecond": 3.32664
+        },
+        {
+          "minute": 4.03028,
+          "cpuPercent": 42.16312,
+          "rssMiB": 5289.9375,
+          "logicalReadMiBPerSecond": 32.50538
+        },
+        {
+          "minute": 4.11378,
+          "cpuPercent": 145.58861,
+          "rssMiB": 9024.25,
+          "logicalReadMiBPerSecond": 28.94185
+        },
+        {
+          "minute": 4.19772,
+          "cpuPercent": 123.83379,
+          "rssMiB": 9667.60938,
+          "logicalReadMiBPerSecond": 16.48091
+        },
+        {
+          "minute": 4.28142,
+          "cpuPercent": 112.29569,
+          "rssMiB": 10248.73438,
+          "logicalReadMiBPerSecond": 12.14495
+        },
+        {
+          "minute": 4.36508,
+          "cpuPercent": 106.08496,
+          "rssMiB": 12315.4375,
+          "logicalReadMiBPerSecond": 8.76541
+        },
+        {
+          "minute": 4.44918,
+          "cpuPercent": 104.07059,
+          "rssMiB": 11449.59375,
+          "logicalReadMiBPerSecond": 7.7296
+        },
+        {
+          "minute": 4.5352,
+          "cpuPercent": 101.40246,
+          "rssMiB": 12106.40625,
+          "logicalReadMiBPerSecond": 6.78153
+        },
+        {
+          "minute": 4.61852,
+          "cpuPercent": 102.81961,
+          "rssMiB": 12582.59375,
+          "logicalReadMiBPerSecond": 6.60081
+        },
+        {
+          "minute": 4.702,
+          "cpuPercent": 89.33655,
+          "rssMiB": 6194.4375,
+          "logicalReadMiBPerSecond": 37.44138
+        },
+        {
+          "minute": 4.7857,
+          "cpuPercent": 147.58302,
+          "rssMiB": 11641.54688,
+          "logicalReadMiBPerSecond": 28.67828
+        },
+        {
+          "minute": 4.86973,
+          "cpuPercent": 120.40739,
+          "rssMiB": 11878.9375,
+          "logicalReadMiBPerSecond": 15.07311
+        },
+        {
+          "minute": 4.9541,
+          "cpuPercent": 108.06646,
+          "rssMiB": 12190.79688,
+          "logicalReadMiBPerSecond": 10.4216
+        },
+        {
+          "minute": 5.03993,
+          "cpuPercent": 107.08427,
+          "rssMiB": 12495.39062,
+          "logicalReadMiBPerSecond": 8.54422
+        },
+        {
+          "minute": 5.12345,
+          "cpuPercent": 105.76621,
+          "rssMiB": 12422.20312,
+          "logicalReadMiBPerSecond": 7.98284
+        },
+        {
+          "minute": 5.20973,
+          "cpuPercent": 102.68707,
+          "rssMiB": 12140.8125,
+          "logicalReadMiBPerSecond": 6.76059
+        },
+        {
+          "minute": 5.29362,
+          "cpuPercent": 99.64824,
+          "rssMiB": 12250.23438,
+          "logicalReadMiBPerSecond": 5.96015
+        },
+        {
+          "minute": 5.37722,
+          "cpuPercent": 131.55324,
+          "rssMiB": 6366.5,
+          "logicalReadMiBPerSecond": 39.58467
+        },
+        {
+          "minute": 5.461,
+          "cpuPercent": 144.33264,
+          "rssMiB": 11427.1875,
+          "logicalReadMiBPerSecond": 27.25584
+        },
+        {
+          "minute": 5.54542,
+          "cpuPercent": 119.90248,
+          "rssMiB": 10841.73438,
+          "logicalReadMiBPerSecond": 13.82034
+        },
+        {
+          "minute": 5.62942,
+          "cpuPercent": 110.87431,
+          "rssMiB": 12389.10938,
+          "logicalReadMiBPerSecond": 10.31677
+        },
+        {
+          "minute": 5.71312,
+          "cpuPercent": 106.80287,
+          "rssMiB": 11518.54688,
+          "logicalReadMiBPerSecond": 8.56194
+        },
+        {
+          "minute": 5.7976,
+          "cpuPercent": 106.00462,
+          "rssMiB": 12312.79688,
+          "logicalReadMiBPerSecond": 8.08895
+        },
+        {
+          "minute": 5.88125,
+          "cpuPercent": 103.3978,
+          "rssMiB": 12025.20312,
+          "logicalReadMiBPerSecond": 7.37182
+        },
+        {
+          "minute": 5.9665,
+          "cpuPercent": 100.57323,
+          "rssMiB": 11768.14062,
+          "logicalReadMiBPerSecond": 6.90813
+        },
+        {
+          "minute": 6.04985,
+          "cpuPercent": 84.16385,
+          "rssMiB": 7582.73438,
+          "logicalReadMiBPerSecond": 4.39886
+        },
+        {
+          "minute": 6.13322,
+          "cpuPercent": 0.09641,
+          "rssMiB": 7582.92188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.21685,
+          "cpuPercent": 66.74347,
+          "rssMiB": 6800.15625,
+          "logicalReadMiBPerSecond": 37.25438
+        },
+        {
+          "minute": 6.30025,
+          "cpuPercent": 143.03129,
+          "rssMiB": 11002.5,
+          "logicalReadMiBPerSecond": 26.57549
+        },
+        {
+          "minute": 6.38432,
+          "cpuPercent": 120.06932,
+          "rssMiB": 11015.60938,
+          "logicalReadMiBPerSecond": 15.06873
+        },
+        {
+          "minute": 6.4686,
+          "cpuPercent": 112.47413,
+          "rssMiB": 12283.9375,
+          "logicalReadMiBPerSecond": 11.86487
+        },
+        {
+          "minute": 6.5533,
+          "cpuPercent": 107.22633,
+          "rssMiB": 12370.9375,
+          "logicalReadMiBPerSecond": 8.65765
+        },
+        {
+          "minute": 6.6393,
+          "cpuPercent": 104.39378,
+          "rssMiB": 12489.5625,
+          "logicalReadMiBPerSecond": 7.75194
+        },
+        {
+          "minute": 6.72348,
+          "cpuPercent": 103.46289,
+          "rssMiB": 12292.42188,
+          "logicalReadMiBPerSecond": 7.72063
+        },
+        {
+          "minute": 6.80763,
+          "cpuPercent": 102.23708,
+          "rssMiB": 12298.71875,
+          "logicalReadMiBPerSecond": 6.33799
+        },
+        {
+          "minute": 6.89117,
+          "cpuPercent": 95.35473,
+          "rssMiB": 7603.3125,
+          "logicalReadMiBPerSecond": 40.22014
+        },
+        {
+          "minute": 6.9757,
+          "cpuPercent": 139.78145,
+          "rssMiB": 9376.6875,
+          "logicalReadMiBPerSecond": 25.78856
+        },
+        {
+          "minute": 7.06033,
+          "cpuPercent": 116.10707,
+          "rssMiB": 11641.4375,
+          "logicalReadMiBPerSecond": 13.19223
+        },
+        {
+          "minute": 7.14448,
+          "cpuPercent": 111.11646,
+          "rssMiB": 11684.17188,
+          "logicalReadMiBPerSecond": 10.89302
+        },
+        {
+          "minute": 7.22985,
+          "cpuPercent": 112.5665,
+          "rssMiB": 8117.98438,
+          "logicalReadMiBPerSecond": 11.12931
+        },
+        {
+          "minute": 7.31343,
+          "cpuPercent": 107.768,
+          "rssMiB": 12179.64062,
+          "logicalReadMiBPerSecond": 9.37116
+        },
+        {
+          "minute": 7.39882,
+          "cpuPercent": 104.07608,
+          "rssMiB": 11670.14062,
+          "logicalReadMiBPerSecond": 7.22232
+        },
+        {
+          "minute": 7.4822,
+          "cpuPercent": 93.41313,
+          "rssMiB": 10192.75,
+          "logicalReadMiBPerSecond": 5.79716
+        },
+        {
+          "minute": 7.5657,
+          "cpuPercent": 82.52126,
+          "rssMiB": 4098.01562,
+          "logicalReadMiBPerSecond": 42.42225
+        },
+        {
+          "minute": 7.64932,
+          "cpuPercent": 137.76706,
+          "rssMiB": 8499.23438,
+          "logicalReadMiBPerSecond": 24.52055
+        },
+        {
+          "minute": 7.73273,
+          "cpuPercent": 122.00928,
+          "rssMiB": 9135.8125,
+          "logicalReadMiBPerSecond": 15.18211
+        },
+        {
+          "minute": 7.81688,
+          "cpuPercent": 110.48276,
+          "rssMiB": 10041.65625,
+          "logicalReadMiBPerSecond": 10.49777
+        },
+        {
+          "minute": 7.9003,
+          "cpuPercent": 112.9258,
+          "rssMiB": 10183.89062,
+          "logicalReadMiBPerSecond": 10.58995
+        },
+        {
+          "minute": 7.98463,
+          "cpuPercent": 104.59601,
+          "rssMiB": 12002.4375,
+          "logicalReadMiBPerSecond": 8.98666
+        },
+        {
+          "minute": 8.06823,
+          "cpuPercent": 103.34384,
+          "rssMiB": 9814.29688,
+          "logicalReadMiBPerSecond": 6.77797
+        },
+        {
+          "minute": 8.15158,
+          "cpuPercent": 59.42464,
+          "rssMiB": 6674.10938,
+          "logicalReadMiBPerSecond": 3.99931
+        },
+        {
+          "minute": 8.235,
+          "cpuPercent": 83.93961,
+          "rssMiB": 4229.28125,
+          "logicalReadMiBPerSecond": 41.27462
+        },
+        {
+          "minute": 8.31835,
+          "cpuPercent": 137.67925,
+          "rssMiB": 8682.4375,
+          "logicalReadMiBPerSecond": 23.59634
+        },
+        {
+          "minute": 8.40187,
+          "cpuPercent": 117.41501,
+          "rssMiB": 10905.23438,
+          "logicalReadMiBPerSecond": 13.96906
+        },
+        {
+          "minute": 8.48573,
+          "cpuPercent": 114.75146,
+          "rssMiB": 11110.01562,
+          "logicalReadMiBPerSecond": 12.12195
+        },
+        {
+          "minute": 8.56992,
+          "cpuPercent": 110.70836,
+          "rssMiB": 12407.21875,
+          "logicalReadMiBPerSecond": 10.09728
+        },
+        {
+          "minute": 8.65392,
+          "cpuPercent": 107.59565,
+          "rssMiB": 12365.67188,
+          "logicalReadMiBPerSecond": 8.13386
+        },
+        {
+          "minute": 8.73762,
+          "cpuPercent": 103.40062,
+          "rssMiB": 12270.46875,
+          "logicalReadMiBPerSecond": 7.3676
+        },
+        {
+          "minute": 8.82098,
+          "cpuPercent": 88.54652,
+          "rssMiB": 7149.48438,
+          "logicalReadMiBPerSecond": 5.79845
+        },
+        {
+          "minute": 8.90438,
+          "cpuPercent": 86.69141,
+          "rssMiB": 4444.5,
+          "logicalReadMiBPerSecond": 42.87251
+        },
+        {
+          "minute": 8.98835,
+          "cpuPercent": 137.85058,
+          "rssMiB": 10460.92188,
+          "logicalReadMiBPerSecond": 24.83438
+        },
+        {
+          "minute": 9.0721,
+          "cpuPercent": 117.51499,
+          "rssMiB": 11445,
+          "logicalReadMiBPerSecond": 13.33237
+        },
+        {
+          "minute": 9.15783,
+          "cpuPercent": 110.78327,
+          "rssMiB": 11924.28125,
+          "logicalReadMiBPerSecond": 10.69238
+        },
+        {
+          "minute": 9.24218,
+          "cpuPercent": 107.6298,
+          "rssMiB": 11997.82812,
+          "logicalReadMiBPerSecond": 9.68103
+        },
+        {
+          "minute": 9.32692,
+          "cpuPercent": 109.81812,
+          "rssMiB": 11477.125,
+          "logicalReadMiBPerSecond": 9.6393
+        },
+        {
+          "minute": 9.41207,
+          "cpuPercent": 103.75753,
+          "rssMiB": 12239.15625,
+          "logicalReadMiBPerSecond": 7.24237
+        },
+        {
+          "minute": 9.4954,
+          "cpuPercent": 73.92467,
+          "rssMiB": 8583.46875,
+          "logicalReadMiBPerSecond": 4.59976
+        },
+        {
+          "minute": 9.57917,
+          "cpuPercent": 88.38755,
+          "rssMiB": 5719.8125,
+          "logicalReadMiBPerSecond": 43.68676
+        },
+        {
+          "minute": 9.663,
+          "cpuPercent": 135.60459,
+          "rssMiB": 11473.59375,
+          "logicalReadMiBPerSecond": 23.25996
+        },
+        {
+          "minute": 9.74732,
+          "cpuPercent": 114.67423,
+          "rssMiB": 12359.71875,
+          "logicalReadMiBPerSecond": 12.2547
+        },
+        {
+          "minute": 9.83193,
+          "cpuPercent": 108.90903,
+          "rssMiB": 12235.14062,
+          "logicalReadMiBPerSecond": 9.45413
+        },
+        {
+          "minute": 9.9172,
+          "cpuPercent": 102.8849,
+          "rssMiB": 12237.5625,
+          "logicalReadMiBPerSecond": 8.01477
+        },
+        {
+          "minute": 10.00163,
+          "cpuPercent": 105.81479,
+          "rssMiB": 9806.67188,
+          "logicalReadMiBPerSecond": 8.77046
+        },
+        {
+          "minute": 10.08552,
+          "cpuPercent": 106.6793,
+          "rssMiB": 9155.42188,
+          "logicalReadMiBPerSecond": 8.94057
+        },
+        {
+          "minute": 10.1699,
+          "cpuPercent": 97.63864,
+          "rssMiB": 12206.82812,
+          "logicalReadMiBPerSecond": 5.92535
+        },
+        {
+          "minute": 10.2533,
+          "cpuPercent": 134.93318,
+          "rssMiB": 6149.40625,
+          "logicalReadMiBPerSecond": 47.87596
+        },
+        {
+          "minute": 10.33678,
+          "cpuPercent": 133.74096,
+          "rssMiB": 11137.34375,
+          "logicalReadMiBPerSecond": 21.96324
+        },
+        {
+          "minute": 10.42012,
+          "cpuPercent": 120.22414,
+          "rssMiB": 10463.89062,
+          "logicalReadMiBPerSecond": 14.39837
+        },
+        {
+          "minute": 10.50407,
+          "cpuPercent": 108.93165,
+          "rssMiB": 12185,
+          "logicalReadMiBPerSecond": 9.72726
+        },
+        {
+          "minute": 10.58923,
+          "cpuPercent": 105.68564,
+          "rssMiB": 11987.90625,
+          "logicalReadMiBPerSecond": 8.41616
+        },
+        {
+          "minute": 10.67475,
+          "cpuPercent": 102.50947,
+          "rssMiB": 11936.34375,
+          "logicalReadMiBPerSecond": 7.21117
+        },
+        {
+          "minute": 10.75812,
+          "cpuPercent": 103.13241,
+          "rssMiB": 12180.26562,
+          "logicalReadMiBPerSecond": 6.7971
+        },
+        {
+          "minute": 10.84358,
+          "cpuPercent": 101.38365,
+          "rssMiB": 12084.40625,
+          "logicalReadMiBPerSecond": 6.04526
+        },
+        {
+          "minute": 10.92697,
+          "cpuPercent": 134.59664,
+          "rssMiB": 8419.65625,
+          "logicalReadMiBPerSecond": 49.50897
+        },
+        {
+          "minute": 11.01118,
+          "cpuPercent": 132.96396,
+          "rssMiB": 11239.53125,
+          "logicalReadMiBPerSecond": 21.3712
+        },
+        {
+          "minute": 11.09505,
+          "cpuPercent": 118.58771,
+          "rssMiB": 11785.95312,
+          "logicalReadMiBPerSecond": 13.91052
+        },
+        {
+          "minute": 11.17875,
+          "cpuPercent": 114.4201,
+          "rssMiB": 12108.79688,
+          "logicalReadMiBPerSecond": 11.94816
+        },
+        {
+          "minute": 11.26312,
+          "cpuPercent": 106.82737,
+          "rssMiB": 11981.01562,
+          "logicalReadMiBPerSecond": 8.29675
+        },
+        {
+          "minute": 11.34645,
+          "cpuPercent": 100.70746,
+          "rssMiB": 12043.39062,
+          "logicalReadMiBPerSecond": 6.80049
+        },
+        {
+          "minute": 11.43142,
+          "cpuPercent": 99.8042,
+          "rssMiB": 12389.625,
+          "logicalReadMiBPerSecond": 6.27626
+        },
+        {
+          "minute": 11.51477,
+          "cpuPercent": 102.42041,
+          "rssMiB": 11694.57812,
+          "logicalReadMiBPerSecond": 6.79914
+        },
+        {
+          "minute": 11.59852,
+          "cpuPercent": 109.00718,
+          "rssMiB": 9943.1875,
+          "logicalReadMiBPerSecond": 46.6813
+        },
+        {
+          "minute": 11.6822,
+          "cpuPercent": 131.76468,
+          "rssMiB": 10637.03125,
+          "logicalReadMiBPerSecond": 20.91178
+        },
+        {
+          "minute": 11.76665,
+          "cpuPercent": 117.8386,
+          "rssMiB": 8310.28125,
+          "logicalReadMiBPerSecond": 14.0115
+        },
+        {
+          "minute": 11.85067,
+          "cpuPercent": 113.9159,
+          "rssMiB": 6957.71875,
+          "logicalReadMiBPerSecond": 11.70485
+        },
+        {
+          "minute": 11.93478,
+          "cpuPercent": 105.99759,
+          "rssMiB": 12171.70312,
+          "logicalReadMiBPerSecond": 8.71747
+        },
+        {
+          "minute": 12.01918,
+          "cpuPercent": 101.19755,
+          "rssMiB": 12196.51562,
+          "logicalReadMiBPerSecond": 7.39399
+        },
+        {
+          "minute": 12.10357,
+          "cpuPercent": 103.42012,
+          "rssMiB": 12173.35938,
+          "logicalReadMiBPerSecond": 6.91183
+        },
+        {
+          "minute": 12.18692,
+          "cpuPercent": 90.89427,
+          "rssMiB": 4993.21875,
+          "logicalReadMiBPerSecond": 6.1998
+        },
+        {
+          "minute": 12.2703,
+          "cpuPercent": 105.56159,
+          "rssMiB": 9942.73438,
+          "logicalReadMiBPerSecond": 47.67902
+        },
+        {
+          "minute": 12.3543,
+          "cpuPercent": 130.78711,
+          "rssMiB": 11783.73438,
+          "logicalReadMiBPerSecond": 20.03927
+        },
+        {
+          "minute": 12.43892,
+          "cpuPercent": 114.26233,
+          "rssMiB": 12129.1875,
+          "logicalReadMiBPerSecond": 11.81876
+        },
+        {
+          "minute": 12.52405,
+          "cpuPercent": 107.32594,
+          "rssMiB": 12153.23438,
+          "logicalReadMiBPerSecond": 9.20082
+        },
+        {
+          "minute": 12.60743,
+          "cpuPercent": 106.45361,
+          "rssMiB": 12247.45312,
+          "logicalReadMiBPerSecond": 8.5953
+        },
+        {
+          "minute": 12.69157,
+          "cpuPercent": 104.27817,
+          "rssMiB": 12153.51562,
+          "logicalReadMiBPerSecond": 7.52688
+        },
+        {
+          "minute": 12.7751,
+          "cpuPercent": 105.56471,
+          "rssMiB": 11599.46875,
+          "logicalReadMiBPerSecond": 7.78103
+        },
+        {
+          "minute": 12.85842,
+          "cpuPercent": 104.13462,
+          "rssMiB": 12054.17188,
+          "logicalReadMiBPerSecond": 7.40144
+        },
+        {
+          "minute": 12.94185,
+          "cpuPercent": 149.62087,
+          "rssMiB": 7386.76562,
+          "logicalReadMiBPerSecond": 51.68533
+        },
+        {
+          "minute": 13.02597,
+          "cpuPercent": 132.16471,
+          "rssMiB": 10617.10938,
+          "logicalReadMiBPerSecond": 20.80497
+        },
+        {
+          "minute": 13.10947,
+          "cpuPercent": 121.4604,
+          "rssMiB": 10834.6875,
+          "logicalReadMiBPerSecond": 14.36945
+        },
+        {
+          "minute": 13.1941,
+          "cpuPercent": 105.64925,
+          "rssMiB": 11864.57812,
+          "logicalReadMiBPerSecond": 8.86228
+        },
+        {
+          "minute": 13.27877,
+          "cpuPercent": 106.63243,
+          "rssMiB": 12137.42188,
+          "logicalReadMiBPerSecond": 8.26817
+        },
+        {
+          "minute": 13.36502,
+          "cpuPercent": 107.24542,
+          "rssMiB": 12058.75,
+          "logicalReadMiBPerSecond": 9.082
+        },
+        {
+          "minute": 13.4494,
+          "cpuPercent": 108.56553,
+          "rssMiB": 11996.26562,
+          "logicalReadMiBPerSecond": 8.88635
+        },
+        {
+          "minute": 13.53277,
+          "cpuPercent": 46.93525,
+          "rssMiB": 651.48438,
+          "logicalReadMiBPerSecond": 2.999
+        },
+        {
+          "minute": 13.61647,
+          "cpuPercent": 115.78415,
+          "rssMiB": 8136,
+          "logicalReadMiBPerSecond": 49.09742
+        },
+        {
+          "minute": 13.69982,
+          "cpuPercent": 129.2344,
+          "rssMiB": 10025.95312,
+          "logicalReadMiBPerSecond": 19.59793
+        },
+        {
+          "minute": 13.78423,
+          "cpuPercent": 117.08195,
+          "rssMiB": 10470.40625,
+          "logicalReadMiBPerSecond": 13.42386
+        },
+        {
+          "minute": 13.86783,
+          "cpuPercent": 109.29563,
+          "rssMiB": 11591.4375,
+          "logicalReadMiBPerSecond": 9.7685
+        },
+        {
+          "minute": 13.95223,
+          "cpuPercent": 105.5792,
+          "rssMiB": 6684.3125,
+          "logicalReadMiBPerSecond": 8.97448
+        },
+        {
+          "minute": 14.0358,
+          "cpuPercent": 106.48231,
+          "rssMiB": 6749,
+          "logicalReadMiBPerSecond": 8.9756
+        },
+        {
+          "minute": 14.12002,
+          "cpuPercent": 108.14205,
+          "rssMiB": 8307.59375,
+          "logicalReadMiBPerSecond": 8.90592
+        },
+        {
+          "minute": 14.20337,
+          "cpuPercent": 55.93847,
+          "rssMiB": 6821.78125,
+          "logicalReadMiBPerSecond": 3.99937
+        },
+        {
+          "minute": 14.28677,
+          "cpuPercent": 113.59476,
+          "rssMiB": 10476.01562,
+          "logicalReadMiBPerSecond": 48.67371
+        },
+        {
+          "minute": 14.37025,
+          "cpuPercent": 128.82383,
+          "rssMiB": 10162.10938,
+          "logicalReadMiBPerSecond": 18.16387
+        },
+        {
+          "minute": 14.45393,
+          "cpuPercent": 119.30112,
+          "rssMiB": 8544.96875,
+          "logicalReadMiBPerSecond": 13.54336
+        },
+        {
+          "minute": 14.53818,
+          "cpuPercent": 111.2206,
+          "rssMiB": 11032.48438,
+          "logicalReadMiBPerSecond": 10.48476
+        },
+        {
+          "minute": 14.62165,
+          "cpuPercent": 108.48843,
+          "rssMiB": 11581.28125,
+          "logicalReadMiBPerSecond": 8.3865
+        },
+        {
+          "minute": 14.70535,
+          "cpuPercent": 109.5185,
+          "rssMiB": 11474.57812,
+          "logicalReadMiBPerSecond": 8.56279
+        },
+        {
+          "minute": 14.78967,
+          "cpuPercent": 103.03107,
+          "rssMiB": 11125.59375,
+          "logicalReadMiBPerSecond": 6.72134
+        },
+        {
+          "minute": 14.87387,
+          "cpuPercent": 101.93683,
+          "rssMiB": 11411.21875,
+          "logicalReadMiBPerSecond": 6.13508
+        },
+        {
+          "minute": 14.9574,
+          "cpuPercent": 154.97636,
+          "rssMiB": 9017.0625,
+          "logicalReadMiBPerSecond": 52.6169
+        },
+        {
+          "minute": 15.0409,
+          "cpuPercent": 129.13463,
+          "rssMiB": 9277.95312,
+          "logicalReadMiBPerSecond": 19.56042
+        },
+        {
+          "minute": 15.12507,
+          "cpuPercent": 120.79552,
+          "rssMiB": 10374.51562,
+          "logicalReadMiBPerSecond": 14.45564
+        },
+        {
+          "minute": 15.20892,
+          "cpuPercent": 111.80369,
+          "rssMiB": 11134.84375,
+          "logicalReadMiBPerSecond": 11.33039
+        },
+        {
+          "minute": 15.29368,
+          "cpuPercent": 109.79816,
+          "rssMiB": 11070.5625,
+          "logicalReadMiBPerSecond": 10.02754
+        },
+        {
+          "minute": 15.37768,
+          "cpuPercent": 106.04157,
+          "rssMiB": 11419.375,
+          "logicalReadMiBPerSecond": 8.33306
+        },
+        {
+          "minute": 15.46255,
+          "cpuPercent": 101.10578,
+          "rssMiB": 11340.25,
+          "logicalReadMiBPerSecond": 6.28406
+        },
+        {
+          "minute": 15.54592,
+          "cpuPercent": 44.96688,
+          "rssMiB": 9181.73438,
+          "logicalReadMiBPerSecond": 2.19942
+        },
+        {
+          "minute": 15.62973,
+          "cpuPercent": 124.51964,
+          "rssMiB": 9491.21875,
+          "logicalReadMiBPerSecond": 50.21307
+        },
+        {
+          "minute": 15.71335,
+          "cpuPercent": 130.76363,
+          "rssMiB": 9742.32812,
+          "logicalReadMiBPerSecond": 19.33561
+        },
+        {
+          "minute": 15.79768,
+          "cpuPercent": 113.22637,
+          "rssMiB": 11022.15625,
+          "logicalReadMiBPerSecond": 11.46324
+        },
+        {
+          "minute": 15.88173,
+          "cpuPercent": 109.50182,
+          "rssMiB": 11368.53125,
+          "logicalReadMiBPerSecond": 9.31875
+        },
+        {
+          "minute": 15.96618,
+          "cpuPercent": 104.12545,
+          "rssMiB": 10751.79688,
+          "logicalReadMiBPerSecond": 8.39592
+        },
+        {
+          "minute": 16.04978,
+          "cpuPercent": 101.71547,
+          "rssMiB": 11477.23438,
+          "logicalReadMiBPerSecond": 7.17613
+        },
+        {
+          "minute": 16.13445,
+          "cpuPercent": 105.11625,
+          "rssMiB": 11368.5625,
+          "logicalReadMiBPerSecond": 7.28484
+        },
+        {
+          "minute": 16.21943,
+          "cpuPercent": 104.66596,
+          "rssMiB": 10087.04688,
+          "logicalReadMiBPerSecond": 7.45137
+        },
+        {
+          "minute": 16.30363,
+          "cpuPercent": 155.18784,
+          "rssMiB": 10770.92188,
+          "logicalReadMiBPerSecond": 53.15778
+        },
+        {
+          "minute": 16.38818,
+          "cpuPercent": 127.66739,
+          "rssMiB": 9525.125,
+          "logicalReadMiBPerSecond": 17.74091
+        },
+        {
+          "minute": 16.47268,
+          "cpuPercent": 108.38761,
+          "rssMiB": 10978.10938,
+          "logicalReadMiBPerSecond": 9.86265
+        },
+        {
+          "minute": 16.55623,
+          "cpuPercent": 104.61847,
+          "rssMiB": 10465.23438,
+          "logicalReadMiBPerSecond": 8.37894
+        },
+        {
+          "minute": 16.64135,
+          "cpuPercent": 106.07927,
+          "rssMiB": 11040.25,
+          "logicalReadMiBPerSecond": 8.0272
+        },
+        {
+          "minute": 16.72637,
+          "cpuPercent": 101.73538,
+          "rssMiB": 11055.65625,
+          "logicalReadMiBPerSecond": 7.05705
+        },
+        {
+          "minute": 16.81077,
+          "cpuPercent": 103.83722,
+          "rssMiB": 11148.3125,
+          "logicalReadMiBPerSecond": 7.30707
+        },
+        {
+          "minute": 16.89577,
+          "cpuPercent": 101.46112,
+          "rssMiB": 10878.25,
+          "logicalReadMiBPerSecond": 6.47032
+        },
+        {
+          "minute": 16.97913,
+          "cpuPercent": 92.05576,
+          "rssMiB": 9382.64062,
+          "logicalReadMiBPerSecond": 5.64849
+        },
+        {
+          "minute": 17.06247,
+          "cpuPercent": 0.06699,
+          "rssMiB": 7633.60938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.14657,
+          "cpuPercent": 131.0791,
+          "rssMiB": 9834.23438,
+          "logicalReadMiBPerSecond": 50.92283
+        },
+        {
+          "minute": 17.23065,
+          "cpuPercent": 121.99193,
+          "rssMiB": 10944.8125,
+          "logicalReadMiBPerSecond": 15.85423
+        },
+        {
+          "minute": 17.31458,
+          "cpuPercent": 114.27288,
+          "rssMiB": 11083.3125,
+          "logicalReadMiBPerSecond": 11.51803
+        },
+        {
+          "minute": 17.39952,
+          "cpuPercent": 110.23533,
+          "rssMiB": 11317.84375,
+          "logicalReadMiBPerSecond": 9.81201
+        },
+        {
+          "minute": 17.48402,
+          "cpuPercent": 111.93845,
+          "rssMiB": 11184.78125,
+          "logicalReadMiBPerSecond": 10.65139
+        },
+        {
+          "minute": 17.5709,
+          "cpuPercent": 103.81089,
+          "rssMiB": 8762.51562,
+          "logicalReadMiBPerSecond": 7.09736
+        },
+        {
+          "minute": 17.65515,
+          "cpuPercent": 106.75776,
+          "rssMiB": 11050.28125,
+          "logicalReadMiBPerSecond": 8.10958
+        },
+        {
+          "minute": 17.74015,
+          "cpuPercent": 99.21926,
+          "rssMiB": 11199.15625,
+          "logicalReadMiBPerSecond": 5.88333
+        },
+        {
+          "minute": 17.82348,
+          "cpuPercent": 37.42468,
+          "rssMiB": 8022.6875,
+          "logicalReadMiBPerSecond": 1.59984
+        },
+        {
+          "minute": 17.90683,
+          "cpuPercent": 0.98491,
+          "rssMiB": 6952.17188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.99017,
+          "cpuPercent": 140.2152,
+          "rssMiB": 9644.21875,
+          "logicalReadMiBPerSecond": 53.67985
+        },
+        {
+          "minute": 18.07368,
+          "cpuPercent": 122.71784,
+          "rssMiB": 9388.9375,
+          "logicalReadMiBPerSecond": 15.96648
+        },
+        {
+          "minute": 18.15708,
+          "cpuPercent": 113.73506,
+          "rssMiB": 7978.5,
+          "logicalReadMiBPerSecond": 11.99026
+        },
+        {
+          "minute": 18.2405,
+          "cpuPercent": 115.16397,
+          "rssMiB": 9764.70312,
+          "logicalReadMiBPerSecond": 11.58788
+        },
+        {
+          "minute": 18.32505,
+          "cpuPercent": 104.11106,
+          "rssMiB": 11620.23438,
+          "logicalReadMiBPerSecond": 8.47624
+        },
+        {
+          "minute": 18.41,
+          "cpuPercent": 103.51226,
+          "rssMiB": 11299.73438,
+          "logicalReadMiBPerSecond": 7.06339
+        },
+        {
+          "minute": 18.49372,
+          "cpuPercent": 100.0881,
+          "rssMiB": 11364.84375,
+          "logicalReadMiBPerSecond": 6.36973
+        },
+        {
+          "minute": 18.57807,
+          "cpuPercent": 100.23914,
+          "rssMiB": 11377.25,
+          "logicalReadMiBPerSecond": 6.12552
+        },
+        {
+          "minute": 18.66143,
+          "cpuPercent": 43.61749,
+          "rssMiB": 4995.35938,
+          "logicalReadMiBPerSecond": 2.59936
+        },
+        {
+          "minute": 18.74477,
+          "cpuPercent": 0.06518,
+          "rssMiB": 4995.59375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.82913,
+          "cpuPercent": 141.15127,
+          "rssMiB": 8576.125,
+          "logicalReadMiBPerSecond": 49.96308
+        },
+        {
+          "minute": 18.91343,
+          "cpuPercent": 130.40165,
+          "rssMiB": 10093.17188,
+          "logicalReadMiBPerSecond": 18.1915
+        },
+        {
+          "minute": 18.99837,
+          "cpuPercent": 111.29394,
+          "rssMiB": 11344.25,
+          "logicalReadMiBPerSecond": 11.66889
+        },
+        {
+          "minute": 19.08348,
+          "cpuPercent": 112.15341,
+          "rssMiB": 11133.76562,
+          "logicalReadMiBPerSecond": 10.37775
+        },
+        {
+          "minute": 19.1675,
+          "cpuPercent": 112.36912,
+          "rssMiB": 11002.53125,
+          "logicalReadMiBPerSecond": 10.51489
+        },
+        {
+          "minute": 19.25213,
+          "cpuPercent": 108.11324,
+          "rssMiB": 11222.96875,
+          "logicalReadMiBPerSecond": 9.05764
+        },
+        {
+          "minute": 19.33643,
+          "cpuPercent": 107.33634,
+          "rssMiB": 10978.90625,
+          "logicalReadMiBPerSecond": 8.30374
+        },
+        {
+          "minute": 19.41978,
+          "cpuPercent": 64.83365,
+          "rssMiB": 7506.09375,
+          "logicalReadMiBPerSecond": 4.19982
+        },
+        {
+          "minute": 19.50348,
+          "cpuPercent": 146.06733,
+          "rssMiB": 9846,
+          "logicalReadMiBPerSecond": 53.47137
+        },
+        {
+          "minute": 19.58683,
+          "cpuPercent": 120.39614,
+          "rssMiB": 10564.125,
+          "logicalReadMiBPerSecond": 15.19846
+        },
+        {
+          "minute": 19.67162,
+          "cpuPercent": 120.47899,
+          "rssMiB": 6720.96875,
+          "logicalReadMiBPerSecond": 13.56342
+        },
+        {
+          "minute": 19.75603,
+          "cpuPercent": 108.34385,
+          "rssMiB": 11080.28125,
+          "logicalReadMiBPerSecond": 9.27925
+        },
+        {
+          "minute": 19.84065,
+          "cpuPercent": 104.46147,
+          "rssMiB": 10789.89062,
+          "logicalReadMiBPerSecond": 7.87813
+        },
+        {
+          "minute": 19.92572,
+          "cpuPercent": 100.64324,
+          "rssMiB": 10894.42188,
+          "logicalReadMiBPerSecond": 6.26983
+        },
+        {
+          "minute": 20.0119,
+          "cpuPercent": 98.41168,
+          "rssMiB": 10692,
+          "logicalReadMiBPerSecond": 6.79784
+        },
+        {
+          "minute": 20.0959,
+          "cpuPercent": 98.10891,
+          "rssMiB": 11093.75,
+          "logicalReadMiBPerSecond": 5.7542
+        },
+        {
+          "minute": 20.17923,
+          "cpuPercent": 77.48712,
+          "rssMiB": 5497.70312,
+          "logicalReadMiBPerSecond": 4.19958
+        },
+        {
+          "minute": 20.2626,
+          "cpuPercent": 0.03875,
+          "rssMiB": 5497.73438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.34623,
+          "cpuPercent": 150.28143,
+          "rssMiB": 9246.46875,
+          "logicalReadMiBPerSecond": 53.39421
+        },
+        {
+          "minute": 20.4298,
+          "cpuPercent": 119.85533,
+          "rssMiB": 10127.3125,
+          "logicalReadMiBPerSecond": 14.95845
+        },
+        {
+          "minute": 20.51357,
+          "cpuPercent": 109.39576,
+          "rssMiB": 10826.71875,
+          "logicalReadMiBPerSecond": 10.14777
+        },
+        {
+          "minute": 20.59698,
+          "cpuPercent": 104.91613,
+          "rssMiB": 10895.73438,
+          "logicalReadMiBPerSecond": 8.58978
+        },
+        {
+          "minute": 20.68048,
+          "cpuPercent": 105.37209,
+          "rssMiB": 10948.625,
+          "logicalReadMiBPerSecond": 8.38421
+        },
+        {
+          "minute": 20.7656,
+          "cpuPercent": 101.78384,
+          "rssMiB": 10998.0625,
+          "logicalReadMiBPerSecond": 7.2449
+        },
+        {
+          "minute": 20.84922,
+          "cpuPercent": 102.37272,
+          "rssMiB": 11032.53125,
+          "logicalReadMiBPerSecond": 6.97568
+        },
+        {
+          "minute": 20.93543,
+          "cpuPercent": 96.00089,
+          "rssMiB": 11191.57812,
+          "logicalReadMiBPerSecond": 5.41312
+        },
+        {
+          "minute": 21.01918,
+          "cpuPercent": 96.37321,
+          "rssMiB": 9882.40625,
+          "logicalReadMiBPerSecond": 6.23067
+        },
+        {
+          "minute": 21.10252,
+          "cpuPercent": 35.28846,
+          "rssMiB": 5247.84375,
+          "logicalReadMiBPerSecond": 1.60007
+        },
+        {
+          "minute": 21.18595,
+          "cpuPercent": 158.8859,
+          "rssMiB": 8930.875,
+          "logicalReadMiBPerSecond": 53.52252
+        },
+        {
+          "minute": 21.27035,
+          "cpuPercent": 119.63493,
+          "rssMiB": 10007.92188,
+          "logicalReadMiBPerSecond": 15.00685
+        },
+        {
+          "minute": 21.3545,
+          "cpuPercent": 109.31698,
+          "rssMiB": 10865.375,
+          "logicalReadMiBPerSecond": 9.90425
+        },
+        {
+          "minute": 21.43787,
+          "cpuPercent": 107.08889,
+          "rssMiB": 10870.35938,
+          "logicalReadMiBPerSecond": 8.59658
+        },
+        {
+          "minute": 21.52138,
+          "cpuPercent": 104.95332,
+          "rssMiB": 11218.04688,
+          "logicalReadMiBPerSecond": 7.98195
+        },
+        {
+          "minute": 21.60617,
+          "cpuPercent": 103.33271,
+          "rssMiB": 8032.9375,
+          "logicalReadMiBPerSecond": 7.07682
+        },
+        {
+          "minute": 21.68958,
+          "cpuPercent": 100.5601,
+          "rssMiB": 10573.21875,
+          "logicalReadMiBPerSecond": 6.39396
+        },
+        {
+          "minute": 21.7735,
+          "cpuPercent": 98.70136,
+          "rssMiB": 10857.5625,
+          "logicalReadMiBPerSecond": 5.75961
+        },
+        {
+          "minute": 21.86005,
+          "cpuPercent": 97.31115,
+          "rssMiB": 10689.32812,
+          "logicalReadMiBPerSecond": 5.19885
+        },
+        {
+          "minute": 21.9435,
+          "cpuPercent": 63.86602,
+          "rssMiB": 6033.42188,
+          "logicalReadMiBPerSecond": 4.68628
+        },
+        {
+          "minute": 22.02735,
+          "cpuPercent": 167.04431,
+          "rssMiB": 8457.34375,
+          "logicalReadMiBPerSecond": 55.20015
+        },
+        {
+          "minute": 22.11162,
+          "cpuPercent": 124.11502,
+          "rssMiB": 10022.64062,
+          "logicalReadMiBPerSecond": 16.02321
+        },
+        {
+          "minute": 22.19673,
+          "cpuPercent": 107.9168,
+          "rssMiB": 10956.46875,
+          "logicalReadMiBPerSecond": 9.3984
+        },
+        {
+          "minute": 22.28133,
+          "cpuPercent": 106.36455,
+          "rssMiB": 10401.60938,
+          "logicalReadMiBPerSecond": 8.4708
+        },
+        {
+          "minute": 22.36597,
+          "cpuPercent": 103.73692,
+          "rssMiB": 11054.01562,
+          "logicalReadMiBPerSecond": 7.48263
+        },
+        {
+          "minute": 22.45057,
+          "cpuPercent": 107.90421,
+          "rssMiB": 10049.1875,
+          "logicalReadMiBPerSecond": 8.66805
+        },
+        {
+          "minute": 22.53783,
+          "cpuPercent": 104.45016,
+          "rssMiB": 10310.84375,
+          "logicalReadMiBPerSecond": 7.83118
+        },
+        {
+          "minute": 22.62347,
+          "cpuPercent": 100.25472,
+          "rssMiB": 9178.98438,
+          "logicalReadMiBPerSecond": 6.22845
+        },
+        {
+          "minute": 22.70682,
+          "cpuPercent": 35.51997,
+          "rssMiB": 7390.35938,
+          "logicalReadMiBPerSecond": 1.59967
+        },
+        {
+          "minute": 22.79025,
+          "cpuPercent": 22.71639,
+          "rssMiB": 2666.96875,
+          "logicalReadMiBPerSecond": 24.95788
+        },
+        {
+          "minute": 22.87398,
+          "cpuPercent": 158.17445,
+          "rssMiB": 8444.98438,
+          "logicalReadMiBPerSecond": 33.04222
+        },
+        {
+          "minute": 22.9575,
+          "cpuPercent": 121.18966,
+          "rssMiB": 7512.85938,
+          "logicalReadMiBPerSecond": 15.86863
+        },
+        {
+          "minute": 23.04112,
+          "cpuPercent": 108.75975,
+          "rssMiB": 10700.51562,
+          "logicalReadMiBPerSecond": 10.16638
+        },
+        {
+          "minute": 23.12457,
+          "cpuPercent": 109.35365,
+          "rssMiB": 8783.1875,
+          "logicalReadMiBPerSecond": 10.18507
+        },
+        {
+          "minute": 23.21228,
+          "cpuPercent": 108.82309,
+          "rssMiB": 10728.1875,
+          "logicalReadMiBPerSecond": 9.30974
+        },
+        {
+          "minute": 23.29672,
+          "cpuPercent": 102.9308,
+          "rssMiB": 11053.84375,
+          "logicalReadMiBPerSecond": 6.7121
+        },
+        {
+          "minute": 23.3826,
+          "cpuPercent": 103.82915,
+          "rssMiB": 10926.375,
+          "logicalReadMiBPerSecond": 7.37371
+        },
+        {
+          "minute": 23.46595,
+          "cpuPercent": 100.53521,
+          "rssMiB": 10304.17188,
+          "logicalReadMiBPerSecond": 5.19959
+        },
+        {
+          "minute": 23.5493,
+          "cpuPercent": 0.05621,
+          "rssMiB": 9257.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.63263,
+          "cpuPercent": 24.67339,
+          "rssMiB": 2960.28125,
+          "logicalReadMiBPerSecond": 25.78815
+        },
+        {
+          "minute": 23.71663,
+          "cpuPercent": 158.36029,
+          "rssMiB": 9684.625,
+          "logicalReadMiBPerSecond": 32.34074
+        },
+        {
+          "minute": 23.80008,
+          "cpuPercent": 120.55079,
+          "rssMiB": 10570.75,
+          "logicalReadMiBPerSecond": 13.78113
+        },
+        {
+          "minute": 23.8845,
+          "cpuPercent": 109.9983,
+          "rssMiB": 10914.95312,
+          "logicalReadMiBPerSecond": 9.87174
+        },
+        {
+          "minute": 23.96993,
+          "cpuPercent": 112.61327,
+          "rssMiB": 10415.73438,
+          "logicalReadMiBPerSecond": 11.32957
+        },
+        {
+          "minute": 24.05545,
+          "cpuPercent": 108.896,
+          "rssMiB": 10054.90625,
+          "logicalReadMiBPerSecond": 9.54887
+        },
+        {
+          "minute": 24.14098,
+          "cpuPercent": 104.29417,
+          "rssMiB": 11061.29688,
+          "logicalReadMiBPerSecond": 7.4048
+        },
+        {
+          "minute": 24.22497,
+          "cpuPercent": 101.37777,
+          "rssMiB": 8609,
+          "logicalReadMiBPerSecond": 6.15199
+        },
+        {
+          "minute": 24.30832,
+          "cpuPercent": 94.23197,
+          "rssMiB": 5518.29688,
+          "logicalReadMiBPerSecond": 6.39827
+        },
+        {
+          "minute": 24.39163,
+          "cpuPercent": 1.92674,
+          "rssMiB": 110.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.4752,
+          "cpuPercent": 48.21084,
+          "rssMiB": 5498.4375,
+          "logicalReadMiBPerSecond": 33.49906
+        },
+        {
+          "minute": 24.5588,
+          "cpuPercent": 150.26387,
+          "rssMiB": 9627.46875,
+          "logicalReadMiBPerSecond": 27.31192
+        },
+        {
+          "minute": 24.64232,
+          "cpuPercent": 124.41791,
+          "rssMiB": 8409.29688,
+          "logicalReadMiBPerSecond": 15.36691
+        },
+        {
+          "minute": 24.7261,
+          "cpuPercent": 116.77229,
+          "rssMiB": 9353.25,
+          "logicalReadMiBPerSecond": 11.93512
+        },
+        {
+          "minute": 24.81037,
+          "cpuPercent": 111.80127,
+          "rssMiB": 10450.84375,
+          "logicalReadMiBPerSecond": 10.28569
+        },
+        {
+          "minute": 24.8948,
+          "cpuPercent": 101.1964,
+          "rssMiB": 11201.8125,
+          "logicalReadMiBPerSecond": 6.90782
+        },
+        {
+          "minute": 24.9797,
+          "cpuPercent": 100.54472,
+          "rssMiB": 10569.60938,
+          "logicalReadMiBPerSecond": 7.07619
+        },
+        {
+          "minute": 25.06345,
+          "cpuPercent": 100.23079,
+          "rssMiB": 11260.35938,
+          "logicalReadMiBPerSecond": 5.97046
+        },
+        {
+          "minute": 25.14678,
+          "cpuPercent": 96.18178,
+          "rssMiB": 11051.14062,
+          "logicalReadMiBPerSecond": 4.80011
+        },
+        {
+          "minute": 25.23013,
+          "cpuPercent": 0.10047,
+          "rssMiB": 4424.29688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.31345,
+          "cpuPercent": 46.04138,
+          "rssMiB": 5143.625,
+          "logicalReadMiBPerSecond": 32.5957
+        },
+        {
+          "minute": 25.39702,
+          "cpuPercent": 150.66164,
+          "rssMiB": 10039.34375,
+          "logicalReadMiBPerSecond": 27.52022
+        },
+        {
+          "minute": 25.48177,
+          "cpuPercent": 126.14176,
+          "rssMiB": 10124.70312,
+          "logicalReadMiBPerSecond": 14.94614
+        },
+        {
+          "minute": 25.56538,
+          "cpuPercent": 109.86242,
+          "rssMiB": 11144.85938,
+          "logicalReadMiBPerSecond": 10.1663
+        },
+        {
+          "minute": 25.6499,
+          "cpuPercent": 111.2209,
+          "rssMiB": 11256.34375,
+          "logicalReadMiBPerSecond": 9.46453
+        },
+        {
+          "minute": 25.73343,
+          "cpuPercent": 104.47811,
+          "rssMiB": 11243.23438,
+          "logicalReadMiBPerSecond": 7.38216
+        },
+        {
+          "minute": 25.81803,
+          "cpuPercent": 99.60622,
+          "rssMiB": 11223.8125,
+          "logicalReadMiBPerSecond": 6.10791
+        },
+        {
+          "minute": 25.90155,
+          "cpuPercent": 98.69949,
+          "rssMiB": 10617.25,
+          "logicalReadMiBPerSecond": 5.78675
+        },
+        {
+          "minute": 25.9859,
+          "cpuPercent": 93.64757,
+          "rssMiB": 11029.375,
+          "logicalReadMiBPerSecond": 5.73954
+        },
+        {
+          "minute": 26.06925,
+          "cpuPercent": 74.58353,
+          "rssMiB": 9329.125,
+          "logicalReadMiBPerSecond": 3.39947
+        },
+        {
+          "minute": 26.15267,
+          "cpuPercent": 44.37604,
+          "rssMiB": 4689.48438,
+          "logicalReadMiBPerSecond": 31.16037
+        },
+        {
+          "minute": 26.2364,
+          "cpuPercent": 153.50802,
+          "rssMiB": 9918.3125,
+          "logicalReadMiBPerSecond": 27.66717
+        },
+        {
+          "minute": 26.3198,
+          "cpuPercent": 121.63962,
+          "rssMiB": 9840.1875,
+          "logicalReadMiBPerSecond": 14.38832
+        },
+        {
+          "minute": 26.40432,
+          "cpuPercent": 107.23986,
+          "rssMiB": 11519.0625,
+          "logicalReadMiBPerSecond": 9.46529
+        },
+        {
+          "minute": 26.48938,
+          "cpuPercent": 106.59026,
+          "rssMiB": 10644.40625,
+          "logicalReadMiBPerSecond": 8.42509
+        },
+        {
+          "minute": 26.57663,
+          "cpuPercent": 108.05138,
+          "rssMiB": 11252.10938,
+          "logicalReadMiBPerSecond": 9.35954
+        },
+        {
+          "minute": 26.66022,
+          "cpuPercent": 102.93448,
+          "rssMiB": 11248.23438,
+          "logicalReadMiBPerSecond": 6.97891
+        },
+        {
+          "minute": 26.74377,
+          "cpuPercent": 108.34292,
+          "rssMiB": 7355.98438,
+          "logicalReadMiBPerSecond": 8.37819
+        },
+        {
+          "minute": 26.82712,
+          "cpuPercent": 92.67863,
+          "rssMiB": 4997.23438,
+          "logicalReadMiBPerSecond": 6.19966
+        },
+        {
+          "minute": 26.91047,
+          "cpuPercent": 1.25464,
+          "rssMiB": 113.625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.99398,
+          "cpuPercent": 53.94208,
+          "rssMiB": 5946.95312,
+          "logicalReadMiBPerSecond": 36.37013
+        },
+        {
+          "minute": 27.07813,
+          "cpuPercent": 146.08731,
+          "rssMiB": 9359.17188,
+          "logicalReadMiBPerSecond": 25.54835
+        },
+        {
+          "minute": 27.16172,
+          "cpuPercent": 124.62798,
+          "rssMiB": 10760.625,
+          "logicalReadMiBPerSecond": 15.55528
+        },
+        {
+          "minute": 27.24508,
+          "cpuPercent": 115.2623,
+          "rssMiB": 9643.6875,
+          "logicalReadMiBPerSecond": 11.59464
+        },
+        {
+          "minute": 27.32972,
+          "cpuPercent": 107.14412,
+          "rssMiB": 11421.76562,
+          "logicalReadMiBPerSecond": 8.46839
+        },
+        {
+          "minute": 27.41522,
+          "cpuPercent": 103.53501,
+          "rssMiB": 11608.26562,
+          "logicalReadMiBPerSecond": 7.0164
+        },
+        {
+          "minute": 27.49985,
+          "cpuPercent": 103.54128,
+          "rssMiB": 11332.84375,
+          "logicalReadMiBPerSecond": 6.89335
+        },
+        {
+          "minute": 27.58488,
+          "cpuPercent": 99.85988,
+          "rssMiB": 11529.79688,
+          "logicalReadMiBPerSecond": 5.8794
+        },
+        {
+          "minute": 27.67127,
+          "cpuPercent": 99.20409,
+          "rssMiB": 11464.26562,
+          "logicalReadMiBPerSecond": 5.59499
+        },
+        {
+          "minute": 27.75462,
+          "cpuPercent": 16.57558,
+          "rssMiB": 3984.82812,
+          "logicalReadMiBPerSecond": 0.40007
+        },
+        {
+          "minute": 27.83807,
+          "cpuPercent": 69.59238,
+          "rssMiB": 7200.40625,
+          "logicalReadMiBPerSecond": 38.53491
+        },
+        {
+          "minute": 27.92225,
+          "cpuPercent": 143.11022,
+          "rssMiB": 10127.70312,
+          "logicalReadMiBPerSecond": 23.36239
+        },
+        {
+          "minute": 28.00698,
+          "cpuPercent": 116.96583,
+          "rssMiB": 11059.875,
+          "logicalReadMiBPerSecond": 14.25557
+        },
+        {
+          "minute": 28.09137,
+          "cpuPercent": 105.51879,
+          "rssMiB": 7605.82812,
+          "logicalReadMiBPerSecond": 8.29509
+        },
+        {
+          "minute": 28.17697,
+          "cpuPercent": 106.18273,
+          "rssMiB": 11243.28125,
+          "logicalReadMiBPerSecond": 8.56712
+        },
+        {
+          "minute": 28.26202,
+          "cpuPercent": 103.92882,
+          "rssMiB": 11124.42188,
+          "logicalReadMiBPerSecond": 7.25055
+        },
+        {
+          "minute": 28.34642,
+          "cpuPercent": 101.81533,
+          "rssMiB": 11550.85938,
+          "logicalReadMiBPerSecond": 6.71397
+        },
+        {
+          "minute": 28.43008,
+          "cpuPercent": 104.75958,
+          "rssMiB": 11354.64062,
+          "logicalReadMiBPerSecond": 7.56934
+        },
+        {
+          "minute": 28.51425,
+          "cpuPercent": 106.28936,
+          "rssMiB": 10509.95312,
+          "logicalReadMiBPerSecond": 7.52454
+        },
+        {
+          "minute": 28.5976,
+          "cpuPercent": 19.16586,
+          "rssMiB": 6491.625,
+          "logicalReadMiBPerSecond": 0.60003
+        },
+        {
+          "minute": 28.68115,
+          "cpuPercent": 85.61828,
+          "rssMiB": 5382.4375,
+          "logicalReadMiBPerSecond": 41.48795
+        },
+        {
+          "minute": 28.76505,
+          "cpuPercent": 139.49956,
+          "rssMiB": 9402.125,
+          "logicalReadMiBPerSecond": 22.04802
+        },
+        {
+          "minute": 28.85015,
+          "cpuPercent": 119.75305,
+          "rssMiB": 11306.40625,
+          "logicalReadMiBPerSecond": 14.10013
+        },
+        {
+          "minute": 28.9348,
+          "cpuPercent": 112.87211,
+          "rssMiB": 11500.75,
+          "logicalReadMiBPerSecond": 10.6319
+        },
+        {
+          "minute": 29.01867,
+          "cpuPercent": 103.14433,
+          "rssMiB": 11145.21875,
+          "logicalReadMiBPerSecond": 8.76599
+        },
+        {
+          "minute": 29.10325,
+          "cpuPercent": 101.95725,
+          "rssMiB": 11378.78125,
+          "logicalReadMiBPerSecond": 6.89616
+        },
+        {
+          "minute": 29.18917,
+          "cpuPercent": 103.46265,
+          "rssMiB": 11010.70312,
+          "logicalReadMiBPerSecond": 6.59588
+        },
+        {
+          "minute": 29.27475,
+          "cpuPercent": 97.52939,
+          "rssMiB": 8112.90625,
+          "logicalReadMiBPerSecond": 5.25763
+        },
+        {
+          "minute": 29.35925,
+          "cpuPercent": 102.33972,
+          "rssMiB": 8981.65625,
+          "logicalReadMiBPerSecond": 6.11494
+        },
+        {
+          "minute": 29.4426,
+          "cpuPercent": 21.01952,
+          "rssMiB": 4527.21875,
+          "logicalReadMiBPerSecond": 0.59998
+        },
+        {
+          "minute": 29.52618,
+          "cpuPercent": 94.26276,
+          "rssMiB": 6449.625,
+          "logicalReadMiBPerSecond": 43.85355
+        },
+        {
+          "minute": 29.60978,
+          "cpuPercent": 136.22999,
+          "rssMiB": 8028.26562,
+          "logicalReadMiBPerSecond": 21.13498
+        },
+        {
+          "minute": 29.69315,
+          "cpuPercent": 114.42693,
+          "rssMiB": 10691.875,
+          "logicalReadMiBPerSecond": 11.79353
+        },
+        {
+          "minute": 29.7778,
+          "cpuPercent": 113.20354,
+          "rssMiB": 9209.15625,
+          "logicalReadMiBPerSecond": 11.0265
+        },
+        {
+          "minute": 29.86117,
+          "cpuPercent": 107.60224,
+          "rssMiB": 11045.35938,
+          "logicalReadMiBPerSecond": 9.39566
+        },
+        {
+          "minute": 29.94478,
+          "cpuPercent": 103.09489,
+          "rssMiB": 10937.39062,
+          "logicalReadMiBPerSecond": 6.77766
+        },
+        {
+          "minute": 30.02933,
+          "cpuPercent": 100.59979,
+          "rssMiB": 10160.76562,
+          "logicalReadMiBPerSecond": 7.49117
+        },
+        {
+          "minute": 30.11357,
+          "cpuPercent": 99.66178,
+          "rssMiB": 11021.14062,
+          "logicalReadMiBPerSecond": 5.93632
+        },
+        {
+          "minute": 30.19912,
+          "cpuPercent": 99.42953,
+          "rssMiB": 11323.40625,
+          "logicalReadMiBPerSecond": 5.64993
+        },
+        {
+          "minute": 30.28248,
+          "cpuPercent": 9.42237,
+          "rssMiB": 8301.29688,
+          "logicalReadMiBPerSecond": 0.00012
+        },
+        {
+          "minute": 30.36612,
+          "cpuPercent": 94.75295,
+          "rssMiB": 6350.32812,
+          "logicalReadMiBPerSecond": 43.63226
+        },
+        {
+          "minute": 30.44958,
+          "cpuPercent": 134.99932,
+          "rssMiB": 9728.1875,
+          "logicalReadMiBPerSecond": 20.56684
+        },
+        {
+          "minute": 30.53473,
+          "cpuPercent": 112.75166,
+          "rssMiB": 10790.85938,
+          "logicalReadMiBPerSecond": 10.57045
+        },
+        {
+          "minute": 30.61872,
+          "cpuPercent": 108.26,
+          "rssMiB": 11305.45312,
+          "logicalReadMiBPerSecond": 9.12849
+        },
+        {
+          "minute": 30.70282,
+          "cpuPercent": 106.74466,
+          "rssMiB": 11085.32812,
+          "logicalReadMiBPerSecond": 8.52163
+        },
+        {
+          "minute": 30.78787,
+          "cpuPercent": 101.8121,
+          "rssMiB": 10459.375,
+          "logicalReadMiBPerSecond": 6.66228
+        },
+        {
+          "minute": 30.87177,
+          "cpuPercent": 100.976,
+          "rssMiB": 11015.4375,
+          "logicalReadMiBPerSecond": 6.75381
+        },
+        {
+          "minute": 30.9581,
+          "cpuPercent": 100.93014,
+          "rssMiB": 9839.79688,
+          "logicalReadMiBPerSecond": 6.37077
+        },
+        {
+          "minute": 31.04358,
+          "cpuPercent": 93.99859,
+          "rssMiB": 8428.78125,
+          "logicalReadMiBPerSecond": 6.27229
+        },
+        {
+          "minute": 31.12697,
+          "cpuPercent": 78.49899,
+          "rssMiB": 5222.92188,
+          "logicalReadMiBPerSecond": 4.19797
+        },
+        {
+          "minute": 31.21085,
+          "cpuPercent": 109.37945,
+          "rssMiB": 8701.65625,
+          "logicalReadMiBPerSecond": 46.68565
+        },
+        {
+          "minute": 31.29475,
+          "cpuPercent": 135.73456,
+          "rssMiB": 8541.28125,
+          "logicalReadMiBPerSecond": 20.45939
+        },
+        {
+          "minute": 31.37975,
+          "cpuPercent": 115.24674,
+          "rssMiB": 11544.09375,
+          "logicalReadMiBPerSecond": 11.76516
+        },
+        {
+          "minute": 31.46492,
+          "cpuPercent": 115.1749,
+          "rssMiB": 11079.09375,
+          "logicalReadMiBPerSecond": 11.54526
+        },
+        {
+          "minute": 31.5493,
+          "cpuPercent": 97.36386,
+          "rssMiB": 11280.28125,
+          "logicalReadMiBPerSecond": 6.91251
+        },
+        {
+          "minute": 31.63503,
+          "cpuPercent": 103.21095,
+          "rssMiB": 11499.71875,
+          "logicalReadMiBPerSecond": 7.38767
+        },
+        {
+          "minute": 31.7211,
+          "cpuPercent": 100.32335,
+          "rssMiB": 11797.46875,
+          "logicalReadMiBPerSecond": 6.39066
+        },
+        {
+          "minute": 31.80467,
+          "cpuPercent": 101.74829,
+          "rssMiB": 11860.65625,
+          "logicalReadMiBPerSecond": 6.38125
+        },
+        {
+          "minute": 31.88803,
+          "cpuPercent": 59.62293,
+          "rssMiB": 5347.40625,
+          "logicalReadMiBPerSecond": 3.99877
+        },
+        {
+          "minute": 31.97138,
+          "cpuPercent": 2.61366,
+          "rssMiB": 129.9375,
+          "logicalReadMiBPerSecond": 1.45044
+        },
+        {
+          "minute": 32.05502,
+          "cpuPercent": 114.51848,
+          "rssMiB": 7284.84375,
+          "logicalReadMiBPerSecond": 47.22227
+        },
+        {
+          "minute": 32.13905,
+          "cpuPercent": 132.27881,
+          "rssMiB": 10223.59375,
+          "logicalReadMiBPerSecond": 20.2279
+        },
+        {
+          "minute": 32.22368,
+          "cpuPercent": 114.92139,
+          "rssMiB": 12284.17188,
+          "logicalReadMiBPerSecond": 12.60497
+        },
+        {
+          "minute": 32.3083,
+          "cpuPercent": 109.79359,
+          "rssMiB": 11928.20312,
+          "logicalReadMiBPerSecond": 9.45354
+        },
+        {
+          "minute": 32.3919,
+          "cpuPercent": 104.96781,
+          "rssMiB": 11223.28125,
+          "logicalReadMiBPerSecond": 7.57578
+        },
+        {
+          "minute": 32.47577,
+          "cpuPercent": 105.90379,
+          "rssMiB": 9695.73438,
+          "logicalReadMiBPerSecond": 7.75071
+        },
+        {
+          "minute": 32.5605,
+          "cpuPercent": 105.95036,
+          "rssMiB": 10125.85938,
+          "logicalReadMiBPerSecond": 7.67123
+        },
+        {
+          "minute": 32.64437,
+          "cpuPercent": 106.9708,
+          "rssMiB": 8654.15625,
+          "logicalReadMiBPerSecond": 7.94869
+        },
+        {
+          "minute": 32.72798,
+          "cpuPercent": 145.47623,
+          "rssMiB": 8020,
+          "logicalReadMiBPerSecond": 50.94012
+        },
+        {
+          "minute": 32.81137,
+          "cpuPercent": 132.46024,
+          "rssMiB": 8385.96875,
+          "logicalReadMiBPerSecond": 20.3857
+        },
+        {
+          "minute": 32.8953,
+          "cpuPercent": 118.32847,
+          "rssMiB": 8309.48438,
+          "logicalReadMiBPerSecond": 12.90683
+        },
+        {
+          "minute": 32.97893,
+          "cpuPercent": 112.18478,
+          "rssMiB": 11450.78125,
+          "logicalReadMiBPerSecond": 12.27488
+        },
+        {
+          "minute": 33.0642,
+          "cpuPercent": 104.58334,
+          "rssMiB": 11808.10938,
+          "logicalReadMiBPerSecond": 8.01485
+        },
+        {
+          "minute": 33.14758,
+          "cpuPercent": 104.67298,
+          "rssMiB": 12100.0625,
+          "logicalReadMiBPerSecond": 7.79566
+        },
+        {
+          "minute": 33.23123,
+          "cpuPercent": 105.3314,
+          "rssMiB": 11901.76562,
+          "logicalReadMiBPerSecond": 7.76906
+        },
+        {
+          "minute": 33.3146,
+          "cpuPercent": 67.18249,
+          "rssMiB": 11013.21875,
+          "logicalReadMiBPerSecond": 4.5985
+        },
+        {
+          "minute": 33.39822,
+          "cpuPercent": 120.11173,
+          "rssMiB": 8458.92188,
+          "logicalReadMiBPerSecond": 49.2227
+        },
+        {
+          "minute": 33.48267,
+          "cpuPercent": 130.15267,
+          "rssMiB": 11360.64062,
+          "logicalReadMiBPerSecond": 18.74915
+        },
+        {
+          "minute": 33.5672,
+          "cpuPercent": 123.49291,
+          "rssMiB": 10984.34375,
+          "logicalReadMiBPerSecond": 14.58882
+        },
+        {
+          "minute": 33.6516,
+          "cpuPercent": 112.47128,
+          "rssMiB": 11766.76562,
+          "logicalReadMiBPerSecond": 11.25751
+        },
+        {
+          "minute": 33.73687,
+          "cpuPercent": 110.65826,
+          "rssMiB": 11597.32812,
+          "logicalReadMiBPerSecond": 10.16424
+        },
+        {
+          "minute": 33.82172,
+          "cpuPercent": 108.31701,
+          "rssMiB": 11674.26562,
+          "logicalReadMiBPerSecond": 8.8378
+        },
+        {
+          "minute": 33.90718,
+          "cpuPercent": 103.04916,
+          "rssMiB": 11932.46875,
+          "logicalReadMiBPerSecond": 6.63093
+        },
+        {
+          "minute": 33.99053,
+          "cpuPercent": 46.73291,
+          "rssMiB": 5705.73438,
+          "logicalReadMiBPerSecond": 2.88326
+        },
+        {
+          "minute": 34.07397,
+          "cpuPercent": 133.62014,
+          "rssMiB": 10244.26562,
+          "logicalReadMiBPerSecond": 52.24606
+        },
+        {
+          "minute": 34.15738,
+          "cpuPercent": 130.06482,
+          "rssMiB": 11042.76562,
+          "logicalReadMiBPerSecond": 19.38046
+        },
+        {
+          "minute": 34.24182,
+          "cpuPercent": 118.27344,
+          "rssMiB": 11443.07812,
+          "logicalReadMiBPerSecond": 13.61943
+        },
+        {
+          "minute": 34.3254,
+          "cpuPercent": 109.41795,
+          "rssMiB": 12139.04688,
+          "logicalReadMiBPerSecond": 9.3725
+        },
+        {
+          "minute": 34.4098,
+          "cpuPercent": 109.26048,
+          "rssMiB": 12372.21875,
+          "logicalReadMiBPerSecond": 8.68837
+        },
+        {
+          "minute": 34.49433,
+          "cpuPercent": 107.11067,
+          "rssMiB": 10058.125,
+          "logicalReadMiBPerSecond": 7.29564
+        },
+        {
+          "minute": 34.57875,
+          "cpuPercent": 102.93926,
+          "rssMiB": 12359.14062,
+          "logicalReadMiBPerSecond": 6.91027
+        },
+        {
+          "minute": 34.6621,
+          "cpuPercent": 79.23213,
+          "rssMiB": 8640.78125,
+          "logicalReadMiBPerSecond": 4.59858
+        },
+        {
+          "minute": 34.74597,
+          "cpuPercent": 140.98722,
+          "rssMiB": 11506,
+          "logicalReadMiBPerSecond": 53.57235
+        },
+        {
+          "minute": 34.8293,
+          "cpuPercent": 130.08723,
+          "rssMiB": 8099.98438,
+          "logicalReadMiBPerSecond": 18.7997
+        },
+        {
+          "minute": 34.9131,
+          "cpuPercent": 116.87185,
+          "rssMiB": 9639.9375,
+          "logicalReadMiBPerSecond": 13.32463
+        },
+        {
+          "minute": 34.99693,
+          "cpuPercent": 112.18266,
+          "rssMiB": 9642.82812,
+          "logicalReadMiBPerSecond": 12.53618
+        },
+        {
+          "minute": 35.08087,
+          "cpuPercent": 107.77023,
+          "rssMiB": 12594.60938,
+          "logicalReadMiBPerSecond": 8.73662
+        },
+        {
+          "minute": 35.16422,
+          "cpuPercent": 107.47681,
+          "rssMiB": 10020.92188,
+          "logicalReadMiBPerSecond": 8.39894
+        },
+        {
+          "minute": 35.2476,
+          "cpuPercent": 109.48098,
+          "rssMiB": 9380.42188,
+          "logicalReadMiBPerSecond": 8.19505
+        },
+        {
+          "minute": 35.33097,
+          "cpuPercent": 1.08608,
+          "rssMiB": 9384.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.41505,
+          "cpuPercent": 138.74255,
+          "rssMiB": 10936.54688,
+          "logicalReadMiBPerSecond": 52.03688
+        },
+        {
+          "minute": 35.49893,
+          "cpuPercent": 131.41625,
+          "rssMiB": 9465.39062,
+          "logicalReadMiBPerSecond": 19.27573
+        },
+        {
+          "minute": 35.58275,
+          "cpuPercent": 114.75202,
+          "rssMiB": 12553.64062,
+          "logicalReadMiBPerSecond": 12.52606
+        },
+        {
+          "minute": 35.66647,
+          "cpuPercent": 106.6123,
+          "rssMiB": 12364.3125,
+          "logicalReadMiBPerSecond": 8.56056
+        },
+        {
+          "minute": 35.74998,
+          "cpuPercent": 109.79593,
+          "rssMiB": 10024,
+          "logicalReadMiBPerSecond": 9.37911
+        },
+        {
+          "minute": 35.83485,
+          "cpuPercent": 103.25904,
+          "rssMiB": 12372.15625,
+          "logicalReadMiBPerSecond": 7.46257
+        },
+        {
+          "minute": 35.91848,
+          "cpuPercent": 102.71436,
+          "rssMiB": 12396.71875,
+          "logicalReadMiBPerSecond": 6.57694
+        },
+        {
+          "minute": 36.0018,
+          "cpuPercent": 103.72376,
+          "rssMiB": 12390.46875,
+          "logicalReadMiBPerSecond": 6.6889
+        },
+        {
+          "minute": 36.08522,
+          "cpuPercent": 149.20352,
+          "rssMiB": 10085.90625,
+          "logicalReadMiBPerSecond": 55.05752
+        },
+        {
+          "minute": 36.16862,
+          "cpuPercent": 130.86087,
+          "rssMiB": 10831.04688,
+          "logicalReadMiBPerSecond": 19.18453
+        },
+        {
+          "minute": 36.25348,
+          "cpuPercent": 111.18508,
+          "rssMiB": 12607.3125,
+          "logicalReadMiBPerSecond": 10.60602
+        },
+        {
+          "minute": 36.33838,
+          "cpuPercent": 108.24534,
+          "rssMiB": 12431.53125,
+          "logicalReadMiBPerSecond": 8.63739
+        },
+        {
+          "minute": 36.42213,
+          "cpuPercent": 106.27521,
+          "rssMiB": 12574.01562,
+          "logicalReadMiBPerSecond": 8.15961
+        },
+        {
+          "minute": 36.50703,
+          "cpuPercent": 111.69145,
+          "rssMiB": 12174.57812,
+          "logicalReadMiBPerSecond": 9.61924
+        },
+        {
+          "minute": 36.59188,
+          "cpuPercent": 107.66049,
+          "rssMiB": 12460.70312,
+          "logicalReadMiBPerSecond": 8.6417
+        },
+        {
+          "minute": 36.67523,
+          "cpuPercent": 32.76351,
+          "rssMiB": 2824.48438,
+          "logicalReadMiBPerSecond": 1.99971
+        },
+        {
+          "minute": 36.75875,
+          "cpuPercent": 148.36986,
+          "rssMiB": 7398.23438,
+          "logicalReadMiBPerSecond": 55.39073
+        },
+        {
+          "minute": 36.84267,
+          "cpuPercent": 126.97366,
+          "rssMiB": 11543.875,
+          "logicalReadMiBPerSecond": 16.28554
+        },
+        {
+          "minute": 36.92747,
+          "cpuPercent": 115.60993,
+          "rssMiB": 12497.39062,
+          "logicalReadMiBPerSecond": 12.18602
+        },
+        {
+          "minute": 37.01138,
+          "cpuPercent": 107.73833,
+          "rssMiB": 12415.39062,
+          "logicalReadMiBPerSecond": 10.15001
+        },
+        {
+          "minute": 37.09605,
+          "cpuPercent": 106.81784,
+          "rssMiB": 11117.17188,
+          "logicalReadMiBPerSecond": 8.07079
+        },
+        {
+          "minute": 37.18023,
+          "cpuPercent": 106.90426,
+          "rssMiB": 8452.26562,
+          "logicalReadMiBPerSecond": 8.3163
+        },
+        {
+          "minute": 37.26427,
+          "cpuPercent": 109.31342,
+          "rssMiB": 8471.67188,
+          "logicalReadMiBPerSecond": 8.92479
+        },
+        {
+          "minute": 37.34763,
+          "cpuPercent": 52.6843,
+          "rssMiB": 5626.15625,
+          "logicalReadMiBPerSecond": 3.79834
+        },
+        {
+          "minute": 37.43122,
+          "cpuPercent": 150.1064,
+          "rssMiB": 6926.15625,
+          "logicalReadMiBPerSecond": 55.55042
+        },
+        {
+          "minute": 37.5152,
+          "cpuPercent": 130.46237,
+          "rssMiB": 8165.29688,
+          "logicalReadMiBPerSecond": 18.25763
+        },
+        {
+          "minute": 37.5995,
+          "cpuPercent": 113.81607,
+          "rssMiB": 12683.0625,
+          "logicalReadMiBPerSecond": 11.66416
+        },
+        {
+          "minute": 37.68327,
+          "cpuPercent": 110.09903,
+          "rssMiB": 11173.04688,
+          "logicalReadMiBPerSecond": 9.15108
+        },
+        {
+          "minute": 37.767,
+          "cpuPercent": 111.75153,
+          "rssMiB": 10534.89062,
+          "logicalReadMiBPerSecond": 10.15154
+        },
+        {
+          "minute": 37.8514,
+          "cpuPercent": 108.91086,
+          "rssMiB": 11671.26562,
+          "logicalReadMiBPerSecond": 9.28239
+        },
+        {
+          "minute": 37.93472,
+          "cpuPercent": 108.87102,
+          "rssMiB": 10228.96875,
+          "logicalReadMiBPerSecond": 8.00087
+        },
+        {
+          "minute": 38.01808,
+          "cpuPercent": 1.44292,
+          "rssMiB": 3374.35938,
+          "logicalReadMiBPerSecond": 1.16213
+        },
+        {
+          "minute": 38.10193,
+          "cpuPercent": 153.80056,
+          "rssMiB": 11018.34375,
+          "logicalReadMiBPerSecond": 56.37067
+        },
+        {
+          "minute": 38.18548,
+          "cpuPercent": 127.236,
+          "rssMiB": 10770.90625,
+          "logicalReadMiBPerSecond": 17.15326
+        },
+        {
+          "minute": 38.26973,
+          "cpuPercent": 117.99256,
+          "rssMiB": 10698.51562,
+          "logicalReadMiBPerSecond": 13.25437
+        },
+        {
+          "minute": 38.35392,
+          "cpuPercent": 109.57299,
+          "rssMiB": 12535.09375,
+          "logicalReadMiBPerSecond": 9.70152
+        },
+        {
+          "minute": 38.43923,
+          "cpuPercent": 112.15937,
+          "rssMiB": 12165.3125,
+          "logicalReadMiBPerSecond": 10.15741
+        },
+        {
+          "minute": 38.52448,
+          "cpuPercent": 105.06319,
+          "rssMiB": 12452.75,
+          "logicalReadMiBPerSecond": 7.42932
+        },
+        {
+          "minute": 38.61022,
+          "cpuPercent": 102.53863,
+          "rssMiB": 12793.10938,
+          "logicalReadMiBPerSecond": 6.60927
+        },
+        {
+          "minute": 38.69358,
+          "cpuPercent": 17.3056,
+          "rssMiB": 3545.32812,
+          "logicalReadMiBPerSecond": 0.79987
+        },
+        {
+          "minute": 38.77752,
+          "cpuPercent": 159.33397,
+          "rssMiB": 11330.17188,
+          "logicalReadMiBPerSecond": 56.69697
+        },
+        {
+          "minute": 38.86243,
+          "cpuPercent": 127.56805,
+          "rssMiB": 12127.35938,
+          "logicalReadMiBPerSecond": 16.88218
+        },
+        {
+          "minute": 38.94598,
+          "cpuPercent": 120.72669,
+          "rssMiB": 12097.70312,
+          "logicalReadMiBPerSecond": 13.76249
+        },
+        {
+          "minute": 39.03053,
+          "cpuPercent": 112.36494,
+          "rssMiB": 10307.07812,
+          "logicalReadMiBPerSecond": 11.39019
+        },
+        {
+          "minute": 39.11617,
+          "cpuPercent": 109.61505,
+          "rssMiB": 12645.03125,
+          "logicalReadMiBPerSecond": 8.95269
+        },
+        {
+          "minute": 39.20048,
+          "cpuPercent": 106.08951,
+          "rssMiB": 11842.21875,
+          "logicalReadMiBPerSecond": 7.31371
+        },
+        {
+          "minute": 39.28435,
+          "cpuPercent": 104.41931,
+          "rssMiB": 11762.5,
+          "logicalReadMiBPerSecond": 6.95505
+        },
+        {
+          "minute": 39.36768,
+          "cpuPercent": 10.93486,
+          "rssMiB": 108.98438,
+          "logicalReadMiBPerSecond": 0.6151
+        },
+        {
+          "minute": 39.45133,
+          "cpuPercent": 170.70774,
+          "rssMiB": 10881.40625,
+          "logicalReadMiBPerSecond": 58.86533
+        },
+        {
+          "minute": 39.5349,
+          "cpuPercent": 127.96108,
+          "rssMiB": 9062,
+          "logicalReadMiBPerSecond": 17.55341
+        },
+        {
+          "minute": 39.61877,
+          "cpuPercent": 112.94988,
+          "rssMiB": 12702.875,
+          "logicalReadMiBPerSecond": 10.73015
+        },
+        {
+          "minute": 39.70253,
+          "cpuPercent": 111.96151,
+          "rssMiB": 11462.73438,
+          "logicalReadMiBPerSecond": 9.94896
+        },
+        {
+          "minute": 39.78763,
+          "cpuPercent": 112.41301,
+          "rssMiB": 11520.23438,
+          "logicalReadMiBPerSecond": 10.18391
+        },
+        {
+          "minute": 39.87197,
+          "cpuPercent": 102.81108,
+          "rssMiB": 12149.8125,
+          "logicalReadMiBPerSecond": 7.11486
+        },
+        {
+          "minute": 39.9553,
+          "cpuPercent": 105.57431,
+          "rssMiB": 10245.78125,
+          "logicalReadMiBPerSecond": 7.89561
+        },
+        {
+          "minute": 40.03863,
+          "cpuPercent": 5.38129,
+          "rssMiB": 398.59375,
+          "logicalReadMiBPerSecond": 6.51163
+        },
+        {
+          "minute": 40.12298,
+          "cpuPercent": 163.5349,
+          "rssMiB": 10417.42188,
+          "logicalReadMiBPerSecond": 51.37243
+        },
+        {
+          "minute": 40.20758,
+          "cpuPercent": 127.98793,
+          "rssMiB": 10332.67188,
+          "logicalReadMiBPerSecond": 17.33517
+        },
+        {
+          "minute": 40.29223,
+          "cpuPercent": 114.29386,
+          "rssMiB": 11815.04688,
+          "logicalReadMiBPerSecond": 12.40571
+        },
+        {
+          "minute": 40.37667,
+          "cpuPercent": 112.2707,
+          "rssMiB": 11832.03125,
+          "logicalReadMiBPerSecond": 10.85518
+        },
+        {
+          "minute": 40.46102,
+          "cpuPercent": 110.85348,
+          "rssMiB": 12266.89062,
+          "logicalReadMiBPerSecond": 9.88049
+        },
+        {
+          "minute": 40.54493,
+          "cpuPercent": 109.6738,
+          "rssMiB": 11701.28125,
+          "logicalReadMiBPerSecond": 8.9379
+        },
+        {
+          "minute": 40.6283,
+          "cpuPercent": 68.96842,
+          "rssMiB": 11990.625,
+          "logicalReadMiBPerSecond": 3.99827
+        },
+        {
+          "minute": 40.71175,
+          "cpuPercent": 20.23771,
+          "rssMiB": 2186.73438,
+          "logicalReadMiBPerSecond": 23.28042
+        },
+        {
+          "minute": 40.79575,
+          "cpuPercent": 160.27812,
+          "rssMiB": 11142.875,
+          "logicalReadMiBPerSecond": 36.90439
+        },
+        {
+          "minute": 40.87932,
+          "cpuPercent": 128.38479,
+          "rssMiB": 11214.59375,
+          "logicalReadMiBPerSecond": 17.74858
+        },
+        {
+          "minute": 40.96385,
+          "cpuPercent": 113.47053,
+          "rssMiB": 11895.625,
+          "logicalReadMiBPerSecond": 11.24279
+        }
+      ],
+      "latencyCoverage": {
+        "expected": 41082,
+        "observed": 41082,
+        "negative": 0
+      },
+      "steadyTerminalEvents": 725,
+      "steadyTerminalsPerSecond": 0.2946674100230253,
+      "steadyToolEvents": 18378,
+      "throughputMinuteBins": [
+        {
+          "startMinute": 0,
+          "seconds": 60,
+          "events": 167,
+          "eventsPerSecond": 2.783333333333333
+        },
+        {
+          "startMinute": 1,
+          "seconds": 60,
+          "events": 910,
+          "eventsPerSecond": 15.166666666666666
+        },
+        {
+          "startMinute": 2,
+          "seconds": 60,
+          "events": 1057,
+          "eventsPerSecond": 17.616666666666667
+        },
+        {
+          "startMinute": 3,
+          "seconds": 60,
+          "events": 1373,
+          "eventsPerSecond": 22.883333333333333
+        },
+        {
+          "startMinute": 4,
+          "seconds": 60,
+          "events": 804,
+          "eventsPerSecond": 13.4
+        },
+        {
+          "startMinute": 5,
+          "seconds": 60,
+          "events": 694,
+          "eventsPerSecond": 11.566666666666666
+        },
+        {
+          "startMinute": 6,
+          "seconds": 60,
+          "events": 1431,
+          "eventsPerSecond": 23.85
+        },
+        {
+          "startMinute": 7,
+          "seconds": 60,
+          "events": 723,
+          "eventsPerSecond": 12.05
+        },
+        {
+          "startMinute": 8,
+          "seconds": 60,
+          "events": 1283,
+          "eventsPerSecond": 21.383333333333333
+        },
+        {
+          "startMinute": 9,
+          "seconds": 60,
+          "events": 713,
+          "eventsPerSecond": 11.883333333333333
+        },
+        {
+          "startMinute": 10,
+          "seconds": 60,
+          "events": 1299,
+          "eventsPerSecond": 21.65
+        },
+        {
+          "startMinute": 11,
+          "seconds": 60,
+          "events": 702,
+          "eventsPerSecond": 11.7
+        },
+        {
+          "startMinute": 12,
+          "seconds": 60,
+          "events": 1292,
+          "eventsPerSecond": 21.533333333333335
+        },
+        {
+          "startMinute": 13,
+          "seconds": 60,
+          "events": 713,
+          "eventsPerSecond": 11.883333333333333
+        },
+        {
+          "startMinute": 14,
+          "seconds": 60,
+          "events": 1300,
+          "eventsPerSecond": 21.666666666666668
+        },
+        {
+          "startMinute": 15,
+          "seconds": 60,
+          "events": 722,
+          "eventsPerSecond": 12.033333333333333
+        },
+        {
+          "startMinute": 16,
+          "seconds": 60,
+          "events": 1183,
+          "eventsPerSecond": 19.716666666666665
+        },
+        {
+          "startMinute": 17,
+          "seconds": 60,
+          "events": 926,
+          "eventsPerSecond": 15.433333333333334
+        },
+        {
+          "startMinute": 18,
+          "seconds": 60,
+          "events": 854,
+          "eventsPerSecond": 14.233333333333333
+        },
+        {
+          "startMinute": 19,
+          "seconds": 60,
+          "events": 868,
+          "eventsPerSecond": 14.466666666666667
+        },
+        {
+          "startMinute": 20,
+          "seconds": 60,
+          "events": 685,
+          "eventsPerSecond": 11.416666666666666
+        },
+        {
+          "startMinute": 21,
+          "seconds": 60,
+          "events": 1588,
+          "eventsPerSecond": 26.466666666666665
+        },
+        {
+          "startMinute": 22,
+          "seconds": 60,
+          "events": 884,
+          "eventsPerSecond": 14.733333333333333
+        },
+        {
+          "startMinute": 23,
+          "seconds": 60,
+          "events": 848,
+          "eventsPerSecond": 14.133333333333333
+        },
+        {
+          "startMinute": 24,
+          "seconds": 60,
+          "events": 841,
+          "eventsPerSecond": 14.016666666666667
+        },
+        {
+          "startMinute": 25,
+          "seconds": 60,
+          "events": 841,
+          "eventsPerSecond": 14.016666666666667
+        },
+        {
+          "startMinute": 26,
+          "seconds": 60,
+          "events": 1582,
+          "eventsPerSecond": 26.366666666666667
+        },
+        {
+          "startMinute": 27,
+          "seconds": 60,
+          "events": 881,
+          "eventsPerSecond": 14.683333333333334
+        },
+        {
+          "startMinute": 28,
+          "seconds": 60,
+          "events": 859,
+          "eventsPerSecond": 14.316666666666666
+        },
+        {
+          "startMinute": 29,
+          "seconds": 60,
+          "events": 836,
+          "eventsPerSecond": 13.933333333333334
+        },
+        {
+          "startMinute": 30,
+          "seconds": 60,
+          "events": 864,
+          "eventsPerSecond": 14.4
+        },
+        {
+          "startMinute": 31,
+          "seconds": 60,
+          "events": 1506,
+          "eventsPerSecond": 25.1
+        },
+        {
+          "startMinute": 32,
+          "seconds": 60,
+          "events": 975,
+          "eventsPerSecond": 16.25
+        },
+        {
+          "startMinute": 33,
+          "seconds": 60,
+          "events": 1363,
+          "eventsPerSecond": 22.716666666666665
+        },
+        {
+          "startMinute": 34,
+          "seconds": 60,
+          "events": 819,
+          "eventsPerSecond": 13.65
+        },
+        {
+          "startMinute": 35,
+          "seconds": 60,
+          "events": 808,
+          "eventsPerSecond": 13.466666666666667
+        },
+        {
+          "startMinute": 36,
+          "seconds": 60,
+          "events": 1184,
+          "eventsPerSecond": 19.733333333333334
+        },
+        {
+          "startMinute": 37,
+          "seconds": 60,
+          "events": 1197,
+          "eventsPerSecond": 19.95
+        },
+        {
+          "startMinute": 38,
+          "seconds": 60,
+          "events": 804,
+          "eventsPerSecond": 13.4
+        },
+        {
+          "startMinute": 39,
+          "seconds": 60,
+          "events": 1200,
+          "eventsPerSecond": 20
+        },
+        {
+          "startMinute": 40,
+          "seconds": 60,
+          "events": 802,
+          "eventsPerSecond": 13.366666666666667
+        }
+      ]
+    },
+    "fixed": {
+      "actualSteadySeconds": 2460.352852294922,
+      "cpuMeanPercent": 1.7811045962641714,
+      "cpuP95Percent": 3.8146514636668662,
+      "cpuPeakPercent": 5.163644725713432,
+      "rssPeakMiB": 353.40625,
+      "rssP95MiB": 352.3125,
+      "logicalReadSteadyBytes": 12893854927,
+      "publishedSteadySessions": 246,
+      "expectedRealEvents": 41249,
+      "realOutputEvents": 41249,
+      "steadyRealOutputEvents": 41082,
+      "steadyEventsPerSecond": 16.69760496413362,
+      "eventTypes": {
+        "other": 1482,
+        "agent.input": 741,
+        "llm.request": 10127,
+        "llm.response": 10127,
+        "tool.call": 9386,
+        "tool.result": 9386
+      },
+      "duplicateRealEventIds": 0,
+      "eventLatencyMs": {
+        "p50": 5896.594970703125,
+        "p95": 9682.89013671875,
+        "p99": 9812.924072265625,
+        "max": 9852.19482421875
+      },
+      "toolLatencyMs": {
+        "p50": 5897.39794921875,
+        "p95": 9683.0029296875,
+        "p99": 9813.554931640625,
+        "max": 9851.19482421875
+      },
+      "stringLimitErrors": 0,
+      "sampleCount": 508,
+      "validLongMeasurement": true,
+      "realCompletenessPassed": true,
+      "outputProbeCoveragePassed": true,
+      "isolationPassed": true,
+      "instrumentationPassed": true,
+      "exit": 0,
+      "guard": null,
+      "totalProcessSeconds": 2531.451552246094,
+      "wholeRunRealEventsPerSecond": 16.29460376731318,
+      "readByScenario": {
+        "real": {
+          "bytes": 357165410,
+          "calls": 2205
+        },
+        "unfinished": {
+          "bytes": 12331289040,
+          "calls": 12005
+        },
+        "giant": {
+          "bytes": 0,
+          "calls": 0
+        }
+      },
+      "nativeWindows": [
+        {
+          "window": 1,
+          "relativeStartSeconds": 525.4214802246094,
+          "relativeEndSeconds": 1125.4184802246093,
+          "l1WindowMs": 599997,
+          "l2WindowMs": 599994,
+          "cpuPercent": 1.78,
+          "rawReadBytes": 3107376600,
+          "rawInBytes": 16402980,
+          "rawInRecords": 18180,
+          "readAmplification": 189.4397603362316
+        },
+        {
+          "window": 2,
+          "relativeStartSeconds": 1125.4274802246093,
+          "relativeEndSeconds": 1725.4184802246093,
+          "l1WindowMs": 599991,
+          "l2WindowMs": 599994,
+          "cpuPercent": 1.73,
+          "rawReadBytes": 3107376600,
+          "rawInBytes": 16402980,
+          "rawInRecords": 18180,
+          "readAmplification": 189.4397603362316
+        },
+        {
+          "window": 3,
+          "relativeStartSeconds": 1725.4214802246095,
+          "relativeEndSeconds": 2325.4184802246095,
+          "l1WindowMs": 599997,
+          "l2WindowMs": 599997,
+          "cpuPercent": 1.73,
+          "rawReadBytes": 3107376600,
+          "rawInBytes": 16402980,
+          "rawInRecords": 18180,
+          "readAmplification": 189.4397603362316
+        }
+      ],
+      "consecutiveNativeWindows": 3,
+      "egress": {
+        "allowedRemoteFetch": 0,
+        "deniedConnections": 0,
+        "redirectedFetch": 1
+      },
+      "series": [
+        {
+          "minute": 0.15674,
+          "cpuPercent": 0.10666,
+          "rssMiB": 296.57812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.24007,
+          "cpuPercent": 5.16364,
+          "rssMiB": 311.57812,
+          "logicalReadMiBPerSecond": 9.87626
+        },
+        {
+          "minute": 0.32342,
+          "cpuPercent": 0.07963,
+          "rssMiB": 311.59375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.40677,
+          "cpuPercent": 3.4816,
+          "rssMiB": 314.29688,
+          "logicalReadMiBPerSecond": 9.87679
+        },
+        {
+          "minute": 0.49012,
+          "cpuPercent": 0.076,
+          "rssMiB": 314.29688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.57347,
+          "cpuPercent": 4.88029,
+          "rssMiB": 314.82812,
+          "logicalReadMiBPerSecond": 9.87579
+        },
+        {
+          "minute": 0.65682,
+          "cpuPercent": 0.11683,
+          "rssMiB": 314.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.74017,
+          "cpuPercent": 3.53393,
+          "rssMiB": 315.28125,
+          "logicalReadMiBPerSecond": 9.87655
+        },
+        {
+          "minute": 0.82352,
+          "cpuPercent": 0.09084,
+          "rssMiB": 315.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 0.90687,
+          "cpuPercent": 4.32919,
+          "rssMiB": 314.6875,
+          "logicalReadMiBPerSecond": 9.87678
+        },
+        {
+          "minute": 0.99021,
+          "cpuPercent": 0.80311,
+          "rssMiB": 318.71875,
+          "logicalReadMiBPerSecond": 0.79749
+        },
+        {
+          "minute": 1.07356,
+          "cpuPercent": 4.82479,
+          "rssMiB": 319.98438,
+          "logicalReadMiBPerSecond": 9.87589
+        },
+        {
+          "minute": 1.15689,
+          "cpuPercent": 0.13026,
+          "rssMiB": 319.98438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 1.24026,
+          "cpuPercent": 3.33431,
+          "rssMiB": 330.76562,
+          "logicalReadMiBPerSecond": 9.87592
+        },
+        {
+          "minute": 1.32361,
+          "cpuPercent": 0.08692,
+          "rssMiB": 330.76562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 1.40696,
+          "cpuPercent": 3.99445,
+          "rssMiB": 330.98438,
+          "logicalReadMiBPerSecond": 9.87589
+        },
+        {
+          "minute": 1.49029,
+          "cpuPercent": 0.0883,
+          "rssMiB": 330.98438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 1.57364,
+          "cpuPercent": 4.07269,
+          "rssMiB": 331.42188,
+          "logicalReadMiBPerSecond": 9.87766
+        },
+        {
+          "minute": 1.65697,
+          "cpuPercent": 0.10291,
+          "rssMiB": 331.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 1.74032,
+          "cpuPercent": 3.67276,
+          "rssMiB": 333.9375,
+          "logicalReadMiBPerSecond": 9.87673
+        },
+        {
+          "minute": 1.82364,
+          "cpuPercent": 0.0667,
+          "rssMiB": 333.9375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 1.90699,
+          "cpuPercent": 3.55496,
+          "rssMiB": 330.125,
+          "logicalReadMiBPerSecond": 9.87648
+        },
+        {
+          "minute": 1.99034,
+          "cpuPercent": 1.31429,
+          "rssMiB": 334.21875,
+          "logicalReadMiBPerSecond": 0.95682
+        },
+        {
+          "minute": 2.07369,
+          "cpuPercent": 3.301,
+          "rssMiB": 334.67188,
+          "logicalReadMiBPerSecond": 9.87568
+        },
+        {
+          "minute": 2.15704,
+          "cpuPercent": 0.11117,
+          "rssMiB": 334.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 2.24037,
+          "cpuPercent": 3.11098,
+          "rssMiB": 335.45312,
+          "logicalReadMiBPerSecond": 9.87669
+        },
+        {
+          "minute": 2.32371,
+          "cpuPercent": 0.08574,
+          "rssMiB": 335.45312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 2.40707,
+          "cpuPercent": 3.78282,
+          "rssMiB": 335.5,
+          "logicalReadMiBPerSecond": 9.87548
+        },
+        {
+          "minute": 2.49041,
+          "cpuPercent": 0.08609,
+          "rssMiB": 335.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 2.57376,
+          "cpuPercent": 3.06734,
+          "rssMiB": 335.5,
+          "logicalReadMiBPerSecond": 9.87543
+        },
+        {
+          "minute": 2.65711,
+          "cpuPercent": 0.08664,
+          "rssMiB": 335.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 2.74046,
+          "cpuPercent": 3.3416,
+          "rssMiB": 331.5625,
+          "logicalReadMiBPerSecond": 9.87726
+        },
+        {
+          "minute": 2.82377,
+          "cpuPercent": 0.10873,
+          "rssMiB": 331.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 2.90712,
+          "cpuPercent": 3.38212,
+          "rssMiB": 331.625,
+          "logicalReadMiBPerSecond": 9.87617
+        },
+        {
+          "minute": 2.99047,
+          "cpuPercent": 1.15314,
+          "rssMiB": 335.65625,
+          "logicalReadMiBPerSecond": 0.95686
+        },
+        {
+          "minute": 3.07381,
+          "cpuPercent": 3.81465,
+          "rssMiB": 335.70312,
+          "logicalReadMiBPerSecond": 9.87791
+        },
+        {
+          "minute": 3.15716,
+          "cpuPercent": 0.11813,
+          "rssMiB": 335.71875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 3.24051,
+          "cpuPercent": 3.32868,
+          "rssMiB": 335.75,
+          "logicalReadMiBPerSecond": 9.87655
+        },
+        {
+          "minute": 3.32384,
+          "cpuPercent": 0.07067,
+          "rssMiB": 335.75,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 3.40719,
+          "cpuPercent": 3.33499,
+          "rssMiB": 335.76562,
+          "logicalReadMiBPerSecond": 9.87763
+        },
+        {
+          "minute": 3.49054,
+          "cpuPercent": 0.0807,
+          "rssMiB": 335.76562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 3.57387,
+          "cpuPercent": 3.49735,
+          "rssMiB": 335.82812,
+          "logicalReadMiBPerSecond": 9.87765
+        },
+        {
+          "minute": 3.65722,
+          "cpuPercent": 0.10296,
+          "rssMiB": 335.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 3.74056,
+          "cpuPercent": 3.10062,
+          "rssMiB": 335.82812,
+          "logicalReadMiBPerSecond": 9.87706
+        },
+        {
+          "minute": 3.82389,
+          "cpuPercent": 0.04724,
+          "rssMiB": 335.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 3.90724,
+          "cpuPercent": 3.93409,
+          "rssMiB": 337.3125,
+          "logicalReadMiBPerSecond": 9.87542
+        },
+        {
+          "minute": 3.99057,
+          "cpuPercent": 1.13061,
+          "rssMiB": 336.875,
+          "logicalReadMiBPerSecond": 0.95728
+        },
+        {
+          "minute": 4.07392,
+          "cpuPercent": 3.7706,
+          "rssMiB": 336.89062,
+          "logicalReadMiBPerSecond": 9.87694
+        },
+        {
+          "minute": 4.15726,
+          "cpuPercent": 0.10318,
+          "rssMiB": 336.89062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 4.24062,
+          "cpuPercent": 2.99083,
+          "rssMiB": 336.89062,
+          "logicalReadMiBPerSecond": 9.87454
+        },
+        {
+          "minute": 4.32397,
+          "cpuPercent": 0.08119,
+          "rssMiB": 336.89062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 4.40731,
+          "cpuPercent": 3.30675,
+          "rssMiB": 334.1875,
+          "logicalReadMiBPerSecond": 9.87687
+        },
+        {
+          "minute": 4.49067,
+          "cpuPercent": 0.06054,
+          "rssMiB": 334.1875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 4.57402,
+          "cpuPercent": 3.73773,
+          "rssMiB": 332.92188,
+          "logicalReadMiBPerSecond": 9.87521
+        },
+        {
+          "minute": 4.65736,
+          "cpuPercent": 0.09448,
+          "rssMiB": 332.92188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 4.74071,
+          "cpuPercent": 3.17436,
+          "rssMiB": 332.96875,
+          "logicalReadMiBPerSecond": 9.87695
+        },
+        {
+          "minute": 4.82404,
+          "cpuPercent": 0.06367,
+          "rssMiB": 332.96875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 4.90739,
+          "cpuPercent": 3.17492,
+          "rssMiB": 334.25,
+          "logicalReadMiBPerSecond": 9.87628
+        },
+        {
+          "minute": 4.99074,
+          "cpuPercent": 1.1264,
+          "rssMiB": 336.98438,
+          "logicalReadMiBPerSecond": 0.95717
+        },
+        {
+          "minute": 5.07409,
+          "cpuPercent": 4.07624,
+          "rssMiB": 337.42188,
+          "logicalReadMiBPerSecond": 9.8762
+        },
+        {
+          "minute": 5.15746,
+          "cpuPercent": 0.1035,
+          "rssMiB": 337.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 5.24082,
+          "cpuPercent": 2.96455,
+          "rssMiB": 337.3125,
+          "logicalReadMiBPerSecond": 9.87467
+        },
+        {
+          "minute": 5.32417,
+          "cpuPercent": 0.08298,
+          "rssMiB": 337.3125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 5.40751,
+          "cpuPercent": 3.41088,
+          "rssMiB": 334.84375,
+          "logicalReadMiBPerSecond": 9.87716
+        },
+        {
+          "minute": 5.49084,
+          "cpuPercent": 0.08202,
+          "rssMiB": 334.84375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 5.57419,
+          "cpuPercent": 3.55841,
+          "rssMiB": 333.60938,
+          "logicalReadMiBPerSecond": 9.8766
+        },
+        {
+          "minute": 5.65754,
+          "cpuPercent": 0.1003,
+          "rssMiB": 333.60938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 5.74089,
+          "cpuPercent": 3.1149,
+          "rssMiB": 333.60938,
+          "logicalReadMiBPerSecond": 9.87662
+        },
+        {
+          "minute": 5.82424,
+          "cpuPercent": 0.08718,
+          "rssMiB": 333.60938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 5.90757,
+          "cpuPercent": 3.104,
+          "rssMiB": 333.60938,
+          "logicalReadMiBPerSecond": 9.87816
+        },
+        {
+          "minute": 5.99092,
+          "cpuPercent": 0.95635,
+          "rssMiB": 337.67188,
+          "logicalReadMiBPerSecond": 0.95742
+        },
+        {
+          "minute": 6.07426,
+          "cpuPercent": 3.22593,
+          "rssMiB": 333.67188,
+          "logicalReadMiBPerSecond": 9.87817
+        },
+        {
+          "minute": 6.15759,
+          "cpuPercent": 0.12251,
+          "rssMiB": 333.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.24094,
+          "cpuPercent": 3.69619,
+          "rssMiB": 334.95312,
+          "logicalReadMiBPerSecond": 9.87572
+        },
+        {
+          "minute": 6.32429,
+          "cpuPercent": 0.06578,
+          "rssMiB": 334.95312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.40766,
+          "cpuPercent": 3.36672,
+          "rssMiB": 333.78125,
+          "logicalReadMiBPerSecond": 9.87573
+        },
+        {
+          "minute": 6.49101,
+          "cpuPercent": 0.07157,
+          "rssMiB": 333.78125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.57434,
+          "cpuPercent": 3.08177,
+          "rssMiB": 333.82812,
+          "logicalReadMiBPerSecond": 9.87701
+        },
+        {
+          "minute": 6.65771,
+          "cpuPercent": 0.10035,
+          "rssMiB": 333.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.74104,
+          "cpuPercent": 3.16809,
+          "rssMiB": 333.89062,
+          "logicalReadMiBPerSecond": 9.8765
+        },
+        {
+          "minute": 6.82439,
+          "cpuPercent": 0.08617,
+          "rssMiB": 333.89062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 6.90774,
+          "cpuPercent": 3.8954,
+          "rssMiB": 334.3125,
+          "logicalReadMiBPerSecond": 9.87677
+        },
+        {
+          "minute": 6.99107,
+          "cpuPercent": 1.15009,
+          "rssMiB": 338.32812,
+          "logicalReadMiBPerSecond": 0.95752
+        },
+        {
+          "minute": 7.07442,
+          "cpuPercent": 3.18612,
+          "rssMiB": 333.92188,
+          "logicalReadMiBPerSecond": 9.87568
+        },
+        {
+          "minute": 7.15776,
+          "cpuPercent": 0.09656,
+          "rssMiB": 333.92188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 7.24109,
+          "cpuPercent": 3.72536,
+          "rssMiB": 333.92188,
+          "logicalReadMiBPerSecond": 9.87825
+        },
+        {
+          "minute": 7.32442,
+          "cpuPercent": 0.06674,
+          "rssMiB": 333.92188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 7.40779,
+          "cpuPercent": 3.10183,
+          "rssMiB": 333.95312,
+          "logicalReadMiBPerSecond": 9.87589
+        },
+        {
+          "minute": 7.49116,
+          "cpuPercent": 0.09092,
+          "rssMiB": 333.95312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 7.57447,
+          "cpuPercent": 3.09559,
+          "rssMiB": 335.25,
+          "logicalReadMiBPerSecond": 9.87845
+        },
+        {
+          "minute": 7.65786,
+          "cpuPercent": 0.09356,
+          "rssMiB": 335.25,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 7.74121,
+          "cpuPercent": 3.22175,
+          "rssMiB": 334.1875,
+          "logicalReadMiBPerSecond": 9.87469
+        },
+        {
+          "minute": 7.82457,
+          "cpuPercent": 0.07128,
+          "rssMiB": 334.1875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 7.90794,
+          "cpuPercent": 3.233,
+          "rssMiB": 334.1875,
+          "logicalReadMiBPerSecond": 9.8741
+        },
+        {
+          "minute": 7.99131,
+          "cpuPercent": 1.03316,
+          "rssMiB": 338.20312,
+          "logicalReadMiBPerSecond": 0.95732
+        },
+        {
+          "minute": 8.07467,
+          "cpuPercent": 3.11233,
+          "rssMiB": 339.5,
+          "logicalReadMiBPerSecond": 9.87374
+        },
+        {
+          "minute": 8.15801,
+          "cpuPercent": 0.10647,
+          "rssMiB": 339.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 8.24137,
+          "cpuPercent": 3.13367,
+          "rssMiB": 338.23438,
+          "logicalReadMiBPerSecond": 9.87466
+        },
+        {
+          "minute": 8.32471,
+          "cpuPercent": 0.08714,
+          "rssMiB": 338.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 8.40806,
+          "cpuPercent": 3.40079,
+          "rssMiB": 338.23438,
+          "logicalReadMiBPerSecond": 9.87543
+        },
+        {
+          "minute": 8.49141,
+          "cpuPercent": 0.07487,
+          "rssMiB": 338.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 8.57474,
+          "cpuPercent": 3.27239,
+          "rssMiB": 339.53125,
+          "logicalReadMiBPerSecond": 9.8786
+        },
+        {
+          "minute": 8.65809,
+          "cpuPercent": 0.09275,
+          "rssMiB": 339.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 8.67749,
+          "cpuPercent": 3.20124,
+          "rssMiB": 334.25,
+          "logicalReadMiBPerSecond": 9.87631
+        },
+        {
+          "minute": 8.76084,
+          "cpuPercent": 0.08148,
+          "rssMiB": 334.25,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 8.84419,
+          "cpuPercent": 3.39338,
+          "rssMiB": 334.25,
+          "logicalReadMiBPerSecond": 9.87683
+        },
+        {
+          "minute": 8.92752,
+          "cpuPercent": 1.14536,
+          "rssMiB": 338.26562,
+          "logicalReadMiBPerSecond": 0.95775
+        },
+        {
+          "minute": 9.01087,
+          "cpuPercent": 3.60016,
+          "rssMiB": 338.6875,
+          "logicalReadMiBPerSecond": 9.8766
+        },
+        {
+          "minute": 9.09422,
+          "cpuPercent": 0.1159,
+          "rssMiB": 338.6875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 9.17757,
+          "cpuPercent": 3.06541,
+          "rssMiB": 339.57812,
+          "logicalReadMiBPerSecond": 9.87652
+        },
+        {
+          "minute": 9.26094,
+          "cpuPercent": 0.07041,
+          "rssMiB": 339.57812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 9.34429,
+          "cpuPercent": 3.17202,
+          "rssMiB": 335.59375,
+          "logicalReadMiBPerSecond": 9.87689
+        },
+        {
+          "minute": 9.42766,
+          "cpuPercent": 0.08361,
+          "rssMiB": 335.59375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 9.51101,
+          "cpuPercent": 4.03161,
+          "rssMiB": 335.875,
+          "logicalReadMiBPerSecond": 9.87521
+        },
+        {
+          "minute": 9.59434,
+          "cpuPercent": 0.09888,
+          "rssMiB": 335.875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 9.67767,
+          "cpuPercent": 3.11415,
+          "rssMiB": 335.95312,
+          "logicalReadMiBPerSecond": 9.87699
+        },
+        {
+          "minute": 9.76102,
+          "cpuPercent": 0.08045,
+          "rssMiB": 335.95312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 9.84437,
+          "cpuPercent": 3.22261,
+          "rssMiB": 335.95312,
+          "logicalReadMiBPerSecond": 9.87536
+        },
+        {
+          "minute": 9.92774,
+          "cpuPercent": 1.10177,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 0.95758
+        },
+        {
+          "minute": 10.01112,
+          "cpuPercent": 3.06945,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 9.87258
+        },
+        {
+          "minute": 10.09451,
+          "cpuPercent": 0.08325,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 10.17786,
+          "cpuPercent": 3.04344,
+          "rssMiB": 339.95312,
+          "logicalReadMiBPerSecond": 9.87549
+        },
+        {
+          "minute": 10.26124,
+          "cpuPercent": 0.089,
+          "rssMiB": 339.95312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 10.34461,
+          "cpuPercent": 3.22879,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 9.87408
+        },
+        {
+          "minute": 10.42797,
+          "cpuPercent": 0.06751,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 10.51131,
+          "cpuPercent": 3.36904,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 9.87679
+        },
+        {
+          "minute": 10.59469,
+          "cpuPercent": 0.10199,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 10.67802,
+          "cpuPercent": 3.01083,
+          "rssMiB": 339.95312,
+          "logicalReadMiBPerSecond": 9.87745
+        },
+        {
+          "minute": 10.76139,
+          "cpuPercent": 0.05724,
+          "rssMiB": 339.95312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 10.84474,
+          "cpuPercent": 2.98421,
+          "rssMiB": 338.67188,
+          "logicalReadMiBPerSecond": 9.87634
+        },
+        {
+          "minute": 10.92807,
+          "cpuPercent": 1.11314,
+          "rssMiB": 338.6875,
+          "logicalReadMiBPerSecond": 0.95794
+        },
+        {
+          "minute": 11.01141,
+          "cpuPercent": 3.84437,
+          "rssMiB": 338.89062,
+          "logicalReadMiBPerSecond": 9.87836
+        },
+        {
+          "minute": 11.09476,
+          "cpuPercent": 0.10057,
+          "rssMiB": 338.89062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 11.17812,
+          "cpuPercent": 3.08699,
+          "rssMiB": 340.70312,
+          "logicalReadMiBPerSecond": 9.87416
+        },
+        {
+          "minute": 11.26149,
+          "cpuPercent": 0.07667,
+          "rssMiB": 340.70312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 11.34481,
+          "cpuPercent": 3.41432,
+          "rssMiB": 335.42188,
+          "logicalReadMiBPerSecond": 9.87848
+        },
+        {
+          "minute": 11.42819,
+          "cpuPercent": 0.06391,
+          "rssMiB": 335.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 11.51152,
+          "cpuPercent": 3.16223,
+          "rssMiB": 335.625,
+          "logicalReadMiBPerSecond": 9.87835
+        },
+        {
+          "minute": 11.59489,
+          "cpuPercent": 0.07187,
+          "rssMiB": 335.625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 11.67822,
+          "cpuPercent": 3.15291,
+          "rssMiB": 337.03125,
+          "logicalReadMiBPerSecond": 9.8765
+        },
+        {
+          "minute": 11.76156,
+          "cpuPercent": 0.07878,
+          "rssMiB": 337.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 11.84492,
+          "cpuPercent": 3.11069,
+          "rssMiB": 335.76562,
+          "logicalReadMiBPerSecond": 9.87476
+        },
+        {
+          "minute": 11.92831,
+          "cpuPercent": 1.01355,
+          "rssMiB": 339.78125,
+          "logicalReadMiBPerSecond": 0.95771
+        },
+        {
+          "minute": 12.01162,
+          "cpuPercent": 3.66556,
+          "rssMiB": 335.79688,
+          "logicalReadMiBPerSecond": 9.87847
+        },
+        {
+          "minute": 12.09499,
+          "cpuPercent": 0.10772,
+          "rssMiB": 335.79688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 12.17834,
+          "cpuPercent": 3.71615,
+          "rssMiB": 337.3125,
+          "logicalReadMiBPerSecond": 9.87672
+        },
+        {
+          "minute": 12.26171,
+          "cpuPercent": 0.05882,
+          "rssMiB": 337.3125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 12.34506,
+          "cpuPercent": 3.14491,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 9.87474
+        },
+        {
+          "minute": 12.42839,
+          "cpuPercent": 0.06658,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 12.51176,
+          "cpuPercent": 3.1966,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 9.87498
+        },
+        {
+          "minute": 12.59512,
+          "cpuPercent": 0.06354,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 12.67847,
+          "cpuPercent": 3.20849,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 9.87559
+        },
+        {
+          "minute": 12.76184,
+          "cpuPercent": 0.07569,
+          "rssMiB": 337.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 12.84519,
+          "cpuPercent": 3.12454,
+          "rssMiB": 336.0625,
+          "logicalReadMiBPerSecond": 9.87492
+        },
+        {
+          "minute": 12.92854,
+          "cpuPercent": 0.99708,
+          "rssMiB": 340.09375,
+          "logicalReadMiBPerSecond": 0.95809
+        },
+        {
+          "minute": 13.01191,
+          "cpuPercent": 3.6762,
+          "rssMiB": 336.34375,
+          "logicalReadMiBPerSecond": 9.87395
+        },
+        {
+          "minute": 13.09527,
+          "cpuPercent": 0.0631,
+          "rssMiB": 336.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 13.17864,
+          "cpuPercent": 3.52037,
+          "rssMiB": 337.73438,
+          "logicalReadMiBPerSecond": 9.87408
+        },
+        {
+          "minute": 13.26199,
+          "cpuPercent": 0.07565,
+          "rssMiB": 337.73438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 13.34534,
+          "cpuPercent": 3.75999,
+          "rssMiB": 336.48438,
+          "logicalReadMiBPerSecond": 9.87605
+        },
+        {
+          "minute": 13.42869,
+          "cpuPercent": 0.08085,
+          "rssMiB": 336.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 13.51204,
+          "cpuPercent": 3.1083,
+          "rssMiB": 336.48438,
+          "logicalReadMiBPerSecond": 9.87645
+        },
+        {
+          "minute": 13.59539,
+          "cpuPercent": 0.08326,
+          "rssMiB": 336.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 13.67874,
+          "cpuPercent": 3.14487,
+          "rssMiB": 337.78125,
+          "logicalReadMiBPerSecond": 9.87729
+        },
+        {
+          "minute": 13.76209,
+          "cpuPercent": 0.07128,
+          "rssMiB": 337.78125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 13.84544,
+          "cpuPercent": 2.97613,
+          "rssMiB": 337.78125,
+          "logicalReadMiBPerSecond": 9.87694
+        },
+        {
+          "minute": 13.92879,
+          "cpuPercent": 1.11466,
+          "rssMiB": 340.53125,
+          "logicalReadMiBPerSecond": 0.95815
+        },
+        {
+          "minute": 14.01212,
+          "cpuPercent": 3.07436,
+          "rssMiB": 341.8125,
+          "logicalReadMiBPerSecond": 9.87807
+        },
+        {
+          "minute": 14.09547,
+          "cpuPercent": 0.10046,
+          "rssMiB": 341.8125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 14.17884,
+          "cpuPercent": 3.31184,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 9.87505
+        },
+        {
+          "minute": 14.26217,
+          "cpuPercent": 0.07832,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 14.34552,
+          "cpuPercent": 3.31315,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 9.87614
+        },
+        {
+          "minute": 14.42887,
+          "cpuPercent": 0.07692,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 14.51224,
+          "cpuPercent": 2.98149,
+          "rssMiB": 340.54688,
+          "logicalReadMiBPerSecond": 9.87408
+        },
+        {
+          "minute": 14.59562,
+          "cpuPercent": 0.06287,
+          "rssMiB": 340.54688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 14.67896,
+          "cpuPercent": 3.20667,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 9.8772
+        },
+        {
+          "minute": 14.76232,
+          "cpuPercent": 0.07415,
+          "rssMiB": 341.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 14.84571,
+          "cpuPercent": 3.20967,
+          "rssMiB": 340.54688,
+          "logicalReadMiBPerSecond": 9.8727
+        },
+        {
+          "minute": 14.92906,
+          "cpuPercent": 1.13074,
+          "rssMiB": 340.57812,
+          "logicalReadMiBPerSecond": 0.95837
+        },
+        {
+          "minute": 15.01241,
+          "cpuPercent": 3.60228,
+          "rssMiB": 337,
+          "logicalReadMiBPerSecond": 9.87677
+        },
+        {
+          "minute": 15.09576,
+          "cpuPercent": 0.10666,
+          "rssMiB": 337,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 15.17911,
+          "cpuPercent": 3.10208,
+          "rssMiB": 337.85938,
+          "logicalReadMiBPerSecond": 9.87705
+        },
+        {
+          "minute": 15.26249,
+          "cpuPercent": 0.07966,
+          "rssMiB": 337.85938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 15.34584,
+          "cpuPercent": 3.65126,
+          "rssMiB": 337,
+          "logicalReadMiBPerSecond": 9.87515
+        },
+        {
+          "minute": 15.42921,
+          "cpuPercent": 0.07619,
+          "rssMiB": 337,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 15.51256,
+          "cpuPercent": 3.27092,
+          "rssMiB": 336.625,
+          "logicalReadMiBPerSecond": 9.87706
+        },
+        {
+          "minute": 15.59591,
+          "cpuPercent": 0.1063,
+          "rssMiB": 336.625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 15.67929,
+          "cpuPercent": 3.15162,
+          "rssMiB": 337.90625,
+          "logicalReadMiBPerSecond": 9.87331
+        },
+        {
+          "minute": 15.76264,
+          "cpuPercent": 0.07948,
+          "rssMiB": 337.90625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 15.84597,
+          "cpuPercent": 3.01543,
+          "rssMiB": 336.625,
+          "logicalReadMiBPerSecond": 9.87778
+        },
+        {
+          "minute": 15.92936,
+          "cpuPercent": 1.10425,
+          "rssMiB": 340.67188,
+          "logicalReadMiBPerSecond": 0.95824
+        },
+        {
+          "minute": 16.01269,
+          "cpuPercent": 3.34823,
+          "rssMiB": 337.96875,
+          "logicalReadMiBPerSecond": 9.87752
+        },
+        {
+          "minute": 16.09606,
+          "cpuPercent": 0.05124,
+          "rssMiB": 337.96875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 16.17939,
+          "cpuPercent": 3.04718,
+          "rssMiB": 337.96875,
+          "logicalReadMiBPerSecond": 9.8773
+        },
+        {
+          "minute": 16.26276,
+          "cpuPercent": 0.07493,
+          "rssMiB": 337.96875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 16.34612,
+          "cpuPercent": 3.53248,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 9.87467
+        },
+        {
+          "minute": 16.42949,
+          "cpuPercent": 0.07192,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 16.51286,
+          "cpuPercent": 2.96311,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 9.87278
+        },
+        {
+          "minute": 16.59624,
+          "cpuPercent": 0.09048,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 16.67959,
+          "cpuPercent": 3.01648,
+          "rssMiB": 337.98438,
+          "logicalReadMiBPerSecond": 9.87486
+        },
+        {
+          "minute": 16.76292,
+          "cpuPercent": 0.06894,
+          "rssMiB": 337.96875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 16.84629,
+          "cpuPercent": 3.14379,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 9.87491
+        },
+        {
+          "minute": 16.92966,
+          "cpuPercent": 1.10645,
+          "rssMiB": 340.71875,
+          "logicalReadMiBPerSecond": 0.95844
+        },
+        {
+          "minute": 17.01301,
+          "cpuPercent": 3.51371,
+          "rssMiB": 342,
+          "logicalReadMiBPerSecond": 9.87422
+        },
+        {
+          "minute": 17.09637,
+          "cpuPercent": 0.08734,
+          "rssMiB": 342,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.17972,
+          "cpuPercent": 3.08441,
+          "rssMiB": 342,
+          "logicalReadMiBPerSecond": 9.87518
+        },
+        {
+          "minute": 17.26307,
+          "cpuPercent": 0.06736,
+          "rssMiB": 342,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.34642,
+          "cpuPercent": 3.19033,
+          "rssMiB": 336.71875,
+          "logicalReadMiBPerSecond": 9.87589
+        },
+        {
+          "minute": 17.42977,
+          "cpuPercent": 0.06007,
+          "rssMiB": 336.70312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.51314,
+          "cpuPercent": 4.01198,
+          "rssMiB": 338.01562,
+          "logicalReadMiBPerSecond": 9.87479
+        },
+        {
+          "minute": 17.59647,
+          "cpuPercent": 0.05229,
+          "rssMiB": 338.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.67984,
+          "cpuPercent": 3.35627,
+          "rssMiB": 338.03125,
+          "logicalReadMiBPerSecond": 9.87481
+        },
+        {
+          "minute": 17.76319,
+          "cpuPercent": 0.05841,
+          "rssMiB": 338.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 17.84656,
+          "cpuPercent": 3.85627,
+          "rssMiB": 336.75,
+          "logicalReadMiBPerSecond": 9.87437
+        },
+        {
+          "minute": 17.92989,
+          "cpuPercent": 1.09209,
+          "rssMiB": 340.76562,
+          "logicalReadMiBPerSecond": 0.95885
+        },
+        {
+          "minute": 18.01324,
+          "cpuPercent": 3.40448,
+          "rssMiB": 342.10938,
+          "logicalReadMiBPerSecond": 9.87659
+        },
+        {
+          "minute": 18.09657,
+          "cpuPercent": 0.09999,
+          "rssMiB": 342.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.17991,
+          "cpuPercent": 3.29081,
+          "rssMiB": 338.10938,
+          "logicalReadMiBPerSecond": 9.87805
+        },
+        {
+          "minute": 18.26326,
+          "cpuPercent": 0.06305,
+          "rssMiB": 338.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.34661,
+          "cpuPercent": 4.12997,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 9.87562
+        },
+        {
+          "minute": 18.42996,
+          "cpuPercent": 0.06851,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.51331,
+          "cpuPercent": 3.16953,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 9.87549
+        },
+        {
+          "minute": 18.59666,
+          "cpuPercent": 0.06949,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.68001,
+          "cpuPercent": 3.80628,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 9.87617
+        },
+        {
+          "minute": 18.76336,
+          "cpuPercent": 0.03737,
+          "rssMiB": 338.125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 18.84672,
+          "cpuPercent": 3.72276,
+          "rssMiB": 343.90625,
+          "logicalReadMiBPerSecond": 9.87516
+        },
+        {
+          "minute": 18.93009,
+          "cpuPercent": 0.92655,
+          "rssMiB": 347.92188,
+          "logicalReadMiBPerSecond": 0.9587
+        },
+        {
+          "minute": 19.01342,
+          "cpuPercent": 3.30265,
+          "rssMiB": 346.20312,
+          "logicalReadMiBPerSecond": 9.87686
+        },
+        {
+          "minute": 19.09679,
+          "cpuPercent": 0.0762,
+          "rssMiB": 346.20312,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 19.18016,
+          "cpuPercent": 3.15598,
+          "rssMiB": 344.92188,
+          "logicalReadMiBPerSecond": 9.87414
+        },
+        {
+          "minute": 19.26351,
+          "cpuPercent": 0.05502,
+          "rssMiB": 344.92188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 19.34686,
+          "cpuPercent": 3.89039,
+          "rssMiB": 345.34375,
+          "logicalReadMiBPerSecond": 9.877
+        },
+        {
+          "minute": 19.43021,
+          "cpuPercent": 0.06512,
+          "rssMiB": 345.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 19.51356,
+          "cpuPercent": 3.10303,
+          "rssMiB": 345.34375,
+          "logicalReadMiBPerSecond": 9.87748
+        },
+        {
+          "minute": 19.59691,
+          "cpuPercent": 0.06375,
+          "rssMiB": 345.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 19.68026,
+          "cpuPercent": 3.47346,
+          "rssMiB": 345.375,
+          "logicalReadMiBPerSecond": 9.8756
+        },
+        {
+          "minute": 19.76362,
+          "cpuPercent": 0.06226,
+          "rssMiB": 345.375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 19.84697,
+          "cpuPercent": 3.06537,
+          "rssMiB": 345.375,
+          "logicalReadMiBPerSecond": 9.87592
+        },
+        {
+          "minute": 19.93031,
+          "cpuPercent": 0.88248,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 0.9591
+        },
+        {
+          "minute": 20.01364,
+          "cpuPercent": 3.13913,
+          "rssMiB": 350.67188,
+          "logicalReadMiBPerSecond": 9.87779
+        },
+        {
+          "minute": 20.09699,
+          "cpuPercent": 0.10465,
+          "rssMiB": 350.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.18036,
+          "cpuPercent": 3.10014,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 9.8754
+        },
+        {
+          "minute": 20.26371,
+          "cpuPercent": 0.0841,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.34706,
+          "cpuPercent": 3.0021,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 9.87551
+        },
+        {
+          "minute": 20.43041,
+          "cpuPercent": 0.03415,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.51376,
+          "cpuPercent": 3.1303,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 9.8767
+        },
+        {
+          "minute": 20.59711,
+          "cpuPercent": 0.0897,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.68046,
+          "cpuPercent": 3.68842,
+          "rssMiB": 350.67188,
+          "logicalReadMiBPerSecond": 9.87674
+        },
+        {
+          "minute": 20.76381,
+          "cpuPercent": 0.08204,
+          "rssMiB": 350.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 20.84714,
+          "cpuPercent": 3.30007,
+          "rssMiB": 349.39062,
+          "logicalReadMiBPerSecond": 9.87728
+        },
+        {
+          "minute": 20.93049,
+          "cpuPercent": 1.57464,
+          "rssMiB": 349.48438,
+          "logicalReadMiBPerSecond": 0.95914
+        },
+        {
+          "minute": 21.01384,
+          "cpuPercent": 3.01586,
+          "rssMiB": 349.48438,
+          "logicalReadMiBPerSecond": 9.876
+        },
+        {
+          "minute": 21.09719,
+          "cpuPercent": 0.09752,
+          "rssMiB": 349.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 21.18056,
+          "cpuPercent": 3.03397,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 9.87487
+        },
+        {
+          "minute": 21.26391,
+          "cpuPercent": 0.0828,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 21.34726,
+          "cpuPercent": 3.36658,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 9.87626
+        },
+        {
+          "minute": 21.43059,
+          "cpuPercent": 0.09045,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 21.51396,
+          "cpuPercent": 3.06684,
+          "rssMiB": 350.78125,
+          "logicalReadMiBPerSecond": 9.87498
+        },
+        {
+          "minute": 21.59729,
+          "cpuPercent": 0.09932,
+          "rssMiB": 350.78125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 21.68062,
+          "cpuPercent": 3.33729,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 9.87646
+        },
+        {
+          "minute": 21.76397,
+          "cpuPercent": 0.05195,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 21.84731,
+          "cpuPercent": 3.4077,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 9.87733
+        },
+        {
+          "minute": 21.93066,
+          "cpuPercent": 0.8652,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 0.95945
+        },
+        {
+          "minute": 22.01401,
+          "cpuPercent": 3.20968,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 9.87685
+        },
+        {
+          "minute": 22.09736,
+          "cpuPercent": 0.05109,
+          "rssMiB": 349.5,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 22.18071,
+          "cpuPercent": 3.86763,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87474
+        },
+        {
+          "minute": 22.26406,
+          "cpuPercent": 0.06551,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 22.34741,
+          "cpuPercent": 3.23534,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87673
+        },
+        {
+          "minute": 22.43077,
+          "cpuPercent": 0.06198,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 22.51411,
+          "cpuPercent": 3.54737,
+          "rssMiB": 350.8125,
+          "logicalReadMiBPerSecond": 9.87728
+        },
+        {
+          "minute": 22.59746,
+          "cpuPercent": 0.09798,
+          "rssMiB": 350.8125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 22.68081,
+          "cpuPercent": 3.01715,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87569
+        },
+        {
+          "minute": 22.76416,
+          "cpuPercent": 0.08155,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 22.84751,
+          "cpuPercent": 3.23851,
+          "rssMiB": 350.8125,
+          "logicalReadMiBPerSecond": 9.87615
+        },
+        {
+          "minute": 22.93084,
+          "cpuPercent": 0.68195,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0.95971
+        },
+        {
+          "minute": 23.01419,
+          "cpuPercent": 3.09205,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87704
+        },
+        {
+          "minute": 23.09752,
+          "cpuPercent": 0.1,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.18086,
+          "cpuPercent": 3.19418,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87801
+        },
+        {
+          "minute": 23.26422,
+          "cpuPercent": 0.05052,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.34757,
+          "cpuPercent": 3.2953,
+          "rssMiB": 350.8125,
+          "logicalReadMiBPerSecond": 9.87616
+        },
+        {
+          "minute": 23.43091,
+          "cpuPercent": 0.07406,
+          "rssMiB": 350.8125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.51426,
+          "cpuPercent": 3.06686,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87724
+        },
+        {
+          "minute": 23.59759,
+          "cpuPercent": 0.08333,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.68094,
+          "cpuPercent": 3.0915,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87546
+        },
+        {
+          "minute": 23.76427,
+          "cpuPercent": 0.07839,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 23.84762,
+          "cpuPercent": 3.26956,
+          "rssMiB": 349.53125,
+          "logicalReadMiBPerSecond": 9.87679
+        },
+        {
+          "minute": 23.93097,
+          "cpuPercent": 1.01621,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 0.95976
+        },
+        {
+          "minute": 24.01432,
+          "cpuPercent": 3.25658,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 9.8765
+        },
+        {
+          "minute": 24.09767,
+          "cpuPercent": 0.07592,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.18101,
+          "cpuPercent": 2.90024,
+          "rssMiB": 350.84375,
+          "logicalReadMiBPerSecond": 9.87787
+        },
+        {
+          "minute": 24.26436,
+          "cpuPercent": 0.06223,
+          "rssMiB": 350.84375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.34771,
+          "cpuPercent": 3.17732,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 9.87548
+        },
+        {
+          "minute": 24.43106,
+          "cpuPercent": 0.05261,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.51441,
+          "cpuPercent": 3.07539,
+          "rssMiB": 350.84375,
+          "logicalReadMiBPerSecond": 9.87534
+        },
+        {
+          "minute": 24.59777,
+          "cpuPercent": 0.07158,
+          "rssMiB": 350.84375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.68109,
+          "cpuPercent": 3.08945,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 9.87781
+        },
+        {
+          "minute": 24.76442,
+          "cpuPercent": 0.07389,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 24.84772,
+          "cpuPercent": 3.2875,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 9.87827
+        },
+        {
+          "minute": 24.93107,
+          "cpuPercent": 0.76392,
+          "rssMiB": 349.5625,
+          "logicalReadMiBPerSecond": 0.9598
+        },
+        {
+          "minute": 25.01441,
+          "cpuPercent": 3.03367,
+          "rssMiB": 345.5625,
+          "logicalReadMiBPerSecond": 9.87539
+        },
+        {
+          "minute": 25.09776,
+          "cpuPercent": 0.09233,
+          "rssMiB": 345.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.18107,
+          "cpuPercent": 3.35281,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 9.87781
+        },
+        {
+          "minute": 25.26441,
+          "cpuPercent": 0.0808,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.34776,
+          "cpuPercent": 3.36779,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 9.87624
+        },
+        {
+          "minute": 25.43111,
+          "cpuPercent": 0.0824,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.51444,
+          "cpuPercent": 3.67224,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 9.87716
+        },
+        {
+          "minute": 25.59779,
+          "cpuPercent": 0.09443,
+          "rssMiB": 345.57812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.68112,
+          "cpuPercent": 2.9137,
+          "rssMiB": 347.71875,
+          "logicalReadMiBPerSecond": 9.87782
+        },
+        {
+          "minute": 25.76444,
+          "cpuPercent": 0.07725,
+          "rssMiB": 347.71875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 25.84777,
+          "cpuPercent": 3.26186,
+          "rssMiB": 346.4375,
+          "logicalReadMiBPerSecond": 9.87839
+        },
+        {
+          "minute": 25.93112,
+          "cpuPercent": 0.73976,
+          "rssMiB": 350.4375,
+          "logicalReadMiBPerSecond": 0.96004
+        },
+        {
+          "minute": 26.01447,
+          "cpuPercent": 3.11187,
+          "rssMiB": 352.01562,
+          "logicalReadMiBPerSecond": 9.87515
+        },
+        {
+          "minute": 26.09784,
+          "cpuPercent": 0.09395,
+          "rssMiB": 352.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.18117,
+          "cpuPercent": 2.88809,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 9.87756
+        },
+        {
+          "minute": 26.26452,
+          "cpuPercent": 0.07727,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.34786,
+          "cpuPercent": 3.26897,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 9.87702
+        },
+        {
+          "minute": 26.43121,
+          "cpuPercent": 0.0834,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.51456,
+          "cpuPercent": 3.10179,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 9.87678
+        },
+        {
+          "minute": 26.59789,
+          "cpuPercent": 0.07432,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.68124,
+          "cpuPercent": 2.97792,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 9.87582
+        },
+        {
+          "minute": 26.76457,
+          "cpuPercent": 0.07869,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 26.84794,
+          "cpuPercent": 3.3433,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 9.87601
+        },
+        {
+          "minute": 26.93129,
+          "cpuPercent": 0.53818,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 0.95995
+        },
+        {
+          "minute": 27.01464,
+          "cpuPercent": 3.71145,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 9.87727
+        },
+        {
+          "minute": 27.09797,
+          "cpuPercent": 0.10991,
+          "rssMiB": 350.82812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 27.18132,
+          "cpuPercent": 3.10432,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 9.87707
+        },
+        {
+          "minute": 27.26466,
+          "cpuPercent": 0.06777,
+          "rssMiB": 352.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 27.34802,
+          "cpuPercent": 3.42111,
+          "rssMiB": 352.15625,
+          "logicalReadMiBPerSecond": 9.87408
+        },
+        {
+          "minute": 27.43136,
+          "cpuPercent": 0.07753,
+          "rssMiB": 352.15625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 27.51469,
+          "cpuPercent": 3.6134,
+          "rssMiB": 350.875,
+          "logicalReadMiBPerSecond": 9.87815
+        },
+        {
+          "minute": 27.59806,
+          "cpuPercent": 0.10742,
+          "rssMiB": 350.875,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 27.68141,
+          "cpuPercent": 3.32457,
+          "rssMiB": 350.90625,
+          "logicalReadMiBPerSecond": 9.87549
+        },
+        {
+          "minute": 27.76476,
+          "cpuPercent": 0.05858,
+          "rssMiB": 350.90625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 27.84839,
+          "cpuPercent": 4.28382,
+          "rssMiB": 351.34375,
+          "logicalReadMiBPerSecond": 10.64323
+        },
+        {
+          "minute": 27.93177,
+          "cpuPercent": 0.20137,
+          "rssMiB": 351.34375,
+          "logicalReadMiBPerSecond": 0.15655
+        },
+        {
+          "minute": 28.01512,
+          "cpuPercent": 2.88056,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 9.87658
+        },
+        {
+          "minute": 28.09846,
+          "cpuPercent": 0.08931,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 28.18181,
+          "cpuPercent": 2.92709,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 9.87655
+        },
+        {
+          "minute": 28.26514,
+          "cpuPercent": 0.0715,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 28.34849,
+          "cpuPercent": 3.23309,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 9.87575
+        },
+        {
+          "minute": 28.43184,
+          "cpuPercent": 0.07851,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 28.51517,
+          "cpuPercent": 3.04125,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 9.87759
+        },
+        {
+          "minute": 28.59854,
+          "cpuPercent": 0.09553,
+          "rssMiB": 352.23438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 28.68189,
+          "cpuPercent": 3.08154,
+          "rssMiB": 350.95312,
+          "logicalReadMiBPerSecond": 9.8754
+        },
+        {
+          "minute": 28.76524,
+          "cpuPercent": 0.22659,
+          "rssMiB": 350.96875,
+          "logicalReadMiBPerSecond": 0.00004
+        },
+        {
+          "minute": 28.84859,
+          "cpuPercent": 3.92343,
+          "rssMiB": 350.98438,
+          "logicalReadMiBPerSecond": 10.83636
+        },
+        {
+          "minute": 28.93194,
+          "cpuPercent": 0.04389,
+          "rssMiB": 350.98438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.01529,
+          "cpuPercent": 3.02642,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 9.87552
+        },
+        {
+          "minute": 29.09866,
+          "cpuPercent": 0.10983,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.18199,
+          "cpuPercent": 3.12023,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 9.87743
+        },
+        {
+          "minute": 29.26534,
+          "cpuPercent": 0.07856,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.34869,
+          "cpuPercent": 3.27263,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 9.87667
+        },
+        {
+          "minute": 29.43204,
+          "cpuPercent": 0.07573,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.51539,
+          "cpuPercent": 3.01185,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 9.87608
+        },
+        {
+          "minute": 29.59874,
+          "cpuPercent": 0.09371,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.68209,
+          "cpuPercent": 2.84047,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 9.87756
+        },
+        {
+          "minute": 29.76542,
+          "cpuPercent": 0.0651,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 29.84877,
+          "cpuPercent": 3.97242,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 10.83674
+        },
+        {
+          "minute": 29.93212,
+          "cpuPercent": 0.06174,
+          "rssMiB": 351,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.01546,
+          "cpuPercent": 3.26331,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 9.87859
+        },
+        {
+          "minute": 30.09881,
+          "cpuPercent": 0.1013,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.18214,
+          "cpuPercent": 3.1067,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 9.8775
+        },
+        {
+          "minute": 30.26549,
+          "cpuPercent": 0.06938,
+          "rssMiB": 352.28125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.34884,
+          "cpuPercent": 3.17616,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 9.87605
+        },
+        {
+          "minute": 30.43217,
+          "cpuPercent": 0.06091,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.51554,
+          "cpuPercent": 3.11749,
+          "rssMiB": 352.29688,
+          "logicalReadMiBPerSecond": 9.87519
+        },
+        {
+          "minute": 30.59889,
+          "cpuPercent": 0.10254,
+          "rssMiB": 352.29688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.68222,
+          "cpuPercent": 3.28517,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 9.87788
+        },
+        {
+          "minute": 30.76566,
+          "cpuPercent": 0.11119,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 30.84901,
+          "cpuPercent": 4.29312,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 10.83656
+        },
+        {
+          "minute": 30.93236,
+          "cpuPercent": 0.05804,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.01571,
+          "cpuPercent": 3.44014,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 9.87647
+        },
+        {
+          "minute": 31.09902,
+          "cpuPercent": 0.09421,
+          "rssMiB": 351.01562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.18237,
+          "cpuPercent": 3.23016,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 9.87723
+        },
+        {
+          "minute": 31.26569,
+          "cpuPercent": 0.15772,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.34904,
+          "cpuPercent": 3.22291,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 9.87683
+        },
+        {
+          "minute": 31.43237,
+          "cpuPercent": 0.07163,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.51574,
+          "cpuPercent": 3.05887,
+          "rssMiB": 352.3125,
+          "logicalReadMiBPerSecond": 9.87546
+        },
+        {
+          "minute": 31.59907,
+          "cpuPercent": 0.09306,
+          "rssMiB": 352.3125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.68241,
+          "cpuPercent": 3.65245,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 9.87714
+        },
+        {
+          "minute": 31.76576,
+          "cpuPercent": 0.1547,
+          "rssMiB": 351.03125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 31.84911,
+          "cpuPercent": 3.68833,
+          "rssMiB": 351.04688,
+          "logicalReadMiBPerSecond": 10.83704
+        },
+        {
+          "minute": 31.93247,
+          "cpuPercent": 0.06276,
+          "rssMiB": 351.04688,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.01581,
+          "cpuPercent": 3.21263,
+          "rssMiB": 352.32812,
+          "logicalReadMiBPerSecond": 9.877
+        },
+        {
+          "minute": 32.09916,
+          "cpuPercent": 0.095,
+          "rssMiB": 352.32812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.18251,
+          "cpuPercent": 3.91764,
+          "rssMiB": 352.34375,
+          "logicalReadMiBPerSecond": 9.87623
+        },
+        {
+          "minute": 32.26586,
+          "cpuPercent": 0.17862,
+          "rssMiB": 352.34375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.34921,
+          "cpuPercent": 3.3,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87616
+        },
+        {
+          "minute": 32.43254,
+          "cpuPercent": 0.05946,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.51589,
+          "cpuPercent": 3.22838,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87675
+        },
+        {
+          "minute": 32.59924,
+          "cpuPercent": 0.10356,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.68257,
+          "cpuPercent": 3.54633,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87745
+        },
+        {
+          "minute": 32.76591,
+          "cpuPercent": 0.1321,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 32.84926,
+          "cpuPercent": 3.65878,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 10.83789
+        },
+        {
+          "minute": 32.93261,
+          "cpuPercent": 0.06193,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 33.01596,
+          "cpuPercent": 3.1465,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87482
+        },
+        {
+          "minute": 33.09931,
+          "cpuPercent": 0.08785,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 33.18266,
+          "cpuPercent": 3.40339,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87491
+        },
+        {
+          "minute": 33.26601,
+          "cpuPercent": 0.08855,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 33.34936,
+          "cpuPercent": 3.06897,
+          "rssMiB": 352.35938,
+          "logicalReadMiBPerSecond": 9.87516
+        },
+        {
+          "minute": 33.43271,
+          "cpuPercent": 0.07003,
+          "rssMiB": 352.35938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 33.51606,
+          "cpuPercent": 3.21028,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87588
+        },
+        {
+          "minute": 33.59939,
+          "cpuPercent": 0.08493,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 33.68274,
+          "cpuPercent": 2.94741,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 9.87658
+        },
+        {
+          "minute": 33.76609,
+          "cpuPercent": 0.16734,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0.00002
+        },
+        {
+          "minute": 33.84944,
+          "cpuPercent": 3.56786,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 10.8361
+        },
+        {
+          "minute": 33.93279,
+          "cpuPercent": 0.06483,
+          "rssMiB": 351.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.01614,
+          "cpuPercent": 3.3654,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 9.87603
+        },
+        {
+          "minute": 34.09949,
+          "cpuPercent": 0.10586,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.18284,
+          "cpuPercent": 3.10176,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 9.87669
+        },
+        {
+          "minute": 34.26617,
+          "cpuPercent": 0.1689,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.34954,
+          "cpuPercent": 3.13368,
+          "rssMiB": 352.375,
+          "logicalReadMiBPerSecond": 9.87354
+        },
+        {
+          "minute": 34.43291,
+          "cpuPercent": 0.08621,
+          "rssMiB": 352.375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.51627,
+          "cpuPercent": 3.26753,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 9.87389
+        },
+        {
+          "minute": 34.59966,
+          "cpuPercent": 0.09363,
+          "rssMiB": 351.09375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.68301,
+          "cpuPercent": 3.18715,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 9.87565
+        },
+        {
+          "minute": 34.76636,
+          "cpuPercent": 0.10906,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 34.84972,
+          "cpuPercent": 3.72457,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 10.8344
+        },
+        {
+          "minute": 34.93311,
+          "cpuPercent": 0.0502,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.01644,
+          "cpuPercent": 2.96014,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 9.87742
+        },
+        {
+          "minute": 35.09977,
+          "cpuPercent": 0.08893,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.18314,
+          "cpuPercent": 2.85918,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 9.87367
+        },
+        {
+          "minute": 35.26649,
+          "cpuPercent": 0.09811,
+          "rssMiB": 351.10938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.34984,
+          "cpuPercent": 3.50248,
+          "rssMiB": 352.39062,
+          "logicalReadMiBPerSecond": 9.87516
+        },
+        {
+          "minute": 35.43319,
+          "cpuPercent": 0.07948,
+          "rssMiB": 352.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.51654,
+          "cpuPercent": 3.21736,
+          "rssMiB": 352.39062,
+          "logicalReadMiBPerSecond": 9.87632
+        },
+        {
+          "minute": 35.59991,
+          "cpuPercent": 0.08379,
+          "rssMiB": 352.39062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.68329,
+          "cpuPercent": 3.70215,
+          "rssMiB": 351.53125,
+          "logicalReadMiBPerSecond": 9.87305
+        },
+        {
+          "minute": 35.76662,
+          "cpuPercent": 0.13175,
+          "rssMiB": 351.53125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 35.84999,
+          "cpuPercent": 4.52662,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 10.83407
+        },
+        {
+          "minute": 35.93336,
+          "cpuPercent": 0.0606,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.01671,
+          "cpuPercent": 3.23833,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 9.87523
+        },
+        {
+          "minute": 36.10007,
+          "cpuPercent": 0.10784,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.18342,
+          "cpuPercent": 3.16626,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 9.87697
+        },
+        {
+          "minute": 36.26679,
+          "cpuPercent": 0.17384,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.35014,
+          "cpuPercent": 3.2707,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 9.87598
+        },
+        {
+          "minute": 36.43349,
+          "cpuPercent": 0.07405,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.51682,
+          "cpuPercent": 3.00085,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 9.87668
+        },
+        {
+          "minute": 36.60019,
+          "cpuPercent": 0.10371,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.68354,
+          "cpuPercent": 3.18115,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 9.87538
+        },
+        {
+          "minute": 36.76689,
+          "cpuPercent": 0.14294,
+          "rssMiB": 348.42188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 36.85026,
+          "cpuPercent": 4.35642,
+          "rssMiB": 351.5625,
+          "logicalReadMiBPerSecond": 10.8343
+        },
+        {
+          "minute": 36.93359,
+          "cpuPercent": 0.0757,
+          "rssMiB": 351.5625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.01694,
+          "cpuPercent": 3.7598,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 9.87576
+        },
+        {
+          "minute": 37.10031,
+          "cpuPercent": 0.09058,
+          "rssMiB": 351.14062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.18367,
+          "cpuPercent": 3.02518,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 9.87425
+        },
+        {
+          "minute": 37.26702,
+          "cpuPercent": 0.14626,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.35036,
+          "cpuPercent": 3.42659,
+          "rssMiB": 352.76562,
+          "logicalReadMiBPerSecond": 9.87726
+        },
+        {
+          "minute": 37.43369,
+          "cpuPercent": 0.0714,
+          "rssMiB": 352.76562,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.51704,
+          "cpuPercent": 3.10347,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 9.8776
+        },
+        {
+          "minute": 37.60036,
+          "cpuPercent": 0.10109,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.68372,
+          "cpuPercent": 3.22802,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 9.87464
+        },
+        {
+          "minute": 37.76707,
+          "cpuPercent": 0.15942,
+          "rssMiB": 351.48438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 37.85044,
+          "cpuPercent": 3.80602,
+          "rssMiB": 351.64062,
+          "logicalReadMiBPerSecond": 10.83575
+        },
+        {
+          "minute": 37.93379,
+          "cpuPercent": 0.06775,
+          "rssMiB": 351.64062,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 38.01712,
+          "cpuPercent": 3.54886,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 9.87914
+        },
+        {
+          "minute": 38.10049,
+          "cpuPercent": 0.11243,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 38.18384,
+          "cpuPercent": 3.7729,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 9.87588
+        },
+        {
+          "minute": 38.26719,
+          "cpuPercent": 0.09821,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 38.35052,
+          "cpuPercent": 3.21185,
+          "rssMiB": 352.07812,
+          "logicalReadMiBPerSecond": 9.87798
+        },
+        {
+          "minute": 38.43389,
+          "cpuPercent": 0.055,
+          "rssMiB": 352.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 38.51722,
+          "cpuPercent": 3.26903,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 9.87708
+        },
+        {
+          "minute": 38.60059,
+          "cpuPercent": 0.0992,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 38.68392,
+          "cpuPercent": 3.27116,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 9.8779
+        },
+        {
+          "minute": 38.76729,
+          "cpuPercent": 0.2561,
+          "rssMiB": 351.65625,
+          "logicalReadMiBPerSecond": 0.00004
+        },
+        {
+          "minute": 38.85064,
+          "cpuPercent": 4.9841,
+          "rssMiB": 351.67188,
+          "logicalReadMiBPerSecond": 10.83733
+        },
+        {
+          "minute": 38.93399,
+          "cpuPercent": 0.06687,
+          "rssMiB": 351.67188,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.01736,
+          "cpuPercent": 4.25127,
+          "rssMiB": 352.3125,
+          "logicalReadMiBPerSecond": 9.87396
+        },
+        {
+          "minute": 39.10071,
+          "cpuPercent": 0.06433,
+          "rssMiB": 352.3125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.18406,
+          "cpuPercent": 3.22473,
+          "rssMiB": 351.67188,
+          "logicalReadMiBPerSecond": 9.87713
+        },
+        {
+          "minute": 39.26741,
+          "cpuPercent": 1.50966,
+          "rssMiB": 351.98438,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.35077,
+          "cpuPercent": 3.33562,
+          "rssMiB": 353.35938,
+          "logicalReadMiBPerSecond": 9.87311
+        },
+        {
+          "minute": 39.43412,
+          "cpuPercent": 0.07697,
+          "rssMiB": 353.35938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.51747,
+          "cpuPercent": 2.87388,
+          "rssMiB": 353.35938,
+          "logicalReadMiBPerSecond": 9.87602
+        },
+        {
+          "minute": 39.60082,
+          "cpuPercent": 0.09023,
+          "rssMiB": 353.35938,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.68417,
+          "cpuPercent": 3.30727,
+          "rssMiB": 352.07812,
+          "logicalReadMiBPerSecond": 9.875
+        },
+        {
+          "minute": 39.76751,
+          "cpuPercent": 0.11436,
+          "rssMiB": 352.07812,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 39.85087,
+          "cpuPercent": 3.64916,
+          "rssMiB": 352.09375,
+          "logicalReadMiBPerSecond": 10.83483
+        },
+        {
+          "minute": 39.93422,
+          "cpuPercent": 0.08203,
+          "rssMiB": 352.09375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.01759,
+          "cpuPercent": 3.74793,
+          "rssMiB": 353.375,
+          "logicalReadMiBPerSecond": 9.87448
+        },
+        {
+          "minute": 40.10096,
+          "cpuPercent": 0.0889,
+          "rssMiB": 353.375,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.18432,
+          "cpuPercent": 3.08005,
+          "rssMiB": 353.40625,
+          "logicalReadMiBPerSecond": 9.87325
+        },
+        {
+          "minute": 40.26769,
+          "cpuPercent": 0.17369,
+          "rssMiB": 353.40625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.35102,
+          "cpuPercent": 3.14897,
+          "rssMiB": 353.40625,
+          "logicalReadMiBPerSecond": 9.87705
+        },
+        {
+          "minute": 40.43437,
+          "cpuPercent": 0.06835,
+          "rssMiB": 353.40625,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.51771,
+          "cpuPercent": 3.15989,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 9.87923
+        },
+        {
+          "minute": 40.60106,
+          "cpuPercent": 0.06717,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.68441,
+          "cpuPercent": 3.63766,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 9.87639
+        },
+        {
+          "minute": 40.76777,
+          "cpuPercent": 0.19116,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 0
+        },
+        {
+          "minute": 40.85111,
+          "cpuPercent": 3.80457,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 10.83951
+        },
+        {
+          "minute": 40.93447,
+          "cpuPercent": 0.08165,
+          "rssMiB": 352.125,
+          "logicalReadMiBPerSecond": 0
+        }
+      ],
+      "latencyCoverage": {
+        "expected": 41082,
+        "observed": 41082,
+        "negative": 0
+      },
+      "steadyTerminalEvents": 738,
+      "steadyTerminalsPerSecond": 0.299956975403598,
+      "steadyToolEvents": 18696,
+      "throughputMinuteBins": [
+        {
+          "startMinute": 0,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 1,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 2,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 3,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 4,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 5,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 6,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 7,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 8,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 9,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 10,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 11,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 12,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 13,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 14,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 15,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 16,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 17,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 18,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 19,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 20,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 21,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 22,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 23,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 24,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 25,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 26,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 27,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 28,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 29,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 30,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 31,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 32,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 33,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 34,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 35,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 36,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 37,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 38,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 39,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        },
+        {
+          "startMinute": 40,
+          "seconds": 60,
+          "events": 1002,
+          "eventsPerSecond": 16.7
+        }
+      ]
+    }
+  },
+  "allMeasurementsValid": true,
+  "allUsefulOutputsComplete": true,
+  "interpretation": [
+    "This is one workstation, sequential single repetitions; no fleet-wide causal claim.",
+    "Useful throughput is measured at the stated offered load, not an estimate of maximum capacity.",
+    "Raw committed input bytes may include skipped records; useful audit output is counted independently.",
+    "Unterminated tail rereads remain unfixed; read bytes are attributed by scenario.",
+    "Native windows use original ten-minute reporting; startup-mixed windows are excluded.",
+    "Preload phase strings are not used; driver timestamps define authoritative phases.",
+    "A separate fresh Qwen/cloud validation ran concurrently during part of the fixed measurement; shared-host interference is not controlled."
+  ],
+  "dependencyAudit": {
+    "runtimeFilesChecked": 15722,
+    "unchanged": true,
+    "frozenBuildsUnchanged": true
+  }
+}
