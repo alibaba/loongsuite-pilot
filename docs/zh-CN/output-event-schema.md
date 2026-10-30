@@ -109,8 +109,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
-| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder、Qoder CLI 和 Qoder CN 在能取得账号时填写，独立于 `user.id`。 |
-| `user.email` | string | 源 Agent 暴露时 Recommended | 与 `user.name` 同一账号的邮箱。没有可用值时不写。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名，独立于 `user.id`。Qoder 与 Qoder CN 的 CLI 都用对应的 `status` 命令。Qoder IDE 可以从 hook 获取；Qoder CN 的 IDE 没有这份 hook 数据。以上没有数据时，使用桌面端账号文件。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | 与 `user.name` 同一账号、同一来源的邮箱。手机号账号只写用户名，不把手机号、登录名或账号 ID 写成邮箱。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |

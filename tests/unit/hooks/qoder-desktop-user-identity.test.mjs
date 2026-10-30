@@ -42,7 +42,7 @@ process.stdout.write(JSON.stringify({logged_in:true, username:'cli-other-account
 `, { mode: 0o755 });
 }
 
-function writeTurn({ cli = true, complete = true, append = false } = {}) {
+function writeTurn({ cli = false, complete = true, append = false } = {}) {
   const suffix = append ? 'b' : 'a';
   const minute = append ? '01' : '00';
   const rows = [
@@ -144,7 +144,7 @@ describe('international Qoder Desktop account metadata', () => {
   });
 
   it.each([undefined, { product: 'cli' }, { product: 'APP' }, 'app', []])('keeps standalone CLI status collection for a non-App invocation: %j', parent_business_info => {
-    writeStatus(); installFakeCli(); writeTurn(); run({ parent_business_info });
+    writeStatus(); installFakeCli(); writeTurn({ cli: true }); run({ parent_business_info });
     expectIdentity('cli-other-account', 'cli@example.com');
     expect(fs.readFileSync(cliCounter, 'utf8')).toBe('status\n');
   });

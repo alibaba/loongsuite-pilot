@@ -56,7 +56,6 @@ const QODER_HOME = path.join(os.homedir(), '.qoder');
 const QODER_CN_HOME = path.join(os.homedir(), '.qoder-cn');
 const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
 const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
-const QODER_CLI_UNAVAILABLE = Symbol('qoder-cli-unavailable');
 const QODER_CLI_IDENTITY = {
   home: QODER_HOME,
   cliDirName: 'qodercli',
@@ -90,15 +89,6 @@ export function extractUserIdentity(extra) {
 function accountEmail(value) {
   const email = nonEmptyIdentityValue(value);
   return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
-}
-
-export function extractQoderCnUserIdentity(extra) {
-  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
-  const user = extra.user && typeof extra.user === 'object' && !Array.isArray(extra.user)
-    ? extra.user : undefined;
-  const name = nonEmptyIdentityValue(user?.name);
-  const email = accountEmail(user?.email) ?? accountEmail(extra.email);
-  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
 }
 
 function readQoderAppUserIdentity(agentId) {
@@ -154,7 +144,7 @@ function resolveQoderCliExecutable(home, cliDirName, executablePrefix) {
 
 async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }) {
   const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix);
-  if (!executable) return QODER_CLI_UNAVAILABLE;
+  if (!executable) return undefined;
 
   const authPath = path.join(home, '.auth', 'user');
   let authStat;
@@ -183,7 +173,7 @@ async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix,
       return undefined;
     } else {
       const name = nonEmptyIdentityValue(cached.name);
-      const email = nonEmptyIdentityValue(cached.email);
+      const email = accountEmail(cached.email);
       return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
     }
   }
@@ -215,7 +205,7 @@ async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix,
         if (parsed.logged_in === false) return resolve({ loggedIn: false });
         if (parsed.logged_in !== true) return resolve(undefined);
         const name = nonEmptyIdentityValue(parsed.username);
-        const email = nonEmptyIdentityValue(parsed.email);
+        const email = accountEmail(parsed.email);
         resolve(name || email
           ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
           : undefined);
@@ -608,26 +598,21 @@ async function main() {
   // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
   // and the eventual processor input.
   const snapshot = readTranscriptSnapshot(transcriptPath);
-  const cliTranscript = agentId === 'qoder'
-    && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
-  const desktopInvocation = parentBusinessInfo?.product === 'app';
   let userIdentity;
   if (agentId === 'qoder-cn') {
-    const cliIdentity = await resolveQoderCliUserIdentity(QODER_CN_CLI_IDENTITY);
-    userIdentity = cliIdentity === QODER_CLI_UNAVAILABLE
-      ? extractQoderCnUserIdentity(extra)
-        ?? (desktopInvocation ? readQoderAppUserIdentity(agentId) : undefined)
-      : cliIdentity;
-  } else if (agentId === 'qoder' && desktopInvocation) {
-    // Desktop embeds CLI-format transcripts but owns a separate login. Do not
-    // attribute its requests to a possibly different standalone CLI account.
-    userIdentity = extractUserIdentity(extra) ?? readQoderAppUserIdentity(agentId);
-  } else if (cliTranscript) {
-    const identity = await resolveQoderCliUserIdentity(QODER_CLI_IDENTITY);
-    userIdentity = identity === QODER_CLI_UNAVAILABLE ? undefined : identity;
+    const product = parentBusinessInfo?.product;
+    if (product === 'cli') {
+      userIdentity = await resolveQoderCliUserIdentity(QODER_CN_CLI_IDENTITY);
+    }
   } else if (agentId === 'qoder') {
-    userIdentity = extractUserIdentity(extra);
+    const isCli = snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
+    if (isCli) {
+      userIdentity = await resolveQoderCliUserIdentity(QODER_CLI_IDENTITY);
+    } else {
+      userIdentity = extractUserIdentity(extra);
+    }
   }
+  if (!userIdentity) userIdentity = readQoderAppUserIdentity(agentId);
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),
