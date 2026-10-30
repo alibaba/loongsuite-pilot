@@ -53,14 +53,21 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
 
 const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
 const QODER_HOME = path.join(os.homedir(), '.qoder');
+const QODER_CN_HOME = path.join(os.homedir(), '.qoder-cn');
 const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
 const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
-const QODER_CLI_IDENTITY_CACHE_FILE = path.join(
-  LOONGSUITE_PILOT_DATA_DIR,
-  'state',
-  'hooks',
-  'qoder-cli-user-identity.json',
-);
+const QODER_CLI_IDENTITY = {
+  home: QODER_HOME,
+  cliDirName: 'qodercli',
+  executablePrefix: 'qodercli',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cli-user-identity.json'),
+};
+const QODER_CN_CLI_IDENTITY = {
+  home: QODER_CN_HOME,
+  cliDirName: 'qoderclicn',
+  executablePrefix: 'qoderclicn',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cn-cli-user-identity.json'),
+};
 
 function nonEmptyIdentityValue(value) {
   if (typeof value !== 'string') return undefined;
@@ -82,15 +89,6 @@ export function extractUserIdentity(extra) {
 function accountEmail(value) {
   const email = nonEmptyIdentityValue(value);
   return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
-}
-
-export function extractQoderCnUserIdentity(extra) {
-  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
-  const user = extra.user && typeof extra.user === 'object' && !Array.isArray(extra.user)
-    ? extra.user : undefined;
-  const name = nonEmptyIdentityValue(user?.name);
-  const email = accountEmail(user?.email) ?? accountEmail(extra.email);
-  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
 }
 
 function readQoderAppUserIdentity(agentId) {
@@ -127,8 +125,28 @@ function readQoderAppUserIdentity(agentId) {
   }
 }
 
-async function resolveQoderCliUserIdentity() {
-  const authPath = path.join(QODER_HOME, '.auth', 'user');
+function resolveQoderCliExecutable(home, cliDirName, executablePrefix) {
+  try {
+    const cliDir = path.join(home, 'bin', cliDirName);
+    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
+    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
+    const executable = path.join(
+      cliDir,
+      `${executablePrefix}-${version}${process.platform === 'win32' ? '.exe' : ''}`,
+    );
+    fs.accessSync(executable, fs.constants.X_OK);
+    if (!fs.statSync(executable).isFile()) return undefined;
+    return executable;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }) {
+  const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix);
+  if (!executable) return undefined;
+
+  const authPath = path.join(home, '.auth', 'user');
   let authStat;
   try {
     authStat = fs.statSync(authPath);
@@ -139,7 +157,7 @@ async function resolveQoderCliUserIdentity() {
 
   let cached;
   try {
-    cached = JSON.parse(fs.readFileSync(QODER_CLI_IDENTITY_CACHE_FILE, 'utf-8'));
+    cached = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
   } catch {
     cached = undefined;
   }
@@ -155,24 +173,9 @@ async function resolveQoderCliUserIdentity() {
       return undefined;
     } else {
       const name = nonEmptyIdentityValue(cached.name);
-      const email = nonEmptyIdentityValue(cached.email);
+      const email = accountEmail(cached.email);
       return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
     }
-  }
-
-  let executable;
-  try {
-    const cliDir = path.join(QODER_HOME, 'bin', 'qodercli');
-    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
-    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
-    executable = path.join(
-      cliDir,
-      `qodercli-${version}${process.platform === 'win32' ? '.exe' : ''}`,
-    );
-    fs.accessSync(executable, fs.constants.X_OK);
-    if (!fs.statSync(executable).isFile()) return undefined;
-  } catch {
-    return undefined;
   }
 
   const timedOut = Symbol();
@@ -202,7 +205,7 @@ async function resolveQoderCliUserIdentity() {
         if (parsed.logged_in === false) return resolve({ loggedIn: false });
         if (parsed.logged_in !== true) return resolve(undefined);
         const name = nonEmptyIdentityValue(parsed.username);
-        const email = nonEmptyIdentityValue(parsed.email);
+        const email = accountEmail(parsed.email);
         resolve(name || email
           ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
           : undefined);
@@ -226,9 +229,9 @@ async function resolveQoderCliUserIdentity() {
     }
   }
 
-  const temporary = `${QODER_CLI_IDENTITY_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  const temporary = `${cacheFile}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(QODER_CLI_IDENTITY_CACHE_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(status && status !== timedOut ? {
       schemaVersion: 1,
       authPath,
@@ -244,7 +247,7 @@ async function resolveQoderCliUserIdentity() {
       size: authStat.size,
       failedUntil: Date.now() + QODER_CLI_STATUS_FAILURE_TTL_MS,
     }), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(temporary, QODER_CLI_IDENTITY_CACHE_FILE);
+    fs.renameSync(temporary, cacheFile);
   } catch {
     try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
   }
@@ -595,22 +598,21 @@ async function main() {
   // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
   // and the eventual processor input.
   const snapshot = readTranscriptSnapshot(transcriptPath);
-  const cliTranscript = agentId === 'qoder'
-    && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
-  const desktopInvocation = parentBusinessInfo?.product === 'app';
   let userIdentity;
   if (agentId === 'qoder-cn') {
-    userIdentity = extractQoderCnUserIdentity(extra)
-      ?? (desktopInvocation ? readQoderAppUserIdentity(agentId) : undefined);
-  } else if (agentId === 'qoder' && desktopInvocation) {
-    // Desktop embeds CLI-format transcripts but owns a separate login. Do not
-    // attribute its requests to a possibly different standalone CLI account.
-    userIdentity = extractUserIdentity(extra) ?? readQoderAppUserIdentity(agentId);
-  } else if (cliTranscript) {
-    userIdentity = await resolveQoderCliUserIdentity();
+    const product = parentBusinessInfo?.product;
+    if (product === 'cli') {
+      userIdentity = await resolveQoderCliUserIdentity(QODER_CN_CLI_IDENTITY);
+    }
   } else if (agentId === 'qoder') {
-    userIdentity = extractUserIdentity(extra);
+    const isCli = snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
+    if (isCli) {
+      userIdentity = await resolveQoderCliUserIdentity(QODER_CLI_IDENTITY);
+    } else {
+      userIdentity = extractUserIdentity(extra);
+    }
   }
+  if (!userIdentity) userIdentity = readQoderAppUserIdentity(agentId);
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),
