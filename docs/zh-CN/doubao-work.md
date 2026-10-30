@@ -79,6 +79,12 @@
 
 Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留微秒，Windows 保留毫秒。`listeners.doubao-work.logDir` 可指定其他只读源目录；输出 `dataDir` 独立。
 
+豆包 App 的工作模式复用同一 `doubao-work` 采集器，需显式设置 `listeners.doubao-work.client: "doubao"`；默认值 `"doubao-work"` 保持原来的豆包工作路径。一套 collector 配置只选择一个产品，不同时合并两个客户端。豆包 App 在 macOS 使用 `~/Library/Application Support/Doubao`，Windows 路径选择为 `%LOCALAPPDATA%/Doubao/User Data`，会话目录使用 `.doubao/agent_mode/workspace/.sessions`；豆包工作使用 `.doubaowork`。客户端选择同时绑定日志、会话和快照根，不通过日志目录推断。Windows 豆包 App 尚需真实客户端验证。
+
+切换客户端前等待旧任务收口并重启 collector；切换后的 checkpoint 会重新基线化该产品的现有日志，只采集之后的新请求，不沿用另一产品的待配对记录或回放它的历史。旧版无客户端标记的 checkpoint 仍按豆包工作解释。普通“对话”模式不保证产生工作模式原生 trajectory，可能仅采到请求边界，无法据此生成 LLM 或补出输入输出。
+
+测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会禁用该 listener 并记录警告，其他 Agent 不受影响。
+
 `logDir` 只覆盖日志读取和监听目录；原生会话与 `coding/snapshot` 仍从平台默认的豆包数据目录读取，不从自定义日志目录向上推导。Agent 检测使用同一平台路径解析，Windows 同样遵循 `LOCALAPPDATA`。
 
 ```json

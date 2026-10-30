@@ -76,6 +76,12 @@ Run `node tests/performance/doubao-work-rounds.perf.mjs` for isolated 4k/8k/16k 
 
 Windows falls back to `~/AppData/Local`; macOS retains microsecond and Windows millisecond source precision. Optional `listeners.doubao-work.logDir` overrides the read-only source, independently of output `dataDir`.
 
+For the Doubao App's work mode, explicitly select `listeners.doubao-work.client: "doubao"`. The default `"doubao-work"` retains the existing Work source. One collector configuration selects one product. App roots are `~/Library/Application Support/Doubao` on macOS and `%LOCALAPPDATA%/Doubao/User Data` on Windows; its native namespace is `.doubao`, while Work uses `.doubaowork`. The selection binds logs, native sessions and snapshots together without deriving native paths from a log override. The Windows App variant still requires real-client validation.
+
+Finish the old client's requests before changing selection and restarting the collector. A product switch baselines existing logs for the newly selected product instead of inheriting the other product's pending records or replaying its history. Legacy checkpoints without a client marker remain Work checkpoints. Ordinary chat mode may expose request boundaries without a work trajectory; this cannot provide reconstructed LLM messages or input/output.
+
+Set the listener below to `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }` for the App, without a `logDir` override. An invalid client value disables only this listener and logs a warning.
+
 `logDir` only overrides log reading and watching. Native sessions and `coding/snapshot` remain under the platform's default Doubao data directory; they are never inferred from a custom log directory's ancestors. Agent detection uses the same platform path resolution, including `LOCALAPPDATA` on Windows.
 
 ```json
