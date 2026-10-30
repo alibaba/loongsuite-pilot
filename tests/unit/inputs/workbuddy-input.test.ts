@@ -625,6 +625,224 @@ describe('WorkBuddy audit-event builder', () => {
     });
   });
 
+  it('emits a minimal cancelled pair for a turn cancelled before its first response', async () => {
+    const records: WorkBuddyRecord[] = [
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-fast',
+        timestamp: 2_000,
+        content: [{ type: 'input_text', text: 'quick question' }],
+      },
+      {
+        type: 'reasoning',
+        id: 'reasoning-fast',
+        timestamp: 2_100,
+        rawContent: [{ type: 'reasoning', text: 'thinking about it' }],
+        providerData: { conversationRequestId: 'request-fast' },
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'incomplete',
+        id: 'marker-fast',
+        timestamp: 2_200,
+        content: [{ type: 'output_text', text: 'Interrupted by user' }],
+        providerData: { skipRun: true, error: { message: 'Interrupted by user' } },
+      },
+    ];
+
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-fast' });
+    const request = entries.find(entry => entry['event.name'] === 'llm.request');
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+
+    expect(request).toMatchObject({
+      'gen_ai.turn.id': 'turn-fast',
+      'gen_ai.turn.start': true,
+      'gen_ai.request.id': 'request-fast:s1',
+    });
+    expect(request?.['gen_ai.input.messages_delta']).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'quick question' }] },
+    ]);
+    expect(response).toMatchObject({
+      'gen_ai.turn.id': 'turn-fast',
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
+    });
+    expect(response?.['gen_ai.output.messages']).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'reasoning', content: 'thinking about it' }],
+        finish_reason: 'cancelled',
+      },
+    ]);
+  });
+
+  it('seals the open turn at the skipRun interrupted marker even after a tool wave', async () => {
+    const sharedProvider = {
+      traceId: '0123456789abcdef0123456789abcdef',
+      conversationRequestId: 'request-marker',
+      messageId: 'response-marker',
+      model: 'model-synthetic',
+    };
+    const records: WorkBuddyRecord[] = [
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-marker',
+        timestamp: 3_000,
+        content: [{ type: 'input_text', text: 'start work' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        id: 'response-marker',
+        timestamp: 3_100,
+        content: [{ type: 'output_text', text: 'running a command' }],
+        providerData: sharedProvider,
+      },
+      {
+        type: 'function_call',
+        id: 'response-marker',
+        callId: 'call-marker',
+        name: 'PowerShell',
+        arguments: '{"command":"Start-Sleep -Seconds 30"}',
+        timestamp: 3_100,
+        providerData: sharedProvider,
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'incomplete',
+        id: 'response-marker-incomplete',
+        timestamp: 3_300,
+        content: [{ type: 'output_text', text: 'Interrupted by user' }],
+        providerData: { ...sharedProvider, skipRun: true },
+      },
+    ];
+
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-marker' });
+    const response = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.turn.id'] === 'turn-marker');
+    const cancelledTool = entries.find(entry =>
+      entry['event.name'] === 'tool.result'
+      && entry['gen_ai.tool.call.id'] === 'call-marker');
+
+    expect(response).toMatchObject({
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
+    });
+    expect(cancelledTool).toMatchObject({
+      'gen_ai.tool.name': 'PowerShell',
+      'tool.result.status': 'cancelled',
+      'gen_ai.tool.call.duration': 200,
+    });
+  });
+
+  it('seals a turn cancelled at the end of a batch without an explicit boundary', async () => {
+    const sharedProvider = {
+      traceId: '0123456789abcdef0123456789abcdef',
+      conversationRequestId: 'request-eof',
+      messageId: 'response-eof',
+      model: 'model-synthetic',
+    };
+    const records: WorkBuddyRecord[] = [
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-eof',
+        timestamp: 4_000,
+        content: [{ type: 'input_text', text: 'start work' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        id: 'response-eof',
+        timestamp: 4_100,
+        content: [{ type: 'output_text', text: 'running a command' }],
+        providerData: sharedProvider,
+      },
+      {
+        type: 'function_call',
+        id: 'response-eof',
+        callId: 'call-eof',
+        name: 'PowerShell',
+        arguments: '{"command":"Start-Sleep -Seconds 30"}',
+        timestamp: 4_100,
+        providerData: sharedProvider,
+      },
+      {
+        type: 'function_call_result',
+        id: 'result-eof',
+        callId: 'call-eof',
+        name: 'PowerShell',
+        output: 'done',
+        status: 'completed',
+        timestamp: 4_200,
+        providerData: sharedProvider,
+      },
+    ];
+
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-eof' });
+    const response = entries.find(entry =>
+      entry['event.name'] === 'llm.response'
+      && entry['gen_ai.turn.id'] === 'turn-eof');
+    const toolResult = entries.find(entry =>
+      entry['event.name'] === 'tool.result'
+      && entry['gen_ai.tool.call.id'] === 'call-eof');
+
+    // The unsealed tool-wave response is sealed as cancelled at the stable
+    // Stop boundary even though no cancel marker or next user turn follows.
+    expect(response).toMatchObject({
+      'gen_ai.response.finish_reasons': ['cancelled'],
+      'gen_ai.turn.end': true,
+    });
+    // The tool result that did complete keeps its real status.
+    expect(toolResult).toMatchObject({
+      'tool.result.status': 'success',
+    });
+  });
+
+  it('does not fabricate a cancelled pair for a turn without model activity', async () => {
+    const records: WorkBuddyRecord[] = [
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-idle-a',
+        timestamp: 5_000,
+        content: [{ type: 'input_text', text: 'first queued prompt' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        id: 'turn-idle-b',
+        timestamp: 5_100,
+        content: [{ type: 'input_text', text: 'second queued prompt' }],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        id: 'response-idle',
+        timestamp: 5_200,
+        content: [{ type: 'output_text', text: 'done' }],
+        providerData: {
+          traceId: '0123456789abcdef0123456789abcdef',
+          conversationRequestId: 'request-idle',
+          messageId: 'response-idle',
+          model: 'model-synthetic',
+        },
+      },
+    ];
+
+    const entries = await buildWorkBuddyEvents(records, { sessionId: 'session-idle' });
+    expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(entries.every(entry => entry['gen_ai.response.finish_reasons']?.[0] !== 'cancelled')).toBe(true);
+  });
+
 });
 
 class TestWorkBuddyInput extends WorkBuddyInput {
