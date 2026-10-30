@@ -532,18 +532,33 @@ describe('Orchestrator', () => {
       } finally { await orch.stop(); }
     });
 
-    it('uses the selected Doubao App root for both input and discovery', async () => {
+    it.each(['darwin', 'win32', 'linux'] as const)('uses the selected Doubao App source on %s', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
       const config = makeConfig();
       config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, client: 'doubao' };
       const orch = new Orchestrator(config);
-      await orch.start();
       try {
-        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir: string; userDataRoot: string };
+        await orch.start();
+        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir?: string; userDataRoot?: string };
         const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
-        expect(input.userDataRoot.replace(/\\/g, '/')).toMatch(/\/Doubao(?:\/User Data)?$/);
-        expect(detection?.watchPaths).toEqual([input.logDir]);
-        expect(input.logDir.replace(/\\/g, '/')).toContain('/Doubao/');
-      } finally { await orch.stop(); }
+        if (target === 'linux') {
+          expect(input.userDataRoot).toBeUndefined();
+          expect(input.logDir).toBeUndefined();
+          expect(detection?.watchPaths).toEqual([]);
+        } else {
+          const paths = target === 'win32' ? path.win32 : path.posix;
+          const expectedRoot = target === 'win32'
+            ? paths.join(process.env.LOCALAPPDATA!, 'Doubao', 'User Data')
+            : paths.join(homeDir, 'Library', 'Application Support', 'Doubao');
+          expect(input.userDataRoot).toBe(expectedRoot);
+          expect(input.logDir).toBe(paths.join(expectedRoot, 'sdk_storage', 'log'));
+          expect(detection?.watchPaths).toEqual([input.logDir]);
+        }
+      } finally {
+        try { await orch.stop(); }
+        finally { Object.defineProperty(process, 'platform', platform); }
+      }
     });
 
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
