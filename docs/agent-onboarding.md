@@ -346,6 +346,11 @@ Synchronous Interceptor policy evaluation remains a separate path.
 `state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/source.json` preserves the
 first observation. `events/` coalesces identical watermark/event/context notices.
 Each notice is at most 16 KiB, with up to 128 distinct notices per source. A
+short per-source metadata gate reserves capacity before publication, including
+competing Hook processes. Reclamation uses the same gate and checks the file
+generation so an old ACK cannot delete a newly published notice. Hook contention
+has a 25 ms wait budget; native parsing and CLI commands never run inside this
+gate. This does not impose a hard timeout on synchronous OS I/O. A
 capacity condition produces a rate-limited diagnostic; existing sources continue
 native polling. Bodies remain in Agent-owned files. Scalar offsets use the
 existing Input StateStore; covered notices are reclaimed on the following cycle
@@ -359,6 +364,11 @@ records, the body cache to 32 MiB of source bytes, and the metadata cache to 4 M
 These are read/cache budgets, not process RSS limits. Oversized records/Turns,
 corrupt metadata and I/O failures defer that source with its cursor intact and a
 rate-limited diagnostic; other sources continue.
+
+Native and metadata opens verify the opened handle is a regular file. On Unix,
+nonblocking open also prevents a path replaced with a FIFO between `stat` and
+`open` from stranding collection. Rejected handles are closed and leave the
+previous cursor intact, allowing recovery when the file is repaired.
 
 A first UserPromptSubmit starts from the observed complete-line watermark and
 waits for the new user row. A first Stop searches backward for the current real

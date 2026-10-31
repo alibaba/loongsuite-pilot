@@ -101,7 +101,7 @@ function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity, extra
   });
 }
 
-function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay = '0' } = {}) {
+function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay = '0', onPublished } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       PROCESSOR,
@@ -122,8 +122,9 @@ function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay =
         HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
         HOOK_RETRY_LOCK_WAIT_MS: '2000',
         HOOK_RETRY_LOCK_POLL_MS: '5',
+        QODER_TEST_CAPTURE_BARRIER: onPublished ? '1' : '',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', ...(onPublished ? ['ipc'] : [])],
     });
     let stdout = '';
     let stderr = '';
@@ -131,6 +132,9 @@ function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay =
     child.stderr.setEncoding('utf-8');
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
+    if (onPublished) child.on('message', message => {
+      if (message.type === 'hook-published') onPublished(child);
+    });
     child.once('error', reject);
     child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
   });
@@ -504,9 +508,13 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ];
     fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
-    const first = runRetryAsync(4, 'ide-session', { retryDelay: '50' });
-    await new Promise(resolve => setTimeout(resolve, 10));
-    const second = runRetryAsync(8, 'ide-session', { retryDelay: '50' });
+    const published = [];
+    const onPublished = child => {
+      published.push(child);
+      if (published.length === 2) published.forEach(worker => worker.send('collect'));
+    };
+    const first = runRetryAsync(4, 'ide-session', { onPublished });
+    const second = runRetryAsync(8, 'ide-session', { onPublished });
     const results = await Promise.all([first, second]);
 
     expect(results.map(result => result.status)).toEqual([0, 0]);

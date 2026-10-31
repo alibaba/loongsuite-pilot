@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import fs from 'node:fs/promises';
+import { constants, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
@@ -9,7 +10,7 @@ import {
   hasQoderCnTerminalMarker, resolveQoderCliUserIdentity,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
-import { qoderWakeupRoot, qoderSourceKey, MAX_WAKEUP_BYTES } from './hook-wakeup.mjs';
+import { qoderWakeupRoot, qoderSourceKey, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
 
 export const QODER_SCAN_BYTES = 4 * 1024 * 1024;
 export const QODER_MAX_TURN_BYTES = 16 * 1024 * 1024;
@@ -25,16 +26,30 @@ const eventOf = row => row?.type === 'progress' ? row.data?.hookEvent ?? '' : ''
 const clone = value => JSON.parse(JSON.stringify(value));
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-async function smallJson(file, limit = MAX_WAKEUP_BYTES) {
-  const handle = await fs.open(file, 'r');
+async function openRegular(file) {
+  // A file can become a FIFO between the path stat and open. O_NONBLOCK makes
+  // that open return so fstat can reject it instead of stranding the Input.
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('not-regular-file');
+    return handle;
+  } catch (error) { await handle.close(); throw error; }
+}
+
+async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES) {
+  const handle = await openRegular(file);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limit) throw new Error('Qoder metadata exceeds limit');
     const buffer = Buffer.alloc(limit + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead > limit) throw new Error('Qoder metadata grew past limit');
-    return JSON.parse(buffer.toString('utf8', 0, bytesRead));
+    return { value: JSON.parse(buffer.toString('utf8', 0, bytesRead)), stat };
   } finally { await handle.close(); }
+}
+
+async function smallJson(file, limit = MAX_WAKEUP_BYTES) {
+  return (await jsonSnapshot(file, limit)).value;
 }
 
 async function names(directory, limit) {
@@ -234,9 +249,16 @@ export class QoderTranscriptCollector {
       for (const entry of await names(directory, MAX_CONTEXT_FILES)) {
         if (!entry.isFile() || !/^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd)-[a-f0-9]{24}\.json$/.test(entry.name)) continue;
         try {
-          const event = await smallJson(path.join(directory, entry.name));
+          const file = path.join(directory, entry.name);
+          const { value: event, stat } = await jsonSnapshot(file);
           if (event.inode === checkpoint.inode && event.observedSize <= checkpoint.committedOffset) {
-            await fs.unlink(path.join(directory, entry.name));
+            withQoderWakeupLock(path.dirname(directory), () => {
+              // A same-watermark publication can replace the path after our
+              // async read. Reclaim only the exact metadata generation read.
+              const current = statSync(file);
+              if (current.ino === stat.ino && current.size === stat.size
+                && current.mtimeMs === stat.mtimeMs && current.ctimeMs === stat.ctimeMs) unlinkSync(file);
+            }, 0);
           }
         } catch { /* Never turn a cleanup/read failure into an input ACK. */ }
       }
@@ -303,7 +325,7 @@ export class QoderTranscriptCollector {
 
   async open(file) {
     this.metrics.sourceFilesOpened++;
-    return fs.open(file, 'r');
+    return openRegular(file);
   }
 
   async fingerprint(file, offset) {

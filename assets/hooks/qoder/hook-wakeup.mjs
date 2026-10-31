@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { decodePayload } from '../shared/decode-payload.mjs';
 import { collectResourceAttributesFromEnv, parseSpanAttributesFromEnv } from '../shared/resource-context.mjs';
 import { recordUpstreamContextOnce } from '../shared/upstream-context.mjs';
+import { withSyncFileLock } from '../shared/sync-file-lock.mjs';
 
 export const MAX_WAKEUP_BYTES = 16 * 1024;
 export const MAX_WAKEUPS_PER_SOURCE = 128;
@@ -60,6 +61,12 @@ function warnCapacity(root, reason) {
   } catch {}
 }
 
+// Coordinate only tiny metadata publication/reclamation, never native parsing.
+// Capacity must be reserved before publishing, including competing Hook PIDs.
+export function withQoderWakeupLock(directory, action, waitMs = 25) {
+  return withSyncFileLock(path.join(directory, '.wakeup.lock'), waitMs, 60_000, action);
+}
+
 /** No transcript body, tool input/result or prompt is read or copied here. */
 export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } = {}) {
   const sessionId = field(payload?.session_id ?? payload?.conversation_id, 512);
@@ -110,13 +117,21 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
     record.legacyTriggerLine,
   ])).digest('hex').slice(0, 24);
   const destination = path.join(events, `${record.observedSize}-${event}-${context}.json`);
-  if (!fs.existsSync(destination) && atCapacity(events, MAX_WAKEUPS_PER_SOURCE)) {
-    // The descriptor remains durable: collector polling still drains native
-    // messages/tools/tokens. Capacity failure is explicit, not a cursor ACK.
-    warnCapacity(root, 'context-limit');
+  const published = withQoderWakeupLock(directory, () => {
+    if (!fs.existsSync(destination) && atCapacity(events, MAX_WAKEUPS_PER_SOURCE)) {
+      warnCapacity(root, 'context-limit');
+      return false;
+    }
+    atomicJson(destination, record);
+    return true;
+  });
+  if (!published.acquired) {
+    // The descriptor remains durable: polling can still drain native data.
+    // Metadata contention/capacity is observable and never acts as a cursor ACK.
+    warnCapacity(root, 'context-lock');
     return false;
   }
-  atomicJson(destination, record);
+  if (!published.value) return false;
   recordUpstreamContextOnce({ agentId, sessionId, dataDir });
   return true;
 }

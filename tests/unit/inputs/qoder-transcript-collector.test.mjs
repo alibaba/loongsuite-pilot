@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -245,6 +246,35 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
     await settle(); await collector.acknowledge(state);
     expect(fs.readdirSync(directory)).toEqual([]);
     expect(fs.existsSync(path.join(directory, '..', 'source.json'))).toBe(true);
+    expect((await collect()).records).toEqual([]);
+  });
+
+  it('preserves a new same-watermark observation published while an old one is acknowledged', async () => {
+    write([...turn(0), { type: 'last-prompt' }]); wake(); await settle();
+    const directory = path.join(qoderWakeupRoot(dataDir, agentId), Object.keys(state)[0], 'events');
+    const file = path.join(directory, fs.readdirSync(directory)[0]);
+    const open = fsp.open.bind(fsp);
+    let replaced = false;
+    vi.spyOn(fsp, 'open').mockImplementation(async (name, ...args) => {
+      const handle = await open(name, ...args);
+      if (name === file && !replaced) {
+        const read = handle.read.bind(handle);
+        handle.read = async (...readArgs) => {
+          const result = await read(...readArgs);
+          replaced = true;
+          fs.writeFileSync(transcript + '.new', [...turn(1), { type: 'last-prompt' }].map(JSON.stringify).join('\n') + '\n');
+          expect(fs.statSync(transcript + '.new').size).toBe(fs.statSync(transcript).size);
+          fs.renameSync(transcript + '.new', transcript);
+          wake();
+          return result;
+        };
+      }
+      return handle;
+    });
+    await collector.acknowledge(state);
+    expect(replaced).toBe(true);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(userTexts(await settle())).toEqual(['prompt 1']);
     expect((await collect()).records).toEqual([]);
   });
 

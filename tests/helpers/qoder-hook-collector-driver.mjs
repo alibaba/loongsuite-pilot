@@ -17,6 +17,16 @@ const input = fs.readFileSync(0);
 const hook = spawnSync(process.execPath, [processor, ...args], { input, encoding: 'utf8', timeout: 5000 });
 if (hook.status !== 0) { process.stderr.write(hook.stderr || 'Hook failed'); process.exit(1); }
 process.stdout.write(hook.stdout);
+if (process.env.QODER_TEST_CAPTURE_BARRIER === '1' && process.send) {
+  // Concurrent-capture tests must establish both observations before starting
+  // their collector. Process launch order is not an observation-time contract.
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Hook capture barrier timed out')), 5000);
+    process.once('message', () => { clearTimeout(timeout); resolve(); });
+    process.send({ type: 'hook-published' });
+  });
+  process.disconnect();
+}
 fs.mkdirSync(path.join(dataDir, 'state'), { recursive: true });
 const lockFile = path.join(dataDir, 'state/test-collector.lock');
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
