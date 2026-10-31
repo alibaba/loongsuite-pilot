@@ -446,7 +446,8 @@ export async function parseStdinPayload(agentId) {
     && !Array.isArray(payload.parent_business_info)
     ? payload.parent_business_info
     : undefined;
-  return { transcriptPath, sessionId, cwd, extra, parentBusinessInfo };
+  const hookEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : undefined;
+  return { transcriptPath, sessionId, cwd, extra, parentBusinessInfo, hookEventName };
 }
 
 // --- Re-export normalizer utilities -----------------------------------------

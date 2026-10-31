@@ -73,12 +73,12 @@ describe('tryAcquireRetryLock', () => {
     expect(lock.sessionId).toBe('sess-2');
   });
 
-  it('overwrites an expired lock (startedAt too old)', () => {
+  it('does not evict a live owner even after the old age limit', () => {
     const lockPath = retryLockPath('/tmp/t.jsonl', lockDir);
     fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, sessionId: 'old', startedAt: 1 }));
-    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-2', lockDir)).toBe(true);
-    expect(readRetryLock(lockPath).sessionId).toBe('sess-2');
+    expect(tryAcquireRetryLock('/tmp/t.jsonl', 'sess-2', lockDir)).toBe(false);
+    expect(readRetryLock(lockPath).sessionId).toBe('old');
   });
 });
 
@@ -134,8 +134,8 @@ describe('isRetryLockStale', () => {
     expect(isRetryLockStale(null)).toBe(true);
   });
 
-  it('returns true for old lock', () => {
-    expect(isRetryLockStale({ pid: process.pid, startedAt: 0 })).toBe(true);
+  it('returns false for an old lock whose owner is still alive', () => {
+    expect(isRetryLockStale({ pid: process.pid, startedAt: 0 })).toBe(false);
   });
 
   it('returns false for fresh, live lock', () => {
