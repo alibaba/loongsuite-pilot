@@ -6,7 +6,7 @@ import { constants, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
-  buildLlmBoundaries, buildEventsFromBoundaries, isRealUserPrompt,
+  buildLlmBoundaries, buildEventsFromBoundaries, isRealUserPrompt, isControlUserRow,
   hasQoderCnTerminalMarker, resolveQoderCliUserIdentity,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
@@ -506,7 +506,11 @@ export class QoderTranscriptCollector {
       ?? { cwd: source.cwd, desktop: source.desktop };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       userIdentity: context.userIdentity, resourceAttributes: context.resourceAttributes ?? {}, spanAttributes: context.spanAttributes ?? {} };
-    const content = value.rows.filter(row => row.type === 'user' || row.type === 'assistant');
+    // The CLI persists local slash commands as user rows, including /exit
+    // after the final response. Reuse the legacy parser's control-row contract
+    // for both boundaries and messages so these cannot create an empty Turn
+    // or leak into the next model request when a turn is still being drained.
+    const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
     if (!config.userIdentity && !context.desktop && this.agentId === 'qoder'
       && content.some(row => row.entrypoint === 'cli' || row.promptId || row.permissionMode || row.userType)) {
       config.userIdentity = await resolveQoderCliUserIdentity(this.dataDir);

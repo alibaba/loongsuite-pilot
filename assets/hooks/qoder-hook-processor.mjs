@@ -1191,7 +1191,7 @@ function cliAttachmentFields(agentType, userRow, allParsed) {
 }
 
 export function isRealUserPrompt(row) {
-  return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row);
+  return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row) && !isControlUserRow(row);
 }
 
 // Slash-command plumbing qoder-cli writes as type=user rows. Confirmed shapes,
@@ -1264,7 +1264,7 @@ function isControlEnvelopeSequence(tags, row) {
   return false;
 }
 
-function isControlUserRow(row) {
+export function isControlUserRow(row) {
   // A promptId means the CLI itself booked the row as a submitted prompt, so it
   // can never be plumbing. Most rows carry no promptId, so this only
   // short-circuits; the envelope shape is what decides.

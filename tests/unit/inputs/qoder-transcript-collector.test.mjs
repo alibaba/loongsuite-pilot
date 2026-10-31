@@ -110,6 +110,55 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
     expect(batch.metrics.bytesRead).toBe(0);
   });
 
+  it('does not create an empty Turn for the native CLI /exit envelope after a completed turn', async () => {
+    const exit = { type: 'user', uuid: 'native-cli-exit', entrypoint: 'cli', userType: 'external',
+      timestamp: new Date(base + 500).toISOString(), message: { role: 'user',
+        content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } };
+    write(turn(0, { tool: true })); wake();
+    const first = await settle();
+    append([exit, progress('SessionEnd', 600)]); wake('SessionEnd');
+    const tail = await settle();
+    expect(tail).toEqual([]);
+    expect(userTexts(first)).toEqual(['prompt 0']);
+    expect(new Set(first.map(row => row['gen_ai.turn.id'])).size).toBe(1);
+    expect(first.filter(row => row['event.name'] === 'tool.call')).toHaveLength(1);
+    expect(first.filter(row => row['event.name'] === 'tool.result')).toHaveLength(1);
+    expect(Object.values(state)[0].offset).toBe(fs.statSync(transcript).size);
+    expect((await collect()).metrics.bytesRead).toBe(0);
+    collector.stop();
+    collector = new QoderTranscriptCollector({ dataDir, agentId, now: () => clock });
+    expect((await settle())).toEqual([]);
+  });
+
+  it('excludes local CLI controls from an active turn without dropping a later genuine command prompt', async () => {
+    const controlText = '<command-message>exit</command-message>\n<command-name>/exit</command-name>';
+    const control = { type: 'user', entrypoint: 'cli', timestamp: new Date(base + 250).toISOString(),
+      message: { role: 'user', content: controlText } };
+    const rows = turn(0, { tool: true });
+    rows.splice(rows.length - 2, 0, control);
+    write(rows); wake();
+    const first = await settle();
+    expect(JSON.stringify(first)).not.toContain('command-name');
+    expect(first.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+    const next = turn(1);
+    next[1] = { ...next[1], entrypoint: 'cli', promptId: 'real-submitted-prompt',
+      message: { role: 'user', content: controlText } };
+    append(next); wake();
+    const second = await settle();
+    expect(userTexts(second)).toEqual([controlText]);
+    expect(second.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
+  });
+
+  it('does not bootstrap a new Turn from a CLI-only command transcript', async () => {
+    write([{ type: 'user', entrypoint: 'cli', timestamp: new Date(base).toISOString(), message: {
+      role: 'user', content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>',
+    } }, progress('SessionEnd', 10)]);
+    wake('SessionEnd');
+    expect(await settle()).toEqual([]);
+    append(turn(1)); wake();
+    expect(userTexts(await settle())).toEqual(['prompt 1']);
+  });
+
   it('resumes complete offsets after restart without duplicating tools or Turns', async () => {
     write(turn(0)); wake();
     const previous = await settle();

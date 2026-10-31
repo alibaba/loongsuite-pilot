@@ -23,7 +23,11 @@ function rows(turn: number, cli: boolean) {
     { type: 'user', timestamp: at(turn, 200), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `tool-${turn}`, content: `result ${secret}` }] } },
     progress('PostToolUse', 220),
     { type: 'assistant', timestamp: at(turn, 300), message: { id: `response-${turn}-1`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-1` }, content: [{ type: 'text', text: `answer ${turn} ${secret}` }], stop_reason: 'end_turn' } },
-    progress('Stop', 400), { type: 'last-prompt' }];
+    progress('Stop', 400), { type: 'last-prompt' },
+    // Real CLI 1.1.81 also persists local command envelopes as user records.
+    // They must not add execution IDs or inputs between the model turns.
+    ...(cli ? [{ type: 'user', entrypoint: 'cli', timestamp: at(turn, 500),
+      message: { role: 'user', content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } }] : [])];
 }
 const jsonl = (value: object[]) => value.map(row => JSON.stringify(row)).join('\n') + '\n';
 let root: string;
