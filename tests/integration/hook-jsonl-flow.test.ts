@@ -9,6 +9,13 @@ import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { AgentActivityEntrySchema } from '../contract/agent-activity-schema.js';
+import { QoderTranscriptCollector } from '../../assets/hooks/qoder/transcript-collector.mjs';
+
+async function nativeRecords(dataDir: string) {
+  const collector = new QoderTranscriptCollector({ dataDir, agentId: 'qoder' });
+  try { return (await collector.collect({})).records; }
+  finally { collector.stop(); }
+}
 
 function getTodayDateString(): string {
   const d = new Date();
@@ -252,6 +259,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -305,9 +313,8 @@ describe('Hook JSONL integration flow', () => {
     expect(result.status).toBe(0);
     expect(result.stdout.trim()).toBe('{}');
 
-    const historyLines = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n');
-    expect(historyLines.length).toBeGreaterThanOrEqual(1);
-    const historyRecord = JSON.parse(historyLines[0]!);
+    expect(await fs.readFile(historyFile, 'utf-8')).toBe('');
+    const historyRecord = (await nativeRecords(dataDir))[0]!;
     expect(historyRecord.type).toBeUndefined();
     expect(historyRecord.uuid).toBeUndefined();
     expect(historyRecord.sessionId).toBeUndefined();
@@ -385,6 +392,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'delayed-ide-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -491,7 +499,7 @@ describe('Hook JSONL integration flow', () => {
     expect(result.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const llmRequests = records.filter(r => r['event.name'] === 'llm.request');
     const llmResponses = records.filter(r => r['event.name'] === 'llm.response');
     const toolCalls = records.filter(r => r['event.name'] === 'tool.call');
@@ -754,6 +762,7 @@ describe('Hook JSONL integration flow', () => {
       path.join(sharedDir, 'upstream-context.mjs'),
     );
     await fs.chmod(hookScript, 0o755);
+    await fs.cp(path.resolve('assets/hooks/qoder'), path.join(hookDir, 'qoder'), { recursive: true });
 
     const transcriptPath = path.join(tmpDir, 'multi-turn-transcript.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -823,7 +832,7 @@ describe('Hook JSONL integration flow', () => {
     expect(secondResult.status).toBe(0);
 
     const historyFile = path.join(dataDir, 'logs', 'qoder', 'history', `qoder-${getTodayDateString()}.jsonl`);
-    const records = (await fs.readFile(historyFile, 'utf-8')).trim().split('\n').map(line => JSON.parse(line));
+    const records = await nativeRecords(dataDir);
     const userHookEvents = records.filter(r => r['event.name'] === 'other');
 
     // Should have two distinct turns

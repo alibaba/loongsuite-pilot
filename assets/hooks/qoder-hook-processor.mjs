@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 /**
- * Qoder / Qoder-CLI hook transcript processor.
- *
- * Parses the full transcript (including progress events) to determine
- * precise LLM call boundaries, merges thinking+text+tool_use into
- * unified multi-part responses, and uses progress timestamps for
- * accurate LLM span timing.
+ * Qoder/QoderCN Hook: publish bounded metadata only. The collector imports
+ * the exported semantic parser below and supplies bounded native Turn ranges.
  */
 
 import fs from 'node:fs';
@@ -16,34 +12,22 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
   parseArgs,
-  parseStdinPayload,
-  readStdin,
-  logDebug,
-  getLineRangeInfo,
-  appendRowsToHistory,
-  updateLineRecord,
-  loadHookRuntimeConfig,
   getErrorLogFile,
-  HOOKS_DIR,
   LOONGSUITE_PILOT_DATA_DIR,
-  LOONGSUITE_PILOT_LOGS_BASE_DIR,
 } from './shared/hook-processor-base.mjs';
 import {
   buildQoderHookRecord,
   inferProviderName,
+  toJsonValue,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
-import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { publishQoderWakeup, readQoderHookPayload } from './qoder/hook-wakeup.mjs';
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
-const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
-const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
-  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
-  : {};
 // Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
@@ -55,12 +39,17 @@ const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
 const QODER_HOME = path.join(os.homedir(), '.qoder');
 const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
 const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
-const QODER_CLI_IDENTITY_CACHE_FILE = path.join(
-  LOONGSUITE_PILOT_DATA_DIR,
-  'state',
-  'hooks',
-  'qoder-cli-user-identity.json',
-);
+function smallText(file, limit = 16 * 1024) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) throw new Error('metadata-byte-limit');
+    const buffer = Buffer.alloc(limit + 1);
+    const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytes > limit) throw new Error('metadata-byte-limit');
+    return buffer.toString('utf8', 0, bytes);
+  } finally { fs.closeSync(fd); }
+}
 
 function nonEmptyIdentityValue(value) {
   if (typeof value !== 'string') return undefined;
@@ -127,7 +116,8 @@ function readQoderAppUserIdentity(agentId) {
   }
 }
 
-async function resolveQoderCliUserIdentity() {
+export async function resolveQoderCliUserIdentity(dataDir = LOONGSUITE_PILOT_DATA_DIR) {
+  const cacheFile = path.join(dataDir, 'state/hooks/qoder-cli-user-identity.json');
   const authPath = path.join(QODER_HOME, '.auth', 'user');
   let authStat;
   try {
@@ -139,7 +129,7 @@ async function resolveQoderCliUserIdentity() {
 
   let cached;
   try {
-    cached = JSON.parse(fs.readFileSync(QODER_CLI_IDENTITY_CACHE_FILE, 'utf-8'));
+    cached = JSON.parse(smallText(cacheFile));
   } catch {
     cached = undefined;
   }
@@ -163,7 +153,7 @@ async function resolveQoderCliUserIdentity() {
   let executable;
   try {
     const cliDir = path.join(QODER_HOME, 'bin', 'qodercli');
-    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
+    const version = smallText(path.join(cliDir, 'version.txt'), 128).trim();
     if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
     executable = path.join(
       cliDir,
@@ -226,9 +216,9 @@ async function resolveQoderCliUserIdentity() {
     }
   }
 
-  const temporary = `${QODER_CLI_IDENTITY_CACHE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  const temporary = `${cacheFile}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(QODER_CLI_IDENTITY_CACHE_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(status && status !== timedOut ? {
       schemaVersion: 1,
       authPath,
@@ -244,7 +234,7 @@ async function resolveQoderCliUserIdentity() {
       size: authStat.size,
       failedUntil: Date.now() + QODER_CLI_STATUS_FAILURE_TTL_MS,
     }), { encoding: 'utf-8', mode: 0o600 });
-    fs.renameSync(temporary, QODER_CLI_IDENTITY_CACHE_FILE);
+    fs.renameSync(temporary, cacheFile);
   } catch {
     try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
   }
@@ -253,134 +243,6 @@ async function resolveQoderCliUserIdentity() {
     ...(status.name ? { name: status.name } : {}),
     ...(status.email ? { email: status.email } : {}),
   };
-}
-
-async function readRetryUserIdentity() {
-  const value = await readStdin();
-  if (!value) return undefined;
-  try {
-    const parsed = JSON.parse(value);
-    const name = nonEmptyIdentityValue(parsed?.name);
-    const email = nonEmptyIdentityValue(parsed?.email);
-    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// --- Per-transcript processing lock -----------------------------------------
-// Every Stop can create a detached retry. Serialize the complete read -> append
-// -> cursor-advance transaction for one transcript so duplicate or adjacent
-// retries cannot commit from the same stale cursor. Contenders wait and re-read
-// state after acquiring the lock; they never treat lock contention as a reason
-// to discard a distinct Turn.
-//
-// The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains JSON
-// `{ pid, sessionId, startedAt }`.
-
-export const RETRY_LOCK_DIR = path.join(HOOKS_DIR, '.retry-locks');
-export const RETRY_LOCK_MAX_AGE_MS = 60_000;
-export const RETRY_LOCK_WAIT_TIMEOUT_MS = 15_000;
-export const RETRY_LOCK_POLL_INTERVAL_MS = 25;
-
-export function retryLockPath(transcriptPath, dir = RETRY_LOCK_DIR) {
-  const hash = crypto.createHash('sha1').update(transcriptPath).digest('hex');
-  return path.join(dir, `${hash}.lock`);
-}
-
-export function pidAlive(pid) {
-  if (!pid || typeof pid !== 'number') return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e && e.code === 'EPERM';
-  }
-}
-
-export function readRetryLock(lockPath) {
-  try {
-    const raw = fs.readFileSync(lockPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return parsed;
-  } catch { /* fall through */ }
-  return null;
-}
-
-export function isRetryLockStale(lock) {
-  if (!lock) return true;
-  const age = Date.now() - (Number(lock.startedAt) || 0);
-  if (age > RETRY_LOCK_MAX_AGE_MS) return true;
-  return !pidAlive(lock.pid);
-}
-
-export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_DIR) {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const payload = JSON.stringify({ pid: process.pid, sessionId, startedAt: Date.now() });
-    try {
-      const handle = fs.openSync(lockPath, 'wx');
-      fs.writeSync(handle, payload);
-      fs.closeSync(handle);
-      return true;
-    } catch (err) {
-      if (err && err.code === 'EEXIST') {
-        const existing = readRetryLock(lockPath);
-        if (isRetryLockStale(existing)) {
-          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
-          try {
-            const handle = fs.openSync(lockPath, 'wx');
-            fs.writeSync(handle, payload);
-            fs.closeSync(handle);
-            return true;
-          } catch { return false; }
-        }
-        return false;
-      }
-      return false;
-    }
-  } catch {
-    return false;
-  }
-}
-
-export function releaseRetryLock(transcriptPath, dir = RETRY_LOCK_DIR) {
-  try {
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const existing = readRetryLock(lockPath);
-    // Only release if we own the lock (avoid wiping a peer's lock on crash recovery)
-    if (existing && existing.pid === process.pid) {
-      fs.unlinkSync(lockPath);
-    }
-  } catch { /* best-effort */ }
-}
-
-export async function acquireRetryLock(
-  transcriptPath,
-  sessionId,
-  {
-    dir = RETRY_LOCK_DIR,
-    waitMs = RETRY_LOCK_WAIT_TIMEOUT_MS,
-    pollMs = RETRY_LOCK_POLL_INTERVAL_MS,
-  } = {},
-) {
-  const boundedWaitMs = clampInteger(waitMs, RETRY_LOCK_WAIT_TIMEOUT_MS, 0, 60_000);
-  const boundedPollMs = clampInteger(pollMs, RETRY_LOCK_POLL_INTERVAL_MS, 5, 1_000);
-  const deadline = Date.now() + boundedWaitMs;
-
-  while (true) {
-    if (tryAcquireRetryLock(transcriptPath, sessionId, dir)) return true;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await new Promise(resolve => setTimeout(resolve, Math.min(boundedPollMs, remaining)));
-  }
-}
-
-function clampInteger(value, fallback, min, max) {
-  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, Math.trunc(parsed)));
 }
 
 // --- Timestamp helpers -------------------------------------------------------
@@ -435,478 +297,32 @@ function computeDurationMs(startNanos, endNanos) {
 // --- Main --------------------------------------------------------------------
 
 async function main() {
-  const args = process.argv.slice(2);
-  const isRetry = args.includes('--retry');
-
-  // Retry mode: called by background subprocess after delay, reads transcript directly
-  if (isRetry) {
-    const transcriptIdx = args.indexOf('--transcript');
-    const sessionIdx = args.indexOf('--session');
-    const cwdIdx = args.indexOf('--cwd');
-    const triggerEndLineIdx = args.indexOf('--trigger-end-line');
-    const transcriptPath = transcriptIdx >= 0 ? args[transcriptIdx + 1] : '';
-    const sessionId = sessionIdx >= 0 ? args[sessionIdx + 1] : '';
-    const cwd = cwdIdx >= 0 ? args[cwdIdx + 1] : undefined;
-    const triggerEndLine = triggerEndLineIdx >= 0
-      ? Number.parseInt(args[triggerEndLineIdx + 1], 10)
-      : Number.NaN;
-    const { agentId, logPrefix } = parseArgs();
-    if (!transcriptPath || !sessionId) return;
-    logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
-    const userIdentity = await readRetryUserIdentity();
-    const runtimeConfig = {
-      ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
-      ...(userIdentity ? { userIdentity } : {}),
-    };
-
-    // Reserve the transcript before applying the flush delay. Earlier Stop
-    // retries therefore retain commit order while later retries wait. The wait
-    // time counts toward HOOK_RETRY_DELAY, so a contender does not sleep for an
-    // extra five seconds after its predecessor finishes.
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-    const lockWaitStartedAt = Date.now();
-    const lockAcquired = await acquireRetryLock(transcriptPath, sessionId, {
-      waitMs: process.env.HOOK_RETRY_LOCK_WAIT_MS,
-      pollMs: process.env.HOOK_RETRY_LOCK_POLL_MS,
-    });
-    if (!lockAcquired) {
-      logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
-      await spawnDelayedRetry(
-        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
-      );
-      return;
-    }
-    try {
-      const remainingDelay = retryDelay - (Date.now() - lockWaitStartedAt);
-      if (remainingDelay > 0) {
-        await new Promise(r => setTimeout(r, remainingDelay));
-      }
-
-      let targetWindow = null;
-      let retrySnapshot = null;
-      let range = null;
-      if (Number.isFinite(triggerEndLine)) {
-        // Stop may be appended only after the hook process receives its
-        // payload. Poll briefly for that Stop and a stable right boundary,
-        // without ever falling through into a queued next prompt.
-        const maxBoundaryPolls = 3;
-        const boundaryPollIntervalMs = clampInteger(
-          process.env.HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS,
-          1000,
-          10,
-          5000,
-        );
-        let previousEofCandidateKey = null;
-        for (let poll = 0; poll < maxBoundaryPolls; poll++) {
-          // One immutable snapshot per poll supplies both EOF/cursor validation
-          // and turn-boundary discovery. The successful snapshot is passed
-          // directly to processTranscript, so it is never read again.
-          retrySnapshot = readTranscriptSnapshot(transcriptPath, { includeContentHash: true });
-          range = getLineRangeInfo(
-            agentId,
-            transcriptPath,
-            sessionId,
-            retrySnapshot.lineCount,
-          );
-          if (!range) return;
-          targetWindow = findTriggeredTurnWindow(retrySnapshot, triggerEndLine);
-          if (targetWindow.status === 'complete') break;
-          const stability = assessStableEofCandidate(
-            previousEofCandidateKey,
-            targetWindow,
-            retrySnapshot,
-          );
-          previousEofCandidateKey = stability.candidateKey;
-          targetWindow = stability.targetWindow;
-          if (targetWindow.status === 'complete') break;
-          if (poll + 1 < maxBoundaryPolls) {
-            await new Promise(r => setTimeout(r, boundaryPollIntervalMs));
-          }
-        }
-
-        if (targetWindow?.status !== 'complete') {
-          logDebug(
-            agentId,
-            `Retry deferred: target turn is not complete (${targetWindow?.reason || 'unknown'})`,
-          );
-          return;
-        }
-        logDebug(
-          agentId,
-          `Retry target window: trigger=${triggerEndLine}, ` +
-          `range=${targetWindow.startLine}-${targetWindow.endLine}, ` +
-          `stop=${targetWindow.stopLine}, terminal=${targetWindow.reason}`,
-        );
-        if (range.startLine >= targetWindow.endLine) {
-          logDebug(
-            agentId,
-            `Retry skipped: cursor ${range.startLine} already passed target ${targetWindow.endLine}`,
-          );
-          return;
-        }
-      } else {
-        // Compatibility with a retry spawned by an older deployed wrapper.
-        retrySnapshot = readTranscriptSnapshot(transcriptPath);
-        range = getLineRangeInfo(
-          agentId,
-          transcriptPath,
-          sessionId,
-          retrySnapshot.lineCount,
-        );
-        if (!range) return;
-      }
-
-      const committed = await processTranscript(
-        agentId, logPrefix, transcriptPath, sessionId,
-        targetWindow?.startLine ?? range.startLine,
-        targetWindow?.endLine ?? range.endLine,
-        runtimeConfig, cwd,
-        {
-          delayApplied: true,
-          rangeReason: range.reason,
-          fixedTurnWindow: targetWindow?.status === 'complete',
-          snapshot: retrySnapshot,
-        },
-      );
-      if (committed === false) {
-        logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
-        await spawnDelayedRetry(
-          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
-        );
-      }
-    } finally {
-      releaseRetryLock(transcriptPath);
-    }
-    return;
-  }
-
-  // Normal mode: called from Stop hook via stdin
-  const { agentId, logPrefix } = parseArgs();
-  const payload = await parseStdinPayload(agentId);
-  if (!payload) return;
-
-  const { transcriptPath, sessionId, cwd, extra, parentBusinessInfo } = payload;
-
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
-  if (sessionId) {
-    recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
-  }
-
-  // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
-  // and the eventual processor input.
-  const snapshot = readTranscriptSnapshot(transcriptPath);
-  const cliTranscript = agentId === 'qoder'
-    && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
-  const desktopInvocation = parentBusinessInfo?.product === 'app';
-  let userIdentity;
-  if (agentId === 'qoder-cn') {
-    userIdentity = extractQoderCnUserIdentity(extra)
-      ?? (desktopInvocation ? readQoderAppUserIdentity(agentId) : undefined);
-  } else if (agentId === 'qoder' && desktopInvocation) {
-    // Desktop embeds CLI-format transcripts but owns a separate login. Do not
-    // attribute its requests to a possibly different standalone CLI account.
-    userIdentity = extractUserIdentity(extra) ?? readQoderAppUserIdentity(agentId);
-  } else if (cliTranscript) {
-    userIdentity = await resolveQoderCliUserIdentity();
-  } else if (agentId === 'qoder') {
-    userIdentity = extractUserIdentity(extra);
-  }
-  const runtimeConfig = {
-    ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
-    ...(userIdentity ? { userIdentity } : {}),
-  };
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
-  if (!range) return;
-
-  const startLine = range.startLine;
-  const endLine = range.endLine;
-  const parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
-  logDebug(agentId, `Read ${parsed.length} lines (range: ${startLine}-${endLine})`);
-  if (!parsed.length) {
-    if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-      logDebug(agentId, `Empty range deferred: transcript lock held for ${transcriptPath}`);
-      return;
-    }
-    try {
-      const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
-      const lockedRange = getLineRangeInfo(
-        agentId,
-        transcriptPath,
-        sessionId,
-        lockedSnapshot.lineCount,
-      );
-      if (lockedRange) {
-        const lockedRows = lockedSnapshot.rows
-          .slice(lockedRange.startLine, lockedRange.endLine)
-          .filter(Boolean);
-        if (lockedRows.length === 0) {
-          updateLineRecord(agentId, transcriptPath, sessionId, lockedRange.endLine);
-        } else {
-          await spawnDelayedRetry(
-            agentId,
-            transcriptPath,
-            sessionId,
-            logPrefix,
-            cwd,
-            lockedRange.endLine,
-            userIdentity,
-          );
-        }
-      }
-    } finally {
-      releaseRetryLock(transcriptPath);
-    }
-    return;
-  }
-
-  // Detect incomplete transcript (race condition in print/non-interactive mode:
-  // Stop hook fires BEFORE transcript is fully written, and writes happen AFTER hook returns).
-  // Solution: spawn a background retry that runs after 5s delay.
-  // last-prompt is the authoritative end-of-transcript marker written by qodercli on exit.
-  // If absent, the file is still being flushed (race: Stop hook fires before transcript flush).
-  const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
-  if (parsed.length > 0 && !hasLastPrompt) {
-    logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
-    // Do not suppress a spawn just because a retry currently owns the lock:
-    // the new Stop may belong to a distinct queued Turn. The child waits, then
-    // re-reads the cursor and either commits that Turn or proves it is a duplicate.
-    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
-    return;
-  }
-
-  // A complete normal-mode snapshot writes the same history/cursor state as a
-  // retry. If a retry is already committing, enqueue this exact Stop instead of
-  // blocking the foreground hook or dropping it.
-  if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-    logDebug(agentId, `Stop deferred: transcript lock held for ${transcriptPath}`);
-    await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
-    return;
-  }
+  const parsed = parseArgs();
+  const agentId = parsed.agentId === 'qoder-cli' ? 'qoder' : parsed.agentId;
   try {
-    // Re-read both snapshot and cursor under the lock; the values inspected
-    // above are only a fast-path completion check and may already be stale.
-    const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
-    const lockedRange = getLineRangeInfo(
-      agentId,
-      transcriptPath,
-      sessionId,
-      lockedSnapshot.lineCount,
-    );
-    if (!lockedRange) return;
-    const committed = await processTranscript(
-      agentId, logPrefix, transcriptPath, sessionId,
-      lockedRange.startLine, lockedRange.endLine,
-      runtimeConfig, cwd,
-      { rangeReason: lockedRange.reason, snapshot: lockedSnapshot },
-    );
-    if (committed === false) {
-      logDebug(agentId, `Stop commit failed; rescheduling ${transcriptPath}`);
-      await spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd, endLine, userIdentity);
+    let payload = await readQoderHookPayload();
+    const args = process.argv.slice(2);
+    if (args.includes('--retry')) {
+      const argument = name => args[args.indexOf(name) + 1];
+      payload = {
+        session_id: argument('--session'), transcript_path: argument('--transcript'),
+        hook_event_name: 'Stop', cwd: args.includes('--cwd') ? argument('--cwd') : undefined,
+        legacy_trigger_line: Number(argument('--trigger-end-line')),
+        extra: payload ? { user: payload } : undefined,
+      };
     }
-  } finally {
-    releaseRetryLock(transcriptPath);
-  }
-}
-
-async function spawnDelayedRetry(
-  agentId,
-  transcriptPath,
-  sessionId,
-  logPrefix,
-  cwd,
-  triggerEndLine,
-  userIdentity,
-) {
-  const nodebin = process.argv[0];
-  const script = fileURLToPath(import.meta.url);
-  const spawnArgs = [
-    script,
-    '--agent-id', agentId,
-    '--log-prefix', logPrefix,
-    '--retry',
-    '--transcript', transcriptPath,
-    '--session', sessionId,
-    '--trigger-end-line', String(triggerEndLine),
-    ...(cwd ? ['--cwd', cwd] : []),
-  ];
-  const child = spawn(nodebin, spawnArgs, {
-    detached: true,
-    stdio: ['pipe', 'ignore', 'ignore'],
-    env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
-  });
-  if (child.stdin) {
-    await new Promise(resolve => {
-      const done = () => resolve();
-      child.stdin.once('error', done);
-      child.stdin.end(userIdentity ? JSON.stringify(userIdentity) : '', done);
+    if (!payload) return;
+    const desktop = payload.parent_business_info?.product === 'app';
+    const identity = agentId === 'qoder-cn'
+      ? extractQoderCnUserIdentity(payload.extra)
+      : extractUserIdentity(payload.extra);
+    publishQoderWakeup(payload, {
+      agentId, dataDir: LOONGSUITE_PILOT_DATA_DIR,
+      userIdentity: identity ?? (desktop ? readQoderAppUserIdentity(agentId) : undefined),
     });
+  } finally {
+    process.stdout.write('{}\n');
   }
-  child.unref();
-  logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
-}
-
-async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd, opts) {
-  // Handle retry delay
-  const delayApplied = !!(opts && opts.delayApplied);
-  if (!delayApplied) {
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-    if (retryDelay > 0) {
-      await new Promise(r => setTimeout(r, retryDelay));
-    }
-  }
-
-  const snapshot = opts?.snapshot || readTranscriptSnapshot(transcriptPath);
-
-  // A Stop-anchored retry receives an exact Turn window ending at an explicit
-  // terminal marker, the next prompt boundary, or a stable EOF after Stop. Do
-  // not expand that range to the current EOF: it may already contain a queued
-  // next prompt.
-  let endLine = initialEndLine;
-  if (!opts?.fixedTurnWindow) {
-    const currentCount = snapshot.lineCount;
-    if (currentCount > endLine) {
-      endLine = currentCount;
-    }
-    if ((opts?.rangeReason || 'incremental') === 'incremental') {
-      endLine = findIncrementalTurnEndLine(snapshot, startLine, endLine);
-    }
-  }
-
-  let parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
-  logDebug(agentId, `Processing ${parsed.length} lines (range: ${startLine}-${endLine})`);
-  if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  // --- Phase 2: Extract progress timing + content events ---
-  const progressEvents = [];
-  const contentEvents = [];
-
-  let lastProgressHookEvent = '';
-  for (const row of parsed) {
-    const rowType = row.type;
-    if (rowType === 'progress') {
-      const data = row.data || {};
-      const hookEvent = data.hookEvent || '';
-      // Deduplicate: each hookEvent fires multiple progress lines (one per registered command).
-      // Only take the first of each consecutive same-hookEvent group.
-      if (hookEvent && hookEvent !== lastProgressHookEvent) {
-        progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
-      }
-      if (hookEvent) lastProgressHookEvent = hookEvent;
-    } else {
-      // Only adjacent progress rows from multiple registered commands are
-      // duplicates. Content between two equal hook events means a new cycle.
-      lastProgressHookEvent = '';
-      if (rowType === 'user' || rowType === 'assistant') {
-        contentEvents.push(row);
-      }
-    }
-    // session_meta, other types: ignored
-  }
-
-  // --- Phase 2.5 (qoder-cn only): Skip processing until the transcript is terminal ---
-  // QoderCN does not guarantee that its progress Stop row is visible when the Stop
-  // hook process runs. In SDK --print mode the terminal assistant row and
-  // last-prompt marker can already be durable while progress Stop is appended only
-  // after the hook returns. Accept all terminal forms understood by the retry path;
-  // otherwise a complete managed-runtime turn is silently dropped forever.
-  if (agentId === 'qoder-cn') {
-    const hasTerminalMarker = hasQoderCnTerminalMarker(progressEvents, parsed);
-    if (!hasTerminalMarker) {
-      logDebug(agentId, `Transcript not yet complete (no terminal marker). Skipping processing.`);
-      return;
-    }
-    // A precise retry snapshot already contains the complete target Turn. Only
-    // legacy/non-anchored handling needs the historical full-snapshot view to
-    // recover a Turn that may have been split across multiple Stop callbacks.
-    if (opts?.fixedTurnWindow) {
-      logDebug(agentId, `Processing precise QoderCN turn window ${startLine}-${endLine}`);
-    } else {
-      // Stop detected — use the already-loaded snapshot from the beginning so
-      // splitContentEventsIntoTurns can recover a Turn that crossed multiple
-      // QoderCN Stop callbacks. This changes only the in-memory slice; it does
-      // not read the transcript again.
-      startLine = 0;
-      parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
-      logDebug(agentId, `Reprocessing snapshot from 0-${endLine} (${parsed.length} lines)`);
-      progressEvents.length = 0;
-      contentEvents.length = 0;
-      lastProgressHookEvent = '';
-      for (const row of parsed) {
-        const rowType = row.type;
-        if (rowType === 'progress') {
-          const data = row.data || {};
-          const hookEvent = data.hookEvent || '';
-          if (hookEvent && hookEvent !== lastProgressHookEvent) {
-            progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
-          }
-          if (hookEvent) lastProgressHookEvent = hookEvent;
-        } else {
-          lastProgressHookEvent = '';
-          if (rowType === 'user' || rowType === 'assistant') {
-            contentEvents.push(row);
-          }
-        }
-      }
-    }
-  }
-
-  // --- Phase 3: Split content events into turns by real user prompts ---
-  // Each real user prompt starts a new turn. Tool results stay attached to the
-  // preceding turn. This ensures each turn gets its own user input instead of
-  // inheriting the first prompt of the whole transcript segment.
-  const allTurnSegments = splitContentEventsIntoTurns(contentEvents);
-  const rangeReason = opts?.rangeReason || 'incremental';
-  // Cursor recovery may inspect the full snapshot to re-establish a safe
-  // checkpoint, but only the latest logical turn is new. Legacy/non-anchored
-  // QoderCN handling may also rebuild from snapshot line 0; an exact retry
-  // window already contains one Turn. In all cases QoderCN emits only latest.
-  const turnSegments = selectTurnSegmentsForCollection(allTurnSegments, rangeReason, agentId);
-  const keepLatestTurnOnly = turnSegments.length < allTurnSegments.length;
-  if (keepLatestTurnOnly && allTurnSegments.length > turnSegments.length) {
-    const recoverySource = agentId === 'qoder-cn' && rangeReason === 'incremental'
-      ? 'QoderCN full reparse'
-      : `cursor recovery (${rangeReason})`;
-    logDebug(agentId, `${recoverySource}: skipped ${allTurnSegments.length - turnSegments.length} historical turn(s), kept latest turn`);
-  }
-  logDebug(agentId, `Split transcript segment into ${turnSegments.length} turn(s)`);
-
-  // --- Phase 4: Build events per turn ---
-  const records = [];
-  for (let turnIdx = 0; turnIdx < turnSegments.length; turnIdx++) {
-    const turnContentEvents = turnSegments[turnIdx];
-    const turnId = crypto.randomUUID();
-
-    // Determine LLM call boundaries within this turn.
-    const llmBoundaries = buildLlmBoundaries(progressEvents, turnContentEvents);
-    logDebug(agentId, `Turn ${turnIdx + 1}: detected ${llmBoundaries.length} LLM call(s)`);
-
-    const turnRecords = buildEventsFromBoundaries(
-      llmBoundaries, turnContentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
-    );
-    records.push(...turnRecords);
-
-    logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
-  }
-
-  const cursorMode = rangeReason === 'incremental' ? 'incremental' : 'bootstrap';
-  const cursorBatchId = crypto.randomUUID();
-  for (const record of records) {
-    record['agent.transcript.cursor_mode'] = cursorMode;
-    record['agent.transcript.cursor_reason'] = rangeReason;
-    record['agent.transcript.cursor_batch_id'] = cursorBatchId;
-  }
-
-  // --- Phase 5: Write to history ---
-  const rowsToAppend = records.map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
-  return success;
 }
 
 export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
@@ -916,31 +332,6 @@ export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agent
     return turnSegments.slice(-1);
   }
   return turnSegments;
-}
-
-export function readTranscriptSnapshot(transcriptPath, { includeContentHash = false } = {}) {
-  try {
-    if (!fs.existsSync(transcriptPath)) {
-      return { lineCount: 0, rows: [], contentHash: '', reason: 'transcript-missing' };
-    }
-    const content = fs.readFileSync(transcriptPath, 'utf-8');
-    const lines = content.split('\n');
-    const lineCount = content.length > 0 && content[content.length - 1] !== '\n'
-      ? lines.length
-      : Math.max(0, lines.length - 1);
-    const rows = new Array(lineCount);
-    for (let i = 0; i < lineCount; i++) {
-      const text = lines[i].trim();
-      if (!text) continue;
-      try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
-    }
-    const contentHash = includeContentHash
-      ? crypto.createHash('sha1').update(content).digest('hex')
-      : '';
-    return { lineCount, rows, contentHash, reason: 'ok' };
-  } catch {
-    return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
-  }
 }
 
 export function assessStableEofCandidate(previousKey, targetWindow, snapshot) {
@@ -1099,10 +490,6 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
       stopSource = 'assistant-stop-reason';
     }
     if (stopLine < 0) return waiting('stop-not-found');
-    logDebug(
-      'qoder',
-      `Stop detected at line ${stopLine} (source: ${stopSource}) for prompt at line ${triggerPromptLine}`,
-    );
 
     // Resolve the start from the actual Stop instead of trusting a global
     // cursor that may have been reset by redeployment.
@@ -1318,7 +705,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       row => row.type === 'assistant' || isToolResult(row),
     );
     const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    return finalizeRecords(legacyRecords, cwd, runtimeConfig?.userIdentity);
+    return finalizeRecords(legacyRecords, cwd, runtimeConfig);
   }
 
   // For each LLM call boundary, produce events
@@ -1534,7 +921,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.tool.name': tc.name,
         'gen_ai.tool.call.id': tc.id,
         'gen_ai.tool.call.exec.id': tc.id,
-        'gen_ai.tool.call.arguments': typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input),
+        'gen_ai.tool.call.arguments': toJsonValue(tc.input),
         'user.id': userId,
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: toolCallTs,
@@ -1572,16 +959,20 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
   }
 
-  return finalizeRecords(records, cwd, runtimeConfig?.userIdentity);
+  return finalizeRecords(records, cwd, runtimeConfig);
 }
 
-function finalizeRecords(records, cwd, userIdentity) {
+function finalizeRecords(records, cwd, runtimeConfig) {
+  const userIdentity = runtimeConfig?.userIdentity;
+  const attributes = runtimeConfig?.resourceAttributes ?? RESOURCE_ATTRIBUTES;
+  const spanAttributes = runtimeConfig?.spanAttributes ?? SPAN_ATTRIBUTES;
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
     if (userIdentity?.name) record['user.name'] = userIdentity.name;
     if (userIdentity?.email) record['user.email'] = userIdentity.email;
-    Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+    Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
+      Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
   return records;
 }
@@ -1799,7 +1190,7 @@ function cliAttachmentFields(agentType, userRow, allParsed) {
   return attachments.length > 0 ? { 'agent.qoder.attachments': attachments } : {};
 }
 
-function isRealUserPrompt(row) {
+export function isRealUserPrompt(row) {
   return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row);
 }
 
@@ -1970,6 +1361,9 @@ function buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeCo
 // --- Entry point -------------------------------------------------------------
 
 function isDirectExec() {
+  // The exported parser is also bundled into dist/index.js. That bundle must
+  // never run this stdin Hook entry point during collector startup.
+  if (path.basename(fileURLToPath(import.meta.url)) !== 'qoder-hook-processor.mjs') return false;
   const argv1 = process.argv[1];
   if (!argv1) return false;
   const here = fileURLToPath(import.meta.url);

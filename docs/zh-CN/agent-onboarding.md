@@ -306,6 +306,38 @@ per-session spool：
 `tests/unit/hooks/workbuddy-hook-event-writer.test.ts` 和
 `tests/unit/inputs/workbuddy-input.test.ts`。
 
+### Qoder / QoderCN 的 transcript 所有权
+
+两者共用轻量 Hook 和 collector 内的增量读取器，参考 Codex 的生命周期通知与
+后台解析模式。Hook 只发布 session、路径、文件大小和调用时的身份/属性快照，
+不读取 transcript 正文、不查询 CLI 登录状态，也不派生重试 worker。原有同步
+Interceptor 规则判定是另一条路径。
+
+定位信息保存在 `state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/`：
+`source.json` 保留首次观察，`events/` 合并同一水位、事件和上下文的重复通知。
+单个通知最多 16 KiB，每个来源最多保留 128 个不同通知；达到边界会记录限频诊断，
+已有来源仍由 collector 轮询。正文留在 Agent 原生文件中，标量游标使用现有 Input
+StateStore 保存。已经保存并覆盖的通知在下一轮清理；来源描述和游标随已知会话
+数量增长，不对历史会话设置永久的准入数量上限，不按日期删除未消费数据。
+
+每个 Input 串行采集，通常每轮最多扫描 4 MiB、访问 64 个来源、完成 32 个 Turn。
+完整行和缓存恢复可能使扫描超过软预算，但单个 Turn 最多 16 MiB / 8,192 条记录，
+正文缓存按源字节计最多 32 MiB，元数据缓存最多 4 MiB。这些是读取与缓存预算，
+不是进程 RSS 上限。超大的记录/Turn、损坏元数据或 I/O 失败会保留游标并限频告警，
+不会确认该来源已消费；其他来源继续采集。
+
+首次 `UserPromptSubmit` 通知从当时的完整行水位等待新用户消息；首次 `Stop` 通知
+向后定位当前真实用户消息，避免重放全部历史。后续按字节增量读取，并保留半行、
+活动 Turn 和重启恢复信息。第三方 Hook 的进度行可能晚到，不作为新 Turn 的依据。
+`last-prompt`、`SessionEnd` 或下一条真实用户消息可封口；仅有终止信号时等待尾部
+稳定和最多 5 秒的写入宽限，等待发生在 collector 中。工具及 Token 仍走原有
+Qoder/QoderCN 补全与统一输出链路。
+
+升级时读取旧版按 session 保存的行游标并分块换算为字节偏移；仍存活的旧 retry
+worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的增量消费能力，
+不要求删除已有 checkpoint 或会话文件。回滚不复用新字节游标，需按目标版本的
+原有历史恢复策略核对数据边界。
+
 ## 注册 Agent
 
 需要自定义 input class 时：

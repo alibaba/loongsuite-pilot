@@ -11,7 +11,7 @@ import {
 import { VALID_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
+const PROCESSOR = path.resolve(__dirname, '../../helpers/qoder-hook-collector-driver.mjs');
 
 let dataDir;
 let transcriptPath;
@@ -146,6 +146,10 @@ function readHistory() {
     .map(line => JSON.parse(line));
 }
 
+function nativeCheckpoints() {
+  return JSON.parse(fs.readFileSync(path.join(dataDir, 'state/qoder-test-native-checkpoints.json'), 'utf8'));
+}
+
 function installFakeQoderCli(root) {
   const cliDir = path.join(root, 'bin', 'qodercli');
   fs.mkdirSync(cliDir, { recursive: true });
@@ -261,8 +265,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       new Set(['missing-cursor']),
     );
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    expect(fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'))).toHaveLength(1);
+    expect(Object.keys(nativeCheckpoints())).toHaveLength(1);
 
     const before = bootstrapRecords.length;
     fs.appendFileSync(transcriptPath, [
@@ -298,11 +301,11 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(new Set(secondSessionRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
       new Set(['bootstrap']),
     );
-    const cursorFiles = fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'));
+    const cursorFiles = Object.keys(nativeCheckpoints());
     expect(cursorFiles).toHaveLength(2);
-    const persistedSessionIds = cursorFiles.map(file =>
-      JSON.parse(fs.readFileSync(path.join(cursorDir, file), 'utf-8')).session_id
-    );
+    const persistedSessionIds = cursorFiles.map(key => JSON.parse(fs.readFileSync(
+      path.join(dataDir, 'state/qoder-transcripts/qoder/sources', key, 'source.json'), 'utf8',
+    )).sessionId);
     expect(new Set(persistedSessionIds)).toEqual(
       new Set(['session-old', 'session-second-old']),
     );
@@ -344,10 +347,10 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(first.status).toBe(0);
     expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt']);
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    const cursorFile = path.join(cursorDir, fs.readdirSync(cursorDir)[0]);
-    const firstCursor = JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
-    expect(firstCursor.last_line_count).toBe(8);
+    const firstCursor = Object.values(nativeCheckpoints())[0];
+    const committedBytes = Buffer.byteLength(initialRows.slice(0, -1).map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(firstCursor.committedOffset).toBe(committedBytes);
+    expect(firstCursor.activeStart).toBe(committedBytes);
 
     const secondTriggerEndLine = initialRows.length + 1;
     fs.appendFileSync(transcriptPath, [
@@ -510,12 +513,8 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(userBoundaryPrompts(readHistory())).toEqual(['first prompt', 'second prompt']);
     expect(readHistory().filter(record => record['event.name'] === 'llm.response')).toHaveLength(2);
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    const cursor = JSON.parse(fs.readFileSync(
-      path.join(cursorDir, fs.readdirSync(cursorDir)[0]),
-      'utf-8',
-    ));
-    expect(cursor.last_line_count).toBe(rows.length);
+    const cursor = Object.values(nativeCheckpoints())[0];
+    expect(cursor.committedOffset).toBe(fs.statSync(transcriptPath).size);
   });
 
   it('keeps equal PostToolUse events from separate tool cycles', () => {

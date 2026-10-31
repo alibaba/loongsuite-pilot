@@ -26,9 +26,11 @@ import {
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { QoderTranscriptSource } from './transcript-source.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  dataDir?: string;
   /** Cached multimodal policy; IDE + CLI extraction when enabled. */
   multimodal?: {
     enabled: boolean;
@@ -114,10 +116,13 @@ export class QoderTraceInput extends BaseInput {
   private readonly multimodalProcessor: MultimodalProcessor | null;
   private readonly allowedRootPaths: string[];
   private multimodalStopped = false;
+  private readonly transcriptSource: QoderTranscriptSource;
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder',
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = opts.multimodal?.processor ?? null;
@@ -128,6 +133,7 @@ export class QoderTraceInput extends BaseInput {
 
   override async stop(): Promise<void> {
     this.multimodalStopped = true;
+    this.transcriptSource.stop();
     await super.stop();
   }
 
@@ -144,6 +150,7 @@ export class QoderTraceInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     this.multimodalStopped = false;
+    this.transcriptSource.start();
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -183,7 +190,15 @@ export class QoderTraceInput extends BaseInput {
   protected async collect(): Promise<AgentActivityEntry[]> {
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
-    if (rawEntries.length === 0) return [];
+    const native = await this.transcriptSource.read(this.getState().extra);
+    for (const record of native.records) {
+      const entry = await this.transformRecord(record);
+      if (entry) rawEntries.push(entry);
+    }
+    if (rawEntries.length === 0) {
+      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      return [];
+    }
 
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
@@ -321,6 +336,7 @@ export class QoderTraceInput extends BaseInput {
       injectTraceId(turnEntries);
     }
 
+    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
     return rawEntries;
   }
 
@@ -352,9 +368,8 @@ export class QoderTraceInput extends BaseInput {
     const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
     try {
-      // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
-      // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
-      const buf = Buffer.alloc(stat.size - offset);
+      // Drain the upgrade-only Hook backlog in bounded complete-line batches.
+      const buf = Buffer.alloc(Math.min(16 * 1024 * 1024, stat.size - offset));
       const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
       if (runtime && readStartedAt !== undefined) {
