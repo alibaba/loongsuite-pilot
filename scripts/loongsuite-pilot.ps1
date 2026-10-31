@@ -14,7 +14,12 @@
 
 $CliArgs = @($args)
 $Command = if ($CliArgs.Count -ge 1) { [string]$CliArgs[0] } else { "status" }
-$SubArgs = if ($CliArgs.Count -ge 2) { [string[]]$CliArgs[1..($CliArgs.Count - 1)] } else { @() }
+# Two statements on purpose. As an `if` *expression* this value gets pipeline-
+# enumerated, so a single sub-argument came back as a bare string: `$SubArgs[0]`
+# then returned a Char and `@SubArgs` splatted the string character by character,
+# which is why `agent list` / `span-attr list` always hit the usage text.
+$SubArgs = @()
+if ($CliArgs.Count -ge 2) { $SubArgs = @($CliArgs[1..($CliArgs.Count - 1)]) }
 $ErrorActionPreference = "Stop"
 
 # ============================================================
@@ -1953,7 +1958,13 @@ timer = setTimeout(() => {
 '@
 
     try {
-        & $nodeBin -e $probe $Port $DATA_DIR *> $null
+        # The probe goes in over stdin instead of as an argv string: PowerShell's
+        # native-argument path rewrites double quotes inside a multi-line argument,
+        # so `require("node:http")` reached node as `require(node:http)` and this
+        # check failed on every run: status printed "dashboard: unavailable" while
+        # the dashboard was serving fine. The wrapper itself uses single quotes only,
+        # which survives arg-passing, and stdin avoids CLM-blocked .NET statics.
+        $probe | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))" $Port $DATA_DIR *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -2330,7 +2341,7 @@ function Cmd-Deploy {
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     # No collector restart afterwards -- see the shell cmd_deploy for why.
-    & $nodeBin $entry "deploy" @SubArgs
+    & $nodeBin --no-warnings $entry "deploy" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2359,7 +2370,7 @@ function Cmd-TokenUsage {
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
-    & $nodeBin $entry "token-usage" @SubArgs
+    & $nodeBin --no-warnings $entry "token-usage" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2387,7 +2398,7 @@ function Cmd-Worker {
 
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
-    & $nodeBin $entry "worker" @SubArgs
+    & $nodeBin --no-warnings $entry "worker" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2418,7 +2429,10 @@ function Cmd-Agent {
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
-    & $nodeBin $entry "agent" @SubArgs
+    # --no-warnings: the script runs under $ErrorActionPreference = "Stop", where a
+    # native command's stderr (node's experimental-feature notices) becomes a
+    # terminating error even when the stream is redirected away.
+    & $nodeBin --no-warnings $entry "agent" @SubArgs
     $result = $LASTEXITCODE
     if ($result -ne 0) { exit $result }
 
@@ -2464,8 +2478,15 @@ if (op === "set") {
   if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
 }
 '@
-        $rest = if ($SubArgs.Count -ge 2) { $SubArgs[1..($SubArgs.Count - 1)] } else { @() }
-        & $nodeBin -e $js $SPAN_ATTR_FILE $sub @rest
+        # Two statements for the same reason as $SubArgs: as an if-expression a
+        # single remaining argument (e.g. `span-attr unset <key>`) unrolls into a
+        # plain string, and `@rest` then splats it character by character.
+        $rest = @()
+        if ($SubArgs.Count -ge 2) { $rest = @($SubArgs[1..($SubArgs.Count - 1)]) }
+        # Same stdin workaround as Test-DashboardAvailable: this script is full of
+        # double quotes, which argv passing mangles. argv indexes shift back to
+        # 1..4 because the wrapper is the `-e` script and args follow it.
+        $js | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))" $SPAN_ATTR_FILE $sub @rest
         exit $LASTEXITCODE
     }
 
