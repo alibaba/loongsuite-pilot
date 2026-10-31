@@ -7,7 +7,7 @@ import os from 'node:os';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const candidate = path.resolve(here, '../../assets/hooks');
@@ -19,9 +19,11 @@ const report = { environment: { platform: os.platform(), os: os.release(), arch:
     ['baselineProcessor', path.join(baseline, 'qoder-hook-processor.mjs')],
     ['candidateProcessor', path.join(candidate, 'qoder-hook-processor.mjs')],
     ['candidateCollector', path.join(candidate, 'qoder/transcript-collector.mjs')],
+    ['candidateWakeup', path.join(candidate, 'qoder/hook-wakeup.mjs')],
   ].map(([name, file]) => [name, crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')])),
   scope: 'Synthetic OS execution; full shell wrapper plus collector parser. Token joins/trace export validated separately. No OS reset test.',
-  limits: { aggregateRSSMiB: 1536, oldSpaceMiB: 256, retrySpawns: 64, retryGeneration: 3 }, scale: [], natural: [] };
+  limits: { aggregateRSSMiB: 1536, oldSpaceMiB: 256, retrySpawns: 64, retryGeneration: 3 },
+  sampling: { intervalMs: 50, trackWrapperFromSpawn: true }, scale: [], natural: [] };
 const rows = file => {
   try { return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(JSON.parse); } catch { return []; }
 };
@@ -50,17 +52,26 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
   const audit = () => rows(directory + '/audit.jsonl');
   let peakRSSMiB = 0; let peakProcesses = 0; let guardHit = false; let worker;
   const parsed = []; const collectorSamples = []; const hookMs = [];
-  const known = () => new Set(audit().flatMap(row => [row.pid, row.childPid].filter(Boolean)));
+  const wrappers = new Set();
+  const known = () => new Set([...wrappers, ...audit().flatMap(row => [row.pid, row.childPid].filter(Boolean))]);
+  let sampling;
   const sample = () => {
-    const pids = [...known()]; if (!pids.length) return;
-    const result = spawnSync('ps', ['-o', 'pid=,rss=,stat=', '-p', pids.join(',')], { encoding: 'utf8' });
-    const processes = result.stdout.trim().split('\n').filter(Boolean).flatMap(line => {
-      const [pid, rss, stat] = line.trim().split(/\s+/);
-      return stat?.startsWith('Z') ? [] : [{ pid: Number(pid), rss: Number(rss) / 1024 }];
-    });
-    const total = processes.reduce((sum, proc) => sum + proc.rss, 0);
-    peakRSSMiB = Math.max(peakRSSMiB, total); peakProcesses = Math.max(peakProcesses, processes.length);
-    if (total > 1536) { guardHit = true; fs.writeFileSync(directory + '/stop', 'rss-cap'); for (const proc of processes) try { process.kill(proc.pid, 'SIGKILL'); } catch {} }
+    if (sampling) return sampling;
+    sampling = (async () => {
+      const pids = [...known()]; if (!pids.length) return;
+      // Keep one asynchronous ps in flight. Sampling must not block the
+      // parent's Hook completion/timeout handlers or create a process storm.
+      const output = await new Promise(resolve => execFile('ps', ['-o', 'pid=,rss=,stat=', '-p', pids.join(',')],
+        { encoding: 'utf8', timeout: 1500 }, (_error, stdout) => resolve(stdout ?? '')));
+      const processes = output.trim().split('\n').filter(Boolean).flatMap(line => {
+        const [pid, rss, stat] = line.trim().split(/\s+/);
+        return stat?.startsWith('Z') ? [] : [{ pid: Number(pid), rss: Number(rss) / 1024 }];
+      });
+      const total = processes.reduce((sum, proc) => sum + proc.rss, 0);
+      peakRSSMiB = Math.max(peakRSSMiB, total); peakProcesses = Math.max(peakProcesses, processes.length);
+      if (total > 1536) { guardHit = true; fs.writeFileSync(directory + '/stop', 'rss-cap'); for (const proc of processes) try { process.kill(proc.pid, 'SIGKILL'); } catch {} }
+    })().finally(() => { sampling = null; });
+    return sampling;
   };
   const timer = setInterval(sample, 50);
   const waitMessage = () => new Promise((resolve, reject) => {
@@ -76,6 +87,9 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
     const wrapper = path.join(revision === 'baseline' ? baseline : candidate,
       agentId === 'qoder' ? 'qoder-loongsuite-pilot-hook.sh' : 'qodercn-loongsuite-pilot-hook.sh');
     const child = spawn('/bin/bash', [wrapper, agentId], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Register immediately, before Node's preload starts: short candidate Hooks
+    // can otherwise exit entirely between the 50 ms samples and bias totals.
+    wrappers.add(child.pid);
     const start = performance.now(); let stdout = ''; let stderr = '';
     child.stdout.on('data', data => { stdout += data; }); child.stderr.on('data', data => { stderr += data; });
     const done = new Promise((resolve, reject) => {
@@ -83,7 +97,8 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
       child.on('error', reject); child.on('close', code => { clearTimeout(deadline); code === 0 ? resolve() : reject(new Error(stderr)); });
     });
     child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: 'synthetic-session', transcript_path: transcript, cwd: directory }));
-    await done; assert.equal(stdout.trim(), '{}'); hookMs.push(performance.now() - start);
+    await done; wrappers.delete(child.pid);
+    assert.equal(stdout.trim(), '{}'); hookMs.push(performance.now() - start);
     await collect();
   }
   try {
@@ -105,7 +120,7 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
         await hook('PostToolUse');
       }
       fs.appendFileSync(transcript, jsonl(turn(index).slice(2))); await hook('Stop');
-      sample(); await sleep(1000);
+      await sample(); await sleep(1000);
       fs.appendFileSync(transcript, jsonl([{ type: 'last-prompt' }]));
       for (let cycle = 0; cycle < 14; cycle++) { await collect(); await sleep(500); }
     } else {
@@ -128,7 +143,7 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
     assert.equal(counts['llm.response'], natural ? 4 : 2);
     if (natural) { assert.equal(counts['tool.call'], 3); assert.equal(counts['tool.result'], 3); }
     if (worker) { worker.send('stop'); await new Promise(resolve => worker.once('exit', resolve)); }
-    sample();
+    await sample();
     const observed = audit();
     assert.equal(guardHit, false); assert.equal(observed.some(row => row.event === 'guard'), false);
     const maximumRSS = Math.max(0, ...observed.filter(row => row.event === 'exit').map(row => row.maxRSSKiB / 1024));
@@ -139,6 +154,7 @@ async function runCase(revision, agentId, sizeMiB, natural = false) {
       runtimes: [...new Set(observed.filter(row => row.event === 'start').map(row => row.node))] };
   } finally {
     clearInterval(timer);
+    await sampling;
     for (const pid of known()) { try { process.kill(pid, 'SIGTERM'); } catch {} }
     worker?.kill();
   }
