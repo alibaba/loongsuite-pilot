@@ -1228,6 +1228,7 @@ export class Orchestrator extends EventEmitter {
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: qoderCnLogDir,
       pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
@@ -1465,6 +1466,7 @@ export class Orchestrator extends EventEmitter {
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: qoderCliLogDir,
       pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
       multimodal: {

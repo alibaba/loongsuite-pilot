@@ -20,6 +20,7 @@ import {
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { QoderTranscriptSource } from '../qoder-trace/transcript-source.js';
 
 // Written by the runtime wrapper that launches qoderclicn. Kept separate from
 // the international build's file so a machine running both keeps the two
@@ -28,6 +29,7 @@ const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
+  dataDir?: string;
 }
 
 /**
@@ -48,6 +50,7 @@ export class QoderCnTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder-cn';
+  private readonly transcriptSource: QoderTranscriptSource;
 
   // Persists across collect() cycles: tracks the last anchor turn.id and its
   // max step counter per session so orphan turns from later cycles can be
@@ -57,6 +60,13 @@ export class QoderCnTraceInput extends BaseInput {
   constructor(opts: QoderCnTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cn/history');
+    this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder-cn',
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
+  }
+
+  override async stop(): Promise<void> {
+    this.transcriptSource.stop();
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -70,6 +80,7 @@ export class QoderCnTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.transcriptSource.start();
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -95,9 +106,25 @@ export class QoderCnTraceInput extends BaseInput {
     return readSegmentTokensForSession(sessionId, expectedRequestIds, QODER_CN_SEGMENTS_ROOT);
   }
 
+  protected readCliIntercept(): Promise<InterceptData> {
+    return readInterceptData(undefined, CN_INTERCEPT_FILE);
+  }
+
+  protected readIdeSqliteTokens(sessionId: string): ReturnType<typeof readSqliteTokensForSession> {
+    return readSqliteTokensForSession(sessionId);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     const rawEntries = await this.readHookJsonl();
-    if (rawEntries.length === 0) return [];
+    const native = await this.transcriptSource.read(this.getState().extra);
+    for (const record of native.records) {
+      const entry = await this.transformRecord(record);
+      if (entry) rawEntries.push(entry);
+    }
+    if (rawEntries.length === 0) {
+      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      return [];
+    }
 
     const turnGroups = this.groupByTurn(rawEntries);
 
@@ -207,7 +234,7 @@ export class QoderCnTraceInput extends BaseInput {
         // token counts and carry only `credits`, same as the international one.
         // The intercept joins on an exact gen_ai.response.id, so its usefulness
         // does not depend on whether segments have landed.
-        interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
+        interceptData ??= await this.readCliIntercept();
         enrichCliPrimary(
           sessionEntries,
           interceptData.systemPrompt?.content,
@@ -222,7 +249,7 @@ export class QoderCnTraceInput extends BaseInput {
       } else {
         // Intentionally ignores matchedDbPath: agent.type must never be derived from
         // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
-        const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
+        const { rows: sqliteRows } = await this.readIdeSqliteTokens(sessionId);
         enrichIdeTurn(sessionEntries, sqliteRows);
       }
 
@@ -266,6 +293,7 @@ export class QoderCnTraceInput extends BaseInput {
     for (const [, turnEntries] of noSessionTurnGroups) {
       ordered.push(...turnEntries);
     }
+    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
     return ordered;
   }
 
@@ -297,7 +325,7 @@ export class QoderCnTraceInput extends BaseInput {
     const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
     try {
-      const buf = Buffer.alloc(stat.size - offset);
+      const buf = Buffer.alloc(Math.min(16 * 1024 * 1024, stat.size - offset));
       const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
       if (runtime && readStartedAt !== undefined) {

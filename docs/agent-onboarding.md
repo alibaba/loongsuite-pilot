@@ -335,6 +335,56 @@ For a working reference, see
 `tests/unit/hooks/workbuddy-hook-event-writer.test.ts` and
 `tests/unit/inputs/workbuddy-input.test.ts`.
 
+### Qoder / QoderCN transcript ownership
+
+Both adapters use a thin Hook and a collector-owned incremental reader, following
+Codex's lifecycle notification/background parsing pattern. The Hook publishes
+bounded session/path/size metadata and invocation identity/context snapshots. It
+does not read transcript bodies, query CLI login status, or spawn retry workers.
+Synchronous Interceptor policy evaluation remains a separate path.
+
+`state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/source.json` preserves the
+first observation. `events/` coalesces identical watermark/event/context notices.
+Each notice is at most 16 KiB, with up to 128 distinct notices per source. A
+short per-source metadata gate reserves capacity before publication, including
+competing Hook processes. Reclamation uses the same gate and checks the file
+generation so an old ACK cannot delete a newly published notice. Hook contention
+has a 25 ms wait budget; native parsing and CLI commands never run inside this
+gate. This does not impose a hard timeout on synchronous OS I/O. A
+capacity condition produces a rate-limited diagnostic; existing sources continue
+native polling. Bodies remain in Agent-owned files. Scalar offsets use the
+existing Input StateStore; covered notices are reclaimed on the following cycle
+after its save. Source descriptors and scalar cursors grow with known sessions;
+there is no lifetime session admission cap or age-based deletion of unread data.
+
+Each Input serializes collection. A normal cycle scans up to 4 MiB, visits 64
+sources and completes 32 Turns. Completing a line or restoring an evicted active
+Turn can exceed this soft scan budget. One Turn is limited to 16 MiB / 8,192
+records, the body cache to 32 MiB of source bytes, and the metadata cache to 4 MiB.
+These are read/cache budgets, not process RSS limits. Oversized records/Turns,
+corrupt metadata and I/O failures defer that source with its cursor intact and a
+rate-limited diagnostic; other sources continue.
+
+Native and metadata opens verify the opened handle is a regular file. On Unix,
+nonblocking open also prevents a path replaced with a FIFO between `stat` and
+`open` from stranding collection. Rejected handles are closed and leave the
+previous cursor intact, allowing recovery when the file is repaired.
+
+A first UserPromptSubmit starts from the observed complete-line watermark and
+waits for the new user row. A first Stop searches backward for the current real
+user message instead of replaying the full history. Later reads use byte offsets,
+preserving partial lines, active Turns and restart recovery. Late third-party
+Hook progress does not define a new Turn. A last-prompt, SessionEnd or next real
+user row seals a range; a terminal-only tail waits for stability and a five-second
+writer grace period inside the collector. Existing tool/token enrichment and
+shared outputs remain in use.
+
+Upgrade converts legacy per-session line cursors into byte offsets in bounded
+chunks, and defers takeover while an old retry worker is alive. Existing Hook
+history JSONL is still consumed incrementally; deleting checkpoints or native
+sessions is unnecessary. Rollback does not consume the new byte cursor: verify
+its data boundary using the target version's original history recovery policy.
+
 ## Register The Agent
 
 When a custom input class is needed:
