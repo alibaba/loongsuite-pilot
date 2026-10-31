@@ -11,6 +11,8 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 - `curl` or `wget`
 - PowerShell 5.1 or later on Windows
 
+Linux RISC-V64 requires system `riscv64` Node/npm with loadable `node:sqlite` (the same requirement above); the pinned guest uses Node 22.22.2. SQLite is provided by Node and zstd-napi has been removed, so no native-addon build is needed. See the [RISC-V installation and verification guide](riscv64.md) for rejection/recovery behavior, acceptance scope and release status.
+
 ## Install From Public Package On Linux Or macOS
 
 ```bash
