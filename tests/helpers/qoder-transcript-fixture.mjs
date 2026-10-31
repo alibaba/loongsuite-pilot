@@ -25,4 +25,3 @@ export function readTranscriptSnapshot(transcriptPath, { includeContentHash = fa
     return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
   }
 }
-

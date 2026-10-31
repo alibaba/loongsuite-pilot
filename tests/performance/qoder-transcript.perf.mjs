@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -14,6 +15,11 @@ const [baseline, output, node] = process.argv.slice(2);
 if (!baseline || !output || !node) throw new Error('Expected baseline Hook directory, fresh output directory, and Node executable');
 fs.mkdirSync(output, { recursive: false, mode: 0o700 });
 const report = { environment: { platform: os.platform(), os: os.release(), arch: os.arch(), node },
+  sources: Object.fromEntries([
+    ['baselineProcessor', path.join(baseline, 'qoder-hook-processor.mjs')],
+    ['candidateProcessor', path.join(candidate, 'qoder-hook-processor.mjs')],
+    ['candidateCollector', path.join(candidate, 'qoder/transcript-collector.mjs')],
+  ].map(([name, file]) => [name, crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')])),
   scope: 'Synthetic OS execution; full shell wrapper plus collector parser. Token joins/trace export validated separately. No OS reset test.',
   limits: { aggregateRSSMiB: 1536, oldSpaceMiB: 256, retrySpawns: 64, retryGeneration: 3 }, scale: [], natural: [] };
 const rows = file => {
