@@ -14,6 +14,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import {
   parseArgs,
   parseStdinPayload,
@@ -38,6 +39,23 @@ import {
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import {
+  pidAlive,
+  tryAcquireLease,
+  releaseLease,
+  tryAcquireParser,
+  reserveRetry,
+  transferRetry,
+  receiveRetry,
+  releaseRetry,
+} from './shared/qoder-resource-guard.mjs';
+
+const RESOURCE_GUARD_DIR = path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-resource-guards');
+const MAX_RETRY_ATTEMPTS = 3;
+const MAX_RETRY_LIFETIME_MS = 60_000;
+export const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+export const MAX_TRANSCRIPT_LINE_BYTES = 4 * 1024 * 1024;
+export const MAX_TRANSCRIPT_LINES = 100_000;
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
@@ -269,16 +287,17 @@ async function readRetryUserIdentity() {
 }
 
 // --- Per-transcript processing lock -----------------------------------------
-// Every Stop can create a detached retry. Serialize the complete read -> append
+// Stops can create capacity-limited detached retries. Serialize read -> append
 // -> cursor-advance transaction for one transcript so duplicate or adjacent
 // retries cannot commit from the same stale cursor. Contenders wait and re-read
-// state after acquiring the lock; they never treat lock contention as a reason
-// to discard a distinct Turn.
+// state after acquiring the lock; distinct Turns are not coalesced by the retry
+// reservation, but capacity exhaustion and retry expiry may defer collection.
 //
 // The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains JSON
 // `{ pid, sessionId, startedAt }`.
 
 export const RETRY_LOCK_DIR = path.join(HOOKS_DIR, '.retry-locks');
+// Retained for callers importing the former timeout; it no longer evicts live owners.
 export const RETRY_LOCK_MAX_AGE_MS = 60_000;
 export const RETRY_LOCK_WAIT_TIMEOUT_MS = 15_000;
 export const RETRY_LOCK_POLL_INTERVAL_MS = 25;
@@ -288,15 +307,7 @@ export function retryLockPath(transcriptPath, dir = RETRY_LOCK_DIR) {
   return path.join(dir, `${hash}.lock`);
 }
 
-export function pidAlive(pid) {
-  if (!pid || typeof pid !== 'number') return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e && e.code === 'EPERM';
-  }
-}
+export { pidAlive };
 
 export function readRetryLock(lockPath) {
   try {
@@ -309,51 +320,15 @@ export function readRetryLock(lockPath) {
 
 export function isRetryLockStale(lock) {
   if (!lock) return true;
-  const age = Date.now() - (Number(lock.startedAt) || 0);
-  if (age > RETRY_LOCK_MAX_AGE_MS) return true;
   return !pidAlive(lock.pid);
 }
 
 export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_DIR) {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const payload = JSON.stringify({ pid: process.pid, sessionId, startedAt: Date.now() });
-    try {
-      const handle = fs.openSync(lockPath, 'wx');
-      fs.writeSync(handle, payload);
-      fs.closeSync(handle);
-      return true;
-    } catch (err) {
-      if (err && err.code === 'EEXIST') {
-        const existing = readRetryLock(lockPath);
-        if (isRetryLockStale(existing)) {
-          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
-          try {
-            const handle = fs.openSync(lockPath, 'wx');
-            fs.writeSync(handle, payload);
-            fs.closeSync(handle);
-            return true;
-          } catch { return false; }
-        }
-        return false;
-      }
-      return false;
-    }
-  } catch {
-    return false;
-  }
+  return !!tryAcquireLease(retryLockPath(transcriptPath, dir), { sessionId });
 }
 
 export function releaseRetryLock(transcriptPath, dir = RETRY_LOCK_DIR) {
-  try {
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const existing = readRetryLock(lockPath);
-    // Only release if we own the lock (avoid wiping a peer's lock on crash recovery)
-    if (existing && existing.pid === process.pid) {
-      fs.unlinkSync(lockPath);
-    }
-  } catch { /* best-effort */ }
+  releaseLease({ file: retryLockPath(transcriptPath, dir) });
 }
 
 export async function acquireRetryLock(
@@ -436,6 +411,55 @@ function computeDurationMs(startNanos, endNanos) {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (!args.includes('--retry')) return processInvocation(args);
+
+  // stdin is closed only AFTER the spawning parent transfers both reservations.
+  const userIdentity = await readRetryUserIdentity();
+  const { agentId } = parseArgs();
+  const arg = name => {
+    const index = args.indexOf(name);
+    return index >= 0 ? args[index + 1] : undefined;
+  };
+  const transcriptPath = arg('--transcript');
+  const sessionId = arg('--session');
+  if (!args.includes('--transcript') || !args.includes('--session') || !transcriptPath || !sessionId) return;
+  const reservation = args.includes('--retry-token')
+    ? receiveRetry(RESOURCE_GUARD_DIR, arg('--retry-slot'), arg('--retry-token'))
+    : reserveRetry(RESOURCE_GUARD_DIR, retryKey(agentId, transcriptPath, sessionId, arg('--trigger-end-line')));
+  if (!reservation) {
+    logDebug(agentId, 'Retry coalesced or capacity unavailable; cursor unchanged');
+    return;
+  }
+  const deadline = Date.now() + MAX_RETRY_LIFETIME_MS;
+  try {
+    for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS && Date.now() < deadline; attempt++) {
+      if (await processInvocation(args, userIdentity, deadline) !== 'retry') return;
+      if (attempt + 1 < MAX_RETRY_ATTEMPTS) {
+        const backoff = Math.min(retryDelayMs() * (2 ** attempt), 10_000, Math.max(0, deadline - Date.now()));
+        await new Promise(resolve => setTimeout(resolve, backoff));
+      }
+    }
+    logDebug(agentId, 'Retry budget exhausted; cursor unchanged, no successor process spawned');
+  } finally {
+    releaseRetry(reservation);
+  }
+}
+
+function retryDelayMs() {
+  return clampInteger(process.env.HOOK_RETRY_DELAY, 5000, 0, 10_000);
+}
+
+function retryKey(agentId, transcriptPath, sessionId, triggerEndLine) {
+  return JSON.stringify([agentId, path.resolve(transcriptPath), sessionId, String(triggerEndLine)]);
+}
+
+function usableSnapshot(snapshot, agentId) {
+  if (snapshot.reason === 'ok') return true;
+  logDebug(agentId, `Transcript deferred: ${snapshot.reason}; cursor unchanged`);
+  return false;
+}
+
+async function processInvocation(args, userIdentityFromRetry, deadline = Infinity) {
   const isRetry = args.includes('--retry');
 
   // Retry mode: called by background subprocess after delay, reads transcript directly
@@ -453,7 +477,7 @@ async function main() {
     const { agentId, logPrefix } = parseArgs();
     if (!transcriptPath || !sessionId) return;
     logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
-    const userIdentity = await readRetryUserIdentity();
+    const userIdentity = userIdentityFromRetry;
     const runtimeConfig = {
       ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
       ...(userIdentity ? { userIdentity } : {}),
@@ -463,24 +487,28 @@ async function main() {
     // retries therefore retain commit order while later retries wait. The wait
     // time counts toward HOOK_RETRY_DELAY, so a contender does not sleep for an
     // extra five seconds after its predecessor finishes.
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
+    const retryDelay = retryDelayMs();
     const lockWaitStartedAt = Date.now();
     const lockAcquired = await acquireRetryLock(transcriptPath, sessionId, {
-      waitMs: process.env.HOOK_RETRY_LOCK_WAIT_MS,
+      waitMs: Math.min(
+        clampInteger(process.env.HOOK_RETRY_LOCK_WAIT_MS, RETRY_LOCK_WAIT_TIMEOUT_MS, 0, RETRY_LOCK_WAIT_TIMEOUT_MS),
+        Math.max(0, deadline - Date.now()),
+      ),
       pollMs: process.env.HOOK_RETRY_LOCK_POLL_MS,
     });
     if (!lockAcquired) {
-      logDebug(agentId, `Retry lock wait timed out; rescheduling ${transcriptPath}`);
-      await spawnDelayedRetry(
-        agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
-      );
-      return;
+      logDebug(agentId, `Retry lock wait timed out; bounded in-process retry for ${transcriptPath}`);
+      return 'retry';
     }
+    let parserLease;
     try {
       const remainingDelay = retryDelay - (Date.now() - lockWaitStartedAt);
       if (remainingDelay > 0) {
         await new Promise(r => setTimeout(r, remainingDelay));
       }
+      if (Date.now() >= deadline) return 'retry';
+      parserLease = tryAcquireParser(RESOURCE_GUARD_DIR);
+      if (!parserLease) return 'retry';
 
       let targetWindow = null;
       let retrySnapshot = null;
@@ -501,7 +529,9 @@ async function main() {
           // One immutable snapshot per poll supplies both EOF/cursor validation
           // and turn-boundary discovery. The successful snapshot is passed
           // directly to processTranscript, so it is never read again.
+          retrySnapshot = null;
           retrySnapshot = readTranscriptSnapshot(transcriptPath, { includeContentHash: true });
+          if (!usableSnapshot(retrySnapshot, agentId)) return;
           range = getLineRangeInfo(
             agentId,
             transcriptPath,
@@ -547,6 +577,7 @@ async function main() {
       } else {
         // Compatibility with a retry spawned by an older deployed wrapper.
         retrySnapshot = readTranscriptSnapshot(transcriptPath);
+        if (!usableSnapshot(retrySnapshot, agentId)) return;
         range = getLineRangeInfo(
           agentId,
           transcriptPath,
@@ -569,12 +600,11 @@ async function main() {
         },
       );
       if (committed === false) {
-        logDebug(agentId, `Retry commit failed; rescheduling ${transcriptPath}`);
-        await spawnDelayedRetry(
-          agentId, transcriptPath, sessionId, logPrefix, cwd, triggerEndLine, userIdentity,
-        );
+        logDebug(agentId, `Retry commit failed; bounded in-process retry for ${transcriptPath}`);
+        return 'retry';
       }
     } finally {
+      releaseLease(parserLease);
       releaseRetryLock(transcriptPath);
     }
     return;
@@ -585,16 +615,33 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const { transcriptPath, sessionId, cwd, extra, parentBusinessInfo } = payload;
+  const { sessionId } = payload;
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
   if (sessionId) {
     recordUpstreamContextOnce({ agentId, sessionId, dataDir: path.dirname(LOONGSUITE_PILOT_LOGS_BASE_DIR) });
   }
 
+  // CN still has older deployments registered for every tool event. All content
+  // and timing is available in the Stop transcript; do not reparse it per tool.
+  if (['PreToolUse', 'PostToolUse', 'UserPromptSubmit'].includes(payload.hookEventName)) return;
+  const parserLease = tryAcquireParser(RESOURCE_GUARD_DIR);
+  if (!parserLease) {
+    logDebug(agentId, 'Parser capacity unavailable; cursor unchanged');
+    return;
+  }
+  try {
+    return await processNormalSnapshot(agentId, logPrefix, payload);
+  } finally {
+    releaseLease(parserLease);
+  }
+}
+
+async function processNormalSnapshot(agentId, logPrefix, { transcriptPath, sessionId, cwd, extra, parentBusinessInfo }) {
   // Read once: this snapshot supplies EOF, incomplete detection, Turn parsing,
   // and the eventual processor input.
-  const snapshot = readTranscriptSnapshot(transcriptPath);
+  let snapshot = readTranscriptSnapshot(transcriptPath);
+  if (!usableSnapshot(snapshot, agentId)) return;
   const cliTranscript = agentId === 'qoder'
     && snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
   const desktopInvocation = parentBusinessInfo?.product === 'app';
@@ -620,7 +667,7 @@ async function main() {
 
   const startLine = range.startLine;
   const endLine = range.endLine;
-  const parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
+  let parsed = snapshot.rows.slice(startLine, endLine).filter(Boolean);
   logDebug(agentId, `Read ${parsed.length} lines (range: ${startLine}-${endLine})`);
   if (!parsed.length) {
     if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
@@ -628,7 +675,10 @@ async function main() {
       return;
     }
     try {
+      snapshot = null;
+      parsed = null;
       const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
+      if (!usableSnapshot(lockedSnapshot, agentId)) return;
       const lockedRange = getLineRangeInfo(
         agentId,
         transcriptPath,
@@ -661,12 +711,12 @@ async function main() {
 
   // Detect incomplete transcript (race condition in print/non-interactive mode:
   // Stop hook fires BEFORE transcript is fully written, and writes happen AFTER hook returns).
-  // Solution: spawn a background retry that runs after 5s delay.
+  // Solution: reserve capacity and spawn a bounded background retry.
   // last-prompt is the authoritative end-of-transcript marker written by qodercli on exit.
   // If absent, the file is still being flushed (race: Stop hook fires before transcript flush).
   const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
   if (parsed.length > 0 && !hasLastPrompt) {
-    logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
+    logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Scheduling bounded retry.`);
     // Do not suppress a spawn just because a retry currently owns the lock:
     // the new Stop may belong to a distinct queued Turn. The child waits, then
     // re-reads the cursor and either commits that Turn or proves it is a duplicate.
@@ -685,7 +735,10 @@ async function main() {
   try {
     // Re-read both snapshot and cursor under the lock; the values inspected
     // above are only a fast-path completion check and may already be stale.
+    snapshot = null;
+    parsed = null;
     const lockedSnapshot = readTranscriptSnapshot(transcriptPath);
+    if (!usableSnapshot(lockedSnapshot, agentId)) return;
     const lockedRange = getLineRangeInfo(
       agentId,
       transcriptPath,
@@ -717,9 +770,17 @@ async function spawnDelayedRetry(
   triggerEndLine,
   userIdentity,
 ) {
+  const reservation = reserveRetry(
+    RESOURCE_GUARD_DIR, retryKey(agentId, transcriptPath, sessionId, triggerEndLine),
+  );
+  if (!reservation) {
+    logDebug(agentId, 'Retry coalesced or capacity unavailable; cursor unchanged');
+    return;
+  }
   const nodebin = process.argv[0];
   const script = fileURLToPath(import.meta.url);
   const spawnArgs = [
+    '--max-old-space-size=256',
     script,
     '--agent-id', agentId,
     '--log-prefix', logPrefix,
@@ -727,35 +788,48 @@ async function spawnDelayedRetry(
     '--transcript', transcriptPath,
     '--session', sessionId,
     '--trigger-end-line', String(triggerEndLine),
+    '--retry-slot', String(reservation.slot),
+    '--retry-token', reservation.capacity.token,
     ...(cwd ? ['--cwd', cwd] : []),
   ];
-  const child = spawn(nodebin, spawnArgs, {
-    detached: true,
-    stdio: ['pipe', 'ignore', 'ignore'],
-    env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
-  });
-  if (child.stdin) {
-    await new Promise(resolve => {
-      const done = () => resolve();
-      child.stdin.once('error', done);
-      child.stdin.end(userIdentity ? JSON.stringify(userIdentity) : '', done);
+  let child;
+  try {
+    child = spawn(nodebin, spawnArgs, {
+      detached: true,
+      stdio: ['pipe', 'ignore', 'ignore'],
+      env: { ...process.env, HOOK_RETRY_DELAY: String(retryDelayMs()) },
     });
+    await new Promise((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    if (!transferRetry(reservation, child.pid)) throw new Error('Retry reservation transfer failed');
+    if (!child.stdin) throw new Error('Retry stdin unavailable');
+    await new Promise((resolve, reject) => {
+      child.stdin.once('error', reject);
+      child.stdin.end(userIdentity ? JSON.stringify(userIdentity) : '', resolve);
+    });
+    child.unref();
+    logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
+  } catch (error) {
+    try { child?.kill(); } catch { /* already exited */ }
+    releaseRetry(reservation);
+    logDebug(agentId, `Retry spawn failed: ${error.message}; cursor unchanged`);
   }
-  child.unref();
-  logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
 }
 
 async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd, opts) {
   // Handle retry delay
   const delayApplied = !!(opts && opts.delayApplied);
   if (!delayApplied) {
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
+    const retryDelay = clampInteger(process.env.HOOK_RETRY_DELAY, 0, 0, 10_000);
     if (retryDelay > 0) {
       await new Promise(r => setTimeout(r, retryDelay));
     }
   }
 
   const snapshot = opts?.snapshot || readTranscriptSnapshot(transcriptPath);
+  if (!usableSnapshot(snapshot, agentId)) return;
 
   // A Stop-anchored retry receives an exact Turn window ending at an explicit
   // terminal marker, the next prompt boundary, or a stable EOF after Stop. Do
@@ -918,28 +992,75 @@ export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agent
   return turnSegments;
 }
 
-export function readTranscriptSnapshot(transcriptPath, { includeContentHash = false } = {}) {
+export function readTranscriptSnapshot(transcriptPath, {
+  includeContentHash = false,
+  maxBytes = MAX_TRANSCRIPT_BYTES,
+  maxLineBytes = MAX_TRANSCRIPT_LINE_BYTES,
+  maxLines = MAX_TRANSCRIPT_LINES,
+} = {}) {
+  const empty = reason => ({ lineCount: 0, rows: [], contentHash: '', reason });
+  // Options can lower the safety budgets for tests or constrained hosts, never
+  // remove them. No readFileSync/string split of the entire transcript.
+  maxBytes = clampInteger(maxBytes, MAX_TRANSCRIPT_BYTES, 1, MAX_TRANSCRIPT_BYTES);
+  maxLineBytes = clampInteger(maxLineBytes, MAX_TRANSCRIPT_LINE_BYTES, 1, MAX_TRANSCRIPT_LINE_BYTES);
+  maxLines = clampInteger(maxLines, MAX_TRANSCRIPT_LINES, 1, MAX_TRANSCRIPT_LINES);
+  let fd;
   try {
-    if (!fs.existsSync(transcriptPath)) {
-      return { lineCount: 0, rows: [], contentHash: '', reason: 'transcript-missing' };
+    // O_NONBLOCK prevents a FIFO supplied as a transcript from hanging the hook.
+    fd = fs.openSync(transcriptPath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return empty('not-regular-file');
+    if (stat.size > maxBytes) return empty('transcript-byte-limit');
+    const buffer = Buffer.alloc(Math.min(64 * 1024, maxBytes));
+    const decoder = new StringDecoder('utf8');
+    const hash = includeContentHash ? crypto.createHash('sha1') : null;
+    const rows = [];
+    let pending = '';
+    let lineCount = 0;
+    let offset = 0;
+    const addLine = line => {
+      if (lineCount >= maxLines) return 'transcript-line-count-limit';
+      if (Buffer.byteLength(line, 'utf8') > maxLineBytes) return 'transcript-line-byte-limit';
+      const index = lineCount++;
+      rows.length = lineCount;
+      const text = line.trim();
+      if (text) {
+        try { rows[index] = JSON.parse(text); } catch { /* skip malformed line */ }
+      }
+      return null;
+    };
+    // Freeze EOF at open time; continuous appends cannot extend this read forever
+    // or defeat the byte budget checked above.
+    while (offset < stat.size) {
+      const length = fs.readSync(fd, buffer, 0, Math.min(buffer.length, stat.size - offset), offset);
+      if (!length) return empty('transcript-changed');
+      offset += length;
+      hash?.update(buffer.subarray(0, length));
+      pending += decoder.write(buffer.subarray(0, length));
+      let start = 0;
+      let end;
+      while ((end = pending.indexOf('\n', start)) >= 0) {
+        const reason = addLine(pending.slice(start, end));
+        if (reason) return empty(reason);
+        start = end + 1;
+      }
+      pending = pending.slice(start);
+      if (Buffer.byteLength(pending, 'utf8') > maxLineBytes) return empty('transcript-line-byte-limit');
     }
-    const content = fs.readFileSync(transcriptPath, 'utf-8');
-    const lines = content.split('\n');
-    const lineCount = content.length > 0 && content[content.length - 1] !== '\n'
-      ? lines.length
-      : Math.max(0, lines.length - 1);
-    const rows = new Array(lineCount);
-    for (let i = 0; i < lineCount; i++) {
-      const text = lines[i].trim();
-      if (!text) continue;
-      try { rows[i] = JSON.parse(text); } catch { /* skip malformed line */ }
+    pending += decoder.end();
+    if (pending) {
+      const reason = addLine(pending);
+      if (reason) return empty(reason);
     }
-    const contentHash = includeContentHash
-      ? crypto.createHash('sha1').update(content).digest('hex')
-      : '';
+    if (fs.fstatSync(fd).size < stat.size) return empty('transcript-changed');
+    const contentHash = hash ? hash.digest('hex') : '';
     return { lineCount, rows, contentHash, reason: 'ok' };
-  } catch {
-    return { lineCount: 0, rows: [], contentHash: '', reason: 'read-failed' };
+  } catch (error) {
+    return empty(error?.code === 'ENOENT' ? 'transcript-missing' : 'read-failed');
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
   }
 }
 
