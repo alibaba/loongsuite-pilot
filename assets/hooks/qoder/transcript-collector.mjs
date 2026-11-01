@@ -22,6 +22,13 @@ const MAX_CONTEXT_FILES = 256;
 const MAX_METADATA_BYTES = 4 * 1024 * 1024;
 const MAX_WARNING_KEYS = 1024;
 const MAX_TURN_RECORDS = 8192;
+const MAX_TAIL_SCANS = 256;
+const MAX_DEFERRED_SOURCES = 1024;
+const DEFERRED_CONTENT_ERRORS = new Set([
+  'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
+  'bootstrap-record-byte-limit', 'invalid-json-line',
+]);
+const fileVersion = stat => [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
 const eventOf = row => row?.type === 'progress' ? row.data?.hookEvent ?? '' : '';
 const clone = value => JSON.parse(JSON.stringify(value));
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -99,6 +106,10 @@ export class QoderTranscriptCollector {
     this.warned = new Map();
     this.metadata = new Map();
     this.metadataBytes = 0;
+    // Physical tail progress is disposable: semantic checkpoints still end at
+    // complete records. Keep only a small append witness, never partial bodies.
+    this.tailScans = new Map();
+    this.deferredSources = new Map();
     this.discovery = null;
     this.pendingSources = [];
     this.cleanupRotation = 0;
@@ -111,6 +122,7 @@ export class QoderTranscriptCollector {
     this.stopped = true;
     this.cache.clear(); this.cacheSize = 0;
     this.metadata.clear(); this.metadataBytes = 0;
+    this.tailScans.clear(); this.deferredSources.clear();
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
@@ -197,9 +209,17 @@ export class QoderTranscriptCollector {
       if (!validSource(source, this.agentId, key)) { this.report(key, 'invalid-source'); continue; }
       const old = next[key];
       let checkpoint = old ? clone(old) : null;
+      let version;
       try {
         const stat = await fs.stat(source.transcriptPath);
         if (!stat.isFile()) continue;
+        version = fileVersion(stat);
+        const deferred = this.deferredSources.get(key);
+        if (deferred?.version === version) {
+          this.report(key, deferred.reason);
+          continue;
+        }
+        this.deferredSources.delete(key);
         if (await this.legacyWorkerAlive(source.transcriptPath)) continue;
         if (source.suppliedPath && source.suppliedPath !== source.transcriptPath && await this.legacyWorkerAlive(source.suppliedPath)) continue;
         const contexts = observedContexts.filter(context => context.inode === undefined || context.inode === stat.ino);
@@ -210,6 +230,7 @@ export class QoderTranscriptCollector {
           checkpoint = await this.initialize(source, contexts, stat, !old);
           if (old) checkpoint.recoveryReason = 'truncated';
           this.dropCache(key);
+          this.tailScans.delete(source.transcriptPath);
         }
         const batch = await this.scanSource(source, contexts, checkpoint, stat);
         if (this.stopped) break;
@@ -226,6 +247,10 @@ export class QoderTranscriptCollector {
         changed ||= JSON.stringify(old) !== JSON.stringify(checkpoint);
       } catch (error) {
         this.dropCache(key);
+        if (version && DEFERRED_CONTENT_ERRORS.has(error.message)) {
+          if (this.deferredSources.size >= MAX_DEFERRED_SOURCES) this.deferredSources.delete(this.deferredSources.keys().next().value);
+          this.deferredSources.set(key, { version, reason: error.message });
+        }
         this.report(key, error.code ?? error.message);
         // Retain the prior checkpoint and published observations on any I/O,
         // parse, capacity or cancellation failure. Other sources still run.
@@ -360,42 +385,89 @@ export class QoderTranscriptCollector {
     let lineStart = start;
     let pending = [];
     let pendingBytes = 0;
+    let replay = false;
+    let lastBuffer;
     try {
-      while (position < end && (this.remainingBytes > 0 || pendingBytes > 0 || rebuild)) {
-        const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, end - position));
+      const stat = await handle.stat();
+      let tail = !rebuild && this.tailScans.get(file);
+      if (tail && tail.start === start && tail.ino === stat.ino && tail.dev === stat.dev
+        && end >= tail.position && stat.size >= tail.size) {
+        let valid = tail.version === fileVersion(stat);
+        if (!valid && stat.size > tail.size) {
+          const witness = Buffer.alloc(tail.witness.length);
+          const read = await this.read(handle, witness, tail.position - witness.length);
+          valid = read === witness.length && witness.equals(tail.witness);
+        }
+        if (valid) {
+          position = tail.position;
+          pendingBytes = position - start;
+          replay = pendingBytes > 0;
+          lastBuffer = tail.witness;
+          if (position === end && (!allowFinal || (tail.version === fileVersion(stat) && tail.finalTried))) return;
+        } else tail = null;
+      } else tail = null;
+      if (!tail && !rebuild) this.tailScans.delete(file);
+      const fullLine = async (from, to) => {
+        const bytes = to - from;
+        if (bytes > this.maxTurnBytes) throw new Error('record-byte-limit');
+        const body = Buffer.alloc(bytes);
+        let offset = 0;
+        while (offset < bytes) {
+          const read = await this.read(handle, body.subarray(offset, Math.min(bytes, offset + CHUNK_BYTES)), from + offset);
+          if (!read) throw new Error('source-changed-during-read');
+          offset += read;
+        }
+        return body;
+      };
+      while (position < end && (this.remainingBytes > 0 || rebuild)) {
+        const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, end - position,
+          rebuild ? CHUNK_BYTES : Math.max(1, this.remainingBytes)));
         const read = await this.read(handle, buffer, position);
         if (!read) break;
         position += read;
+        lastBuffer = buffer.subarray(0, read);
         let cursor = 0;
         while (cursor < read) {
           const newline = buffer.indexOf(0x0a, cursor);
           const stop = newline >= 0 && newline < read ? newline : read;
           const fragment = buffer.subarray(cursor, stop);
-          pending.push(fragment);
+          if (!replay) pending.push(fragment);
           pendingBytes += fragment.length;
           if (pendingBytes > this.maxTurnBytes) throw new Error('record-byte-limit');
           if (stop === read) break;
-          const text = Buffer.concat(pending, pendingBytes).toString('utf8').trim();
           const lineEnd = position - read + stop + 1;
+          const body = replay ? await fullLine(lineStart, lineEnd - 1) : Buffer.concat(pending, pendingBytes);
+          const text = body.toString('utf8').trim();
           let row = null;
           if (text) {
             try { row = JSON.parse(text); } catch { throw new Error('invalid-json-line'); }
             if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('invalid-json-line');
             this.metrics.recordsParsed++;
           }
+          if (!rebuild) this.tailScans.delete(file);
           yield { row, start: lineStart, end: lineEnd, bytes: lineEnd - lineStart };
           lineStart = lineEnd;
           pending = [];
           pendingBytes = 0;
+          replay = false;
           cursor = stop + 1;
         }
       }
+      if (pendingBytes && !rebuild) {
+        if (this.tailScans.size >= MAX_TAIL_SCANS) this.tailScans.delete(this.tailScans.keys().next().value);
+        tail = { start: lineStart, position, size: stat.size, ino: stat.ino, dev: stat.dev,
+          version: fileVersion(stat), witness: Buffer.from(lastBuffer.subarray(-64)), finalTried: false };
+        this.tailScans.set(file, tail);
+      }
       if (allowFinal && position === end && pendingBytes) {
+        if (tail) tail.finalTried = true;
         let row;
-        try { row = JSON.parse(Buffer.concat(pending, pendingBytes).toString('utf8').trim()); }
+        const body = replay ? await fullLine(lineStart, end) : Buffer.concat(pending, pendingBytes);
+        try { row = JSON.parse(body.toString('utf8').trim()); }
         catch { return; } // Incomplete native write: preserve its starting byte.
         if (!row || typeof row !== 'object' || Array.isArray(row)) return;
         this.metrics.recordsParsed++;
+        if (!rebuild) this.tailScans.delete(file);
         yield { row, start: lineStart, end, bytes: end - lineStart };
       }
     } finally { await handle.close(); }

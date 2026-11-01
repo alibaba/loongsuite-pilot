@@ -78,6 +78,24 @@ limit aggregate RSS to 1,536 MiB, Node old space to 256 MiB, and retry creation 
 128 MiB sparse-file test forbids both transcript reads and child spawning in the
 Hook path; it passes for both products.
 
+### Incomplete and deferred source protection
+
+The collector also retains bounded, process-local physical scan positions for
+up to 256 incomplete tails, with only a 64-byte append witness and no body cache.
+Unchanged tails stop reading after one stable EOF decode attempt. Appends search
+only new bytes, then reread a completed record once for UTF-8 decoding under the
+16 MiB record limit. The ordinary scan budget also applies inside a single line.
+Replacement, truncation, same-size modification or a changed append witness
+invalidates physical progress; restart/eviction permits a bounded rescan.
+
+Oversized, dense or malformed sources keep their semantic checkpoint and emit
+rate-limited diagnostics. Up to 1,024 deferred source versions are remembered so
+an unchanged rejected file is not parsed every poll; a changed file is retried.
+This deliberately defers that source until repair rather than skipping an
+oversized record or promising lossless collection of arbitrarily large Turns.
+These metadata budgets are not RSS limits. A finite append witness cannot prove
+that arbitrary earlier bytes were not modified concurrently.
+
 ## Correctness and native validation
 
 - A four-process last-slot race admits exactly one additional notice at the
