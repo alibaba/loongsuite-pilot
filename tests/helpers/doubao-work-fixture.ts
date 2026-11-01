@@ -1,4 +1,6 @@
-export const DOUBAO_EPOCH = Date.parse('2026-10-25T03:00:00.000Z');
+// Keep synthetic requests inside the production seven-day ingestion window.
+// All generated log headers, filenames and native metadata share this anchor.
+export const DOUBAO_EPOCH = Math.floor((Date.now() - 60_000) / 1000) * 1000;
 const date = new Date(DOUBAO_EPOCH);
 const pad = (value: number, length = 2) => String(value).padStart(length, '0');
 export const DOUBAO_FILE = `saman_frontend_${date.getFullYear()}.${pad(date.getMonth() + 1)}${pad(date.getDate())}.0.log`;
