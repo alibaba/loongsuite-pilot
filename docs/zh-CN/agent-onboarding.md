@@ -340,6 +340,19 @@ StateStore 保存。已经保存并覆盖的通知在下一轮清理；来源描
 稳定和最多 5 秒的写入宽限，等待发生在 collector 中。工具及 Token 仍走原有
 Qoder/QoderCN 补全与统一输出链路。
 
+这条路径覆盖 Qoder IDE、Qoder CLI、QoderCN，以及复用 Qoder 数据目录和 SQLite
+补全的 JetBrains 版（输出标识 `qoder-idea`）。Qoder Work/Work CN 使用独立的
+Hook、解析器和 Input，不能因名称相近就视为覆盖；其旧版 Hook 仍有全量 snapshot
+读取，需要单独迁移和验收，不属于这里的 transcript reader。
+
+Trace 转换时，独立会话的 ENTRY 是真正的根节点。`otel-util-genai` beta.13
+通过虚拟父节点 `0000000000000001` 沿用源 Trace ID；Pilot 的 Qoder 适配器改用
+SDK 的公开 `IdGenerator` 和根 Context 创建 ENTRY，保留同一个 Trace ID，
+不改写已结束的 Span。只有输入标记（`event.name=other`）没有有效
+`parent_span_id` 时才使用这一适配；显式上游父节点原样保留，包括值恰好为
+`0000000000000001` 的真实父节点。LLM/TOOL 事件的内部父引用不充当上游父节点。
+ENTRY、AGENT、STEP、LLM、TOOL 的数量和内容不因这一适配改变。
+
 升级时读取旧版按 session 保存的行游标并分块换算为字节偏移；仍存活的旧 retry
 worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的增量消费能力，
 不要求删除已有 checkpoint 或会话文件。回滚不复用新字节游标，需按目标版本的

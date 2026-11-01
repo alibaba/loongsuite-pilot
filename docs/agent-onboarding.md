@@ -379,6 +379,22 @@ user row seals a range; a terminal-only tail waits for stability and a five-seco
 writer grace period inside the collector. Existing tool/token enrichment and
 shared outputs remain in use.
 
+This path covers Qoder IDE, Qoder CLI, QoderCN and the JetBrains integration
+(`qoder-idea`), which reuses Qoder storage and SQLite enrichment. Qoder Work
+and Work CN have separate Hooks, parsers and Inputs. Their legacy Hook still
+reads a full snapshot and requires its own migration and acceptance; it does
+not use this transcript reader.
+
+Independent Qoder turns export ENTRY as an actual root. The beta.13 util
+converter uses a virtual parent (`0000000000000001`) to inherit the source
+Trace ID. Pilot's Qoder adapter instead uses the public SDK IdGenerator and
+root Context to create ENTRY under that same Trace ID, without modifying
+ended spans. This applies only when input markers (`event.name=other`) carry
+no valid `parent_span_id`. Explicit upstream parents, including a real parent
+whose ID happens to equal the virtual value, pass through unchanged. Internal
+LLM/TOOL parent pointers are not treated as upstream parents. Span counts,
+messages, tool results and token usage remain unchanged.
+
 Upgrade converts legacy per-session line cursors into byte offsets in bounded
 chunks, and defers takeover while an old retry worker is alive. Existing Hook
 history JSONL is still consumed incrementally; deleting checkpoints or native

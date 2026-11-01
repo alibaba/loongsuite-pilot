@@ -17,6 +17,7 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertCodexTurn } from './codex-turn-converter.js';
+import { convertQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
@@ -1289,6 +1290,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
             : agentType === 'codex' ? convertCodexTurn
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? convertQoderTurn
             : agentType === 'doubao-work' ? convertDoubaoWorkTurn
             : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
             : convertEventLogToTrace;
