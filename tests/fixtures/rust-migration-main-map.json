@@ -14655,10 +14655,10 @@
     },
     {
       "legacy": "tests/unit/validate-trace.test.mjs",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
       "source_hash": "4ba60a5cd929d81c5b6fa66306aabefaec906c0e3b1c08cfbda3aff0a452cbae",
-      "note": "Main f84 adds9 delegated topology/execution/rule-generator declarations beyond these8 unchanged cases; those9 are explicitly pending and this supplemental file is partial. Each original8 declaration is indexed with all2 extension parameters and12 required-field parameters retained. Existing real native CLI and semantic tests cover model/runtime Skill matching; pinned source hash remains exact c1fddd81. Original diagnostic substrings and known GenericPart image/compaction names were missing in native implementation: one actual original-contract assertion failed before the minimal diagnostic compatibility repair. Arbitrary untrusted type values remain redacted, and all default Cargo tests run without Node. Native and actual platform execution recorded separately.",
+      "note": "All17 fixed-main declarations covered: original8 native schema/Skill contracts,8 actual native delegation contracts and1 optional developer rule-generator contract. Golden fixture is extracted from original f84 helper, with all source mutations retained; the invalid upstream nested positive is preserved as a negative plus the minimally corrected valid positive, verified against both actual upstream JS and native validators. Native8 passed Linux glibc2.34/Rust1.99.1; optional real generator1 passed after restoring exact main1.1 metadata/scope. Actual Windows/mac execution tracked separately.",
       "cases": [
         {
           "source": {
@@ -14746,6 +14746,245 @@
               {
                 "file": "xtask/tests/trace_validate.rs",
                 "test": "native_trace_runtime_skills_and_observed_content_keep_compatibility"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L159:C3",
+            "title": "regenerating rules retains delegated topology, identity and execution scopes",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual optional developer generator preserves exact version/ENTRY/AGENT/TOOL metadata/timeRules/semanticRules; real red1(version1.0 vs1.1) repaired by exact frozen-main generator changes. Collector validation remains native.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/trace-rule-generator.test.mjs",
+            "names": [
+              "development trace-rule generator > retains delegated topology identity and execution scopes"
+            ],
+            "resources": [
+              "scripts/update-validation-rules.mjs",
+              "docs/trace-validation-rules.json"
+            ],
+            "npm_script": "test:host:trace-rules"
+          }
+        },
+        {
+          "source": {
+            "id": "L186:C3",
+            "title": "accepts independent child turns, overlapping execution and late child completion",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "accepts independent child turns, overlapping execution and late child completion ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_independent_child_turns_overlap_and_finish_after_the_parent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L195:C3",
+            "title": "accepts nested delegation under the immediate child tool without aggregating descendant usage",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "accepts nested delegation under the immediate child tool without aggregating descendant usage; original upstream positive fixture is actually invalid (LLM15..150 outside STEP15..30), reproduced with actual frozen JS validator. Native also rejects the original; correcting only that LLM end to30 makes valid nested delegation pass, without weakening containment.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_nested_delegation_excludes_descendant_usage_and_keeps_real_containment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C3",
+            "title": "recognizes a delegated-only local fragment and reports its external parent boundary",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "recognizes a delegated-only local fragment and reports its external parent boundary ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_external_fragment_requires_context_and_reports_the_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C3",
+            "title": "rejects an all-zero external delegation parent span ID",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "rejects an all-zero external delegation parent span ID ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_zero_external_parent_cannot_establish_delegation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L231:C3",
+            "title": "rejects %s corruption inside a child execution",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": [
+              "test.each(['gen_ai.session.id', 'gen_ai.turn.id'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "rejects %s corruption inside a child execution ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_both_child_identity_corruptions_point_at_its_own_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L242:C3",
+            "title": "still rejects within-agent STEP overlap, incorrect tokens and a nonfinal tool response",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "still rejects within-agent STEP overlap, incorrect tokens and a nonfinal tool response ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_within_execution_overlap_tokens_and_unfinished_final_tool_still_fail"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L255:C3",
+            "title": "keeps ordinary containment and rejects delegated work starting before its tool",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "keeps ordinary containment and rejects delegated work starting before its tool ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_ordinary_containment_and_delegated_causal_start_both_remain_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "still rejects AGENT under STEP and duplicate root AGENTs",
+            "suites": [
+              "delegated trace validation scopes"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "still rejects AGENT under STEP and duplicate root AGENTs ; all original rule IDs/status/span IDs and both identity parameters retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/delegated_history_tests.rs",
+                "test": "history_agent_under_step_and_duplicate_entry_roots_are_still_invalid"
               }
             ]
           }
@@ -16407,6 +16646,868 @@
               "assets/hooks/claude-code-fetch-intercept.mjs"
             ],
             "npm_script": "test:host:claude-fetch"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/metrics/metrics-writer.test.ts",
+      "source_hash": "9d1d21585ee5ac1596d5ba4c2696dba131bf4b5e2f65cc3ac06342dba5538aad",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Whole frozenf84 file32 declarations; actual delta2 Hookcases and empty-Hook-mirror assertion. First30 title-corresponding baseline contracts mapped to same native evidence; baseline source/hash unchanged. Do not count32 as32 newly introduced declarations.",
+      "cases": [
+        {
+          "source": {
+            "id": "L119:C3",
+            "title": "writes L1 metrics on start",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual writer.start creates nonempty L1 JSONL with version2.0.0/useru1/agent_count1 and all three raw_in fields absent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l119_l145_l394_l1_start_preserves_identity_fields_and_legacy_absences"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L145:C3",
+            "title": "calls sendStatus with pilot_status topic on L1 write",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real status recorder receives pilot_status/version2.0.0 without __topic__; old input_detail/flusher_detail/alarm_metric topics absent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l119_l145_l394_l1_start_preserves_identity_fields_and_legacy_absences"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L172:C3",
+            "title": "reports scalar snapshots in the existing L1 cycle using its exact process identity",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual start invokes trace provider exactly1; snapshot schema2/pending_conversion/agentcodex/removed3 and exact run/instance/user/version/time match pilot_status; no window_ms/rss_before_convert_bytes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l172_trace_snapshot_runs_once_in_l1_and_shares_exact_process_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L196:C3",
+            "title": "isolates runtime %s failures from existing status output and shutdown",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": [
+              "it.each(['snapshot', 'send'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both parameter cases use real Err trace provider or actual injected trace-send failure, writer.start/stop succeed and status/nonempty localL1 survives in each.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l196_snapshot_and_trace_send_failures_preserve_l1_and_clean_shutdown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L212:C3",
+            "title": "sends one row per agent and per destination on L2 flush",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual L2 sends exactly agent,input,flusher in order; exact host/IP,test-agent,in_events5,primary/raw2048/parsefailed1,sls/proj-a/store-a/out9; all3 agentraw fields absent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l212_l255_pipeline_has_exact_dimensions_then_zero_deltas"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L255:C3",
+            "title": "drains the rows, so an unchanged snapshot reports zeros",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Second actual L2 with unchanged cumulative snapshot keeps3 row types but exact agentevents/bytes,inputraw/parsefail,flusheroutentries/outbytes all0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l212_l255_pipeline_has_exact_dimensions_then_zero_deltas"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L280:C3",
+            "title": "mirrors each L2 row type to its own file on stop (final flush)",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual start then stop finalflush; actual local agent/input/flusher firstrows preserve all original type/user/agent/events/inputcalls/flusher/logstore/outentry literals.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l280_real_start_stop_mirrors_each_pipeline_row_type"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L315:C3",
+            "title": "drains Hook timing spools into hook rows and their own mirror file",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real literal Hook JSONL40+120ms is drained to exact agent,input,flusher,hook order; codex/stop/calls2/160/120/useru1/hostname plus localHookmirror asserted;second L2 has noHook.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "main_f84_source_l315_hook_spool_pipeline_and_mirror_are_consumed_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L361:C3",
+            "title": "reports hook call samples produced after startup on a clean shutdown",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual writer.start then newly created55ms Hookspool then actual writer.stop produces exactly1Hookrow calls1/55/55 and empty spooldirectory.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "main_f84_source_l361_shutdown_drains_hook_samples_created_after_startup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L385:C3",
+            "title": "takes a fresh final snapshot after an in-flight dataflow cycle",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real native append blocked on soleIO worker; stop waits with providercount1, then release leads fresh second providercall and2actual JSONL rows. Separate true scheduler abort control proves owned cycle survives caller cancellation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l315_stop_waits_for_real_inflight_write_then_takes_fresh_final_snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L420:C3",
+            "title": "does not reject stop when the final dataflow snapshot fails",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "After successful start actual final get_snapshot returnsErr; stop completes and clears owned tasks, preserving existing L1 mirror.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l350_failed_final_snapshot_does_not_reject_stop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L439:C3",
+            "title": "does not write the L2 file when snapshot has no inputs/flushers",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual emptySnapshot start/stop creates none of agent/input/flusher mirrors; also no Hook mirror per f84 added assertion.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l369_empty_snapshot_creates_no_l2_mirror_including_main_hook_type"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L465:C3",
+            "title": "keeps capture_message_disabled_agents empty for compatibility",
+            "suites": [
+              "MetricsWriter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual config cursorcapturetrue/qoderfalse preserves empty capture_message_disabled_agents in real L1 JSONL compatibility field.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l119_l145_l394_l1_start_preserves_identity_fields_and_legacy_absences"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L488:C5",
+            "title": "debounces soft memory alarms until 3 consecutive samples",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact600,620 produce no soft memory alarm;640 produces level2,soft512MB and3consecutive soft samples.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l417_soft_memory_needs_three_consecutive_soft_samples"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L506:C5",
+            "title": "alerts hard and critical memory tiers immediately",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Hard1200 immediatelylevel2/hard1024/1sample; critical2300 immediatelylevel3/critical2048/1sample.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l435_hard_and_critical_memory_alarm_immediately_and_escalate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L526:C5",
+            "title": "does not reuse hard or critical samples after falling back to soft memory tier",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both initialhard1200/critical2300 followed by full-hour advance and600,620 do not alarm;640 needs fresh3softsamples with exact messages.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l455_soft_streak_does_not_reuse_hard_or_critical_samples"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L551:C5",
+            "title": "uses one memory cooldown for same or lower tiers and lets higher tiers escalate",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Soft3 alarm then30min650 suppressed,hard1200 escalatesimmediately, subsequent700/710/720 lower tier suppressed in same memory cooldown.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l480_memory_uses_one_cooldown_but_higher_tiers_escalate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L579:C5",
+            "title": "suppresses transient CPU spikes until 3 consecutive process CPU samples",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual rawCPU81 forfirst2samples suppressed,thirdlevel2,exact3consecutive/81exceeds80 message and no cores normalization.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l508_l528_cpu_debounce_uses_raw_process_percent_and_exact_message"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L599:C5",
+            "title": "compares CPU threshold against raw process percent",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "CPU81 evaluated as raw process percent; same exact third-sample CPUmessage asserted without core-count scaling.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l508_l528_cpu_debounce_uses_raw_process_percent_and_exact_message"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L613:C5",
+            "title": "keeps CPU and memory alarms split in the same flush window",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Same drain contains exactly sorted CPU+Memory kinds with distinct CPUusage/Memoryusage messages after81/128,81/128,81/1200.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l542_cpu_and_memory_are_separate_in_the_same_drain"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L632:C5",
+            "title": "cools down repeated process resource alarms",
+            "suites": [
+              "MetricsWriter",
+              "process resource thresholds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Memory1200 alarms;1300 at30min suppressed;1300 at1hour+1ms alarms.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l561_memory_resource_reminder_waits_full_hour"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L652:C5",
+            "title": "records alarm when init_type is nohup",
+            "suites": [
+              "MetricsWriter",
+              "DEGRADED_STARTUP_ALARM"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "init-type nohup written before native construction; actual start yields degraded level2 and nohup inmessage.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l581_l602_l621_l640_startup_modes_have_original_alarm_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L673:C5",
+            "title": "records alarm when init_type is unknown (file missing)",
+            "suites": [
+              "MetricsWriter",
+              "DEGRADED_STARTUP_ALARM"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing init-type before native construction; actual start yields degraded message containing unknown.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l581_l602_l621_l640_startup_modes_have_original_alarm_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L692:C5",
+            "title": "does not record alarm when init_type is launchd",
+            "suites": [
+              "MetricsWriter",
+              "DEGRADED_STARTUP_ALARM"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "init-type launchd before construction; actual start produces no degraded startup alarm.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l581_l602_l621_l640_startup_modes_have_original_alarm_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L711:C5",
+            "title": "does not record alarm when init_type is systemd-user",
+            "suites": [
+              "MetricsWriter",
+              "DEGRADED_STARTUP_ALARM"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "init-type systemd-user before construction; actual start produces no degraded startup alarm.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l581_l602_l621_l640_startup_modes_have_original_alarm_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L732:C5",
+            "title": "UPDATER_NOT_RUNNING_ALARM does not fire during grace period",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Controlled missing updater on first L1 grace cycle does not alarm.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l661_l679_l709_updater_alarm_keeps_grace_failure_count_and_disable_gate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L750:C5",
+            "title": "UPDATER_NOT_RUNNING_ALARM fires after 2 consecutive failures post-grace",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual controlled missing updater L1 cycles1/2 grace,cycle3firstfailure noalarm,cycle4level3 updaternotrunning alarm.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l661_l679_l709_updater_alarm_keeps_grace_failure_count_and_disable_gate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L780:C5",
+            "title": "UPDATER_NOT_RUNNING_ALARM never fires when auto-update is disabled",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Same four actual L1 cycles withauto_update_enabledfalse never emit updaternotrunning.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l661_l679_l709_updater_alarm_keeps_grace_failure_count_and_disable_gate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L809:C5",
+            "title": "BROKEN_VERSION_POINTER_ALARM fires when current points to missing dir",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real native runtime package plus current->nonexistentversion produces BROKEN_VERSION_POINTER_ALARMlevel2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l738_l758_real_native_current_pointer_failure_and_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L829:C5",
+            "title": "BROKEN_VERSION_POINTER_ALARM does not fire when current is valid",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real valid signed native package/versions/current pointer succeeds withoutbrokenpointeralarm; native integrity is retained rather than weakened to old Node directory-only check.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l738_l758_real_native_current_pointer_failure_and_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L849:C5",
+            "title": "INVALID_NODE_BIN_ALARM fires when node-bin is invalid and self-heal fails",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Approved runtime architecture adaptation: missing native executable/resource package emits INVALID_RUNTIME_BIN_ALARMlevel2 with native-binary diagnostic; never invokes or modifies legacy node-bin. Old Node-specific alarm name/selfheal is replaced, not claimed identical.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l778_l810_invalid_runtime_contract_is_owned_by_native_package_health"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L881:C5",
+            "title": "INVALID_NODE_BIN_ALARM does not fire when node-bin is valid",
+            "suites": [
+              "MetricsWriter",
+              "infra health alarms"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Approved runtime architecture adaptation: real valid manifest/resource-hash/executable native package emits no INVALID_RUNTIME_BIN_ALARM or old Nodealarm; legacy node-bin sentinel byte-preserved and never invoked.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_writer_history_contract_tests.rs",
+                "test": "source_l778_l810_invalid_runtime_contract_is_owned_by_native_package_health"
+              }
+            ]
           }
         }
       ]

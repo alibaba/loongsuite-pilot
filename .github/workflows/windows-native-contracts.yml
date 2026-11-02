@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           cargo build --locked -p xtask --bin xtask
           cargo test --locked -p xtask --bin xtask --test windows_services --test jsonl_validate --test trace_validate --no-run
-          cargo test --locked -p loongsuite-pilot --lib --test hooks_native --test installer_native --test cli_native --test interceptor_native --test upstream_context --test hook_timing --test claude_entry_history --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --no-run
+          cargo test --locked -p loongsuite-pilot --lib --test hooks_native --test installer_native --test cli_native --test interceptor_native --test upstream_context --test hook_timing --test claude_entry_history --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --test host_plugin_native_projection_history --no-run
       - name: Generated Hook wrappers match production assets
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: ./target/debug/xtask.exe sync-hook-wrappers --check
@@ -101,6 +101,9 @@ jobs:
             inputs::qoder_work:: \
             inputs::qoder_work_sqlite:: \
             inputs::qoder_trace:: \
+            inputs::qoder:: \
+            inputs::qoder_cn_trace:: \
+            inputs::wukong:: \
             inputs::rest_support:: \
             inputs::workbuddy:: \
             inputs::codex_aborted_turn:: \
@@ -119,9 +122,7 @@ jobs:
             core::orchestrator:: \
             core::upstream_link:: \
             pipeline::workspace_policy:: \
-            pipeline::flusher::file:: \
-            pipeline::pipeline_manager:: \
-            pipeline::sleep_detector:: \
+            pipeline:: \
             core::log_retention_service:: \
             core::hook_watchdog:: \
             deployment::runtime_retirement:: \
@@ -150,6 +151,7 @@ jobs:
             deployment::legacy_cli_cleanup:: \
             updater::package_archive::tests \
             updater::runtime::tests \
+            metrics::metrics_writer:: \
             updater::updater_metrics:: \
             updater::updater:: \
             updater::version_utils:: \
@@ -164,4 +166,4 @@ jobs:
           test "$failures" -eq 0
       - name: Native interceptor, upstream context, and Hook timing
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
-        run: cargo test --locked -p loongsuite-pilot --test interceptor_native --test upstream_context --test hook_timing --test grok_output_contracts --test runtime_snapshot_allocation --test doubao_delivery --test doubao_pipeline --test hosted_collect_durability --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history -- --nocapture
+        run: cargo test --locked -p loongsuite-pilot --test interceptor_native --test upstream_context --test hook_timing --test grok_output_contracts --test runtime_snapshot_allocation --test doubao_delivery --test doubao_pipeline --test hosted_collect_durability --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --test host_plugin_native_projection_history -- --nocapture
