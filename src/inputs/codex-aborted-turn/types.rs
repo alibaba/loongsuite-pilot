@@ -26,6 +26,8 @@ pub struct CodexCompletedTurn {
 #[serde(rename_all = "camelCase")]
 pub struct CodexAbortedCheckpoint {
     pub inode: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<u64>,
     pub scan_offset: i64,
     pub active_turn: Option<CodexActiveTurn>,
     pub latest_session_meta_offset: Option<i64>,

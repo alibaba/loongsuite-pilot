@@ -68,6 +68,10 @@ fn fixture(root: &Path, hold: bool) -> String {
     }
     #[cfg(windows)]
     {
+        // A held PS5.1 command must publish its marker before the script ends.
+        // AppendAllText closes its file handle before entering the wait loop;
+        // readiness therefore observes a completed write, independently of the
+        // Add-Content provider/pipeline lifecycle on native Windows ARM.
         let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
         let file = root.join("fixture pilot.ps1");
         let wait = if hold {
@@ -78,7 +82,7 @@ fn fixture(root: &Path, hold: bool) -> String {
         } else {
             String::new()
         };
-        fs_write(&file,&format!("\u{feff}param([string]$Action)\r\nif ($Action -ne 'restart-updater') {{ exit 79 }}\r\nAdd-Content -LiteralPath {} -Value \"$Action|$PID\" -Encoding UTF8\r\n{}exit 0\r\n",quote(&invocation),wait));
+        fs_write(&file,&format!("\u{feff}param([string]$Action)\r\nif ($Action -ne 'restart-updater') {{ exit 79 }}\r\n[System.IO.File]::AppendAllText({}, (\"$Action|$PID\" + [Environment]::NewLine), [System.Text.Encoding]::UTF8)\r\n{}exit 0\r\n",quote(&invocation),wait));
         file.to_string_lossy().into_owned()
     }
 }
@@ -162,7 +166,13 @@ impl Harness {
             }
         })
         .await
-        .expect("isolated restart command did not start");
+        .unwrap_or_else(|error| {
+            panic!(
+                "isolated restart command did not start: {error:?}; marker={:?}; alarms={}",
+                std::fs::read_to_string(self.root.path().join("invocations.log")),
+                serde_json::to_string(&self.alarms.serialize()).unwrap()
+            )
+        });
     }
 }
 fn alarm_type(alarms: &[crate::metrics::AlarmEntry], kind: &str) {

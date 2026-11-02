@@ -179,17 +179,30 @@ impl CodexAbortedTurnBody {
         rt: &InputRuntime,
         file_path: &str,
     ) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        let meta = match tokio::fs::metadata(file_path).await {
-            Ok(meta) => meta,
-            Err(_) => return Ok(Vec::new()),
+        let (mut file, identity) = match open_rollout_file(file_path).await {
+            Ok(opened) => opened,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
         };
-        let inode = file_ino(&meta);
-        let size = file_len(&meta);
+        self.process_opened_file(rt, file_path, &mut file, &identity)
+            .await
+    }
+
+    async fn process_opened_file(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        file: &mut tokio::fs::File,
+        identity: &crate::utils::file_identity::OpenedFileIdentity,
+    ) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        let inode = identity.ino;
+        let size = i64::try_from(identity.size).unwrap_or(i64::MAX);
         let key = state_key(file_path);
         let mut checkpoint = match read_checkpoint(rt, &key) {
             Some(checkpoint) => checkpoint,
             None => CodexAbortedCheckpoint {
                 inode,
+                dev: Some(identity.dev),
                 scan_offset: 0,
                 active_turn: None,
                 latest_session_meta_offset: None,
@@ -199,16 +212,17 @@ impl CodexAbortedTurnBody {
                 emitted_hook_gap_turn_ids: Vec::new(),
             },
         };
-        if checkpoint.inode != inode {
-            baseline_file(rt, file_path, &key).await;
+        if checkpoint.inode != inode || checkpoint.dev.is_some_and(|dev| dev != identity.dev) {
+            baseline_opened_file(rt, file, identity, &key).await;
             return Ok(Vec::new());
         }
+        checkpoint.dev = Some(identity.dev);
         if size <= checkpoint.scan_offset {
             self.emit_due_hook_gap_warnings(rt, &mut checkpoint).await;
             save_checkpoint(rt, &key, &checkpoint);
             return Ok(Vec::new());
         }
-        let lines = read_json_lines(file_path, checkpoint.scan_offset, size).await?;
+        let lines = read_json_lines(file, checkpoint.scan_offset, size).await?;
         if lines.next_offset == checkpoint.scan_offset {
             return Ok(Vec::new());
         }
@@ -314,7 +328,7 @@ impl CodexAbortedTurnBody {
                 .any(|id| id == turn_id)
             {
                 let recovered = self
-                    .recover_turn(file_path, &checkpoint, line.end_offset)
+                    .recover_turn(file_path, file, size, &checkpoint, line.end_offset)
                     .await?;
                 if recovered.is_empty() {
                     self.emit_recovery_failure_diagnostic(rt, file_path, turn_id, &line.record)
@@ -340,15 +354,17 @@ impl CodexAbortedTurnBody {
     async fn recover_turn(
         &self,
         file_path: &str,
+        file: &mut tokio::fs::File,
+        size: i64,
         checkpoint: &CodexAbortedCheckpoint,
         abort_end_offset: i64,
     ) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let Some(active) = &checkpoint.active_turn else {
             return Ok(Vec::new());
         };
-        let range = read_json_lines(file_path, active.start_offset, abort_end_offset).await?;
+        let range = read_json_lines(file, active.start_offset, abort_end_offset).await?;
         let meta_record = match checkpoint.latest_session_meta_offset {
-            Some(offset) => read_json_line_at(file_path, offset).await?,
+            Some(offset) => read_json_line_at(file, offset, size).await?,
             None => None,
         };
         let meta = meta_record.as_ref().and_then(extract_codex_transcript_meta);
@@ -445,11 +461,20 @@ impl CodexAbortedTurnBody {
 }
 
 async fn baseline_file(rt: &InputRuntime, file_path: &str, key: &str) {
-    let Ok(meta) = tokio::fs::metadata(file_path).await else {
+    let Ok((mut file, identity)) = open_rollout_file(file_path).await else {
         return;
     };
-    let size = file_len(&meta);
-    let Ok(lines) = read_json_lines(file_path, 0, size).await else {
+    baseline_opened_file(rt, &mut file, &identity, key).await;
+}
+
+async fn baseline_opened_file(
+    rt: &InputRuntime,
+    file: &mut tokio::fs::File,
+    identity: &crate::utils::file_identity::OpenedFileIdentity,
+    key: &str,
+) {
+    let size = i64::try_from(identity.size).unwrap_or(i64::MAX);
+    let Ok(lines) = read_json_lines(file, 0, size).await else {
         return;
     };
     let mut latest = None;
@@ -462,7 +487,8 @@ async fn baseline_file(rt: &InputRuntime, file_path: &str, key: &str) {
         rt,
         key,
         &CodexAbortedCheckpoint {
-            inode: file_ino(&meta),
+            inode: identity.ino,
+            dev: Some(identity.dev),
             scan_offset: size,
             active_turn: None,
             latest_session_meta_offset: latest,
@@ -565,6 +591,7 @@ fn read_checkpoint(rt: &InputRuntime, key: &str) -> Option<CodexAbortedCheckpoin
         .unwrap_or_default();
     Some(CodexAbortedCheckpoint {
         inode,
+        dev: value.get("dev").and_then(Value::as_u64),
         scan_offset,
         active_turn,
         latest_session_meta_offset: value.get("latestSessionMetaOffset").and_then(Value::as_i64),
@@ -686,7 +713,7 @@ struct ReadLines {
 }
 
 async fn read_json_lines(
-    file_path: &str,
+    file: &mut tokio::fs::File,
     start_offset: i64,
     end_offset: i64,
 ) -> anyhow::Result<ReadLines> {
@@ -696,7 +723,6 @@ async fn read_json_lines(
             next_offset: start_offset,
         });
     }
-    let mut file = tokio::fs::File::open(file_path).await?;
     file.seek(std::io::SeekFrom::Start(start_offset as u64))
         .await?;
     let mut buffer = vec![0u8; (end_offset - start_offset) as usize];
@@ -740,15 +766,14 @@ async fn read_json_lines(
 }
 
 async fn read_json_line_at(
-    file_path: &str,
+    file: &mut tokio::fs::File,
     offset: i64,
+    size: i64,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
-    let meta = tokio::fs::metadata(file_path).await?;
-    let available = file_len(&meta) - offset;
+    let available = size - offset;
     if available <= 0 {
         return Ok(None);
     }
-    let mut file = tokio::fs::File::open(file_path).await?;
     let mut size = available.min(64 * 1024);
     while size > 0 {
         let mut buffer = vec![0u8; size as usize];
@@ -769,19 +794,22 @@ async fn read_json_line_at(
     Ok(None)
 }
 
-fn file_ino(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
+async fn open_rollout_file(
+    path: &str,
+) -> std::io::Result<(
+    tokio::fs::File,
+    crate::utils::file_identity::OpenedFileIdentity,
+)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&file)?;
+        Ok((tokio::fs::File::from_std(file), identity))
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
-fn file_len(meta: &std::fs::Metadata) -> i64 {
-    i64::try_from(meta.len()).unwrap_or(i64::MAX)
-}
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod identity_tests;

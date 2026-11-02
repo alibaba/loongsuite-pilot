@@ -29,8 +29,14 @@ pub fn number_value(value: Option<&Value>) -> Option<f64> {
 }
 
 pub fn i64_value(value: Option<&Value>) -> Option<i64> {
-    let number = number_value(value)?;
-    if number.fract() == 0.0 && number >= i64::MIN as f64 && number <= i64::MAX as f64 {
+    let value = value?;
+    if let Some(integer) = value.as_i64() {
+        return Some(integer);
+    }
+    let number = number_value(Some(value))?;
+    // The upper integer bound rounds to 2^63 in binary64. Keep legacy
+    // integral JSON floats, but reject that exclusive boundary before casting.
+    if number.fract() == 0.0 && number >= i64::MIN as f64 && number < i64::MAX as f64 {
         Some(number as i64)
     } else {
         None
@@ -38,8 +44,14 @@ pub fn i64_value(value: Option<&Value>) -> Option<i64> {
 }
 
 pub fn u64_value(value: Option<&Value>) -> Option<u64> {
-    let number = number_value(value)?;
-    if number.fract() == 0.0 && number >= 0.0 && number <= u64::MAX as f64 {
+    let value = value?;
+    if let Some(integer) = value.as_u64() {
+        return Some(integer);
+    }
+    let number = number_value(Some(value))?;
+    // Native Windows file IDs commonly exceed 2^53. Preserve JSON integers
+    // above it exactly; the float fallback must reject the rounded 2^64 bound.
+    if number.fract() == 0.0 && number >= 0.0 && number < u64::MAX as f64 {
         Some(number as u64)
     } else {
         None

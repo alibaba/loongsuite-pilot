@@ -2583,7 +2583,7 @@ fn first_native_install_publishes_command_before_owned_legacy_cleanup_and_preser
             let mut command = fixture.command(&shell);
             let quoted = bin.to_str().unwrap().replace('\'', "''");
             command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                &format!("$env:PATH='{quoted}'; $c=Get-Command loongsuite-pilot -CommandType Application,ExternalScript -ErrorAction Stop; [Console]::Write($c.Path)")]);
+                &format!("$env:PATH='{quoted}'; $PSModuleAutoLoadingPreference='None'; $c=$ExecutionContext.SessionState.InvokeCommand.GetCommand('loongsuite-pilot',[System.Management.Automation.CommandTypes]::All); if ($null -eq $c -or $c -is [array] -or [string]::IsNullOrEmpty([string]$c.Path)) {{ throw 'Expected one external command resolution' }}; [Console]::Write([string]$c.Path)")]);
             let resolution = bounded(command);
             success(&resolution);
             let resolved = PathBuf::from(String::from_utf8(resolution.stdout).unwrap().trim());

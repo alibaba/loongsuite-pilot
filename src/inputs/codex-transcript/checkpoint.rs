@@ -315,3 +315,7 @@ pub fn empty_checkpoint(inode: u64) -> CodexTranscriptCheckpoint {
         fork_bootstrap: None,
     }
 }
+
+#[cfg(test)]
+#[path = "identity_precision_tests.rs"]
+mod identity_precision_tests;

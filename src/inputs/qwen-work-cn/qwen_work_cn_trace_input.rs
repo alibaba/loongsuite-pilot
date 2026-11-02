@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 const NANO_PER_MILLI: i64 = 1_000_000;
 const SEGMENT_TIMING_TOLERANCE_MS: i64 = 5 * 60 * 1000;
@@ -358,47 +359,73 @@ impl QwenWorkCnTraceBody {
     }
 
     async fn read_segment_file(&self, rt: &InputRuntime, session_id: &str, file_path: &str) {
-        let state_key = format!("{}:segment:{file_path}", rt.id);
-        let Ok(meta) = tokio::fs::metadata(file_path).await else {
+        let Some((file, identity)) = open_segment_file(file_path).await else {
             return;
         };
-        let inode = file_inode(&meta);
+        self.read_opened_segment(rt, session_id, file_path, file, identity)
+            .await;
+    }
+
+    async fn read_opened_segment(
+        &self,
+        rt: &InputRuntime,
+        session_id: &str,
+        file_path: &str,
+        mut file: tokio::fs::File,
+        identity: crate::utils::file_identity::OpenedFileIdentity,
+    ) {
+        let state_key = format!("{}:segment:{file_path}", rt.id);
+        let inode = identity.ino;
         let previous = rt.state_store.get(&state_key);
         let previous_inode = previous
             .extra()
             .and_then(|extra| extra.get("inode").and_then(Value::as_u64));
-        if previous_inode.is_some() && previous_inode != Some(inode) {
+        let previous_dev = previous
+            .extra()
+            .and_then(|extra| extra.get("dev").and_then(Value::as_u64));
+        if (previous_inode.is_some() && previous_inode != Some(inode))
+            || (previous_dev.is_some() && previous_dev != Some(identity.dev))
+        {
             rt.state_store.set_offset(&state_key, 0.0);
         }
         let mut offset = rt.state_store.get_offset(&state_key);
-        if offset > 0.0 && (meta.len() as f64) < offset {
+        if offset > 0.0 && (identity.size as f64) < offset {
             offset = 0.0;
+            rt.state_store.set_offset(&state_key, 0.0);
         }
-        if (meta.len() as f64) <= offset {
+        if (identity.size as f64) <= offset {
             rt.state_store.update(
                 &state_key,
                 crate::checkpoints::InputStatePatch {
-                    extra: Some(json!({ "inode": inode })),
+                    extra: Some(json!({ "inode": inode, "dev": identity.dev })),
                     ..crate::checkpoints::InputStatePatch::default()
                 },
             );
             return;
         }
-        let read_size = (meta.len() - offset as u64).min(MAX_HOOK_READ_BYTES) as usize;
-        let Ok(Some(slice)) = crate::inputs::base::read_file_slice(file_path, offset as u64).await
-        else {
+        let read_size = (identity.size - offset as u64).min(MAX_HOOK_READ_BYTES) as usize;
+        if file
+            .seek(std::io::SeekFrom::Start(offset as u64))
+            .await
+            .is_err()
+        {
             return;
-        };
-        let bytes = if slice.bytes.len() > read_size {
-            &slice.bytes[..read_size]
-        } else {
-            &slice.bytes[..]
-        };
+        }
+        let mut bytes = vec![0; read_size];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            match file.read(&mut bytes[filled..]).await {
+                Ok(0) => break,
+                Ok(read) => filled += read,
+                Err(_) => return,
+            }
+        }
+        bytes.truncate(filled);
         let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
             rt.state_store.update(
                 &state_key,
                 crate::checkpoints::InputStatePatch {
-                    extra: Some(json!({ "inode": inode })),
+                    extra: Some(json!({ "inode": inode, "dev": identity.dev })),
                     ..crate::checkpoints::InputStatePatch::default()
                 },
             );
@@ -410,7 +437,7 @@ impl QwenWorkCnTraceBody {
         rt.state_store.update(
             &state_key,
             crate::checkpoints::InputStatePatch {
-                extra: Some(json!({ "inode": inode })),
+                extra: Some(json!({ "inode": inode, "dev": identity.dev })),
                 ..crate::checkpoints::InputStatePatch::default()
             },
         );
@@ -1019,17 +1046,20 @@ async fn is_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn file_inode(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
+async fn open_segment_file(
+    path: &str,
+) -> Option<(
+    tokio::fs::File,
+    crate::utils::file_identity::OpenedFileIdentity,
+)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path).ok()?;
+        let identity = crate::utils::file_identity::identity_from_open(&file).ok()?;
+        Some((tokio::fs::File::from_std(file), identity))
+    })
+    .await
+    .ok()?
 }
 
 fn now_ms() -> i64 {
@@ -1038,3 +1068,7 @@ fn now_ms() -> i64 {
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "segment_identity_tests.rs"]
+mod segment_identity_tests;

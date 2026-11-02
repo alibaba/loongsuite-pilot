@@ -35,6 +35,7 @@ const LEGACY_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 struct DshFileRuntimeState {
     aggregator: DshEventAggregatorState,
     inode: u64,
+    dev: u64,
     bound_session_id: Option<String>,
     active_turn_start_offset: Option<u64>,
     last_header_offset: Option<u64>,
@@ -270,11 +271,24 @@ impl DshRuntime {
     }
 
     async fn process_dsh_file(&self, file_path: &str) -> Result<Vec<AgentActivityEntry>, String> {
-        let meta = match std::fs::metadata(file_path) {
-            Ok(meta) => meta,
+        let mut file = match File::open(file_path) {
+            Ok(file) => file,
+            Err(error) if is_unreadable_io(&error) => return Err("unreadable".to_string()),
             Err(_) => return Ok(Vec::new()),
         };
-        let inode = inode_of(&meta);
+        let identity = crate::utils::file_identity::identity_from_open(&file)
+            .map_err(|error| error.to_string())?;
+        self.process_opened_dsh_file(file_path, &mut file, &identity)
+            .await
+    }
+
+    async fn process_opened_dsh_file(
+        &self,
+        file_path: &str,
+        file: &mut File,
+        identity: &crate::utils::file_identity::OpenedFileIdentity,
+    ) -> Result<Vec<AgentActivityEntry>, String> {
+        let inode = identity.ino;
         let state_key = format!("{}:{file_path}", self.id);
         let persisted = self.state_store.get(&state_key);
         let persisted_inode = persisted
@@ -283,8 +297,14 @@ impl DshRuntime {
             .and_then(|extra| extra.get("inode"))
             .and_then(value_u64);
         let mut offset = self.state_store.get_offset(&state_key).max(0.0) as u64;
-        let size = meta.len();
-        let replaced = persisted_inode.is_some() && persisted_inode != Some(inode);
+        let size = identity.size;
+        let persisted_dev = persisted
+            .extra()
+            .as_ref()
+            .and_then(|extra| extra.get("dev"))
+            .and_then(value_u64);
+        let replaced = (persisted_inode.is_some() && persisted_inode != Some(inode))
+            || (persisted_dev.is_some() && persisted_dev != Some(identity.dev));
         let truncated = offset > 0 && size < offset;
         if replaced || truncated {
             let mut meta_log = Map::new();
@@ -302,7 +322,7 @@ impl DshRuntime {
                 .lock()
                 .expect("file states")
                 .remove(file_path);
-            self.update_checkpoint(&state_key, inode, None);
+            self.update_checkpoint(&state_key, identity, None);
         }
         let mut runtime = {
             let states = self.file_states.lock().expect("file states");
@@ -310,16 +330,16 @@ impl DshRuntime {
         };
         if runtime
             .as_ref()
-            .is_none_or(|runtime| runtime.inode != inode)
+            .is_none_or(|runtime| runtime.inode != inode || runtime.dev != identity.dev)
         {
             runtime = Some(
-                self.restore_runtime(file_path, &state_key, inode, offset)
+                self.restore_runtime(file_path, file, &state_key, identity, offset)
                     .await,
             );
         }
         let runtime = runtime.expect("runtime");
         if size <= offset {
-            self.update_checkpoint(&state_key, inode, Some(&runtime));
+            self.update_checkpoint(&state_key, identity, Some(&runtime));
             self.file_states
                 .lock()
                 .expect("file states")
@@ -329,7 +349,7 @@ impl DshRuntime {
         let end = size.min(offset + READ_BUDGET_BYTES);
         let mut entries = Vec::new();
         let mut runtime = runtime;
-        let (complete_end, lines) = complete_lines(file_path, offset, end).map_err(|err| {
+        let (complete_end, lines) = complete_lines(file, offset, end).map_err(|err| {
             if is_unreadable_io(&err) {
                 "unreadable".to_string()
             } else {
@@ -353,7 +373,7 @@ impl DshRuntime {
             }
         }
         self.state_store.set_offset(&state_key, complete_end as f64);
-        self.update_checkpoint(&state_key, inode, Some(&runtime));
+        self.update_checkpoint(&state_key, identity, Some(&runtime));
         self.file_states
             .lock()
             .expect("file states")
@@ -364,8 +384,9 @@ impl DshRuntime {
     async fn restore_runtime(
         &self,
         file_path: &str,
+        file: &mut File,
         state_key: &str,
-        inode: u64,
+        identity: &crate::utils::file_identity::OpenedFileIdentity,
         offset: u64,
     ) -> DshFileRuntimeState {
         let extra = self
@@ -375,7 +396,8 @@ impl DshRuntime {
             .unwrap_or(Value::Null);
         let mut runtime = DshFileRuntimeState {
             aggregator: new_state(),
-            inode,
+            inode: identity.ino,
+            dev: identity.dev,
             bound_session_id: extra
                 .get("dshBoundSessionId")
                 .and_then(Value::as_str)
@@ -387,7 +409,7 @@ impl DshRuntime {
         let has_header_offset = extra_has(&extra, "dshLastHeaderOffset");
         if let Some(header_offset) = extra.get("dshLastHeaderOffset").and_then(value_u64) {
             let header_record = if header_offset < offset {
-                read_record_at_offset(file_path, header_offset, offset)
+                read_record_at_offset(file, header_offset, offset)
             } else {
                 None
             };
@@ -406,7 +428,7 @@ impl DshRuntime {
             }
         } else if !has_header_offset && offset > 0 {
             if let Some((header_offset, record)) =
-                find_legacy_last_header(file_path, offset, runtime.bound_session_id.as_deref())
+                find_legacy_last_header(file, offset, runtime.bound_session_id.as_deref())
             {
                 if let Some(record) = record.as_object() {
                     restore_header(record, header_offset, &mut runtime);
@@ -417,13 +439,13 @@ impl DshRuntime {
             if extra.get("dshStateVersion").and_then(Value::as_i64) == Some(DSH_STATE_VERSION) {
                 extra.get("dshActiveTurnStartOffset").and_then(value_u64)
             } else if offset > 0 && !extra_has(&extra, "dshActiveTurnStartOffset") {
-                find_legacy_active_turn_start(file_path, offset)
+                find_legacy_active_turn_start(file, offset)
             } else {
                 None
             };
         if let Some(replay_start) = replay_start {
             if replay_start < offset {
-                let (_end, lines) = complete_lines(file_path, replay_start, offset)
+                let (_end, lines) = complete_lines(file, replay_start, offset)
                     .unwrap_or((replay_start, Vec::new()));
                 for (line_offset, line) in lines {
                     match serde_json::from_str::<Value>(&line) {
@@ -502,11 +524,12 @@ impl DshRuntime {
     fn update_checkpoint(
         &self,
         state_key: &str,
-        inode: u64,
+        identity: &crate::utils::file_identity::OpenedFileIdentity,
         runtime: Option<&DshFileRuntimeState>,
     ) {
         let mut extra = Map::new();
-        extra.insert("inode".to_string(), Value::from(inode));
+        extra.insert("inode".to_string(), Value::from(identity.ino));
+        extra.insert("dev".to_string(), Value::from(identity.dev));
         extra.insert(
             "dshStateVersion".to_string(),
             Value::from(DSH_STATE_VERSION),
@@ -594,7 +617,7 @@ fn restore_header(
 }
 
 fn read_record_at_offset(
-    file_path: &str,
+    file: &mut File,
     line_offset: u64,
     committed_offset: u64,
 ) -> Option<Value> {
@@ -602,18 +625,18 @@ fn read_record_at_offset(
     if length == 0 {
         return None;
     }
-    let bytes = read_at(file_path, line_offset, length as usize).ok()?;
+    let bytes = read_at(file, line_offset, length as usize).ok()?;
     let newline = bytes.iter().position(|byte| *byte == b'\n')?;
     serde_json::from_slice(&bytes[..newline]).ok()
 }
 
 fn find_legacy_last_header(
-    file_path: &str,
+    file: &mut File,
     offset: u64,
     bound_session_id: Option<&str>,
 ) -> Option<(u64, Value)> {
     let start = offset.saturating_sub(LEGACY_SCAN_BYTES);
-    let data = read_at(file_path, start, (offset - start) as usize).ok()?;
+    let data = read_at(file, start, (offset - start) as usize).ok()?;
     let mut cursor = 0usize;
     if start > 0 {
         let newline = data.iter().position(|byte| *byte == b'\n')?;
@@ -645,9 +668,9 @@ fn find_legacy_last_header(
     last
 }
 
-fn find_legacy_active_turn_start(file_path: &str, offset: u64) -> Option<u64> {
+fn find_legacy_active_turn_start(file: &mut File, offset: u64) -> Option<u64> {
     let start = offset.saturating_sub(LEGACY_SCAN_BYTES);
-    let data = read_at(file_path, start, (offset - start) as usize).ok()?;
+    let data = read_at(file, start, (offset - start) as usize).ok()?;
     let mut cursor = 0usize;
     if start > 0 {
         let newline = data.iter().position(|byte| *byte == b'\n')?;
@@ -680,14 +703,13 @@ fn find_legacy_active_turn_start(file_path: &str, offset: u64) -> Option<u64> {
 }
 
 fn complete_lines(
-    file_path: &str,
+    file: &mut File,
     start: u64,
     end: u64,
 ) -> std::io::Result<(u64, Vec<(u64, String)>)> {
     if end <= start {
         return Ok((start, Vec::new()));
     }
-    let mut file = File::open(file_path)?;
     let mut read_position = start;
     let mut carry: Vec<u8> = Vec::new();
     let mut carry_offset = start;
@@ -731,8 +753,7 @@ fn complete_lines(
     Ok((complete_end, lines))
 }
 
-fn read_at(path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
+fn read_at(file: &mut File, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut buf = vec![0_u8; len];
     let mut filled = 0;
@@ -763,18 +784,6 @@ fn value_u64(value: &Value) -> Option<u64> {
                 .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
                 .map(|n| n as u64)
         })
-}
-
-fn inode_of(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::MetadataExt::ino(meta)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
 }
 
 pub async fn ensure_dsh_log_dir(dir: &str) {
@@ -906,5 +915,11 @@ mod tests {
         writeln!(handle).unwrap();
         let _ = input.collect_entries().await.unwrap();
         assert!(store.get_offset(&key) > 0.0);
+    }
+    mod identity_tests {
+        include!("identity_tests.rs");
+    }
+    mod history_contracts {
+        include!("history_contracts.rs");
     }
 }

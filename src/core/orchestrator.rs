@@ -4243,7 +4243,7 @@ mod tests {
                     },
                 );
             }
-            let doubao_fixture = home.join("doubao-fixture/log");
+            let doubao_fixture = home.join("doubao-fixture").join("log");
             {
                 let listener = config.listeners.get_mut("doubao-work").unwrap();
                 listener.log_dir = Some(doubao_fixture.to_string_lossy().into_owned());

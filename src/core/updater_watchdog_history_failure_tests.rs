@@ -87,8 +87,12 @@ fn make_script(root: &Path, mode: CommandMode) -> String {
     }
     #[cfg(windows)]
     {
+        // A held PS5.1 command must publish its marker before the script ends.
+        // AppendAllText closes its file handle before entering the wait loop;
+        // readiness therefore observes a completed write, independently of the
+        // Add-Content provider/pipeline lifecycle on native Windows ARM.
         let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
-        let mut script = format!("\u{feff}param([string]$Action)\r\nif ($Action -ne 'restart-updater' -or $args.Count -ne 0) {{ exit 79 }}\r\nAdd-Content -LiteralPath {} -Value \"$Action|$PID\" -Encoding UTF8\r\n", q(&calls.to_string_lossy()));
+        let mut script = format!("\u{feff}param([string]$Action)\r\nif ($Action -ne 'restart-updater' -or $args.Count -ne 0) {{ exit 79 }}\r\n[System.IO.File]::AppendAllText({}, (\"$Action|$PID\" + [Environment]::NewLine), [System.Text.Encoding]::UTF8)\r\n", q(&calls.to_string_lossy()));
         if matches!(mode, CommandMode::FreshFlat | CommandMode::FreshArray) {
             script.push_str(&format!("$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()\r\n$body = {} + [string]$now + {}\r\nSet-Content -LiteralPath {} -Value $body -Encoding UTF8\r\n",
                 q(prefix), q(suffix), q(&failure)));
@@ -153,7 +157,13 @@ impl Harness {
             }
         })
         .await
-        .expect("isolated real restart child never became ready")
+        .unwrap_or_else(|error| {
+            panic!(
+                "isolated real restart child never became ready: {error:?}; marker={:?}; alarms={}",
+                std::fs::read_to_string(self.root.path().join("calls.txt")),
+                serde_json::to_string(&self.alarms.serialize()).unwrap()
+            )
+        })
     }
     fn write_breadcrumb(&self, value: Value) {
         let file = crate::utils::restart_failure_path(

@@ -410,7 +410,7 @@ mod tests {
             let shell =
                 PathBuf::from(&system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
             let quoted = bin.to_str().unwrap().replace('\'', "''");
-            let command = format!("$env:PATH='{quoted}'; $c=Get-Command loongsuite-pilot -CommandType Application,ExternalScript -ErrorAction Stop; [Console]::Write($c.Path)");
+            let command = format!("$env:PATH='{quoted}'; $PSModuleAutoLoadingPreference='None'; $c=$ExecutionContext.SessionState.InvokeCommand.GetCommand('loongsuite-pilot',[System.Management.Automation.CommandTypes]::All); if ($null -eq $c -or $c -is [array] -or [string]::IsNullOrEmpty([string]$c.Path)) {{ throw 'Expected one external command resolution' }}; [Console]::Write([string]$c.Path)");
             let output = std::process::Command::new(shell)
                 .args([
                     "-NoProfile",

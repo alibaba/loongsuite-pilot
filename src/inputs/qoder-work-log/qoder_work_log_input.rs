@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 static RECEIVED_MSG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\[([^\]]+)\] \[(\w+)\] \[SDK\] \[QueryHandler\] Received message: (\w+) (.+)$")
@@ -396,19 +397,19 @@ impl InputBody for QoderWorkLogBody {
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
         for file_path in self.discover().await {
-            let Ok(meta) = tokio::fs::metadata(&file_path).await else {
+            let Ok((mut file, identity)) = open_log_file(&file_path).await else {
                 continue;
             };
             let state_key = format!("{}:{file_path}", self.id);
             if rt.state_store.get(&state_key).last_offset().is_some() {
                 continue;
             }
-            let baseline = find_last_result_boundary(&file_path, meta.len()).await;
+            let baseline = find_last_result_boundary(&mut file, identity.size).await;
             rt.state_store.set_offset(&state_key, baseline);
             rt.state_store.update(
                 &state_key,
                 crate::checkpoints::InputStatePatch {
-                    extra: Some(json!({ "inode": file_ino(&meta) })),
+                    extra: Some(json!({ "inode": identity.ino, "dev": identity.dev })),
                     ..crate::checkpoints::InputStatePatch::default()
                 },
             );
@@ -482,31 +483,51 @@ impl QoderWorkLogBody {
         rt: &InputRuntime,
         file_path: &str,
     ) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        let meta = tokio::fs::metadata(file_path).await?;
+        let (file, identity) = open_log_file(file_path).await?;
+        self.process_opened_log_file(rt, file_path, file, identity)
+            .await
+    }
+
+    async fn process_opened_log_file(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        mut file: tokio::fs::File,
+        identity: crate::utils::file_identity::OpenedFileIdentity,
+    ) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let state_key = format!("{}:{file_path}", self.id);
-        let inode = file_ino(&meta);
+        let inode = identity.ino;
         let prev = rt.state_store.get(&state_key);
         let prev_inode = prev
             .extra()
             .and_then(|extra| extra.get("inode").and_then(Value::as_u64));
-        if prev_inode.is_some() && prev_inode != Some(inode) {
+        let prev_dev = prev
+            .extra()
+            .and_then(|extra| extra.get("dev").and_then(Value::as_u64));
+        if (prev_inode.is_some() && prev_inode != Some(inode))
+            || (prev_dev.is_some() && prev_dev != Some(identity.dev))
+            || rt.state_store.get_offset(&state_key) > identity.size as f64
+        {
             rt.state_store.set_offset(&state_key, 0.0);
         }
         let offset = rt.state_store.get_offset(&state_key);
-        if (meta.len() as f64) <= offset {
+        if (identity.size as f64) <= offset {
             return Ok(Vec::new());
         }
-        let read_size = (meta.len() - offset as u64).min(16 * 1024 * 1024) as usize;
-        let Some(slice) = crate::inputs::base::read_file_slice(file_path, offset as u64).await?
-        else {
-            return Ok(Vec::new());
-        };
-        let mut bytes = slice.bytes;
-        if bytes.len() > read_size {
-            bytes.truncate(read_size);
+        let read_size = (identity.size - offset as u64).min(16 * 1024 * 1024) as usize;
+        file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+        let mut bytes = vec![0; read_size];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            let read = file.read(&mut bytes[filled..]).await?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
         }
+        bytes.truncate(filled);
         let mut consumed = bytes.len();
-        if (read_size as u64) < meta.len() - offset as u64 {
+        if (read_size as u64) < identity.size - offset as u64 {
             if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
                 bytes.truncate(newline);
                 consumed = newline + 1;
@@ -517,7 +538,7 @@ impl QoderWorkLogBody {
         rt.state_store.update(
             &state_key,
             crate::checkpoints::InputStatePatch {
-                extra: Some(json!({ "inode": inode })),
+                extra: Some(json!({ "inode": inode, "dev": identity.dev })),
                 ..crate::checkpoints::InputStatePatch::default()
             },
         );
@@ -693,13 +714,17 @@ impl QoderWorkLogBody {
     }
 }
 
-async fn find_last_result_boundary(file_path: &str, size: u64) -> f64 {
+async fn find_last_result_boundary(file: &mut tokio::fs::File, size: u64) -> f64 {
     if size == 0 {
         return 0.0;
     }
-    let Ok(bytes) = tokio::fs::read(file_path).await else {
+    if file.seek(std::io::SeekFrom::Start(0)).await.is_err() {
         return 0.0;
-    };
+    }
+    let mut bytes = Vec::new();
+    if file.take(size).read_to_end(&mut bytes).await.is_err() {
+        return 0.0;
+    }
     let text = String::from_utf8_lossy(&bytes);
     let mut offset = 0_usize;
     let mut boundary = 0_usize;
@@ -710,21 +735,23 @@ async fn find_last_result_boundary(file_path: &str, size: u64) -> f64 {
         }
         offset = next;
     }
-    let _ = size;
     boundary as f64
 }
 
-fn file_ino(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
+async fn open_log_file(
+    path: &str,
+) -> std::io::Result<(
+    tokio::fs::File,
+    crate::utils::file_identity::OpenedFileIdentity,
+)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&file)?;
+        Ok((tokio::fs::File::from_std(file), identity))
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn model_for_tier(policy: &ModelPolicy, tier: &str) -> String {
@@ -786,3 +813,7 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "log_identity_tests.rs"]
+mod log_identity_tests;
