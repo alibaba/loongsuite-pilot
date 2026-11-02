@@ -11,6 +11,7 @@ use super::extractor::extract_codex_transcript_meta;
 use super::utils::string_value;
 
 pub const READ_CHUNK_SIZE: usize = 1024 * 1024;
+pub const MAX_JSONL_RECORD_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct JsonLine {
@@ -19,13 +20,20 @@ pub struct JsonLine {
     pub record: Map<String, Value>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScanStats {
     pub next_offset: i64,
     pub records: u64,
     pub parse_success_records: u64,
     pub parse_failed_records: u64,
     pub max_record_bytes: u64,
+    pub quarantined: bool,
+    #[cfg(test)]
+    pub examined_bytes: u64,
+    #[cfg(test)]
+    pub retained_copy_bytes: u64,
+    #[cfg(test)]
+    pub peak_retained_record_bytes: u64,
 }
 
 pub struct ReadLines {
@@ -58,95 +66,164 @@ pub async fn scan_json_lines(
     runtime: Option<&InputRuntime>,
     mut on_line: impl FnMut(JsonLine) -> bool,
 ) -> anyhow::Result<ScanStats> {
+    let mut stats = ScanStats {
+        next_offset: start_offset,
+        ..Default::default()
+    };
     if end_offset <= start_offset {
-        return Ok(ScanStats {
-            next_offset: start_offset,
-            records: 0,
-            parse_success_records: 0,
-            parse_failed_records: 0,
-            max_record_bytes: 0,
-        });
+        return Ok(stats);
     }
     let mut file = tokio::fs::File::open(file_path).await?;
-    let mut next_offset = start_offset;
     let mut position = start_offset;
-    let mut pending: Vec<u8> = Vec::new();
+    let mut pending = Vec::<u8>::new();
     let mut pending_start = start_offset;
-    let mut records = 0u64;
-    let mut parse_success = 0u64;
-    let mut parse_failed = 0u64;
-    let mut max_record_bytes = 0u64;
-
     while position < end_offset {
         let length = ((end_offset - position) as usize).min(READ_CHUNK_SIZE);
         let mut chunk = vec![0u8; length];
         file.seek(SeekFrom::Start(position as u64)).await?;
         let started = InputRuntimeAccumulator::now();
-        let bytes_read = file.read(&mut chunk).await?;
-        observe_read(runtime, bytes_read as u64, length as u64, started);
-        if bytes_read == 0 {
+        let read = file.read(&mut chunk).await?;
+        observe_read(runtime, read as u64, length as u64, started);
+        if read == 0 {
             break;
         }
-        position += bytes_read as i64;
-        let mut data = if pending.is_empty() {
-            chunk[..bytes_read].to_vec()
-        } else {
-            let mut combined = std::mem::take(&mut pending);
-            combined.extend_from_slice(&chunk[..bytes_read]);
-            combined
-        };
-        let data_start = pending_start;
-        let mut cursor = 0usize;
-        while cursor < data.len() {
-            let Some(relative) = data[cursor..].iter().position(|byte| *byte == b'\n') else {
+        let chunk_start = position;
+        position += read as i64;
+        let mut cursor = 0;
+        while cursor < read {
+            // Search only newly read bytes; repeatedly searching the retained
+            // prefix makes one long record quadratic even when Vec growth is linear.
+            let newline = chunk[cursor..read]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|relative| cursor + relative);
+            let part_end = newline.unwrap_or(read);
+            #[cfg(test)]
+            {
+                stats.examined_bytes += (part_end - cursor + usize::from(newline.is_some())) as u64;
+            }
+            let record_bytes = (chunk_start + part_end as i64 - pending_start) as u64;
+            if record_bytes <= MAX_JSONL_RECORD_BYTES as u64 {
+                let part = &chunk[cursor..part_end];
+                let needed = pending.len() + part.len();
+                if pending.capacity() < needed {
+                    let capacity = pending
+                        .capacity()
+                        .saturating_mul(2)
+                        .max(READ_CHUNK_SIZE)
+                        .max(needed)
+                        .min(MAX_JSONL_RECORD_BYTES);
+                    #[cfg(test)]
+                    let previous = (pending.as_ptr(), pending.len());
+                    pending.reserve_exact(capacity - pending.len());
+                    #[cfg(test)]
+                    if previous.0 != pending.as_ptr() {
+                        stats.retained_copy_bytes += previous.1 as u64;
+                    }
+                }
+                pending.extend_from_slice(part);
+                #[cfg(test)]
+                {
+                    stats.retained_copy_bytes += part.len() as u64;
+                    stats.peak_retained_record_bytes =
+                        stats.peak_retained_record_bytes.max(pending.len() as u64);
+                }
+            } else {
+                // Do not retain, decode or parse the over-limit body. Continue
+                // physical newline discovery using offsets alone.
+                pending = Vec::new();
+            }
+            let Some(newline) = newline else {
                 break;
             };
-            let newline = cursor + relative;
-            let text = String::from_utf8_lossy(&data[cursor..newline]);
+            let line_end = chunk_start + newline as i64 + 1;
+            if record_bytes > MAX_JSONL_RECORD_BYTES as u64 {
+                stats.records += 1;
+                stats.parse_failed_records += 1;
+                stats.max_record_bytes = stats.max_record_bytes.max(record_bytes + 1);
+                stats.next_offset = line_end;
+                stats.quarantined = true;
+                use sha2::{Digest, Sha256};
+                let digest = hex::encode(Sha256::digest(file_path.as_bytes()));
+                let fields = serde_json::json!({"fileId":&digest[..16],"startOffset":pending_start,"endOffset":line_end,"recordBytes":record_bytes,"maxRecordBytes":MAX_JSONL_RECORD_BYTES,"reason":"record-too-large"});
+                crate::utils::create_logger("CodexTranscriptInput").warn(
+                    "Codex JSONL record exceeds size limit; quarantined in source transcript",
+                    fields.as_object(),
+                );
+                // The skipped record may have been a terminal. Return to the
+                // engine before any next-turn start is allowed to replace it.
+                return Ok(stats);
+            }
+            let text = String::from_utf8_lossy(&pending);
             let text = text.trim();
             if !text.is_empty() {
-                records += 1;
-                max_record_bytes = max_record_bytes.max((newline - cursor + 1) as u64);
+                stats.records += 1;
+                stats.max_record_bytes = stats.max_record_bytes.max(record_bytes + 1);
                 match serde_json::from_str::<Value>(text) {
                     Ok(Value::Object(record)) => {
-                        parse_success += 1;
-                        let keep_going = on_line(JsonLine {
-                            start_offset: data_start + cursor as i64,
-                            end_offset: data_start + newline as i64 + 1,
+                        stats.parse_success_records += 1;
+                        if !on_line(JsonLine {
+                            start_offset: pending_start,
+                            end_offset: line_end,
                             record,
-                        });
-                        if !keep_going {
-                            return Ok(ScanStats {
-                                next_offset: data_start + newline as i64 + 1,
-                                records,
-                                parse_success_records: parse_success,
-                                parse_failed_records: parse_failed,
-                                max_record_bytes,
-                            });
+                        }) {
+                            stats.next_offset = line_end;
+                            return Ok(stats);
                         }
                     }
-                    _ => parse_failed += 1,
+                    _ => stats.parse_failed_records += 1,
                 }
             }
-            next_offset = data_start + newline as i64 + 1;
+            pending.clear();
+            stats.next_offset = line_end;
+            pending_start = line_end;
             cursor = newline + 1;
         }
-        if cursor < data.len() {
-            data.drain(..cursor);
-            pending = data;
-        } else {
-            pending.clear();
-        }
-        pending_start = data_start + cursor as i64;
     }
+    Ok(stats)
+}
 
-    Ok(ScanStats {
-        next_offset,
-        records,
-        parse_success_records: parse_success,
-        parse_failed_records: parse_failed,
-        max_record_bytes,
-    })
+/// Explicit range readers own their entire requested range. Live scanning
+/// instead yields at quarantine so the turn-recovery state machine runs first.
+pub async fn scan_json_lines_through_quarantine(
+    file_path: &str,
+    start_offset: i64,
+    end_offset: i64,
+    runtime: Option<&InputRuntime>,
+    mut on_line: impl FnMut(JsonLine) -> bool,
+) -> anyhow::Result<ScanStats> {
+    let mut all = ScanStats {
+        next_offset: start_offset,
+        ..Default::default()
+    };
+    while all.next_offset < end_offset {
+        let scanned = scan_json_lines(
+            file_path,
+            all.next_offset,
+            end_offset,
+            runtime,
+            &mut on_line,
+        )
+        .await?;
+        let progress = scanned.next_offset > all.next_offset;
+        all.next_offset = scanned.next_offset;
+        all.records += scanned.records;
+        all.parse_success_records += scanned.parse_success_records;
+        all.parse_failed_records += scanned.parse_failed_records;
+        all.max_record_bytes = all.max_record_bytes.max(scanned.max_record_bytes);
+        #[cfg(test)]
+        {
+            all.examined_bytes += scanned.examined_bytes;
+            all.retained_copy_bytes += scanned.retained_copy_bytes;
+            all.peak_retained_record_bytes = all
+                .peak_retained_record_bytes
+                .max(scanned.peak_retained_record_bytes);
+        }
+        if !progress || !scanned.quarantined {
+            break;
+        }
+    }
+    Ok(all)
 }
 
 pub async fn read_json_lines(
@@ -159,7 +236,7 @@ pub async fn read_json_lines(
         return Ok(ReadLines { items: Vec::new() });
     }
     let mut items = Vec::new();
-    scan_json_lines(file_path, start_offset, end_offset, runtime, |line| {
+    scan_json_lines_through_quarantine(file_path, start_offset, end_offset, runtime, |line| {
         items.push(line);
         true
     })
@@ -484,5 +561,125 @@ mod native_file_identity_tests {
             replaced.0
         );
         drop(held_original);
+    }
+}
+
+#[cfg(test)]
+mod main346_scanner_contracts {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    async fn large_record(path: &std::path::Path, newline: bool) -> (i64, i64) {
+        let mut f = tokio::fs::File::create(path).await.unwrap();
+        f.write_all(b"{\"before\":true}\n").await.unwrap();
+        let prefix = f.metadata().await.unwrap().len() as i64;
+        f.write_all(b"{\"padding\":\"").await.unwrap();
+        let block = vec![b'x'; 1024 * 1024];
+        for _ in 0..129 {
+            f.write_all(&block).await.unwrap();
+        }
+        f.write_all(b"\"}").await.unwrap();
+        if newline {
+            f.write_all(b"\n").await.unwrap();
+        }
+        f.flush().await.unwrap();
+        (prefix, f.metadata().await.unwrap().len() as i64)
+    }
+    #[tokio::test]
+    async fn completed_record_above_128_mib_is_quarantined_once_before_later_records() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("synthetic-large.jsonl");
+        let (_, boundary) = large_record(&path, true).await;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        f.write_all(b"{\"after\":true}\n").await.unwrap();
+        f.flush().await.unwrap();
+        let size = f.metadata().await.unwrap().len() as i64;
+        drop(f);
+        let mut before = 0;
+        let mut after = 0;
+        let first = scan_json_lines(path.to_str().unwrap(), 0, size, None, |line| {
+            before += usize::from(line.record.contains_key("before"));
+            after += usize::from(line.record.contains_key("after"));
+            true
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            first.parse_failed_records, 1,
+            "a >128MiB completed object is quarantined rather than parsed"
+        );
+        assert!(first.quarantined);
+        assert!(first.peak_retained_record_bytes <= 128 * 1024 * 1024);
+        assert_eq!(first.examined_bytes, boundary as u64);
+        assert_eq!(first.records, 2);
+        assert_eq!(first.parse_success_records, 1);
+        assert_eq!(first.next_offset, boundary);
+        assert_eq!((before, after), (1, 0));
+        let second = scan_json_lines(
+            path.to_str().unwrap(),
+            first.next_offset,
+            size,
+            None,
+            |line| {
+                after += usize::from(line.record.contains_key("after"));
+                true
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.next_offset, size);
+        assert_eq!(second.parse_failed_records, 0);
+        assert_eq!(after, 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            size as u64,
+            "native source remains intact"
+        );
+    }
+    #[tokio::test]
+    async fn oversized_unterminated_tail_never_advances_the_complete_line_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("synthetic-incomplete.jsonl");
+        let (prefix, size) = large_record(&path, false).await;
+        let result = scan_json_lines(path.to_str().unwrap(), 0, size, None, |_| true)
+            .await
+            .unwrap();
+        assert_eq!(result.next_offset, prefix);
+        assert_eq!(result.records, 1);
+        assert_eq!(result.parse_failed_records, 0);
+    }
+    #[tokio::test]
+    async fn valid_utf8_record_larger_than_16_mib_scan_budget_remains_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("synthetic-utf8.jsonl");
+        let text = "界".repeat(6 * 1024 * 1024);
+        let record = serde_json::json!({"output":text}).to_string() + "\n";
+        tokio::fs::write(&path, &record).await.unwrap();
+        let mut actual = None;
+        let stats = scan_json_lines(
+            path.to_str().unwrap(),
+            0,
+            record.len() as i64,
+            None,
+            |line| {
+                actual = line
+                    .record
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                true
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.next_offset, record.len() as i64);
+        assert_eq!(stats.parse_success_records, 1);
+        assert_eq!(actual.as_deref(), Some(text.as_str()));
+        assert_eq!(stats.examined_bytes, record.len() as u64);
+        assert!(stats.retained_copy_bytes >= record.len() as u64 - 1);
+        assert!(stats.retained_copy_bytes < 4 * record.len() as u64);
     }
 }

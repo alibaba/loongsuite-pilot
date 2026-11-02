@@ -8,11 +8,15 @@
 
 use crate::utils::create_logger;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::Instant;
+#[path = "disk_usage_fs.rs"]
+mod fs_io;
+use fs_io::{Directory, FileSystem, Kind, NativeFileSystem, Node};
 
 pub const DISK_USAGE_STALE_MS: i64 = 20 * 60 * 1000;
 
@@ -110,6 +114,7 @@ struct SamplerState {
     failures: u32,
     next_attempt_at: i64,
     in_flight: bool,
+    flight: Option<Arc<ScanGate>>,
     opened: Vec<PathBuf>,
 }
 
@@ -117,10 +122,13 @@ pub struct DiskUsageSampler {
     options: DiskUsageSamplerOptions,
     state: Arc<Mutex<SamplerState>>,
     generation: Arc<AtomicU64>,
-    cancel_pause: Arc<AtomicBool>,
+    cancel_pause: Notify,
+    fs: Arc<dyn FileSystem>,
     on_sample: Arc<dyn Fn(DiskUsageSnapshot) + Send + Sync>,
     now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(test)]
+    test_read_calls: AtomicU64,
 }
 
 impl DiskUsageSampler {
@@ -137,13 +145,17 @@ impl DiskUsageSampler {
                 failures: 0,
                 next_attempt_at: 0,
                 in_flight: false,
+                flight: None,
                 opened: Vec::new(),
             })),
             generation: Arc::new(AtomicU64::new(0)),
-            cancel_pause: Arc::new(AtomicBool::new(false)),
+            cancel_pause: Notify::new(),
+            fs: Arc::new(NativeFileSystem),
             on_sample,
             now_ms: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             task: Mutex::new(None),
+            #[cfg(test)]
+            test_read_calls: AtomicU64::new(0),
         }
     }
 
@@ -155,34 +167,59 @@ impl DiskUsageSampler {
         state.active = true;
         state.stopped = false;
         state.next_attempt_at = 0;
+        let generation = self.generation.load(Ordering::SeqCst);
         drop(state);
         let sampler = Arc::clone(self);
         let handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(sampler.options.initial_delay_ms)).await;
             loop {
-                if !sampler.is_active() {
+                if !sampler.active_generation(generation) {
                     break;
                 }
-                let now = (sampler.now_ms)();
-                let due = sampler.state.lock().expect("disk sampler").next_attempt_at;
-                if now >= due {
-                    sampler.sample().await;
+                let (flight, due) = {
+                    let state = sampler.state.lock().expect("disk sampler");
+                    (state.flight.clone(), state.next_attempt_at)
+                };
+                // A restart tick may encounter the old generation's outstanding
+                // IO. Wait for its owner to close handles, then sample immediately.
+                if let Some(flight) = flight {
+                    flight.wait().await;
+                    continue;
                 }
-                tokio::time::sleep(Duration::from_millis(sampler.options.interval_ms)).await;
+                let now = (sampler.now_ms)();
+                if due > now {
+                    tokio::time::sleep(Duration::from_millis((due - now) as u64)).await;
+                    continue;
+                }
+                sampler.sample().await;
             }
         });
         *self.task.lock().expect("disk task") = Some(handle);
     }
-
     pub fn stop(&self) {
         let mut state = self.state.lock().expect("disk sampler");
         state.active = false;
         state.stopped = true;
         drop(state);
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.cancel_pause.store(true, Ordering::SeqCst);
+        self.cancel_pause.notify_waiters();
         if let Some(task) = self.task.lock().expect("disk task").take() {
             task.abort();
+        }
+    }
+    fn active_generation(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == generation
+            && self.state.lock().expect("disk sampler").active
+    }
+    async fn cancelled(&self, generation: u64) {
+        loop {
+            let notified = self.cancel_pause.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if generation != self.generation.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -213,23 +250,42 @@ impl DiskUsageSampler {
     }
 
     pub async fn sample(self: &Arc<Self>) {
-        if self.state.lock().expect("disk sampler").stopped {
-            return;
-        }
         let generation = self.generation.load(Ordering::SeqCst);
-        {
+        let (flight, lead) = {
             let mut state = self.state.lock().expect("disk sampler");
-            if state.in_flight {
+            if state.stopped {
                 return;
             }
-            state.in_flight = true;
-            state.opened.clear();
+            if let Some(flight) = &state.flight {
+                (Arc::clone(flight), false)
+            } else {
+                let flight = Arc::new(ScanGate {
+                    done: AtomicBool::new(false),
+                    notify: Notify::new(),
+                });
+                state.flight = Some(Arc::clone(&flight));
+                state.in_flight = true;
+                state.opened.clear();
+                (flight, true)
+            }
+        };
+        if lead {
+            let sampler = Arc::clone(self);
+            let done = Arc::clone(&flight);
+            tokio::spawn(async move {
+                let _settle = SettleScan {
+                    sampler: Arc::clone(&sampler),
+                    flight: done,
+                };
+                sampler.sample_owned(generation).await;
+            });
         }
-        let started_at = (self.now_ms)();
+        flight.wait().await;
+    }
+    async fn sample_owned(&self, generation: u64) {
         let started = Instant::now();
         let outcome = walk(self, generation, started).await;
         let mut state = self.state.lock().expect("disk sampler");
-        state.in_flight = false;
         if generation != self.generation.load(Ordering::SeqCst) {
             return;
         }
@@ -249,32 +305,41 @@ impl DiskUsageSampler {
             state.failures += 1;
         }
         let multiplier = backoff_multiplier(state.failures);
-        state.next_attempt_at = started_at + self.options.interval_ms as i64 * multiplier as i64;
+        // Missed attempts are never queued after slow IO; the next interval
+        // begins only after this owned scan and its directory closes settle.
+        state.next_attempt_at = (self.now_ms)().saturating_add(
+            (self
+                .options
+                .interval_ms
+                .saturating_mul(u64::from(multiplier)))
+            .min(i64::MAX as u64) as i64,
+        );
         let published = self.get_snapshot_locked(&state);
-        let failed = outcome.status != DiskUsageStatus::Ok;
         drop(state);
-        if failed {
-            let logger = create_logger("DiskUsageSampler");
-            let mut meta = serde_json::Map::new();
-            meta.insert(
-                "status".into(),
-                serde_json::Value::String(outcome.status.as_str().into()),
+        if outcome.status != DiskUsageStatus::Ok {
+            create_logger("DiskUsageSampler").debug(
+                "Directory usage scan incomplete",
+                Some(
+                    &serde_json::json!({"status":outcome.status.as_str(),"scanMs":scan_ms})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
             );
-            meta.insert("scanMs".into(), serde_json::json!(scan_ms));
-            logger.debug("Directory usage scan incomplete", Some(&meta));
         }
-        if let Err(err) =
+        if let Err(error) =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.on_sample)(published)))
         {
-            let logger = create_logger("DiskUsageSampler");
-            let mut meta = serde_json::Map::new();
-            meta.insert("err".into(), serde_json::Value::String(format!("{err:?}")));
-            logger.warn("Directory usage sample callback failed", Some(&meta));
+            create_logger("DiskUsageSampler").warn(
+                "Directory usage sample callback failed",
+                Some(
+                    &serde_json::json!({"err":format!("{error:?}")})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            );
         }
-    }
-
-    fn is_active(&self) -> bool {
-        self.state.lock().expect("disk sampler").active
     }
 
     fn get_snapshot_locked(&self, state: &SamplerState) -> DiskUsageSnapshot {
@@ -304,79 +369,194 @@ struct WalkOutcome {
     logs_bytes: u64,
 }
 
+struct ScanGate {
+    done: AtomicBool,
+    notify: Notify,
+}
+impl ScanGate {
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.done.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+struct SettleScan {
+    sampler: Arc<DiskUsageSampler>,
+    flight: Arc<ScanGate>,
+}
+impl Drop for SettleScan {
+    fn drop(&mut self) {
+        let mut state = self.sampler.state.lock().expect("disk sampler");
+        if state
+            .flight
+            .as_ref()
+            .is_some_and(|flight| Arc::ptr_eq(flight, &self.flight))
+        {
+            state.flight = None;
+            state.in_flight = false;
+        }
+        drop(state);
+        self.flight.done.store(true, Ordering::SeqCst);
+        self.flight.notify.notify_waiters();
+    }
+}
 struct Frame {
     path: PathBuf,
-    entries: Vec<fs::DirEntry>,
-    index: usize,
-    dev: u64,
-    ino: u64,
+    dir: Box<dyn Directory>,
+    identity: (u64, u64),
     in_logs: bool,
 }
-
+fn check(
+    sampler: &DiskUsageSampler,
+    generation: u64,
+    started: Instant,
+) -> Result<(), DiskUsageStatus> {
+    if generation != sampler.generation.load(Ordering::SeqCst) {
+        return Err(DiskUsageStatus::Pending);
+    }
+    if started.elapsed().as_millis() >= sampler.options.budget_ms {
+        return Err(DiskUsageStatus::Timeout);
+    }
+    Ok(())
+}
+async fn paths_still(
+    sampler: &DiskUsageSampler,
+    paths: &[(PathBuf, (u64, u64))],
+    root: &Path,
+    generation: u64,
+    started: Instant,
+) -> Result<(), DiskUsageStatus> {
+    for (path, identity) in paths {
+        let meta = sampler.fs.metadata(path).await;
+        check(sampler, generation, started)?;
+        if !meta.is_ok_and(|meta| meta.kind == Kind::Directory && meta.identity == *identity) {
+            return Err(if path == root {
+                DiskUsageStatus::Error
+            } else {
+                DiskUsageStatus::Partial
+            });
+        }
+    }
+    Ok(())
+}
+async fn open_frame(
+    sampler: &DiskUsageSampler,
+    path: PathBuf,
+    meta: Node,
+    in_logs: bool,
+    ancestors: Vec<(PathBuf, (u64, u64))>,
+    root: &Path,
+    attempt: (u64, Instant),
+) -> Result<Frame, DiskUsageStatus> {
+    let (generation, started) = attempt;
+    check(sampler, generation, started)?;
+    let resolved = sampler.fs.realpath(&path).await;
+    check(sampler, generation, started)?;
+    if !resolved.is_ok_and(|resolved| resolved == path && resolved.starts_with(root)) {
+        return Err(if path == root {
+            DiskUsageStatus::Error
+        } else {
+            DiskUsageStatus::Partial
+        });
+    }
+    let opened = sampler.fs.open(&path).await;
+    let late = check(sampler, generation, started);
+    let mut dir = match opened {
+        Ok(dir) => dir,
+        Err(_) => {
+            late?;
+            return Err(if path == root {
+                DiskUsageStatus::Error
+            } else {
+                DiskUsageStatus::Partial
+            });
+        }
+    };
+    sampler
+        .state
+        .lock()
+        .expect("disk sampler")
+        .opened
+        .push(path.clone());
+    let mut paths = ancestors;
+    paths.push((path.clone(), meta.identity));
+    let valid = if let Err(status) = late {
+        Err(status)
+    } else if dir.identity() != meta.identity {
+        Err(if path == root {
+            DiskUsageStatus::Error
+        } else {
+            DiskUsageStatus::Partial
+        })
+    } else {
+        paths_still(sampler, &paths, root, generation, started).await
+    };
+    if let Err(status) = valid {
+        let _ = dir.close().await;
+        return Err(status);
+    }
+    Ok(Frame {
+        path,
+        dir,
+        identity: meta.identity,
+        in_logs,
+    })
+}
 async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> WalkOutcome {
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut status = DiskUsageStatus::Ok;
+    let empty = |status| WalkOutcome {
+        status,
+        data_bytes: 0,
+        logs_bytes: 0,
+    };
+    let root = sampler
+        .fs
+        .realpath(Path::new(&sampler.options.data_dir))
+        .await;
+    if let Err(status) = check(sampler, generation, started) {
+        return empty(status);
+    }
+    let root = match root {
+        Ok(root) => root,
+        Err(_) => return empty(DiskUsageStatus::Error),
+    };
+    let meta = sampler.fs.metadata(&root).await;
+    if let Err(status) = check(sampler, generation, started) {
+        return empty(status);
+    }
+    let meta = match meta {
+        Ok(meta) if meta.kind == Kind::Directory => meta,
+        _ => return empty(DiskUsageStatus::Error),
+    };
+    let frame = match open_frame(
+        sampler,
+        root.clone(),
+        meta,
+        false,
+        Vec::new(),
+        &root,
+        (generation, started),
+    )
+    .await
+    {
+        Ok(frame) => frame,
+        Err(status) => return empty(status),
+    };
+    let mut frames = vec![frame];
+    let mut entries = 0u64;
     let mut data_bytes = 0u64;
     let mut logs_bytes = 0u64;
-    let mut entries = 0u64;
-    let mut completed = false;
-    let root = match fs::canonicalize(&sampler.options.data_dir) {
-        Ok(path) => path,
-        Err(_) => {
-            return WalkOutcome {
-                status: DiskUsageStatus::Error,
-                data_bytes: 0,
-                logs_bytes: 0,
-            };
-        }
-    };
-    let check = |sampler: &DiskUsageSampler| -> Result<(), DiskUsageStatus> {
-        if generation != sampler.generation.load(Ordering::SeqCst) {
-            return Err(DiskUsageStatus::Error);
-        }
-        if started.elapsed().as_millis() >= sampler.options.budget_ms {
-            return Err(DiskUsageStatus::Timeout);
-        }
-        Ok(())
-    };
-    let open_result = (|| {
-        check(sampler)?;
-        let meta = fs::symlink_metadata(&root).map_err(|_| DiskUsageStatus::Error)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err(DiskUsageStatus::Error);
-        }
-        let (dev, ino) = identity(&meta);
-        let listed = fs::read_dir(&root).map_err(|_| DiskUsageStatus::Error)?;
-        let children: Vec<_> = listed.flatten().collect();
-        frames.push(Frame {
-            path: root.clone(),
-            entries: children,
-            index: 0,
-            dev,
-            ino,
-            in_logs: false,
-        });
-        sampler
-            .state
-            .lock()
-            .expect("disk sampler")
-            .opened
-            .push(root.clone());
-        Ok::<(), DiskUsageStatus>(())
-    })();
-    if open_result.is_err() {
-        return WalkOutcome {
-            status: open_result.err().unwrap_or(DiskUsageStatus::Error),
-            data_bytes: 0,
-            logs_bytes: 0,
-        };
-    }
+    let mut status = DiskUsageStatus::Ok;
     loop {
         if frames.is_empty() {
-            completed = true;
             break;
         }
-        if let Err(interrupted) = check(sampler) {
+        if let Err(interrupted) = check(sampler, generation, started) {
             status = interrupted;
             break;
         }
@@ -384,113 +564,129 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
             status = DiskUsageStatus::Partial;
             break;
         }
-        let frame_index = frames.len() - 1;
-        if !directory_still(&frames[frame_index]) {
-            status = if frames[frame_index].path == root {
-                DiskUsageStatus::Error
-            } else {
-                DiskUsageStatus::Partial
-            };
-            frames.pop();
-            if status == DiskUsageStatus::Error {
-                break;
-            }
-            continue;
+        let paths = frames
+            .iter()
+            .map(|frame| (frame.path.clone(), frame.identity))
+            .collect::<Vec<_>>();
+        if let Err(failure) = paths_still(sampler, &paths, &root, generation, started).await {
+            status = failure;
+            break;
         }
-        if frames[frame_index].index >= frames[frame_index].entries.len() {
-            frames.pop();
-            if frames.is_empty() {
-                completed = true;
-            }
-            continue;
+        let last = frames.len() - 1;
+        #[cfg(test)]
+        sampler.test_read_calls.fetch_add(1, Ordering::SeqCst);
+        let next = frames[last].dir.read().await;
+        if let Err(failure) = check(sampler, generation, started) {
+            status = failure;
+            break;
         }
-        let entry = frames[frame_index].entries[frames[frame_index].index].path();
-        let name = frames[frame_index].entries[frames[frame_index].index].file_name();
-        frames[frame_index].index += 1;
-        entries += 1;
-        if sampler.options.batch_size > 0 && entries.is_multiple_of(sampler.options.batch_size) {
-            sampler.cancel_pause.store(false, Ordering::SeqCst);
-            let pause = Duration::from_millis(sampler.options.batch_pause_ms);
-            tokio::select! {
-                _ = tokio::time::sleep(pause) => {}
-                _ = wait_cancel(&sampler.cancel_pause) => {}
-            }
-            if let Err(interrupted) = check(sampler) {
-                status = interrupted;
-                break;
-            }
+        // A root/ancestor removed during the read cannot become a false empty
+        // success, even when the OS returns end-of-directory.
+        if let Err(failure) = paths_still(sampler, &paths, &root, generation, started).await {
+            status = failure;
+            break;
         }
-        let file_type = match fs::symlink_metadata(&entry) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+        let name = match next {
+            Ok(Some(name)) => name,
+            Ok(None) => {
+                let mut frame = frames.pop().unwrap();
+                if frame.dir.close().await.is_err() {
+                    status = DiskUsageStatus::Partial;
+                    break;
+                }
+                // Enumeration is complete: a slow final close is not a timeout.
+                continue;
+            }
             Err(_) => {
                 status = DiskUsageStatus::Partial;
                 break;
             }
         };
-        if file_type.file_type().is_symlink() {
-            continue;
+        entries += 1;
+        if sampler.options.batch_size > 0 && entries.is_multiple_of(sampler.options.batch_size) {
+            tokio::select! {_=tokio::time::sleep(Duration::from_millis(sampler.options.batch_pause_ms))=>{},_=sampler.cancelled(generation)=>{}}
+            if let Err(failure) = check(sampler, generation, started) {
+                status = failure;
+                break;
+            }
         }
-        if file_type.is_dir() {
-            let normalized = name.to_string_lossy().to_lowercase();
-            let parent = frames
-                .last()
-                .map(|frame| frame.path.clone())
-                .unwrap_or_default();
-            if parent == root && !SCANNED_DATA_DIRECTORIES.contains(&normalized.as_str()) {
-                continue;
-            }
-            if is_local_worker_payload(&parent, &normalized, &root) {
-                continue;
-            }
-            if frames.len() >= sampler.options.max_depth {
+        let parent = frames[last].path.clone();
+        let path = parent.join(&name);
+        let meta = sampler.fs.metadata(&path).await;
+        if let Err(failure) = check(sampler, generation, started) {
+            status = failure;
+            break;
+        }
+        let meta = match meta {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
                 status = DiskUsageStatus::Partial;
                 break;
             }
-            let in_logs = frames.last().map(|frame| frame.in_logs).unwrap_or(false)
-                || (parent == root && normalized == "logs");
-            match fs::read_dir(&entry) {
-                Ok(listed) => {
-                    let (dev, ino) = identity(&file_type);
-                    frames.push(Frame {
-                        path: entry.clone(),
-                        entries: listed.flatten().collect(),
-                        index: 0,
-                        dev,
-                        ino,
-                        in_logs,
-                    });
-                    sampler
-                        .state
-                        .lock()
-                        .expect("disk sampler")
-                        .opened
-                        .push(entry);
+        };
+        match meta.kind {
+            Kind::Link | Kind::Other => {}
+            Kind::File => {
+                let Some(total) = data_bytes.checked_add(meta.bytes) else {
+                    status = DiskUsageStatus::Partial;
+                    break;
+                };
+                data_bytes = total;
+                if frames[last].in_logs {
+                    let Some(total) = logs_bytes.checked_add(meta.bytes) else {
+                        status = DiskUsageStatus::Partial;
+                        break;
+                    };
+                    logs_bytes = total;
                 }
-                Err(_) => {
+            }
+            Kind::Directory => {
+                let normalized = name.to_string_lossy().to_lowercase();
+                if parent == root && !SCANNED_DATA_DIRECTORIES.contains(&normalized.as_str()) {
+                    continue;
+                }
+                if is_local_worker_payload(&parent, &normalized, &root) {
+                    continue;
+                }
+                if frames.len() >= sampler.options.max_depth {
                     status = DiskUsageStatus::Partial;
                     break;
                 }
-            }
-        } else if file_type.is_file() {
-            data_bytes += file_type.len();
-            if frames.last().map(|frame| frame.in_logs).unwrap_or(false) {
-                logs_bytes += file_type.len();
+                let in_logs = frames[last].in_logs || (parent == root && normalized == "logs");
+                let ancestors = frames
+                    .iter()
+                    .map(|frame| (frame.path.clone(), frame.identity))
+                    .collect();
+                match open_frame(
+                    sampler,
+                    path,
+                    meta,
+                    in_logs,
+                    ancestors,
+                    &root,
+                    (generation, started),
+                )
+                .await
+                {
+                    Ok(frame) => frames.push(frame),
+                    Err(failure) => {
+                        status = failure;
+                        break;
+                    }
+                }
             }
         }
     }
-    if generation != sampler.generation.load(Ordering::SeqCst) {
-        return WalkOutcome {
-            status: DiskUsageStatus::Pending,
-            data_bytes: 0,
-            logs_bytes: 0,
-        };
+    // Every frame stays owned through its last outstanding IO and close,
+    // including cancellation/timeout/error paths. Never publish partial totals.
+    while let Some(mut frame) = frames.pop() {
+        if frame.dir.close().await.is_err() && status == DiskUsageStatus::Ok {
+            status = DiskUsageStatus::Partial;
+        }
     }
-    if status == DiskUsageStatus::Ok
-        && !completed
-        && started.elapsed().as_millis() >= sampler.options.budget_ms
-    {
-        status = DiskUsageStatus::Timeout;
+    if generation != sampler.generation.load(Ordering::SeqCst) {
+        status = DiskUsageStatus::Pending;
     }
     WalkOutcome {
         status,
@@ -498,45 +694,13 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
         logs_bytes,
     }
 }
-
 fn is_local_worker_payload(directory: &Path, name: &str, root: &Path) -> bool {
-    let parent_is_worker = directory
+    directory
         .parent()
-        .map(|parent| parent == root.join("local-workers"))
-        .unwrap_or(false);
-    parent_is_worker
+        .is_some_and(|parent| parent == root.join("local-workers"))
         && (name == "bundle"
             || name.starts_with(".bundle.staging-")
             || name.starts_with(".bundle.backup-"))
-}
-
-fn directory_still(frame: &Frame) -> bool {
-    match fs::symlink_metadata(&frame.path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            let (dev, ino) = identity(&meta);
-            dev == frame.dev && ino == frame.ino
-        }
-        _ => false,
-    }
-}
-
-fn identity(meta: &fs::Metadata) -> (u64, u64) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        (meta.dev(), meta.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        (0, 0)
-    }
-}
-
-async fn wait_cancel(flag: &AtomicBool) {
-    while !flag.load(Ordering::SeqCst) {
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
 }
 
 #[cfg(test)]
@@ -667,3 +831,7 @@ mod tests {
         assert!(sampler.get_snapshot().data_bytes.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "disk_sampler_history_contract_tests.rs"]
+mod history_contract_tests;

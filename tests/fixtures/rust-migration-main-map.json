@@ -18084,6 +18084,258 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/flushers/jsonl-flusher.test.ts",
+      "source_hash": "e1d8c81dc35022739aa3a94ce58609d17be40236df09d9155002f571c636f732",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef→f84只将appendLine mock切换到node:fs/promises mkdir/lstat/appendFile，9个业务断言逐字未改；复用现有真实JsonlFlusher/临时FS原生断言，独立定向6/6复验，不重建baseline测试。",
+      "cases": [
+        {
+          "source": {
+            "id": "L41:C5",
+            "title": "writes canonical JSON values without flattening their types",
+            "suites": [
+              "JsonlFlusher",
+              "send (T008)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "writes_canonical_json_without_flattening_types"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C5",
+            "title": "omits agent-scoped extension fields from output",
+            "suites": [
+              "JsonlFlusher",
+              "send (T008)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "omits_agent_scoped_extension_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C5",
+            "title": "uses date in filename when rotateDaily=true",
+            "suites": [
+              "JsonlFlusher",
+              "resolveFilePath with rotateDaily (T009)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "rotate_daily_uses_date_or_all"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C5",
+            "title": "uses \"all\" in filename when rotateDaily=false",
+            "suites": [
+              "JsonlFlusher",
+              "resolveFilePath with rotateDaily (T009)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "rotate_daily_uses_date_or_all"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L114:C5",
+            "title": "writes to {topic}-{date}.jsonl with topic and payload",
+            "suites": [
+              "JsonlFlusher",
+              "sendRaw (T010)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "send_raw_writes_topic_date_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C5",
+            "title": "calls send for each entry",
+            "suites": [
+              "JsonlFlusher",
+              "sendBatch (T011)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录和JSONL解析逐值保留原期望；日期固定2026-04-27，JSON类型、agent扩展剔除、原始topic、每记录一行均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "send_batch_writes_each_entry_and_lifecycle_is_inert"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C5",
+            "title": "flush is a no-op",
+            "suites": [
+              "JsonlFlusher",
+              "flush and shutdown"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "新增实际缺失父目录→start创建与空目录断言，flush/shutdown前后均无额外创建/改写；已在独立固定环境6项定向suite真实复验。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "lifecycle_only_start_creates_missing_output_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L145:C5",
+            "title": "shutdown is a no-op",
+            "suites": [
+              "JsonlFlusher",
+              "flush and shutdown"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "新增实际缺失父目录→start创建与空目录断言，flush/shutdown前后均无额外创建/改写；已在独立固定环境6项定向suite真实复验。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "lifecycle_only_start_creates_missing_output_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L151:C5",
+            "title": "calls ensureDir on outputDir",
+            "suites": [
+              "JsonlFlusher",
+              "start"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "新增实际缺失父目录→start创建与空目录断言，flush/shutdown前后均无额外创建/改写；已在独立固定环境6项定向suite真实复验。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_flusher.rs",
+                "test": "lifecycle_only_start_creates_missing_output_directory"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

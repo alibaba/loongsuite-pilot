@@ -37,8 +37,8 @@ use super::super::extractor::{
 use super::super::scan::{
     self, file_meta_snapshot, file_mtime_ms, find_owner_session_meta_offset,
     find_turn_start_offset, last_complete_jsonl_offset, read_json_line_at, read_json_lines,
-    scan_json_lines, select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
-    uuid_v7_timestamp_ms, JsonLine,
+    scan_json_lines, scan_json_lines_through_quarantine, select_owner_session_meta_offset,
+    terminal_turn_id_for, turn_id_for_start, uuid_v7_timestamp_ms, JsonLine,
 };
 use super::super::subagent_linker::{
     extract_codex_spawn_descriptors, is_codex_work_input, CodexSpawnDescriptor,
@@ -1836,7 +1836,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             .await?;
         let mut owner = None;
         let mut active: Option<CodexActiveTranscriptTurn> = None;
-        let stats = scan_json_lines(file_path, 0, size, Some(rt), |line| {
+        let stats = scan_json_lines_through_quarantine(file_path, 0, size, Some(rt), |line| {
             let Some(payload) = line.record.get("payload").and_then(Value::as_object) else {
                 return true;
             };

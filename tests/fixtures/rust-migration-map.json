@@ -86547,6 +86547,851 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/metrics/disk-usage-sampler.test.ts",
+      "source_hash": "0d5ec48ac24039ac5382eae0af775eb6ff25bbc318ac292a68bb7da7b0e7f839",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Frozen ef8953=f84 file32 exactdeclarations,0retired. Same native walker driven by private controlledmetadata/Directory ordinaryResult adapter as originalsourceFS mocks; actualnativefiles+OSdirectoryhandles separately evidenced(L444/L701 andpublicstoprestart). No store_snapshot fake. Linux actual; Windows/macOS actual executionpending, platformlist applicabilityonly. POSIXclosedir/WinFindClose expliciterrors preserve originalclose contract,not type-safety retirement.",
+      "cases": [
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "starts pending and counts ordinary files, hidden files and only the root logs subtree",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual walker begins exactPending, then controlled metadata .hidden3/rootlogs7/workerlogs11 yields21/7 at exact clock time;maxactiveIO1/allDirclosed/rootopened;2snapshotreads do not re-call consumer. Original Node bufferSize1 is carried by lazy single-entry native Directory::read, not a literal Node option.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l132_pending_hidden_files_and_only_root_logs_are_counted_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L147:C3",
+            "title": "recurses only into mutable root data directories while retaining root files",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All original mutable/rootfile byte literals retained;13 managed root families never opened or accessed below root, while cache/versions and workerstate/runtime remain traversed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l147_mutable_root_allowlist_keeps_files_and_nested_managed_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L189:C3",
+            "title": "opens a strict subset of the directories opened by github/main",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original old traversal oracle excludes only exact-case root versions/runtime; actual opened set is strictsubset; all12 original path cases and5 strict witnesses asserted, no copy of new allowlist in oracle.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l189_opened_directories_are_a_strict_subset_of_the_old_traversal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L250:C3",
+            "title": "prunes local worker runtime bundles but keeps each instance mutable data",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All10 original worker-file literals yield41/0;Bundle/staging/backup/arbitraryinstance bundle pruned without descendantcalls; nested workerstate/bundle traversed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l250_worker_bundles_are_pruned_without_pruning_instance_mutable_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "does not descend into a large worker bundle tree",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original10000 workerbundle entries withmaxEntries20 do not defeat pruning;actualwalker returns7/0,neveropensbundle,<100metadataadapterAPIcalls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l282_ten_thousand_worker_bundle_entries_do_not_consume_the_scan_budget"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L299:C3",
+            "title": "reports a valid empty directory as zero and returns a copy of cached state",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Successful empty walk returns ok0/0, mutating returned data999 does not change cached0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l299_empty_directory_is_zero_and_cached_snapshots_are_copies"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C3",
+            "title": "does not follow links or junctions, including links substituted after readdir",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original cached links/directory links and new-link substituted after enumeration are excluded;onlyordinary5 counted/rootonlyopened.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l309_links_and_post_readdir_link_substitutions_are_not_followed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L324:C3",
+            "title": "rejects a directory replaced by a link while opening before reading its entries",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Directory replaced withlink duringopen yieldspartial/noData, newly openedchild0reads andallDirclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l324_link_replacement_during_open_is_closed_before_any_read"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L338:C3",
+            "title": "rejects ancestor replacement detected at a nested open boundary",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Nested child realpath resolvingoutside is rejectedbeforeopendir,partial; no childopen,allancestorsclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l338_outside_realpath_at_nested_boundary_is_rejected_before_open"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L351:C3",
+            "title": "skips child files and unopened directories that vanish during lstat without spinning",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Vanishedfile99 and unopened directory disappear at lstat;remaining7 succeeds,allclosed,<50APIcalls, no retryspin.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l351_vanished_unopened_children_are_skipped_without_spinning"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L366:C3",
+            "title": "reports partial without values when read returns ENOENT but its directory still exists",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Second read ordinaryResult ENOENT on existing root returnspartial+scanMs only, no sizes/time;2readattempts/rootstillpresent/allclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l366_read_enoent_on_existing_directory_is_partial_without_values"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L380:C3",
+            "title": "retains the complete snapshot when a later read loses buffered entries with ENOENT",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Goodcomplete16/0 followed100mslater by second-readENOENT keeps16/0/oldsampletime;2callbacks,secondpartial,2readattempts/allclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l380_read_enoent_retains_full_cached_snapshot_and_reports_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L401:C3",
+            "title": "keeps complete values and timestamps on permission errors; explicit failure outranks stale",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Aftergood7 sample expires20min+1ms toStale, ordinarylstatPermissionDenied returnsPartial retaining7/oldtime; explicit failure outranksstale.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l401_permission_failure_retains_values_and_outranks_staleness"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L417:C3",
+            "title": "reports root failures as error without inventing zero values",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "RootopendirPermissionDenied giveserror+scanMs only/no invented0/time andexactly1consumer.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l417_root_open_failure_reports_error_without_fabricated_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L429:C3",
+            "title": "does not report a disappearing root as a successful empty directory",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Rootdeleted duringreadENOENT givesError/noData ratherthansuccessfulempty,allDirclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l429_disappearing_root_is_error_not_successful_empty_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L444:C3",
+            "title": "bounds item count and open handles, never publishing partial sums",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Entrybudget2: controlled actualwalker reads2 andclosesall/no partialtotals; independent actual native temp-directory regression proves old eager3reads→lazy2reads.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l444_actual_directory_reads_stop_at_the_entry_budget"
+              },
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l444_entry_limit_closes_all_handles_without_partial_totals"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L454:C3",
+            "title": "never opens more than 32 directory layers",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Depth35tree yieldsPartial andexactly32simultaneousDirectoryowners;allclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l454_never_exceeds_thirty_two_live_directory_layers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L465:C3",
+            "title": "rests after every 100 entries and includes that rest in elapsed time",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "201files pauseafter100reads:at19ms no callback/readcount100;completion40ms gives201/0,scanMs40,maxactive1.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l465_hundred_entry_pauses_count_toward_exact_scan_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L479:C3",
+            "title": "times out during a batch pause, closes handles and retains the last complete value",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Good7 followed2entry20msbatchpauseunder10msbudget yieldsTimeout retaining7/oldtime;allclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l479_batch_pause_timeout_closes_handles_and_keeps_prior_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L492:C3",
+            "title": "checks the budget after slow IO and closes a late-opened handle without reading it",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "50msbudget/60msopen produceslateopenedclosedhandle with0reads,Timeout,finalAPIclose.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l492_slow_open_is_closed_after_deadline_before_first_read"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L506:C3",
+            "title": "limits a scan to the default 10-second budget",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unchangeddefault10000msbudget rejects10001msopen;latehandleclosedwith0reads. Default production budget explicitlyasserted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l506_default_ten_second_budget_is_checked_after_outstanding_io"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L519:C3",
+            "title": "preserves timeout when a slow directory read exceeds the budget",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "50msbudget/60msread yieldsTimeout/noData;one successfulreadreturnedafterdelay,thenclose.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l519_slow_read_preserves_timeout_and_closes_its_handle"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L534:C3",
+            "title": "publishes a complete sample when the final handle close crosses the budget",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Final successfulhandleclosecrossing50msbudgetto60ms stillpublishescomplete7/0/scan60;allclosed,lastAPIclose.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l534_complete_final_close_may_cross_budget_without_false_timeout"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L550:C3",
+            "title": "does not treat a close error as a complete sample",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Ordinary explicitcloseResult EIO givesPartial/noData/allownersreleased; no panic used to emulate IOerror. NativePOSIXclosedir/WinFindClose return actual Results.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l550_explicit_close_result_error_is_partial_never_complete"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L563:C3",
+            "title": "starts after 30 seconds, uses a 10-minute cadence, and ignores duplicate start",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Defaultinitial30000/interval600000 asserted;duplicate start causesone schedule,0IOuntil29999,firstcallbackat30000,second10minlater;stop preventsfuturecalls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l563_schedule_keeps_thirty_second_delay_ten_minute_cadence_and_duplicate_start_guard"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L580:C3",
+            "title": "backs off after two failures to 20/40/60 minutes and recovers to 10 minutes",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact failure schedule1st/2nd10min,then20/40/60min backoffs, noearlycallbacks;successfulscan resetsnextintervalto10min.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l580_failures_back_off_twenty_forty_sixty_minutes_then_recover"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L609:C3",
+            "title": "does not overlap slow scans or enqueue missed attempts",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Slow outstandingopen remainsoneactiveIO;reentrantsample waits sameoperation;no missedattemptqueue;nextcallbackonly10msaftercompletion.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l609_slow_scan_is_single_flight_and_does_not_queue_missed_attempts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L632:C3",
+            "title": "stop cancels batch waits and discards results without further reads or callbacks",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop during firstbatchpause leaves1read/closedowner,exactPending/no callbacks/no scheduledtask/inflightfalse;later clockadvance addsnothing.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l632_stop_cancels_batch_wait_without_extra_reads_callbacks_or_result"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L646:C3",
+            "title": "stop waits for outstanding IO before closing its handle, and restart cannot revive old work",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop/start while readpending keepsoldhandleopen untilreadsettles,thencloses/discardsoldresult,maxIO1;newgenerationfirstsampleafter30s.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l646_stop_and_restart_wait_for_owned_read_before_close_and_new_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L668:C3",
+            "title": "starts the new generation immediately when an old scan settles after its restart tick",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Restart30stick passeswhileoldreadpending:oneopen/no earlyclose;afteroldsettlesnewgenerationrunsimmediately,exactly2opens/1freshcallback7/0,maxIO1/allclosed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l668_overdue_restart_tick_runs_immediately_after_old_read_settles"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L693:C3",
+            "title": "isolates a throwing consumer callback from later sampling",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual consumerpanic twice is caught at callback boundary; both later native walker attempts completeOk with2calls/allclosed; IOerrors elsewhere use ordinaryResults.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l693_panicking_consumer_does_not_prevent_later_actual_samples"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L701:C3",
+            "title": "also counts a real temporary tree through native Node directory handles",
+            "suites": [
+              "DiskUsageSampler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real Linuxnative directoryhandles sample actualhidden3+logs7 andactualdirectorysymlink withoutfollowinglink, yielding10/7;Windows fixture creates realjunction ratherthanfakesnapshot (actualplatformexecutionpending).",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/disk_sampler_history_contract_tests.rs",
+                "test": "source_l701_real_native_handles_count_hidden_and_logs_but_not_directory_links"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

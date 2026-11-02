@@ -1,0 +1,84 @@
+{
+  "schema": 2,
+  "baselineCommit": "346dd24dd56452b8ca127db75a9c6b1f6992669f",
+  "mappings": [
+    {
+      "legacy": "tests/unit/inputs/codex-transcript/codex-transcript-input.test.ts",
+      "source_hash": "8a433bf8b9dd19dbe4f67c9d21d3468eb90ceef5ec9296620a6b9740598109dc",
+      "coverage": "partial",
+      "rust": [
+        {
+          "file": "src/inputs/codex-transcript/scan.rs",
+          "test": "main346_scanner_contracts::completed_record_above_128_mib_is_quarantined_once_before_later_records"
+        },
+        {
+          "file": "src/inputs/codex-transcript/scan.rs",
+          "test": "main346_scanner_contracts::oversized_unterminated_tail_never_advances_the_complete_line_boundary"
+        },
+        {
+          "file": "src/inputs/codex-transcript/scan.rs",
+          "test": "main346_scanner_contracts::valid_utf8_record_larger_than_16_mib_scan_budget_remains_complete"
+        }
+      ],
+      "note": "最新main346dd24新增7声明的第一批scanner基础，映射仅两条partial候选；不替换Root既有123主合同或宣称130完整。128MiB上限、1MiB物理chunk及16MiB engine预算原值不降；live在quarantine即交还engine，whole-range与startup baseline显式穿过隔离点。尾缓存2048/64 witness及new-turn旧终结将下一批承接。",
+      "cases": [
+        {
+          "source": {
+            "id": "L599:C3",
+            "title": "quarantines a completed oversized record, preserves its incomplete tail, and resumes after restart",
+            "suites": [
+              "CodexTranscriptInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "partial",
+          "behavior": "仅scanner层真实129MiB完成对象quarantine一次、未LF不推进、不触碰源、后继行显式恢复；尚缺本case完整CodexInput/control tokens/runtime/restart断言，因此partial。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/scan.rs",
+                "test": "main346_scanner_contracts::completed_record_above_128_mib_is_quarantined_once_before_later_records"
+              },
+              {
+                "file": "src/inputs/codex-transcript/scan.rs",
+                "test": "main346_scanner_contracts::oversized_unterminated_tail_never_advances_the_complete_line_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L654:C3",
+            "title": "still parses complete records larger than the scan budget with linear buffer assembly",
+            "suites": [
+              "CodexTranscriptInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "partial",
+          "behavior": "真实18MiB完整UTF8读出；按实际newline检查字节及Vec追加/搬移量证明一次检索和线性buffer装配。尚缺本case完整Input事件及checkpoint闭合，因此partial。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/scan.rs",
+                "test": "main346_scanner_contracts::valid_utf8_record_larger_than_16_mib_scan_budget_remains_complete"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
