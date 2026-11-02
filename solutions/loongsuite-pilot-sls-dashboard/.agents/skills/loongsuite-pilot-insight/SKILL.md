@@ -1,13 +1,13 @@
 ---
 name: loongsuite-pilot-insight
-description: 基于 LoongSuite Pilot / AI Coding Agent 日志生成事件洞察、组织洞察、数据质量、研发效能和 AI Native 使用类 SLS 报表时使用；包含 agent-event / agent-event-webtracking 应用事实、audit-event 意图审计与 incident-event 风险事件语义，以及团队报表可选的部门维表、dept_user 组织关系、指标口径和公共 CTE，通常与 sls-dashboard-builder 一起使用。
+description: 基于 LoongSuite Pilot 采集的 AI Agent 事件生成事件洞察、组织洞察、数据质量、研发效能和 AI Native 使用类 SLS 报表时使用；包含 agent-event / agent-event-webtracking 应用事实、audit-event 意图审计与 incident-event 风险事件语义，以及团队报表可选的部门维表、dept_user 组织关系、指标口径和公共 CTE，通常与 sls-dashboard-builder 一起使用。
 ---
 
 # LoongSuite Pilot Insight
 
 ## Purpose
 
-将 LoongSuite Pilot / AI Coding Agent 日志转化为可复用的报表语义。用户应直接使用本 skill；本 skill 负责业务数据语义、指标口径和场景需求解释，再调用 `sls-dashboard-builder` 的通用能力生成或修改 SLS dashboard JSON。
+将 LoongSuite Pilot 采集的 AI Agent 事件转化为可复用的报表语义。用户应直接使用本 skill；本 skill 负责业务数据语义、指标口径和场景需求解释，再调用 `sls-dashboard-builder` 的通用能力生成或修改 SLS dashboard JSON。
 
 ## References
 
@@ -56,7 +56,7 @@ dashboard:
   layout: grid
 data:
   sources:
-    - ai_coding_events
+    - agent_events
 ---
 
 # <dashboard display name>
@@ -76,7 +76,7 @@ size: <w>x<h>
 
 规则：
 
-- `data.sources` 引用 `schema.md` 中的 logical source，例如 `ai_coding_events`、`dept_roster`。
+- `data.sources` 引用 `schema.md` 中的 logical source，例如 `agent_events`、`dept_roster`。
 - `dashboard.name` 是生成 SLS dashboard JSON 的稳定名称，`dashboard.displayName` 是大盘展示名。
 - `dashboard.defaultTimeRange` 使用 SLS 相对时间，例如 `-604800s`、`-86400s`、`-2592000s`。
 - `dashboard.layout` 默认使用 `grid`。
@@ -92,7 +92,7 @@ size: <w>x<h>
 ## Guardrails
 
 - 不编造不存在的字段或 logstore。
-- 当 spec 的 `data.sources` 只有 `ai_coding_events` 时，不要生成总在册人数、覆盖率、未产生日志员工列表、部门或团队 TopN；这些都需要 `dept_roster` 或客户自定义外表。
+- 当 spec 的 `data.sources` 只有 `agent_events` 时，不要生成总在册人数、覆盖率、未产生日志员工列表、部门或团队 TopN；这些都需要 `dept_roster` 或客户自定义外表。
 - 部门维表是客户扩展；先确认存在、用户映射及唯一归属，再使用 `department` 的 `work_no`、`name`、`dept_name`。
 - 应用事实合并 `agent-event` / `agent-event-webtracking`，正常事件 ID 唯一，不额外增加去重；Token 仅按模型响应粒度统计，兼容 Help 与实际历史事件名。
 - 缓存指标同时提供有效样本口径、字段覆盖率与异常样本数；输入 Token 已包含缓存，不重复相加。

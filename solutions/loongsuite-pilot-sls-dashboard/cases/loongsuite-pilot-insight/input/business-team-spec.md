@@ -1,17 +1,17 @@
 ---
 output: dashboard
 dashboard:
-  name: loongsuite-pilot-ai-coding-team
-  displayName: "LoongSuite Pilot AI Coding 团队报表"
+  name: loongsuite-pilot-business-team
+  displayName: "LoongSuite Pilot 业务团队报表"
   defaultTimeRange: "-604800s"
   layout: grid
 data:
   sources:
-    - ai_coding_events
+    - agent_events
     - dept_roster
 ---
 
-# LoongSuite Pilot AI Coding 团队报表
+# LoongSuite Pilot 业务团队报表
 
 二级部门级团队洞察大盘，从 `dept_name_2`（二级部门）出发，下钻到 `dept_name_3`（三级团队）。
 
