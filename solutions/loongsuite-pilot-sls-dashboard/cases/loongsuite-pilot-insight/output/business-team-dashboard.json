@@ -1,7 +1,7 @@
 {
-  "dashboardName": "loongsuite-pilot-ai-coding-team",
-  "displayName": "LoongSuite Pilot AI Coding 团队报表",
-  "description": "面向二级部门到三级团队的 LoongSuite Pilot / AI Coding 使用、覆盖率、Token、Skill 与 Tool 洞察。",
+  "dashboardName": "loongsuite-pilot-business-team",
+  "displayName": "LoongSuite Pilot 业务团队报表",
+  "description": "面向二级部门到三级团队的 LoongSuite Pilot / Agent 使用、覆盖率、Token、Skill 与 Tool 洞察。",
   "attribute": {
     "type": "grid",
     "remark": "按spec重新生成并发布团队报表",
