@@ -215,10 +215,13 @@ fn token_l1454_empty_trace_injection_is_a_noop() {
 }
 #[test]
 fn roots_l1629_default_paths_include_tmp_vibe_and_ide_images() {
-    let roots = qoder_default_allowed_root_paths();
+    let roots: Vec<PathBuf> = qoder_default_allowed_root_paths()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
     let home = PathBuf::from(loongsuite_pilot::utils::resolve_home("~"));
     for tail in [".qoder/tmp", ".qoder/vibe_images"] {
-        assert!(roots.contains(&home.join(tail).to_string_lossy().into_owned()));
+        assert!(roots.contains(&home.join(tail)));
     }
     let app = if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Qoder")
@@ -230,11 +233,7 @@ fn roots_l1629_default_paths_include_tmp_vibe_and_ide_images() {
     } else {
         home.join(".config/Qoder")
     };
-    assert!(roots.contains(
-        &app.join("SharedClientCache/cache/images")
-            .to_string_lossy()
-            .into_owned()
-    ));
+    assert!(roots.contains(&app.join("SharedClientCache").join("cache").join("images")));
 }
 #[test]
 fn roots_l1641_custom_roots_are_canonicalized_together_with_defaults() {

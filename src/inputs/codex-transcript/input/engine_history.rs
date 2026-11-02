@@ -2,6 +2,12 @@ use super::*;
 use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use std::sync::{Arc, Mutex};
 
+fn isolated_fixture_root() -> Arc<tempfile::TempDir> {
+    let canonical_temp =
+        std::fs::canonicalize(std::env::temp_dir()).expect("canonical synthetic temp base");
+    Arc::new(tempfile::tempdir_in(canonical_temp).expect("isolated native tempdir"))
+}
+
 struct Fixture {
     root: Arc<tempfile::TempDir>,
     input: CodexTranscriptInput,
@@ -10,7 +16,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        Self::with_root(Arc::new(tempfile::tempdir().expect("tempdir")))
+        Self::with_root(isolated_fixture_root())
     }
     fn with_root(root: Arc<tempfile::TempDir>) -> Self {
         Self::with_root_options(root, None)
@@ -74,7 +80,13 @@ impl Fixture {
         &self.input.inner.runtime
     }
     async fn write(&self, name: &str, text: &str) -> String {
-        let p = self.root.path().join("sessions").join(name);
+        // Node path.join in the source fixtures normalizes embedded separators
+        // and parent components. Keep one native spelling for scans and state keys.
+        let native_name: std::path::PathBuf = std::path::Path::new(name).components().collect();
+        let joined = self.root.path().join("sessions").join(native_name);
+        let p = std::path::PathBuf::from(
+            crate::inputs::codex_transcript::discovery::lexical_absolute(&joined.to_string_lossy()),
+        );
         tokio::fs::create_dir_all(p.parent().expect("parent"))
             .await
             .expect("dir");
@@ -258,8 +270,7 @@ async fn absent_metadata_survives_discovery_until_exact_absence_ttl_then_reclaim
             ) + "\n"),
         )
         .await;
-    let stat = tokio::fs::metadata(&path).await.expect("stat");
-    let (ino, size, _) = file_meta_snapshot(&stat);
+    let (ino, size, _) = file_meta_snapshot(&path).await.expect("native snapshot");
     f.engine()
         .register_subagent_owner_meta(f.rt(), &path, ino, size, Some(0), true)
         .await
@@ -306,8 +317,7 @@ async fn discovery_cache_hits_do_not_refresh_or_evict_the_active_metadata_workin
             ) + "\n"),
         )
         .await;
-    let stat = tokio::fs::metadata(&cold).await.expect("stat");
-    let (ino, size, _) = file_meta_snapshot(&stat);
+    let (ino, size, _) = file_meta_snapshot(&cold).await.expect("native snapshot");
     f.engine()
         .register_subagent_owner_meta(f.rt(), &cold, ino, size, Some(0), true)
         .await
@@ -431,8 +441,7 @@ async fn recovery_watermark_is_actual_file_size_so_same_inode_shrink_reloads_own
         )
     );
     let path = f.write("rollout-watermark.jsonl", &original).await;
-    let stat = tokio::fs::metadata(&path).await.expect("stat");
-    let (ino, size, _) = file_meta_snapshot(&stat);
+    let (ino, size, _) = file_meta_snapshot(&path).await.expect("native snapshot");
     let mut cp = empty_checkpoint(ino);
     cp.owner_session_meta_offset = Some(0);
     cp.scan_offset = turn.len() as i64;
@@ -474,8 +483,7 @@ async fn recovery_watermark_is_actual_file_size_so_same_inode_shrink_reloads_own
         )
     );
     tokio::fs::write(&path, &rewritten).await.expect("rewrite");
-    let after = tokio::fs::metadata(&path).await.expect("stat");
-    let (ino2, size2, _) = file_meta_snapshot(&after);
+    let (ino2, size2, _) = file_meta_snapshot(&path).await.expect("native snapshot");
     assert_eq!(ino2, ino);
     assert!(size2 < size && size2 >= turn.len() as i64);
     let replacement = f
@@ -1654,8 +1662,7 @@ async fn cached_owner_metadata_reregisters_child_after_linker_eviction_without_r
             &(child_record().to_string() + "\n"),
         )
         .await;
-    let stat = tokio::fs::metadata(&p).await.expect("stat");
-    let (ino, size, _) = file_meta_snapshot(&stat);
+    let (ino, size, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     f.engine()
         .register_subagent_owner_meta(f.rt(), &p, ino, size, Some(0), true)
         .await
@@ -1863,7 +1870,12 @@ async fn expired_dynamic_home_marker_is_removed_without_checkpointing_its_rollou
     f.marker("wakeups","session-1.json",json!({"session_id":"session-1","session_dir":f.root.path().join("stale/sessions"),"received_at":(chrono::Utc::now()-chrono::Duration::hours(49)).to_rfc3339()})).await;
     run_real_lifecycle(&f).await;
     assert!(f.records().is_empty());
-    assert!(!f.root.path().join("wakeups/session-1.json").exists());
+    assert!(!f
+        .root
+        .path()
+        .join("wakeups")
+        .join("session-1.json")
+        .exists());
     let canonical = tokio::fs::canonicalize(p).await.expect("canonical");
     assert!(f
         .rt()
@@ -2177,7 +2189,7 @@ async fn truly_unparseable_legacy_pending_range_survives_durable_restart_and_blo
             &(pending.clone() + &simple_turn("turn-normal", 120, 12, 60).join("\n") + "\n"),
         )
         .await;
-    let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+    let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     first.rt().state_store.update(&first.engine().state_key(&p),InputStatePatch{last_offset:Some(pending.len() as f64),extra:Some(json!({"codexTranscript":{"inode":ino,"scanOffset":pending.len(),"activeTurn":{"turnId":"turn-unparseable","startOffset":0,"startedAtMs":1_782_280_800_000.0},"pendingTerminal":{"turnId":"turn-unparseable","terminalEndOffset":pending.len()},"latestSessionMetaOffset":null,"emittedTerminalTurnIds":[]}})),..Default::default()});
     let second = first.restart().await;
     start_until_first_native_cycle(&second).await;
@@ -2323,7 +2335,7 @@ async fn startup_copied_baseline_does_not_poison_parent(subagent: bool) {
                 + "\n"),
         )
         .await;
-    let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+    let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     let mut cp = empty_checkpoint(ino);
     cp.scan_offset = (parent_meta.len() + 1) as i64;
     cp.owner_session_meta_offset = Some(0);
@@ -2425,7 +2437,7 @@ async fn hook_anchor_uses_turn_context_when_task_started_is_absent() {
 fn isolated_diagnostic_records(scenario: &str) -> Vec<Value> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let root = tempfile::tempdir().expect("isolated child home");
+    let root = isolated_fixture_root();
     let mut command = Command::new(std::env::current_exe().expect("native test executable"));
     command.args(["--exact","inputs::codex_transcript::input::engine::history_contracts::native_diagnostic_records_preserve_control_retry_resource_and_anchor_reasons","--nocapture"]);
     command
@@ -2555,7 +2567,7 @@ async fn native_diagnostic_records_preserve_control_retry_resource_and_anchor_re
                             + "\n"),
                     )
                     .await;
-                let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+                let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
                 let mut cp = empty_checkpoint(ino);
                 cp.scan_offset = pending.len() as i64;
                 cp.active_turn = Some(create_active_turn(
@@ -2598,7 +2610,7 @@ async fn native_diagnostic_records_preserve_control_retry_resource_and_anchor_re
                 .await;
                 println!(
                     "{}",
-                    json!({"msg":"synthetic fixture expected resource marker","expectedMarker":f.root.path().join("wakeups/session-1.json")})
+                    json!({"msg":"synthetic fixture expected resource marker","expectedMarker":f.root.path().join("wakeups").join("session-1.json")})
                 );
                 let p = f.write("rollout-resource-logs.jsonl", &completed()).await;
                 f.process(&p).await;
@@ -3139,7 +3151,7 @@ async fn legacy_latest_parent_meta_checkpoint_rebuilds_true_owner_before_child_r
     let copied_end = (lines.join("\n") + "\n").len();
     lines.extend(turn_block(child, "2026-08-05T10:00:10Z"));
     let p = fork_path(&first, owner, &lines).await;
-    let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+    let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     first.rt().state_store.update(&first.engine().state_key(&p),InputStatePatch{last_offset:Some(copied_end as f64),extra:Some(json!({"codexTranscript":{"inode":ino,"scanOffset":copied_end,"activeTurn":null,"pendingTerminal":null,"latestSessionMetaOffset":first_line.len()+1,"emittedTerminalTurnIds":["parent-turn-1"]}})),..Default::default()});
     initial_hook(&first, owner, child, &p, "subagent-stop").await;
     let second = first.restart().await;
@@ -4675,7 +4687,7 @@ async fn legacy_empty_pending_terminal_clears_during_actual_startup_and_collects
             .join("\n")
         + "\n";
     let p = f.write("rollout-session-1.jsonl", &text).await;
-    let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+    let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     f.rt().state_store.update(&f.engine().state_key(&p),InputStatePatch {
         last_offset:Some(control.len() as f64),
         extra:Some(json!({"codexTranscript":{
@@ -4818,7 +4830,7 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
     let mut privacy_failures = Vec::new();
     for child_terminal in [true, false] {
         for (blocked_parent, blocked_child) in [(true, false), (false, false), (false, true)] {
-            let root = Arc::new(tempfile::tempdir().expect("tempdir"));
+            let root = isolated_fixture_root();
             let uploads = Arc::new(SyntheticImageUploads::default());
             let processor = crate::multimodal::MultimodalProcessor::new(
                 Some("oss://test/synthetic-child"),
@@ -4981,8 +4993,10 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
 }
 
 async fn replace_native_inode(path: &str, text: &str) -> u64 {
-    let original = tokio::fs::metadata(path).await.expect("old stat");
-    let original = file_meta_snapshot(&original).0;
+    let original = file_meta_snapshot(path)
+        .await
+        .expect("old native snapshot")
+        .0;
     let replacement = format!("{path}.replacement");
     tokio::fs::write(&replacement, text)
         .await
@@ -4990,7 +5004,7 @@ async fn replace_native_inode(path: &str, text: &str) -> u64 {
     tokio::fs::rename(&replacement, path)
         .await
         .expect("atomic replacement");
-    let current = file_meta_snapshot(&tokio::fs::metadata(path).await.expect("new stat")).0;
+    let current = file_meta_snapshot(path).await.expect("native snapshot").0;
     assert_ne!(
         current, original,
         "real replacement must change platform file identity"
@@ -5135,7 +5149,7 @@ async fn assert_invalid_fork_search_repair(f: &Fixture) {
     lines.extend(turn_block(turn, "2026-08-05T10:00:00.010Z"));
     let text = lines.join("\n") + "\n";
     let p = fork_path(f, owner, &lines).await;
-    let (ino, _, _) = file_meta_snapshot(&tokio::fs::metadata(&p).await.expect("stat"));
+    let (ino, _, _) = file_meta_snapshot(&p).await.expect("native snapshot");
     f.rt().state_store.update(&f.engine().state_key(&p),InputStatePatch{
       last_offset:Some(0.0),
       extra:Some(json!({"codexTranscript":{
@@ -5168,4 +5182,70 @@ async fn persisted_out_of_range_fork_search_offset_is_repaired_and_actual_warnin
         .expect("actual repair diagnostic");
     assert_eq!(warning["searchOffset"], offset);
     assert_eq!(warning["repairedSearchOffset"], 0);
+}
+
+#[path = "engine_main_history.rs"]
+mod main_history_contracts;
+
+#[tokio::test]
+async fn fixture_native_path_matches_real_discovery_and_checkpoint_key_for_nested_rollout() {
+    let f = Fixture::new();
+    f.input.start().await.expect("start before rollout");
+    let path = f
+        .write("2026/06/24/rollout-native-spelling.jsonl", &completed())
+        .await;
+    f.input.run_cycle().await;
+    f.input.stop().await.expect("bounded stop");
+    let canonical = tokio::fs::canonicalize(&path)
+        .await
+        .expect("canonical source")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(path, canonical);
+    assert_eq!(f.checkpoint(&path).scan_offset, completed().len() as i64);
+    assert_eq!(responses_for(&f.records(), "turn-1").len(), 3);
+    assert_eq!(
+        f.engine().state_key(&path),
+        format!("codex-transcript:{canonical}")
+    );
+}
+
+#[tokio::test]
+async fn ordinary_home_and_canonical_transcript_marker_collect_real_isolated_root_on_windows() {
+    let f = Fixture::new();
+    let path = f
+        .write(
+            "../home/u/synthetic/sessions/2026/06/24/rollout-session-1.jsonl",
+            &completed(),
+        )
+        .await;
+    let canonical = tokio::fs::canonicalize(&path)
+        .await
+        .expect("canonical transcript");
+    let home = f.root.path().join("home").to_string_lossy().into_owned();
+    // Construct the ordinary hook spelling independently of the comparison code.
+    #[cfg(windows)]
+    let home = home
+        .strip_prefix(r"\\?\")
+        .expect("canonical local temp prefix")
+        .to_string();
+    f.marker(
+        "wakeups",
+        "session-1.json",
+        json!({
+            "session_id": "session-1", "turn_id": "turn-1",
+            "codex_home": home,
+            "session_dir": std::path::Path::new(&home).join("sessions"),
+            "transcript_path": canonical,
+            "received_at": chrono::Utc::now().to_rfc3339()
+        }),
+    )
+    .await;
+    run_real_lifecycle(&f).await;
+    assert_eq!(responses_for(&f.records(), "turn-1").len(), 3);
+    assert_eq!(
+        f.checkpoint(canonical.to_str().expect("canonical string"))
+            .scan_offset,
+        completed().len() as i64
+    );
 }

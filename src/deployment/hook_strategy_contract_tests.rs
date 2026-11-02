@@ -188,15 +188,35 @@ async fn actual_windows_deployment_replaces_legacy_alias_and_keeps_declared_shel
     let h = def.hook.as_mut().unwrap();
     h.hook_command = "C:/Users/Test User/hooks/qoder.ps1".into();
     h.events = vec!["Stop".into()];
+    h.format = crate::types::HookFormat::Nested;
     h.event_subcommand = Some(EventSubcommand::KebabCase);
     h.win_shell = Some("powershell".into());
     let legacy="powershell -NoProfile -ExecutionPolicy Bypass -File C:/Users/Test User/hooks/qoder.ps1 stop";
-    f.write(&json!({"hooks":{"Stop":[{"command":legacy},{"command":"user-hook"}]}}));
+    f.write(&json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":legacy}]},{"hooks":[{"type":"command","command":"user-hook"}]}]}}));
     let deployed = f.strategy.deploy(&def).await;
     assert!(deployed.success, "{:?}", deployed.error);
     let text = std::fs::read_to_string(&f.settings).unwrap();
     assert!(!text.contains(legacy));
     assert_eq!(text.matches("qoder.ps1").count(), 1);
+    assert_eq!(text.matches("user-hook").count(), 1);
+    let data = f.data();
+    let handlers: Vec<_> = data["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .collect();
+    let installed = handlers
+        .iter()
+        .find(|handler| {
+            handler
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| command.contains("qoder.ps1"))
+        })
+        .unwrap();
+    assert_eq!(installed["shell"], "powershell");
+
     assert_eq!(
         f.strategy.build_hook_definitions(&def)[0].shell.as_deref(),
         Some("powershell")

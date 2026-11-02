@@ -1480,24 +1480,47 @@ impl SessionTail {
         file_path: &str,
         on_line: &LineFn,
     ) -> Result<Vec<AgentActivityEntry>, String> {
-        let meta = match tokio::fs::metadata(file_path).await {
-            Ok(meta) => meta,
-            Err(_) => return Ok(Vec::new()),
+        let (file, identity) = match open_session_file(file_path).await {
+            Ok(opened) => opened,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) if is_unreadable_io(&err) => {
+                self.diagnose_unreadable_path(file_path, "event file").await;
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(err.to_string()),
         };
+        self.read_opened_lines(file_path, on_line, file, identity)
+            .await
+    }
+
+    async fn read_opened_lines(
+        &self,
+        file_path: &str,
+        on_line: &LineFn,
+        mut file: tokio::fs::File,
+        identity: crate::utils::file_identity::OpenedFileIdentity,
+    ) -> Result<Vec<AgentActivityEntry>, String> {
         let state_key = format!("{}:{file_path}", self.id);
-        let inode = inode_of(&meta);
+        let inode = identity.ino;
         let prev = self.state_store.get(&state_key);
         let prev_inode = prev
             .extra()
             .as_ref()
             .and_then(|extra| extra.get("inode"))
             .and_then(value_u64);
-        if prev_inode.is_some() && prev_inode != Some(inode) {
+        let prev_dev = prev
+            .extra()
+            .as_ref()
+            .and_then(|extra| extra.get("dev"))
+            .and_then(value_u64);
+        if (prev_inode.is_some() && prev_inode != Some(inode))
+            || (prev_dev.is_some() && prev_dev != Some(identity.dev))
+        {
             self.state_store.set_offset(&state_key, 0.0);
-            self.store_inode(&state_key, inode);
+            self.store_identity(&state_key, &identity);
         }
         let mut offset = self.state_store.get_offset(&state_key).max(0.0) as u64;
-        let size = meta.len();
+        let size = identity.size;
         if offset > 0 && size < offset {
             self.logger.info(
                 "file truncated or rotated, resetting offset",
@@ -1509,20 +1532,11 @@ impl SessionTail {
             );
             offset = 0;
             self.state_store.set_offset(&state_key, 0.0);
-            self.store_inode(&state_key, inode);
+            self.store_identity(&state_key, &identity);
         }
         if size <= offset {
             return Ok(Vec::new());
         }
-        let mut file = match tokio::fs::File::open(file_path).await {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) if is_unreadable_io(&err) => {
-                self.diagnose_unreadable_path(file_path, "event file").await;
-                return Ok(Vec::new());
-            }
-            Err(err) => return Err(err.to_string()),
-        };
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(|err| err.to_string())?;
@@ -1540,7 +1554,7 @@ impl SessionTail {
             filled += n;
         }
         buf.truncate(filled);
-        self.store_inode(&state_key, inode);
+        self.store_identity(&state_key, &identity);
         let Some(last_nl) = buf.iter().rposition(|byte| *byte == b'\n') else {
             return Ok(Vec::new());
         };
@@ -1597,9 +1611,14 @@ impl SessionTail {
         Ok(entries)
     }
 
-    fn store_inode(&self, state_key: &str, inode: u64) {
+    fn store_identity(
+        &self,
+        state_key: &str,
+        identity: &crate::utils::file_identity::OpenedFileIdentity,
+    ) {
         let mut extra = Map::new();
-        extra.insert("inode".to_string(), Value::Number(inode.into()));
+        extra.insert("inode".to_string(), Value::Number(identity.ino.into()));
+        extra.insert("dev".to_string(), Value::Number(identity.dev.into()));
         self.state_store.update(
             state_key,
             InputStatePatch {
@@ -1681,16 +1700,20 @@ pub fn is_unreadable_io(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied || matches!(err.raw_os_error(), Some(1 | 13))
 }
 
-fn inode_of(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::MetadataExt::ino(meta)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
+async fn open_session_file(
+    path: &str,
+) -> std::io::Result<(
+    tokio::fs::File,
+    crate::utils::file_identity::OpenedFileIdentity,
+)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&file)?;
+        Ok((tokio::fs::File::from_std(file), identity))
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn owner_uid(path: &Path) -> Option<u32> {
@@ -1740,3 +1763,7 @@ pub fn memory_state_store(dir: &Path) -> Arc<StateStore> {
 pub fn positive_number(value: &Value) -> bool {
     value.as_f64().is_some_and(|number| number > 0.0)
 }
+
+#[cfg(test)]
+#[path = "session_tail_identity_tests.rs"]
+mod session_tail_identity_tests;

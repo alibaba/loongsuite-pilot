@@ -135,6 +135,10 @@ async fn isolated_case(name: &str) {
             "grok_target_checks_every_asset_repairs_settings_and_scopes_cleanup" => {
                 grok_contract(&root).await
             }
+            #[cfg(unix)]
+            "copilot_plugin_watchdog_repairs_real_registration_and_cleans_disabled_owned_state" => {
+                copilot_contract(&root).await
+            }
             _ => panic!("unexpected fixture case"),
         }
         return;
@@ -468,4 +472,186 @@ async fn grok_contract(root: &Path) {
             .and_then(|hooks| hooks.get(event))
             .is_none_or(|rows| rows.as_array().is_some_and(Vec::is_empty)));
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copilot_plugin_watchdog_repairs_real_registration_and_cleans_disabled_owned_state() {
+    isolated_case(
+        "copilot_plugin_watchdog_repairs_real_registration_and_cleans_disabled_owned_state",
+    )
+    .await;
+}
+#[cfg(unix)]
+async fn copilot_contract(root: &Path) {
+    let detected = root.join(".copilot");
+    let plugin = detected.join("installed-plugins/loongsuite-pilot/loongsuite-pilot");
+    let settings = detected.join("settings.json");
+    let config = detected.join("config.json");
+    std::fs::create_dir_all(&detected).unwrap();
+    let settings_before = "{\n // user settings\n \"theme\":\"dark\", \"enabledPlugins\":{\"foreign@market\":true}\n}\n";
+    let config_before = "{\"custom\":42,\"installedPlugins\":[{\"name\":\"foreign\",\"marketplace\":\"market\"}]}\n";
+    std::fs::write(&settings, settings_before).unwrap();
+    std::fs::write(&config, config_before).unwrap();
+    std::fs::write(root.join(".bashrc"), "export USER_CUSTOM=value\n").unwrap();
+    let mut def = declaration("copilot", "copilot-plugin", &detected);
+    def["hook"] = json!({"settingsPath":settings,"events":["sessionStart","preToolUse","agentStop"],
+        "hookCommand":"$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh","format":"nested","eventSubcommand":"kebab-case"});
+    def["copilotPlugin"] = json!({"pluginRoot":plugin,"pluginId":"loongsuite-pilot","settingsPath":settings,
+        "configPath":config,"events":["sessionStart","preToolUse","agentStop"],
+        "hookCommand":"$PILOT_DATA/hooks/copilot-loongsuite-pilot-hook.sh",
+        "format":"nested","eventSubcommand":"kebab-case","timeoutSec":5});
+    let incomplete = declaration("copilot-incomplete", "copilot-plugin", &detected);
+    let fixture = Fixture::new(root, vec![def, incomplete]).await;
+    std::fs::create_dir_all(fixture.pilot.join("assets/hooks/shared")).unwrap();
+    std::fs::write(
+        fixture
+            .pilot
+            .join("assets/hooks/copilot-loongsuite-pilot-hook.sh"),
+        include_bytes!("../../assets/hooks/copilot-loongsuite-pilot-hook.sh"),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.pilot.join("assets/hooks/shared/native.sh"),
+        include_bytes!("../../assets/hooks/shared/native.sh"),
+    )
+    .unwrap();
+    let orchestrator = fixture.orchestrator("copilot", Some(true));
+    assert!(!fixture.manager.has_record("copilot"));
+    let first = orchestrator
+        .build_watchdog(&fixture.manager)
+        .run_check()
+        .await;
+    assert!(
+        plugin.join("plugin.json").is_file(),
+        "actual Orchestrator-built watchdog must install missing Copilot plugin; summary={first:?}"
+    );
+    assert!(fixture.manager.has_record("copilot"));
+    assert_eq!(first.repaired, 1);
+    let hooks = plugin.join("hooks/hooks.json");
+    let original_hooks = std::fs::read(&hooks).unwrap();
+    let targets = orchestrator.mode_intercepts(
+        &fixture.manager,
+        DeployMode::CopilotPlugin,
+        "copilot-plugin",
+        true,
+    );
+    assert_eq!(
+        targets.len(),
+        1,
+        "incomplete Copilot declarations must not become repair targets"
+    );
+    let target = &targets[0];
+    assert_eq!(target.id, "copilot-plugin:copilot");
+    assert!((target.enabled)());
+    assert!((target.precondition)().await);
+    assert!((target.check)().await);
+
+    std::fs::write(&hooks, "{}\n").unwrap();
+    assert!(!(target.check)().await);
+    let repaired = orchestrator
+        .build_watchdog(&fixture.manager)
+        .run_check()
+        .await;
+    assert_eq!(repaired.repaired, 1);
+    assert_eq!(std::fs::read(&hooks).unwrap(), original_hooks);
+    assert!((target.check)().await);
+    // A skipped deployment cannot be reported as a successful repair.
+    assert!((target.repair)().await.is_err());
+
+    orchestrator
+        .bits
+        .lock()
+        .unwrap()
+        .modes
+        .insert("copilot".into(), crate::types::AgentControlMode::Off);
+    assert!(!(target.enabled)());
+    orchestrator
+        .build_watchdog(&fixture.manager)
+        .run_check()
+        .await;
+    assert!(!fixture.manager.has_record("copilot"));
+    assert!(!plugin.exists());
+    let read = |p: &Path| {
+        crate::utils::parse_json_document(&std::fs::read_to_string(p).unwrap(), JsonSyntax::Jsonc)
+            .unwrap()
+    };
+    assert_eq!(read(&settings)["theme"], "dark");
+    assert_eq!(read(&settings)["enabledPlugins"]["foreign@market"], true);
+    assert!(read(&settings)["enabledPlugins"]
+        .get("loongsuite-pilot@loongsuite-pilot")
+        .is_none());
+    assert_eq!(read(&config)["custom"], 42);
+    assert_eq!(
+        read(&config)["installedPlugins"],
+        json!([{"name":"foreign","marketplace":"market"}])
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".bashrc")).unwrap(),
+        "export USER_CUSTOM=value\n"
+    );
+
+    // No record means no ownership: even an unmanaged directory at the same
+    // target must be left alone, and cleanup itself must succeed as a no-op.
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(plugin.join("foreign.txt"), "not owned by pilot\n").unwrap();
+    let saved_settings = std::fs::read(&settings).unwrap();
+    target.cleanup.as_ref().unwrap()().await.unwrap();
+    assert_eq!(std::fs::read(&settings).unwrap(), saved_settings);
+    assert_eq!(
+        std::fs::read_to_string(plugin.join("foreign.txt")).unwrap(),
+        "not owned by pilot\n"
+    );
+    std::fs::remove_dir_all(&plugin).unwrap();
+
+    let away = root.join(".copilot-away");
+    std::fs::rename(&detected, &away).unwrap();
+    assert!(!(target.precondition)().await);
+    assert!((target.repair)().await.is_err());
+    assert!(!detected.exists());
+    std::fs::rename(&away, &detected).unwrap();
+    orchestrator
+        .bits
+        .lock()
+        .unwrap()
+        .modes
+        .insert("copilot".into(), crate::types::AgentControlMode::On);
+    orchestrator
+        .build_watchdog(&fixture.manager)
+        .run_check()
+        .await;
+    assert!(fixture.manager.has_record("copilot"));
+    let valid_settings = std::fs::read(&settings).unwrap();
+    std::fs::write(&settings, "{\"enabledPlugins\":[]}").unwrap();
+    assert!(target.cleanup.as_ref().unwrap()().await.is_err());
+    assert!(
+        fixture.manager.has_record("copilot"),
+        "failed cleanup must preserve ownership for retry"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        "{\"enabledPlugins\":[]}"
+    );
+    std::fs::write(&settings, valid_settings).unwrap();
+    target.cleanup.as_ref().unwrap()().await.unwrap();
+    assert!(!fixture.manager.has_record("copilot"));
+    assert!(!plugin.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn copilot_plugin_watchdog_is_absent_on_windows() {
+    let root = tempfile::tempdir().unwrap();
+    let detected = root.path().join(".copilot");
+    std::fs::create_dir_all(&detected).unwrap();
+    let mut def = declaration("copilot", "copilot-plugin", &detected);
+    def["copilotPlugin"] = json!({"pluginRoot":detected.join("plugins/pilot"),
+        "pluginId":"loongsuite-pilot","settingsPath":detected.join("settings.json"),
+        "configPath":detected.join("config.json"),"events":["sessionStart"],
+        "hookCommand":root.path().join("never-run.sh"),"format":"nested"});
+    let fixture = Fixture::new(root.path(), vec![def]).await;
+    let orchestrator = fixture.orchestrator("copilot", Some(true));
+    assert!(orchestrator.copilot_intercepts(&fixture.manager).is_empty());
+    assert!(!fixture.manager.has_record("copilot"));
+    assert!(!detected.join("plugins").exists());
 }

@@ -386,24 +386,103 @@ pub fn uuid_v7_timestamp_ms(value: &str) -> Option<f64> {
     Some(timestamp as f64)
 }
 
-pub fn file_meta_snapshot(meta: &std::fs::Metadata) -> (u64, i64, i64) {
-    let ino = {
+/// Read stable platform identity for a rollout. Windows Metadata alone does
+/// not expose the stable handle file index on stable Rust.
+pub async fn file_meta_snapshot(path: &str) -> std::io::Result<(u64, i64, i64)> {
+    #[cfg(windows)]
+    {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            let file = std::fs::File::open(path)?;
+            let identity = crate::utils::file_identity::identity_from_open(&file)?;
+            let metadata = file.metadata()?;
+            Ok((
+                identity.ino,
+                i64::try_from(identity.size).unwrap_or(i64::MAX),
+                file_mtime_ms(&metadata),
+            ))
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = tokio::fs::metadata(path).await?;
         #[cfg(unix)]
-        {
+        let inode = {
             use std::os::unix::fs::MetadataExt;
-            meta.ino()
-        }
+            metadata.ino()
+        };
         #[cfg(not(unix))]
-        {
-            0
-        }
-    };
-    let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-    let mtime = meta
-        .modified()
+        let inode = 0;
+        Ok((
+            inode,
+            i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+            file_mtime_ms(&metadata),
+        ))
+    }
+}
+
+pub fn file_mtime_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0);
-    (ino, size, mtime)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod native_file_identity_tests {
+    use super::*;
+    #[tokio::test]
+    async fn native_handle_identity_survives_append_and_detects_atomic_replacement() {
+        use tokio::io::AsyncWriteExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("rollout-native-id.jsonl");
+        tokio::fs::write(&path, "a\n").await.expect("source");
+        let path_text = path.to_string_lossy().into_owned();
+        let held_original = std::fs::File::open(&path).expect("hold identity lifetime");
+        let first = file_meta_snapshot(&path_text)
+            .await
+            .expect("first snapshot");
+        assert_ne!(first.0, 0, "a real regular file has stable native identity");
+        assert_eq!(first.1, 2);
+        assert_eq!(
+            file_meta_snapshot(&path_text).await.expect("reopen").0,
+            first.0
+        );
+        let mut appending = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .expect("append");
+        appending.write_all(b"b\n").await.expect("bytes");
+        appending.flush().await.expect("visible bytes");
+        drop(appending);
+        let grown = file_meta_snapshot(&path_text)
+            .await
+            .expect("append snapshot");
+        assert_eq!(grown.0, first.0);
+        assert_eq!(grown.1, 4);
+        let replacement = root.path().join("replacement.jsonl");
+        tokio::fs::write(&replacement, "new\n")
+            .await
+            .expect("replacement");
+        tokio::fs::rename(&replacement, &path)
+            .await
+            .expect("atomic rename");
+        let replaced = file_meta_snapshot(&path_text)
+            .await
+            .expect("replaced snapshot");
+        assert_ne!(replaced.0, first.0);
+        assert_eq!(replaced.1, 4);
+        assert_eq!(
+            file_meta_snapshot(&path_text)
+                .await
+                .expect("stable replacement")
+                .0,
+            replaced.0
+        );
+        drop(held_original);
+    }
 }

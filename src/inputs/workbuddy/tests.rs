@@ -1,8 +1,7 @@
 //! Translated from `tests/unit/inputs/workbuddy-input.test.ts`.
 //!
-//! The span-conversion case used `@loongsuite/otel-util-genai`, which is not
-//! part of this crate. The assertions below check the transcript boundaries
-//! that converter turns into 100ms LLM spans and 100ms / 0 tool spans.
+//! Historical boundary assertions remain here. The production native converter
+//! and scheduler contracts are verified in the private history_contracts module.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -527,6 +526,8 @@ async fn replaces_all_zero_trace_ids() {
         })
         .collect();
     let entries = built(&records, "session-1", Vec::new()).await;
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry.trace_id.is_some()));
     let mut trace_ids: Vec<String> = entries
         .iter()
         .filter_map(|entry| entry.trace_id.clone())
@@ -535,7 +536,12 @@ async fn replaces_all_zero_trace_ids() {
     trace_ids.dedup();
     assert_eq!(trace_ids.len(), 1);
     let trace_id = &trace_ids[0];
-    assert!(trace_id.len() == 32 && trace_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(
+        trace_id.len() == 32
+            && trace_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    );
     assert_ne!(trace_id, "00000000000000000000000000000000");
 }
 
@@ -559,9 +565,14 @@ async fn uses_workbuddy_as_provider_without_an_upstream_provider() {
             })
             .collect();
         let entries = built(&records, "session-1", Vec::new()).await;
-        assert!(entries
-            .iter()
-            .all(|entry| entry.provider_name == "workbuddy"));
+        assert!(!entries.is_empty());
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.provider_name.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["workbuddy"])
+        );
     }
 }
 
@@ -1150,6 +1161,7 @@ async fn baselines_existing_transcripts_and_emits_only_new_turns() {
         ]
     );
     assert!(input.collect_now().await.unwrap().is_empty());
+    store.save().await.unwrap();
     let second_user = {
         let mut record = user.clone();
         record
@@ -1188,7 +1200,7 @@ async fn baselines_existing_transcripts_and_emits_only_new_turns() {
         format!(
             "{}{}",
             std::fs::read_to_string(&transcript).unwrap(),
-            jsonl(&[second_user, second_assistant], true)
+            jsonl(&[second_user.clone(), second_assistant.clone()], true)
         ),
     )
     .unwrap();
@@ -1197,7 +1209,7 @@ async fn baselines_existing_transcripts_and_emits_only_new_turns() {
         format!(
             "{}{}",
             std::fs::read_to_string(&outside).unwrap(),
-            jsonl(&[], false)
+            jsonl(&[second_user, second_assistant], false)
         ),
     )
     .unwrap();
@@ -1725,3 +1737,6 @@ async fn reports_identity_availability_and_default_watch_paths() {
         ]
     );
 }
+
+#[path = "history_contracts.rs"]
+mod history_contracts;

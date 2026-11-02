@@ -3,10 +3,7 @@
 //! Reads today's hook JSONL, drops bootstrap history except the latest turn in
 //! each batch, and enriches git context. Segment timing uses the same session
 //! directory layout as the TypeScript input (`<segmentsRoot>/<encoded cwd>/<session>/segments`).
-//! Loop-id iteration pairing and the legacy SDK token fallback are not applied
-//! when the segment file has no `model.request.started` / `model.response.completed`
-//! pair; those paths stay on the hook timestamps.
-
+use super::enrichment::{read_hook_lines, WorkState};
 use crate::inputs::base::{
     create_hook_history_startup_checkpoint, entry_from, filter_bootstrap_history_turns, InputBody,
     InputRuntime,
@@ -17,6 +14,7 @@ use crate::utils::{
     directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
 };
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -36,6 +34,7 @@ struct QoderWorkTraceBody {
     log_dir: String,
     segments_root: String,
     sdk_log_dir: String,
+    state: tokio::sync::Mutex<WorkState>,
 }
 
 impl QoderWorkTraceInput {
@@ -61,6 +60,7 @@ impl QoderWorkTraceInput {
         Self {
             inner: crate::inputs::base::HostedInput::new(
                 QoderWorkTraceBody {
+                    state: tokio::sync::Mutex::new(WorkState::default()),
                     log_dir: opts.log_dir.unwrap_or_else(|| {
                         resolve_home("~/.loongsuite-pilot/logs/qoder-work/history")
                     }),
@@ -145,48 +145,68 @@ impl InputBody for QoderWorkTraceBody {
     }
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        let raw = match read_hook(&self.log_dir, rt).await {
-            Ok(entries) => entries,
-            Err(err)
-                if err.to_string().contains("Permission denied")
-                    || err.to_string().contains("EACCES") =>
+        let mut state = self.state.lock().await;
+        let result: anyhow::Result<Vec<AgentActivityEntry>> = async {
+            state.read_sdk(rt, &self.sdk_log_dir).await?;
+            let entries = filter_bootstrap_history_turns(read_hook(&self.log_dir, rt).await?);
+            if entries.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut sessions = IndexMap::<String, String>::new();
+            for entry in &entries {
+                let cwd = entry
+                    .extra
+                    .get("agent.qoderwork.cwd")
+                    .and_then(Value::as_str)
+                    .filter(|cwd| !cwd.is_empty());
+                if let Some(cwd) = cwd.filter(|_| !entry.session_id.is_empty()) {
+                    sessions
+                        .entry(entry.session_id.clone())
+                        .or_insert_with(|| cwd.to_owned());
+                }
+            }
+            for (session, cwd) in sessions {
+                state
+                    .read_segments(rt, &self.segments_root, &session, &cwd)
+                    .await?;
+            }
+            let mut groups = IndexMap::<String, Vec<AgentActivityEntry>>::new();
+            for entry in entries {
+                let turn = entry
+                    .turn_id
+                    .clone()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| "unknown".into());
+                groups.entry(turn).or_default().push(entry);
+            }
+            let mut output = Vec::new();
+            for mut entries in groups.into_values() {
+                state.enrich(&mut entries);
+                let trace = hex::encode(uuid::Uuid::new_v4().as_bytes());
+                for entry in &mut entries {
+                    entry.trace_id = Some(trace.clone());
+                    let record = crate::inputs::base::entry_map(entry);
+                    let _ = enrich_canonical_entry_with_git(entry, &record, "qoder-work").await;
+                }
+                output.extend(entries);
+            }
+            Ok(output)
+        }
+        .await;
+        // Includes empty polls and failed reads; stale cache cannot live forever
+        // simply because no later hook event arrives for that session.
+        state.evict();
+        match result {
+            Err(error)
+                if error.to_string().contains("Permission denied")
+                    || error.to_string().contains("EACCES") =>
             {
                 rt.diagnose_unreadable_path(&self.log_dir, "session directory")
                     .await;
-                return Ok(Vec::new());
+                Ok(Vec::new())
             }
-            Err(err) => return Err(err),
-        };
-        if raw.is_empty() {
-            return Ok(Vec::new());
+            result => result,
         }
-        let entries = filter_bootstrap_history_turns(raw);
-        let mut output = Vec::new();
-        let mut current_turn = String::new();
-        let mut batch = Vec::new();
-        let finish = |batch: &mut Vec<AgentActivityEntry>, output: &mut Vec<AgentActivityEntry>| {
-            if batch.is_empty() {
-                return;
-            }
-            let trace_id = hex::encode(uuid::Uuid::new_v4().as_bytes());
-            for entry in batch.iter_mut() {
-                entry.trace_id = Some(trace_id.clone());
-            }
-            output.append(batch);
-        };
-        for mut entry in entries {
-            let turn = entry.turn_id.clone().unwrap_or_else(|| "unknown".into());
-            if !current_turn.is_empty() && turn != current_turn {
-                finish(&mut batch, &mut output);
-            }
-            current_turn = turn;
-            let record = crate::inputs::base::entry_map(&entry);
-            let _ = enrich_canonical_entry_with_git(&mut entry, &record, "qoder-work").await;
-            batch.push(entry);
-        }
-        let _ = (&self.segments_root, &self.sdk_log_dir);
-        finish(&mut batch, &mut output);
-        Ok(output)
     }
 }
 
@@ -194,52 +214,13 @@ async fn read_hook(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<Agent
     let today = get_today_date_string();
     let name = format!("qoder-work-{today}.jsonl");
     let path = Path::new(log_dir).join(&name);
-    let Ok(meta) = tokio::fs::metadata(&path).await else {
-        return Ok(Vec::new());
-    };
-    let state = rt.state();
-    let mut offset = if state.last_file() == Some(name.as_str()) {
-        state.last_offset().unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    if offset > 0.0 && (meta.len() as f64) < offset {
-        rt.info(
-            "file truncated, resetting offset",
-            json!({ "file": path }).as_object(),
-        );
-        offset = 0.0;
-    }
-    if (meta.len() as f64) <= offset {
-        return Ok(Vec::new());
-    }
-    let read_size = (meta.len() - offset as u64).min(16 * 1024 * 1024) as usize;
-    let Some(slice) =
-        crate::inputs::base::read_file_slice(path.to_string_lossy().as_ref(), offset as u64)
-            .await?
-    else {
-        return Ok(Vec::new());
-    };
-    let mut bytes = slice.bytes;
-    if bytes.len() > read_size {
-        bytes.truncate(read_size);
-    }
-    let mut consumed = bytes.len();
-    if bytes.len() < (meta.len() as usize).saturating_sub(offset as usize) {
-        if let Some(newline) = String::from_utf8_lossy(&bytes).rfind('\n') {
-            let prefix = &bytes[..newline];
-            consumed = prefix.len() + 1;
-            bytes = prefix.to_vec();
-        }
-    }
-    rt.set_state_fields(Some(name), Some(offset + consumed as f64), None);
-    let text = String::from_utf8_lossy(&bytes);
+    let lines = read_hook_lines(rt, &path, &name).await?;
     let mut entries = Vec::new();
-    for line in text.split('\n') {
+    for line in lines {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(mut value) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
             rt.warn("invalid JSONL line", None);
             continue;
         };
@@ -254,3 +235,7 @@ async fn read_hook(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<Agent
     }
     Ok(entries)
 }
+
+#[cfg(test)]
+#[path = "qoder_work_trace_history_tests.rs"]
+mod history_tests;

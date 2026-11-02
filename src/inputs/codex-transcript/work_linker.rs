@@ -568,6 +568,9 @@ impl CodexSubagentLinker {
     }
 
     pub fn get_delegations_for_parent(&self, parent: &str) -> Vec<CodexSpawnDescriptor> {
+        #[cfg(test)]
+        self.delegation_queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.spawns
             .scoped_values(&[FactScope::Parent(parent.into())])
             .into_iter()

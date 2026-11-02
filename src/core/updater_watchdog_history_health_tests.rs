@@ -147,9 +147,17 @@ impl Harness {
         assert!(self.calls().is_empty());
         assert!(self.alarms.serialize().is_empty());
     }
-    async fn wait_for_child(&self) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+    async fn wait_for_child(&self, first: &tokio::task::JoinHandle<UpdaterWatchdogResult>) {
+        // PS5.1 cold startup on Windows ARM may exceed five seconds.
+        // This is fixture readiness; the production command still has 90 seconds.
+        let readiness = if cfg!(windows) { 20 } else { 5 };
+        tokio::time::timeout(Duration::from_secs(readiness), async {
             while self.calls().is_empty() {
+                assert!(
+                    !first.is_finished(),
+                    "restart ended before its fixture invocation marker: {}",
+                    serde_json::to_string(&self.alarms.serialize()).unwrap()
+                );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -188,7 +196,7 @@ async fn health_l165_overlapping_check_does_not_alarm_or_spawn() {
     let h = Harness::new(Probe::Missing, true, |_| {});
     let wd = h.wd.clone();
     let first = tokio::spawn(async move { wd.run_check().await });
-    h.wait_for_child().await;
+    h.wait_for_child(&first).await;
     assert_eq!(
         h.alarms
             .serialize()

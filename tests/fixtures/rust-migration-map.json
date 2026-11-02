@@ -47101,9 +47101,9 @@
     },
     {
       "legacy": "tests/unit/updater/updater.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "固定ef8953 58条逐声明已登记：56complete、L245/L794明确partial，保持文件partial。仅Linux glibc2.34/Rust1.99.1实际运行；platforms仅适用。候选执行/service transport scripted处逐项注明，真实文件/hash/格式/解包/事务/JSONL/PID及29.5s健康窗口直接断言；caps-response与pin测试不冒称live CLI capability发布。旧timer延迟/owned legacy清理继续实施，不为凑数退休。",
+      "note": "固定ef8953全部58声明逐项complete（含逐项Node机制适配/退休原因），source_hash/sourcecase保持原样。06恢复60s独立首检；07补owned Windows旧CLI安全清理与首次native installer接线。实际Linux glibc2.34/Rust1.99.1；Windows/macOS仅适用，真实Get-Command尚待Windows CI，不冒称实际命令选择已跑。候选capability响应/服务命令scripted证据限制继承05，未声称live CLI capability发布。",
       "source_hash": "4db0980f0bacb1fc16058a4f21a8c9c72f4b9b08334532bb6f01e1eb880996b0",
       "cases": [
         {
@@ -47143,8 +47143,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "已有native daemon立即首检，不同于明确旧源60s延迟；本批只验证native注册/取消，不假报延迟完成。接续将恢复60s daemon delay，manual check立即，使用真实timer调度可控clock验59999/60000边界并保留独立heartbeat/interval。",
+          "coverage": "complete",
+          "behavior": "忠实承接旧start三个独立timer的业务时序：daemon未到59999ms不首检，60000ms首检；checkInterval=70s仍于70000/140000ms检查，未被首检重置；30s heartbeat独立。配置10s时周期可在首检timeout前执行，符合旧setInterval；manual check立即且stop在首检前取消全部工作。原生精确paused clock与测试effect seam只替代timer业务副作用、不改生产duration；actual pending网络/锁取消由shutdown回归真实覆盖。",
           "platforms": [
             "linux",
             "macos",
@@ -47155,7 +47155,19 @@
             "tests": [
               {
                 "file": "src/updater/updater_contract_tests.rs",
-                "test": "enabled_scheduler_owns_and_cancels_a_real_pending_check_and_supports_idempotent_stop"
+                "test": "daemon_dispatches_at_sixty_seconds_with_startup_phased_interval_and_independent_heartbeats"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "configured_periodic_check_can_precede_the_separate_initial_timeout"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "manual_check_remains_immediate_while_daemon_waits_for_its_first_scheduled_check"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "stop_during_initial_delay_cancels_all_automatic_work_and_is_idempotent"
               }
             ]
           }
@@ -47183,7 +47195,7 @@
             "replacement": [
               {
                 "file": "src/updater/updater_contract_tests.rs",
-                "test": "enabled_scheduler_owns_and_cancels_a_real_pending_check_and_supports_idempotent_stop"
+                "test": "stop_during_initial_delay_cancels_all_automatic_work_and_is_idempotent"
               }
             ]
           }
@@ -47771,8 +47783,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "真实PS1服务文件BOM/.cmd目标名及回滚已验证，unknown同名legacy PS1原文保留；尚未证明有归属的旧PS1由updater或installer安全移交清理，不把拒Node/新文件名当删除完成。",
+          "coverage": "complete",
+          "behavior": "native service_files真实发布-service.ps1(UTF8 BOM)+.cmd -File argv，主事务提交前取消/回滚不删除旧文件；提交后installer与updater共享cleanup，要求本cache/data匹配的显式layout及已发布service/cmd，且仅完整字节SHA256匹配固定ef8953祖先24个官方版本(96个LF/CRLF/BOM组合)的保留basename旧PS1才清理。unknown/user-modified/oversize/目录/链接/reparse/跨安装/readonly均保留；已是current的健康检查重试，不等下次升级。实际文件/hash/事务/native archive check/真实installer-helper sync-service测试覆盖；Linux实际运行，Windows真实Get-Command路径已实现但未运行，必须CI执行。相比旧force删除为必要安全收紧，非拒绝Node即完成。",
           "platforms": [
             "windows"
           ],
@@ -47780,8 +47792,32 @@
             "kind": "rust",
             "tests": [
               {
+                "file": "src/deployment/legacy_cli_cleanup.rs",
+                "test": "committed_native_publication_removes_exact_official_shadow_and_keeps_bom_cmd_and_pointers"
+              },
+              {
+                "file": "src/deployment/legacy_cli_cleanup.rs",
+                "test": "foreign_modified_oversize_directory_and_missing_layout_are_preserved"
+              },
+              {
+                "file": "src/deployment/legacy_cli_cleanup.rs",
+                "test": "rollback_before_native_commit_keeps_legacy_command_and_retry_does_not_touch_other_install"
+              },
+              {
+                "file": "src/deployment/legacy_cli_cleanup.rs",
+                "test": "readonly_official_shadow_is_reported_and_preserved_without_harming_native_install"
+              },
+              {
+                "file": "src/deployment/legacy_cli_cleanup.rs",
+                "test": "actual_powershell_command_resolution_switches_from_owned_v1_ps1_to_native_cmd"
+              },
+              {
                 "file": "src/updater/updater_contract_tests.rs",
-                "test": "windows_service_file_publication_has_bom_cmd_and_preserves_unowned_legacy_script"
+                "test": "actual_native_upgrade_cleans_only_owned_windows_shadow_after_commit_and_retries_current_install"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "first_native_install_publishes_command_before_owned_legacy_cleanup_and_preserves_foreign_shadow"
               }
             ]
           }
@@ -52823,10 +52859,10 @@
     },
     {
       "legacy": "tests/unit/core/updater-watchdog.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
       "source_hash": "b803c8cb8526e1dd86ff7ea52d7639c299def62d6262b3a92396bb5e0e913b63",
-      "note": "首14/26；其余12明确暂缓转优先QoderWork产品缺口。Linux实际14+既有14 watchdog=28通过，strict通过。平台适用性不是Windows/macOS执行证据。",
+      "note": "26/26精确源声明映射。14首批加12后批，后批3项Windows专属等待原生执行，Linux只执行其余9项，不把适用性当执行。L536实际默认90s；L564短真实timeout只是原60s cooldown合同的独立fixture。中央首批Windows冷启动readiness已调整20s，本批不改旧health helper，不回退中央改进。",
       "cases": [
         {
           "source": {
@@ -53142,6 +53178,312 @@
         },
         {
           "source": {
+            "id": "L435:C3",
+            "title": "records updater failure alarm when restart command fails",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实隔离 .sh/.ps1 restart 子进程退出1，完整 UPDATER_FAILURE_ALARM/input_name/updater 和 restarted=false",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l435_real_failed_command_records_updater_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L457:C3",
+            "title": "enriches the failure alarm with the breadcrumb the script left behind",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "子进程实际写本次新鲜 BOM 面包屑，再用 stdout/stderr 分别写原始诊断；flat diag 与 PS5.1 Key/Value[] 两种实际文件都验证 stage/reason/init_type/definition_owner/exit/双流摘要，追加 task_state 带引号精确断言",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l457_fresh_bom_flat_and_ps51_array_diagnostics_and_both_streams"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L506:C3",
+            "title": "ignores a breadcrumb left by an earlier attempt",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实十分钟前面包屑 + 不存在的命令路径，实际 spawn/脚本加载错误不能取旧 register-denied/stale 作为本次原因，失败告警必须 stage=unknown",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l506_stale_prior_attempt_is_not_current_failure_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L536:C3",
+            "title": "reports a timeout kill as its own stage",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实生产默认 run_restart_command、restart_command=None、now_ms=None，90s 实际计时后杀死独立 hold child，检查 stage=timeout/killed=true/exit=ETIMEDOUT、新鲜持久文件和进程退出。源 Node mock 的 killed=true signal=SIGTERM 是 execFile 专有错误形状，原生 Tokio 跨平台以 killed=true+ETIMEDOUT 保持超时归因，不伪造信号或降低默认90s",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l536_default_ninety_second_timeout_kills_real_child_and_writes_stage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L564:C3",
+            "title": "attaches the timeout breadcrumb to cooldown SERVICE_NOT_RUNNING_ALARM",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留原60s cooldown，真实 hold 子进程超时后再 runCheck rate-limited，SERVICE_NOT_RUNNING_ALARM 附 last_restart_failure timeout；本项特意注入短 process timeout（Linux2s/Windows30s），不改变任何生产预算，不冒充默认90s证据。默认90s由 L536独立实际验证",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l564_real_timeout_breadcrumb_survives_original_sixty_second_cooldown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L589:C3",
+            "title": "aborts an in-flight restart on stop without recording a failure alarm",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实默认90s命令启动后 stop，观察 child 真退出，pending 返回 restart-failed/aborted by stop/restarted=false，不能产生失败告警或timeout面包屑",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l589_stop_aborts_real_in_flight_child_without_failure_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L627:C3",
+            "title": "does not launch restart-updater after stop()",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "stop之后真实默认runCheck返回disabled/stopped，隔离命令调用文件不存在且无告警",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l627_stopped_watchdog_never_spawns_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L641:C3",
+            "title": "does not launch restart-updater if stop() raced during the health probe",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 loopback TCP 健康探测I/O阻塞窗口里 stop，然后释放socket；保持 aborted/restarted=false/零实际restart子进程/零告警，不只计数虚拟callback",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l641_stop_during_real_health_socket_io_cannot_spawn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L674:C3",
+            "title": "attaches the previous restart failure to the alarm raised before this restart",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际五分钟前 task-missing 面包屑在新restart之前富化 SERVICE_NOT_RUNNING_ALARM，仍调用真实成功子进程一次",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l674_previous_attempt_still_enriches_pre_restart_service_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L700:C3",
+            "title": "defaults Windows pilot bin to loongsuite-pilot-service.ps1",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属：实际 default_pilot_bin 输出与 SystemRoot 已安装 PowerShell builder 完整程序/参数逐项核对，避免执行任何用户已安装服务；实际 PowerShell 调用由 L724独立隔离脚本验证。生产 CREATE_NO_WINDOW 保留，替代 Node windowsHide 机制",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l700_windows_default_service_script_and_installed_powershell_arguments"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L724:C3",
+            "title": "restarts through PowerShell on Windows",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属真实 PowerShell 运行带空格隔离路径脚本，必须只收 restart-updater 动作并生成实际PID调用记录，RestartAttempted，未mock执行平台/execFile",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l724_real_powershell_restarts_explicit_script_with_correct_action"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L754:C3",
+            "title": "does not require heartbeat pid to match pid file on Windows",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属实际 heartbeat/pid 文件不一致仍healthy，没有启动隔离restart子进程；liveness probe 是有意注入独立契约边界",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l754_windows_heartbeat_pid_mismatch_does_not_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L776:C3",
             "title": "does nothing when disabled",
             "suites": [
@@ -53188,6 +53530,2898 @@
               {
                 "file": "src/core/updater_watchdog_history_health_tests.rs",
                 "test": "health_l787_agentshell_checks_nothing"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-work-trace-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "2b6de1a08ad1f3e57dfbcca7bca7b71aafc842b9dac463ba0b5fe2c959473b5f",
+      "note": "27/27 pinned AST declarations; L1231 it.each true/false both execute inside native case, plus 3 extra native physical-file/JSONL/rotation acceptances. Actual execution Linux/glibc2.34/Rust1.99.1; Windows/macOS listed only as applicability, not native execution evidence. Production semantics audited against frozen main f84e388. No retired business declarations.",
+      "cases": [
+        {
+          "source": {
+            "id": "L169:C3",
+            "title": "has correct identity",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 InputBody identity/ClientType/collection method",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l169_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L176:C3",
+            "title": "reads hook JSONL and injects trace_id",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 hook JSONL collect，trace 格式和 QoderWork workspace/git canonical 富化",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l176_hook_jsonl_trace_and_workspace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L191:C3",
+            "title": "strips a legacy bare runtime version while preserving the agent-scoped version",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "序列化后 bare version 真缺失，scoped agent version 原样保留",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l191_bare_version_stripped_scoped_version_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L208:C3",
+            "title": "resumes from offset on second poll",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两次真实文件轮询与 offset，不重复输出",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l208_second_poll_resumes_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C3",
+            "title": "baselines an existing history when the checkpoint is missing, then reads new appends",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际 HostedInput.start baseline 再 append，保留 bootstrap 初次边界",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l226_baseline_history_then_new_append"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L277:C3",
+            "title": "initializes offset zero before a lazily-created history and consumes its first turn",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 start 时无 hook 文件，后来创建后 offset0 不漏首轮",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l277_lazy_first_history_starts_at_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L300:C3",
+            "title": "reports every bootstrap session written before the first poll after empty startup",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实空启动后多 session bootstrap batch 只输出各自最后 turn，后续正常增量",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l300_every_bootstrap_session_after_empty_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L335:C3",
+            "title": "baselines a large existing history without loading or replaying it",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "17MiB 实际历史文件启动只 baseline 大小，不回放已有内容",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l335_large_existing_history_is_only_baselined"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L353:C3",
+            "title": "caps tool.result to not exceed next step llm.request",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实三组 hook 与 segments，前一 tool.result clamp 到下一请求前1ms",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l353_previous_tool_result_capped_before_next_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L422:C3",
+            "title": "assigns unique trace_id per turn group",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不同 turn trace 独立且同 turn 一致",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l422_each_turn_has_its_own_trace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L438:C3",
+            "title": "overrides llm.request/response time and model from segments",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际 segment 的 LLM 时间和 model 优先级，继承 auto/显式 model 规则",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l438_segments_own_model_and_exact_llm_timing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L485:C3",
+            "title": "enriches response usage from a matched segment pair",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际 segment input/output/total/cache-read/cache-creation 数值",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l485_segment_usage_including_cache"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L525:C3",
+            "title": "uses SDK token data only when the matched segment has no usage",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 SDK 主日志仅 token 兜底；hook/segment 时钟保持原断言",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l525_sdk_fallback_is_token_only"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L561:C3",
+            "title": "falls back to locating segment directories by session id",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实不同 cwd 编码路径，经 session 目录回退发现 segment",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l561_session_id_directory_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L594:C3",
+            "title": "evicts stale segment state even when no later hook entries arrive",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "只回溯隔离测试缓存 seen 数据，真实 collect finally/实际 TTL 清理；生产时钟/预算不改，替代 Node fakeTimers 机制",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l594_empty_poll_evicts_aged_cache_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L631:C3",
+            "title": "skips subagent LLM pairs when matching to hook steps",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 subagent 与 memory sink segments 均不能挤占主请求 step",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l631_subagent_pairs_do_not_shift_main_steps"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L673:C3",
+            "title": "matches multiple hook steps to multiple segment pairs in FIFO order",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 legacy request_id 配对保持三步 FIFO",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l673_legacy_pairs_keep_fifo_step_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L721:C3",
+            "title": "pairs a retried logical LLM by loop_id when request_id changes",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实同 loop_id 不同 request_id 重试，最早 request 与最后 response/usage/iteration hints；原占位实现此断言已失败",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l721_retry_pairs_by_loop_despite_changed_request_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L767:C3",
+            "title": "keeps ten transcript steps aligned when iterations 1 and 3 change request_id",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实十个逆序文件 loop，request_index 保持重试对齐而非错误 FIFO",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l767_ten_reverse_file_iterations_keep_retry_alignment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L842:C3",
+            "title": "does not shift a later indexed pair into an interrupted transcript step",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺少 index1 时保留缺口，不把后面 index2 分配到第一步",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l842_interrupted_index_never_consumes_later_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L888:C3",
+            "title": "pairs model start and completion across segment files by loop_id",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同 loop 开始/结束分布两物理文件，合并后物化",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l888_loop_pair_can_span_segment_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L928:C3",
+            "title": "uses iteration start when a completed loop has no model.request.started",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失 model.request.started 时回退 iteration.started，保留结束与 token",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l928_iteration_start_falls_back_without_model_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L964:C3",
+            "title": "matches segment timing by turn id and uses segment tool timing without consuming background pairs",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实文件匹配 turn、runtime>user>plugins hook 时间优先级、model-response tool 起点及生产 converter + apply_qoder_work_step_timing 最终 STEP span 起止",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l964_turn_matching_hook_source_priority_and_real_step_spans"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1093:C3",
+            "title": "retains segment tool timing when tool.call and tool.result arrive in separate batches",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两次 hook collect 的 tool.call/result 分批仍保留 timing 状态",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l1093_tool_timing_survives_split_hook_batches"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1155:C3",
+            "title": "keeps hook timing when segments are unavailable",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无 segments 时输出保留 hook 原时间",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l1155_missing_segments_keep_hook_clock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1186:C3",
+            "title": "uses model.response.completed when segments have no PreToolUse event",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无 PreToolUse 时 tool.call 回退同 step model.response，优先于 tool.requested",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l1186_model_completion_is_tool_start_without_pre_hook"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1231:C3",
+            "title": "uses native usage without consulting intercept (cache present: %s)",
+            "suites": [
+              "QoderWorkTraceInput"
+            ],
+            "parameters": [
+              "it.each([true, false])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "true/false 参数两行均运行，native segment usage 优先于矛盾 SDK token；cache 缺失保持 None，SDK 不改 model/timing，无 system instructions。f84 输入已无 intercept-reader 导入/调用，Node intercept spy 用闭合原生读取路径与最终事件断言替代，不退休业务合同",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-trace/qoder_work_trace_history_tests.rs",
+                "test": "work_l1231_native_usage_wins_with_and_without_cache"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/core/orchestrator.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "5c84329fa1733fa71e2c7d5efa0c41e65603333143296928bdc309565fdebe48",
+      "note": "26/26源声明；main明确改变的OpenCode URI按f84生产声明及replaceSpecs记录；既有原生组件合同复用不镜像重写。所有源hash/AST逐字保留，平台适用性独立于实际执行（Linux）。",
+      "cases": [
+        {
+          "source": {
+            "id": "L274:C5",
+            "title": "creates a detected OpenCode config only inside the isolated home",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实完整隔离启动同时跑目录检测和CLI-only检测：初始无.config/opencode，隔离可执行stub+实际子进程PATH查找确认CLI（最小Linux镜像缺which，fixture入口委托真实POSIX command -v并验证负向不存在命令；Windows使用真实where.exe），产出仅在临时HOME配置/资源，保留decoy。URI按明确f84生产更新：ef agents.d/opencode.json 17b4083... pluginSpec=file://.../plugin.mjs，f84 6ec5b1a... 改为目录且replaceSpecs包含旧mjs；原生断言目录URI并核对index.js/plugin.mjs/shared资源。旧URI字面不是原样通过，保留的是当前main声明对应的完整业务合同",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L331:C5",
+            "title": "starts the metrics summary and dashboard even when the menu bar is disabled",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整真实启动 statusBar.enabled=false，自定义配置JSONL outputDir下实际Manager接受的合成llm.response=150 tokens，由Orchestrator创建的MetricsSummaryWriter聚合出ranges.today.totalTokens=150；真实dashboard已绑定，summary/runtime定时任务存在，stop后各自清理。macOS生产门禁按main补enabled条件，Linux不能证明Mac分支原生执行",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L360:C5",
+            "title": "keeps starting and stops safely when the dashboard rejects",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整真实启动占用所配dashboard端口产生AddrInUse，仍Running+Started并发出ComponentFailure，stop安全完成并清理服务；Node rejected-Promise伪异常改为真实服务绑定失败。Mac enabled UI分支仍需原生平台执行，未假报Linux为Mac",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C5",
+            "title": "reports a menu bar stop failure during orchestrator shutdown",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际StatusBarAppManager组件+隔离runtime记录+ProcessOps.inert(darwin=true)，真实TERM/KILL状态机无法消失而报错，Orchestrator日志/ComponentFailure记录原因、保留runtime证据并仍保存checkpoint/Stopped。模拟的是该组件的进程边界，不是把Linux当真实macOS App启动验收",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "actual_menu_stop_failure_notifies_and_preserves_final_state_save"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L412:C5",
+            "title": "calls subsystems in correct order",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "隔离完整 Orchestrator.start 的真实 hosted source on_start 断言目录已创建、持久StateStore offset73已加载、AgentControl On已发布，flusher已建而metrics/Running/Started尚未发布；跨实际startup gate再完成，保留所有顺序合同",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L439:C5",
+            "title": "emits starting and started events",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整真实启动检查 Starting/Started 各一次且顺序首尾正确；实际source启动gate释放前不得Started，第二次start不再发事件",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L451:C5",
+            "title": "passes the configured OpenCode log poll interval to the input",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整隔离启动读取真实已注册OpenCode collector runtime.poll_interval_ms=1000，且第二组真实detection poll=1000",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L465:C5",
+            "title": "applies listener poll intervals and lets the unified env override them",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整隔离子进程以env_clear分别运行无全局override及LOONGSUITE_PILOT_POLL_INTERVAL_MS=3000，实际Cursor/Codex/QoderCNSqlite runtime scheduler从30000变3000；无同进程全局环境污染",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L494:C5",
+            "title": "passes the configured QoderCN trace poll interval to the input",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整隔离启动的实际已注册QoderCN trace runtime.poll_interval_ms=1000，detection poll=1000",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L508:C5",
+            "title": "uses the configured dataDir for QwenWorkCN Hook history and watches only native sources",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原生注册watchPaths精确为custom dataDir/history与临时HOME native sessions；额外直接启动该已注册trace组件，用custom dataDir物理sentinel {}换行baseline到offset3，证明构造参数真正进入reader，无sentinel回放或真实Agent注入。保持所有availability/gate断言",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L526:C5",
+            "title": "registers the QwenWorkCN Hook listener as a fallback when trace is disabled",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原生trace-disabled/hook-enabled注册，实际Hook collector poll=1234，精确history watchPaths，实际live agent/control gate下fallback检测enabled=true",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L550:C5",
+            "title": "registers the OpenClaw plugin JSONL input with the configured data directory",
+            "suites": [
+              "Orchestrator",
+              "startup sequence (T038)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际已注册OpenClaw concrete runtime source_paths=custom dataDir/logs/openclaw，agent_type=openclaw，poll=1234，检测watchPaths一致",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L568:C5",
+            "title": "stops subsystems in correct order",
+            "suites": [
+              "Orchestrator",
+              "stop sequence (T039)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际 discovery/source.stop 的callback检查metrics尚在且disk仍旧offset；最后metrics→flusher settlement→checkpoint save，有真实gate与文件验证",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              },
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "metrics_snapshot_failure_during_actual_stop_does_not_skip_sink_or_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L587:C5",
+            "title": "emits stopped event",
+            "suites": [
+              "Orchestrator",
+              "stop sequence (T039)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整真实stop之后才发Stopped，第二次stop不再发，且runtime/background task/服务已清理，最终checkpoint真实落盘",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L598:C5",
+            "title": "still shuts down the flusher and saves state when metrics stop fails",
+            "suites": [
+              "Orchestrator",
+              "stop sequence (T039)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MetricsWriter.get_snapshot返回Err，真实stop仍执行final snapshot、flusher.shutdown并保存状态；持有sink gate时无Stopped且不提前保存，失败后仍保存。Node spy rejected-Promise异常机制改为Rust组件实际Result失败，不以函数存在替代",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "metrics_snapshot_failure_during_actual_stop_does_not_skip_sink_or_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L619:C5",
+            "title": "second start is no-op when already running",
+            "suites": [
+              "Orchestrator",
+              "idempotency (T040)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "完整真实start之后再次start，discovery Arc身份不变且生命周期事件计数不变，未重建子系统",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L630:C5",
+            "title": "second stop is no-op when not running",
+            "suites": [
+              "Orchestrator",
+              "idempotency (T040)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实stop两次，不重复事件或flusher.shutdown/StateStore副作用；另含未running时实际sink调用计数0",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "full_start_and_registration_are_isolated_in_temp_home_subprocess"
+              },
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "shutdown_releases_component_lock_and_still_saves_after_flusher_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L642:C5",
+            "title": "uses JsonlFlusher fallback when all flushers disabled",
+            "suites": [
+              "Orchestrator",
+              "JSONL fallback (T041)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "关闭所有目的地后调用实际build_flusher，得到真实JSONL fallback，send/shutdown后读取物理JSONL并校验事件id/type/目录，强于旧不抛异常烟测",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "disabled_destinations_write_real_jsonl_fallback_in_configured_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L660:C5",
+            "title": "delegates to InputManager.setUserId",
+            "suites": [
+              "Orchestrator",
+              "setUserId"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "set_user_id通过真正注册Manager队列、身份归一化与JSONL writer验证 fallback-one→fallback-two、native优先、configured优先，强于旧只调用不崩溃",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "fallback_user_identity_updates_real_manager_output_without_overriding_configured_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L671:C5",
+            "title": "records INPUT_STOP_ALARM only for unexpected reason",
+            "suites": [
+              "Orchestrator",
+              "agent:stopped alarm semantics"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际handle_discovery_event与AlarmManager，合成fixture-source替代真实Agent注入；Unexpected必须逐字段保留type INPUT_STOP_ALARM、level3、message格式、input_name及user identity",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "discovery_notifications_only_aggregate_unexpected_stop_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L689:C5",
+            "title": "does not record alarm for unavailable reason",
+            "suites": [
+              "Orchestrator",
+              "agent:stopped alarm semantics"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同真实handler/AlarmManager，Unavailable不产生告警；合成fixture-source避免对真实Agent注入",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "discovery_notifications_only_aggregate_unexpected_stop_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L701:C5",
+            "title": "does not record alarm for disabled reason",
+            "suites": [
+              "Orchestrator",
+              "agent:stopped alarm semantics"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同真实handler/AlarmManager，Disabled不产生告警；合成fixture-source避免对真实Agent注入",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "discovery_notifications_only_aggregate_unexpected_stop_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L713:C5",
+            "title": "does not record alarm for shutdown reason",
+            "suites": [
+              "Orchestrator",
+              "agent:stopped alarm semantics"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同真实handler/AlarmManager，Shutdown不产生告警；合成fixture-source避免对真实Agent注入",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "discovery_notifications_only_aggregate_unexpected_stop_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L779:C5",
+            "title": "uses the configured storageBasePath directly for sls",
+            "suites": [
+              "Orchestrator",
+              "multimodal startup wiring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际Orchestrator multimodal factory+InputManager安装真实processor/uploader，SLS storageBasePath直接保留，观察就绪路径与零presign调用，关闭真实processor。HTTP使用隔离task-local transport，绝不发真实SLS",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "actual_multimodal_factory_reports_direct_and_discovered_storage_and_cold_waiting"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L811:C5",
+            "title": "leaves delegatedOss retrying inside the processor when the startup sniff fails",
+            "suites": [
+              "Orchestrator",
+              "multimodal startup wiring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际delegated uploader/processor factory，启动presign401后processor保持cold并已安装，原生retry scheduler随后可自行恢复，stop后不再重试。延迟调度沿用既有Tokio暂停时间测试，未触服务90s/30s预算",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "actual_multimodal_factory_reports_direct_and_discovered_storage_and_cold_waiting"
+              },
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "delegated_cold_processor_recovers_live_through_actual_retry_scheduler_and_factory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L832:C5",
+            "title": "installs a processor when the delegatedOss sniff succeeds",
+            "suites": [
+              "Orchestrator",
+              "multimodal startup wiring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际delegated presign成功响应解析成oss://fixture-bucket/...，manager持有ready processor且唯一次startup presign，关闭后无额外调用；并保留独立cold→ready真实scheduler回归",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "actual_multimodal_factory_reports_direct_and_discovered_storage_and_cold_waiting"
+              },
+              {
+                "file": "src/core/orchestrator.rs",
+                "test": "delegated_cold_processor_recovers_live_through_actual_retry_scheduler_and_factory"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/cross-version-upgrade.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953 8声明逐项审查，frozen f84文件哈希相同/实质新增0。3个原生合同、5个仅Node依赖或probe机制逐条退休，均有真实专用v1→native installer替代证据；不承诺旧Node updater直接安装Rust包。附加发现CLI rollback手动swap会在拒绝v1后改写CRLF指针，已用当前可信native helper事务修复并红绿验证。Linux glibc2.34实际；Windows PS分支已实现但必须CI，不冒称已实测。",
+      "source_hash": "d19f6b31276394c07ff3b7df6d85c8ea31b23c938643d8ee398dad663fc31d7f",
+      "cases": [
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "declares the shim as a regular (non-optional) dependency",
+            "suites": [
+              "cross-version upgrade: packaging keeps the sqlite3 shim resolvable"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际旧断言要求pkg.dependencies.sqlite3==file:compat/sqlite3且optionalDependencies不存在。仅为旧Node updater的require(sqlite3)空shim兼容。Rust v2使用独立原生manifest/二进制与bundled rusqlite，不发布npm package或强迫旧Node updater安装Rust包；专用首次原生installer真实承接v1安装根并保留配置/旧包、无需Node/npm。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "实际旧断言要求pkg.dependencies.sqlite3==file:compat/sqlite3且optionalDependencies不存在。仅为旧Node updater的require(sqlite3)空shim兼容。Rust v2使用独立原生manifest/二进制与bundled rusqlite，不发布npm package或强迫旧Node updater安装Rust包；专用首次原生installer真实承接v1安装根并保留配置/旧包、无需Node/npm。",
+            "replacement": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "the release packager ships every file: dependency directory",
+            "suites": [
+              "cross-version upgrade: packaging keeps the sqlite3 shim resolvable"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧断言枚举每个file:依赖目录并要求packager复制目录及.npmrc。原生对应完整runtime-manifest运行资源必须逐个实体复制并验证：真实stage-package逐项检查已登记资源为普通文件，候选无node_modules/package.json，真实binary --version及publish-package成功，旧.npmrc保留在旧树而不混入native运行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "installs file: dependencies as real directories, not symlinks",
+            "suites": [
+              "cross-version upgrade: packaging keeps the sqlite3 shim resolvable"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧断言.npmrc install-links=true、lock中sqlite3无link且resolved=file:compat/sqlite3，为跨平台归档可移动性。原生stage实际产物逐个已登记resource为普通非symlink文件，native manifest与完整资源严格校验；缺失asset在任何安装写入前拒绝。Linux实际文件证据，Windows/macOS仅适用待CI。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C3",
+            "title": "the shim is plain JS with no native binding",
+            "suites": [
+              "cross-version upgrade: packaging keeps the sqlite3 shim resolvable"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧断言shim非注释正文module.exports={}且无require调用，用来避免npm native binding加载。Rust v2不再使用或分发该JS空模块；实际完整native候选在仅synthetic PATH下stage/publish/--version成功，Unix node/npm sentinel未执行；保留旧shim原字节在v1树而不带入native运行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "旧断言shim非注释正文module.exports={}且无require调用，用来避免npm native binding加载。Rust v2不再使用或分发该JS空模块；实际完整native候选在仅synthetic PATH下stage/publish/--version成功，Unix node/npm sentinel未执行；保留旧shim原字节在v1树而不带入native运行包。",
+            "replacement": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C3",
+            "title": "npm install fallback (--production --no-optional), then the old probe passes",
+            "suites": [
+              "cross-version upgrade: old updater sequence against a staged candidate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧测试实际运行npm install --production --no-optional，断言node_modules/sqlite3非链接且旧require(sqlite3) probe不抛错。Rust v2明确不接受旧Node升级协议，这套npm fallback/probe机制逐项退休；由真实首次native installer在两种v1目录布局成功迁移替代，旧Node artifact作为native candidate严格拒绝且安装状态/用户配置不变。不能声称旧Node updater可直接安装native v2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "旧测试实际运行npm install --production --no-optional，断言node_modules/sqlite3非链接且旧require(sqlite3) probe不抛错。Rust v2明确不接受旧Node升级协议，这套npm fallback/probe机制逐项退休；由真实首次native installer在两种v1目录布局成功迁移替代，旧Node artifact作为native candidate严格拒绝且安装状态/用户配置不变。不能声称旧Node updater可直接安装native v2。",
+            "replacement": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L107:C3",
+            "title": "prebuilt path (npm ci --omit=dev --omit=optional), then the old probe passes",
+            "suites": [
+              "cross-version upgrade: old updater sequence against a staged candidate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧测试删除node_modules后实际npm ci --omit=dev --omit=optional，断言shim目录非symlink、lib/sqlite3.js存在且旧probe成功。v2无预构建node_modules或npm ci阶段；真实native stage完整资源直接复制、无package.json/node_modules，native binary无需Node运行。仅该Node机制退休，专用v1→native迁移实际承接而非放宽旧artifact验证。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "旧测试删除node_modules后实际npm ci --omit=dev --omit=optional，断言shim目录非symlink、lib/sqlite3.js存在且旧probe成功。v2无预构建node_modules或npm ci阶段；真实native stage完整资源直接复制、无package.json/node_modules，native binary无需Node运行。仅该Node机制退休，专用v1→native迁移实际承接而非放宽旧artifact验证。",
+            "replacement": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C3",
+            "title": "without the shim directory the old probe fails (guards the test itself)",
+            "suites": [
+              "cross-version upgrade: old updater sequence against a staged candidate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧负控移除shim后要求旧probe失败以证明测试自身有效。原生负控分别提供只有v1 package/dist/shim的旧artifact及删除实际native asset，真实installer-helper均拒绝，cache/服务入口根本未建立、配置与原始旧文件不变；证明正常v1首次迁移成功并非候选验证被绕过。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L123:C3",
+            "title": "uses NODE_SQLITE_PROBE, which loads node:sqlite",
+            "suites": [
+              "cross-version upgrade: the new updater does not probe sqlite3"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧源码断言updater使用NODE_SQLITE_PROBE=require(node:sqlite)且不再require(sqlite3)。Rust v2两种Node probe都被移除；实际native helper及候选在无Node/npm依赖下完成版本/资源预检，v1采集器/updater JS字节原样保留但不执行，旧Node候选拒绝。依赖机制退休，首次迁移和受控native rollback对应功能由真实API合同承接。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "旧源码断言updater使用NODE_SQLITE_PROBE=require(node:sqlite)且不再require(sqlite3)。Rust v2两种Node probe都被移除；实际native helper及候选在无Node/npm依赖下完成版本/资源预检，v1采集器/updater JS字节原样保留但不执行，旧Node候选拒绝。依赖机制退休，首次迁移和受控native rollback对应功能由真实API合同承接。",
+            "replacement": [
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "v1_layouts_migrate_via_real_native_installer_without_node_or_mutating_config_and_legacy_artifacts"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "legacy_node_candidate_and_missing_native_resource_are_rejected_before_install_writes"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "rollback_rejects_legacy_corrupt_and_outside_targets_without_pointer_or_service_byte_changes"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "successful_native_rollback_uses_the_same_publication_transaction_and_preserves_v1_config_and_runtime"
+              },
+              {
+                "file": "tests/native_contracts/cross_version_upgrade.rs",
+                "test": "current_rollback_helper_rejects_unbound_source_and_configuration_mutation_before_any_writes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/workbuddy-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "16c6247e3a05d32f6c3871b81b887a58ca8df9e3905fb942063ed805aaa15e25",
+      "note": "固定ef8953 WorkBuddy25逐声明/逐assert已核，25完整native；旧converter仅boundary现补真实生产converter与完整context，trace/provider/outside fixture松断言已补严格原意。固定f84该test及3个生产TS文件字节均与baseline一致，0新增实质delta，未膨胀分母。类当前默认10s、显式30s真实scheduler/FS wake/停止及Windows identity额外能力验收下一批，不能把本25覆盖当作那些额外能力已通过。Linux实际，Windows/macOS仍需CI。",
+      "cases": [
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "merges a multi-tool response wave into stable, uniquely identified audit events",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实builder原fixture，8事件/2steps、finish/tool/turn-end/provider/cache4/credit0.5/output4parts、next delta三角色与两call IDs/精确response对象无result别名、tool args/result/duration[100,None]、四个nano时点、唯一及重复稳定eventID、workspace全相同。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "merges_a_multi_tool_response_wave"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C3",
+            "title": "serializes safe millisecond timestamps as exact decimal nanoseconds",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原safe JS整数8_639_999_999_999_998及+1精确i128十进制nano，恰2事件，observed nano非空纯数字。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "serializes_safe_millisecond_timestamps_as_exact_nanoseconds"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C3",
+            "title": "replaces WorkBuddy all-zero trace IDs with a stable valid trace ID",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原zero trace fixture非空且每条trace均存在，唯一1、32小写hex且非全零；补齐原Rust会忽略漏trace/允许uppercase的松断言。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "replaces_all_zero_trace_ids"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "uses WorkBuddy as provider when %s has no explicit upstream provider",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": [
+              "it.each([\n    'deepseek-v4-flash',\n    'kimi-k2.6',\n    'minimax-m3',\n    'glm-5v-turbo',\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "4原模型逐一，非空事件集且provider集合精确仅workbuddy；补齐旧all谓词空真漏洞。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "uses_workbuddy_as_provider_without_an_upstream_provider"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L212:C3",
+            "title": "omits unavailable source facts and drops tool events without a reliable name",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原移除model/names/status操作；全部顶层无unknown、request/response无model、tool事件和LLM tool_call parts均0。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "omits_unavailable_source_facts_and_unnamed_tools"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L243:C3",
+            "title": "drops tools without a reliable ID and omits malformed structured payloads",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原破损A ID/结构payload与B plain args，只有B有效ToolCall parts/ToolCall/ToolResult，args字符串原样，next delta精确assistant/tool与B ID。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "drops_tools_without_a_reliable_id_and_malformed_payloads"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "emits a standard null tool response when WorkBuddy has no usable output",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原A output缺失，next delta相应part精确3字段tool_call_response/id/response:null且无result。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "emits_null_tool_response_when_output_is_missing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L303:C3",
+            "title": "uses structural Hook data to repair missing transcript tool identity and timestamps",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原工具ID/timestamp缺失后结构Hook唯一修复，name SyntheticRead、call1210000000/result1330000000纳秒、duration120ms。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "uses_hook_data_to_repair_missing_tool_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "does not guess between ambiguous parallel Hook tool identities",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两个同名并行Pre/Post A/B Hook，不能猜ID，所有tool.call/result为0。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "does_not_guess_ambiguous_parallel_hook_identities"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L381:C3",
+            "title": "uses prompt and Stop Hook times only when LLM transcript timestamps are missing",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原user/assistant timestamp均缺失，仅Hook prompt2000/Stop2500提供精确2个纳秒时点。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "uses_prompt_and_stop_hook_times_when_transcript_timestamps_are_missing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L402:C3",
+            "title": "prefers transcript response time over an earlier Stop Hook observation",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原native user1000/assistant1500优先于Hook900/1300，精确native纳秒值不被较早Stop覆盖。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "prefers_transcript_response_time_over_an_earlier_stop_hook"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L420:C3",
+            "title": "preserves Hook fallback boundaries for later records that lack transcript timestamps",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原前段native1000/1500与后段缺timestamp的Hook2000/2500，四时点按原顺序精确。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "preserves_hook_fallback_boundaries_for_later_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L456:C3",
+            "title": "drops tool events when neither transcript nor Hook provides a call timestamp",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原call时间全缺失且无Hook，tool.call和tool.result均0，不制造duration。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "drops_tool_events_without_a_call_timestamp"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L467:C3",
+            "title": "produces positive LLM and TOOL spans with transcript-derived boundaries",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实GenAiEventLogConverter，无全局env mock：warnings空、LLM durations[100000000,100000000]ns、TOOL[100000000,0]ns；第二LLM实际JSON input为user/assistant/tool/tool，response IDs匹配assistant calls，两个exact对象及无result别名。旧Rust只检boundary缺口已闭合。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/history_contracts.rs",
+                "test": "actual_native_converter_preserves_exact_workbuddy_span_durations_and_full_tool_context"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L525:C3",
+            "title": "does not infer model finish semantics from assistant status",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原assistant status=failed不改真实模型finish；仍tool_call/stop，最后turn.end=true且error.type缺失。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "does_not_infer_finish_semantics_from_assistant_status"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L539:C3",
+            "title": "closes an interrupted turn and cancels its pending tool before the next user turn",
+            "suites": [
+              "WorkBuddy audit-event builder"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原中断与待决PowerShell工具/下一user，前response cancelled+end，工具cancelled/name/200ms，下一response stop+end。仅fixture命令文本不执行。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "closes_an_interrupted_turn_and_cancels_its_pending_tool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L637:C3",
+            "title": "baselines existing transcripts and emits only newly appended turns",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实collect/StateStore：已有CRLF baseline保存，项目外同样追加原second turn且保持排除；Stop双稳定扫描后仅新turn2事件、Hook清除、persisted offsets唯一精确EOF。补旧Rust误写outside空slice与漏中途save。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "baselines_existing_transcripts_and_emits_only_new_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L721:C3",
+            "title": "waits for Stop before processing a turn written in several chunks",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实分3chunks写入，Stop前多次collect都0；Stop首轮0、次轮恰8原事件及2finish、一处end、全uniqueID，再扫0。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "waits_for_stop_before_processing_a_chunked_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L784:C3",
+            "title": "does not checkpoint past a failed newline-delimited record",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实坏newline记录前不能越过offset消费后面的合法assistant；修正完整user/assistant后两轮stable输出恰2且turn ID来自user。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "does_not_checkpoint_past_a_failed_newline_delimited_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L832:C3",
+            "title": "passes uniquely matched structural Hook identity through to the builder",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Hook event文件唯一结构identity进入production builder，两个工具事件ID/name/1210/1330纳秒精确、result120ms。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "passes_structural_hook_identity_through_to_the_builder"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L909:C3",
+            "title": "preserves checkpoints while the projects directory is temporarily unavailable",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实projects目录rename暂不可见，持久offset map逐值保留且pending Hook文件仍在；恢复目录后仅新追加turn输出2事件。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "preserves_checkpoints_while_projects_directory_is_unavailable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L984:C3",
+            "title": "removes per-session Hook events and checkpoints after transcript deletion",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实完整scan忽略非目录.DS_Store，移除transcript后对应Hook files与offset/file-meta两个persisted maps精确清空。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "removes_hook_events_and_checkpoints_after_transcript_deletion"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1025:C3",
+            "title": "does not treat a newly announced transcript as deleted before it is created",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实近期Hook先宣告未来路径，文件尚未创建及后创建仅user prefix两阶段均保留该Hook且不误删。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "does_not_treat_a_newly_announced_transcript_as_deleted"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1054:C3",
+            "title": "removes an orphan Hook session when its observation time is missing",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实缺observed_at的orphan Hook session在collect后文件清空。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "removes_an_orphan_hook_session_when_observation_time_is_missing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1079:C3",
+            "title": "requires a stable Stop boundary for a hook-backed transcript",
+            "suites": [
+              "WorkBuddyInput checkpoints"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Store save/new Store load无Stop不发；重启后Stop需两次stable collect才发request/response且stop/end标记正确。 Linux Rust1.99.1/glibc2.34/network-none strict+27 WorkBuddy tests实际通过；Windows/macOS未执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/workbuddy/tests.rs",
+                "test": "requires_a_stable_stop_boundary_across_restart"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/multimodal/processor.test.ts",
+      "coverage": "partial",
+      "rust": [],
+      "note": "37固定声明中本批20complete/17pending；ef8953与f84相同无新增。13新增真实processor合同；发现并修复并发roots继承泄漏、超时/外部取消遗留slot和waiter挂起，保留全部生产预算；只复用逐行核对的3个已有blob/constructor/idempotence断言。Linux实际，其他平台待CI。",
+      "source_hash": "c043de1300d1cdffea92774463fd2c8f71b01dec344a08b12ac3a242418fee2e",
+      "cases": [
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "returns the value when work finishes first",
+            "suites": [
+              "withDeadline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实with_deadline保留成功值和普通Result Err（不以panic冒充错误），0/-1不触发deadline；暂停时钟精确29ms仍pending、30ms一次onTimeout返回，未降低生产预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "deadlines_preserve_success_result_errors_disabled_races_and_the_exact_expiry_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L45:C3",
+            "title": "returns onTimeout when work never settles",
+            "suites": [
+              "withDeadline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实with_deadline保留成功值和普通Result Err（不以panic冒充错误），0/-1不触发deadline；暂停时钟精确29ms仍pending、30ms一次onTimeout返回，未降低生产预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "deadlines_preserve_success_result_errors_disabled_races_and_the_exact_expiry_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L51:C3",
+            "title": "does not swallow a fast rejection",
+            "suites": [
+              "withDeadline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实with_deadline保留成功值和普通Result Err（不以panic冒充错误），0/-1不触发deadline；暂停时钟精确29ms仍pending、30ms一次onTimeout返回，未降低生产预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "deadlines_preserve_success_result_errors_disabled_races_and_the_exact_expiry_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "deadlineMs <= 0 disables the race",
+            "suites": [
+              "withDeadline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实with_deadline保留成功值和普通Result Err（不以panic冒充错误），0/-1不触发deadline；暂停时钟精确29ms仍pending、30ms一次onTimeout返回，未降低生产预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "deadlines_preserve_success_result_errors_disabled_races_and_the_exact_expiry_boundary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L112:C3",
+            "title": "rejects empty content",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐行复用已有真实Rust显式empty content→None断言；不因为此函数名含overlong而冒称其未断言的overlong case完成。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor.rs",
+                "test": "rejects_empty_overlong_and_shutdown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L257:C3",
+            "title": "rejects empty storageBasePath at construction",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐行复用已有Rust构造storageBasePath只含空白且无resolver必Err断言，对应trim后空storageBasePath拒绝。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor.rs",
+                "test": "with_deadline_and_blob_uri"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L319:C3",
+            "title": "shutdown is idempotent and closes uploader once",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐行复用既有两次await shutdown、Uploader shutdown_calls精确1断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor.rs",
+                "test": "rejects_empty_overlong_and_shutdown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L330:C3",
+            "title": "reads a local image as bytes and returns uri",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际临时PNG经processor读取并上传到受控Uploader，验证完整日期/sha256 URI、mime/modality/size、实际payload字节/content-type/meta/source_uri/expected_size。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "a_real_local_image_emits_exact_uploaded_bytes_hash_mime_and_a_day_scoped_uri"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "does not reuse a same-path URI across event days",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实同文件与dot规范化别名只读/上传一次；不同event day生成各自URI与UploadItem日期，sha和body保持一致，阻止跨日缓存。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "path_cache_is_normalized_but_never_reuses_a_uri_across_event_days"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C3",
+            "title": "LRU-caches path→uri so the same path is uploaded once",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实同文件与dot规范化别名只读/上传一次；不同event day生成各自URI与UploadItem日期，sha和body保持一致，阻止跨日缓存。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "path_cache_is_normalized_but_never_reuses_a_uri_across_event_days"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L376:C3",
+            "title": "shares one in-flight read for concurrent pathToUri calls",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留生产1024路径预算；测试独立override=2且实际两读屏障占满，第三独立文件拒绝，同路径同权限仍join既有owner，精确两次真实读取与两次上传，URI一致。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "a_full_two_path_budget_still_coalesces_an_authorized_existing_owner"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L391:C3",
+            "title": "rejects new path reads when path inflight queue is full",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留生产1024路径预算；测试独立override=2且实际两读屏障占满，第三独立文件拒绝，同路径同权限仍join既有owner，精确两次真实读取与两次上传，URI一致。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "a_full_two_path_budget_still_coalesces_an_authorized_existing_owner"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L458:C3",
+            "title": "does not cache missing paths (re-stat each call)",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际缺失文件连续两次触发stat且不上传，随后创建可读；真实重写PNG改变size与mtime后重新读/新URI、两条上传，未mock文件正文。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "real_path_cache_revalidates_missing_files_and_changed_size_and_mtime"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L467:C3",
+            "title": "invalidates path cache when mtime or size changes",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际缺失文件连续两次触发stat且不上传，随后创建可读；真实重写PNG改变size与mtime后重新读/新URI、两条上传，未mock文件正文。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "real_path_cache_revalidates_missing_files_and_changed_size_and_mtime"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L488:C3",
+            "title": "rejects pathToUri without allowed roots or outside them",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无roots、互斥roots均拒绝，允许root成功后换互斥roots仍拒绝cached URI；另coalesced_path_call_never_inherits_another_callers_allowed_roots通过真实并发红绿证明等待者不能借用owner权限。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "absent_disjoint_and_changed_roots_never_authorize_a_file_or_cached_uri"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L501:C3",
+            "title": "rejects a directory-symlink escape even when the lexical path is inside the root",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Unix临时目录symlink逃逸与同root leaf symlink均拒绝、零上传；macOS/Windows未实际运行，Windows对应reparse行为待跨平台CI/后续专属边界，未声称Linux提供Windows执行证据。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "directory_symlink_escape_and_leaf_symlink_inside_the_root_never_upload"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L520:C3",
+            "title": "rejects symlink targets even inside an allowed root",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Unix临时目录symlink逃逸与同root leaf symlink均拒绝、零上传；macOS/Windows未实际运行，Windows对应reparse行为待跨平台CI/后续专属边界，未声称Linux提供Windows执行证据。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "directory_symlink_escape_and_leaf_symlink_inside_the_root_never_upload"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L530:C3",
+            "title": "rejects image-extension files whose magic is not an image",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际名为.png但非图片魔数的临时文件拒绝，受控Uploader收到0 item。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "image_extension_with_non_image_magic_is_rejected_before_upload"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L587:C3",
+            "title": "times out a never-resolving stat and returns null",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实processor受控stat前屏障永不返回，暂停时钟39ms仍pending、40ms返回None且无上传，生产默认3s不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "a_never_settling_stat_returns_none_at_the_requested_forty_millisecond_deadline"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L616:C3",
+            "title": "rejects pathToUri after shutdown",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "shutdown实际关闭Uploader一次，之后path读取None且stat阶段观察计数0，无文件读取或上传。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "shutdown_rejects_new_paths_without_even_starting_the_stat_phase"
               }
             ]
           }

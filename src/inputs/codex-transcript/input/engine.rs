@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::checkpoints::InputStatePatch;
 use crate::inputs::base::{CommittedInputBatch, InputRuntime};
@@ -34,9 +35,9 @@ use super::super::extractor::{
     extract_codex_transcript_meta, session_id_from_transcript_path, ExtractOptions,
 };
 use super::super::scan::{
-    self, file_meta_snapshot, find_owner_session_meta_offset, find_turn_start_offset,
-    last_complete_jsonl_offset, read_json_line_at, read_json_lines, scan_json_lines,
-    select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
+    self, file_meta_snapshot, file_mtime_ms, find_owner_session_meta_offset,
+    find_turn_start_offset, last_complete_jsonl_offset, read_json_line_at, read_json_lines,
+    scan_json_lines, select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
     uuid_v7_timestamp_ms, JsonLine,
 };
 use super::super::subagent_linker::{
@@ -312,15 +313,12 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     pub async fn process_file(&self, rt: &InputRuntime, file_path: &str) -> anyhow::Result<usize> {
-        let stat = match tokio::fs::metadata(file_path).await {
-            Ok(meta) => {
-                let (ino, size, mtime_ms) = file_meta_snapshot(&meta);
-                Some(RolloutStat {
-                    ino,
-                    size,
-                    mtime_ms,
-                })
-            }
+        let stat = match file_meta_snapshot(file_path).await {
+            Ok((ino, size, mtime_ms)) => Some(RolloutStat {
+                ino,
+                size,
+                mtime_ms,
+            }),
             Err(_) => None,
         };
         let result = match stat {
@@ -887,9 +885,9 @@ impl<'a> CodexTranscriptEngine<'a> {
             return Ok(empty_unparseable(end_offset));
         };
         let records = read_json_lines(file_path, active.start_offset, end_offset, Some(rt)).await?;
-        let current_stat = tokio::fs::metadata(file_path).await.ok();
-        let current_ino = current_stat.as_ref().map(|meta| file_meta_snapshot(meta).0);
-        let current_size = current_stat.as_ref().map(|meta| file_meta_snapshot(meta).1);
+        let current_stat = file_meta_snapshot(file_path).await.ok();
+        let current_ino = current_stat.map(|(inode, _, _)| inode);
+        let current_size = current_stat.map(|(_, size, _)| size);
         let mut meta = if current_ino == Some(checkpoint.inode) {
             current_size
                 .and_then(|size| self.cached_meta_for_checkpoint(file_path, checkpoint, size))
@@ -1100,11 +1098,15 @@ impl<'a> CodexTranscriptEngine<'a> {
         let spawns = extract_codex_spawn_descriptors(&dispatch_turn, &sources, &trace_id);
         self.body
             .with_shared(|shared| shared.linker.register_spawns(&spawns));
-        let known = self.body.with_shared(|shared| {
-            shared
-                .linker
-                .get_delegations_for_parent(&extraction.turn.session_id)
-        });
+        let mut known = if spawns.is_empty() {
+            Vec::new()
+        } else {
+            self.body.with_shared(|shared| {
+                shared
+                    .linker
+                    .get_delegations_for_parent(&extraction.turn.session_id)
+            })
+        };
         let dispatches: Vec<_> = spawns
             .iter()
             .map(|spawn| {
@@ -1152,21 +1154,30 @@ impl<'a> CodexTranscriptEngine<'a> {
                 link.parent_trace_id.as_deref() == Some(trace_id.as_str()),
             );
         }
-        built.entries = self.body.with_shared(|shared| {
-            super::super::invocation_audit::append_agent_results(
-                built.entries,
-                &sources,
-                &known,
-                super::super::invocation_audit::ResultContext {
-                    receiving_session: &extraction.turn.session_id,
-                    delivered: &mut shared.delivered_invocations,
-                    fallback: &audit_base,
-                    pending: &mut shared.pending_agent_results,
-                    file_path,
-                    inode: checkpoint.inode,
-                },
-            )
-        });
+        if has_codex_result_delivery(&built.entries, &sources, &dispatches) {
+            if spawns.is_empty() {
+                known = self.body.with_shared(|shared| {
+                    shared
+                        .linker
+                        .get_delegations_for_parent(&extraction.turn.session_id)
+                });
+            }
+            built.entries = self.body.with_shared(|shared| {
+                super::super::invocation_audit::append_agent_results(
+                    built.entries,
+                    &sources,
+                    &known,
+                    super::super::invocation_audit::ResultContext {
+                        receiving_session: &extraction.turn.session_id,
+                        delivered: &mut shared.delivered_invocations,
+                        fallback: &audit_base,
+                        pending: &mut shared.pending_agent_results,
+                        file_path,
+                        inode: checkpoint.inode,
+                    },
+                )
+            });
+        }
         if let Some(active) = checkpoint.active_turn.as_mut() {
             if !built.entries.is_empty() {
                 active.emitted_trace_id = Some(trace_id);
@@ -1182,10 +1193,8 @@ impl<'a> CodexTranscriptEngine<'a> {
         {
             let marker_base = ready.last().unwrap_or(&audit_base);
             if let Some(mut marker) =
-                codex_turn_end_marker(std::slice::from_ref(marker_base), extraction.turn.status)
+                codex_turn_end_marker(std::slice::from_ref(marker_base), &extraction.turn)
             {
-                marker.time_unix_nano =
-                    ((extraction.turn.terminal_at_ms as i128) * 1_000_000).to_string();
                 for key in [
                     "agent.codex.delegated",
                     "agent.codex.parent_span_id",
@@ -1372,7 +1381,7 @@ fn filter_new_segment_entries(
     let mut deduplicated_entry_count = 0;
     let mut rejected_entry_count = 0;
     let mut audits: HashSet<String> = active.emitted_audit_event_ids.iter().cloned().collect();
-    for entry in entries {
+    for mut entry in entries {
         if matches!(
             entry.event_name,
             Some(
@@ -1403,6 +1412,7 @@ fn filter_new_segment_entries(
                 continue;
             }
             active.emitted_prompt = true;
+            entry.turn_start = Some(true);
             out.push(entry);
             continue;
         }
@@ -1488,19 +1498,82 @@ fn persisted_input_context(
     }
 }
 
+fn has_codex_result_delivery(
+    entries: &[AgentActivityEntry],
+    records: &[CodexTranscriptSourceRecord],
+    spawns: &[CodexSpawnDescriptor],
+) -> bool {
+    if spawns.iter().any(|work| work.dispatch_failed) {
+        return true;
+    }
+    if entries.iter().any(|entry| {
+        entry.event_name == Some(AgentEventName::ToolResult)
+            && entry.tool_name.as_deref().is_some_and(|name| {
+                matches!(
+                    name.rsplit(['.', '/']).next().unwrap_or(""),
+                    "wait"
+                        | "wait_agent"
+                        | "wait_threads"
+                        | "spawn_agent"
+                        | "followup_task"
+                        | "send_input"
+                )
+            })
+    }) {
+        return true;
+    }
+    static FINAL_ANSWER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Message Type:\s*FINAL_ANSWER").expect("result type"));
+    records.iter().any(|source| {
+        let record = &source.record;
+        let Some(payload) = record.get("payload").and_then(Value::as_object) else {
+            return false;
+        };
+        if record.get("type").and_then(Value::as_str) == Some("event_msg")
+            && payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity")
+        {
+            return matches!(
+                payload.get("kind").and_then(Value::as_str),
+                Some("completed" | "result" | "failed")
+            );
+        }
+        record.get("type").and_then(Value::as_str) == Some("response_item")
+            && payload.get("type").and_then(Value::as_str) == Some("agent_message")
+            && payload
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| FINAL_ANSWER.is_match(text))
+                    })
+                })
+    })
+}
+
 fn codex_turn_end_marker(
     entries: &[AgentActivityEntry],
-    status: CodexTerminalStatus,
+    turn: &super::super::types::CodexExtractedTranscriptTurn,
 ) -> Option<AgentActivityEntry> {
     let source = entries
         .iter()
         .rev()
         .find(|entry| entry.event_name == Some(AgentEventName::LlmResponse))
         .or_else(|| entries.last())?;
+    let terminal_time = ((turn.terminal_at_ms as i128) * 1_000_000).to_string();
+    let event_id = hex::encode(Sha256::digest(
+        format!("{}\0{}\0turn-end", turn.session_id, turn.transcript_turn_id).as_bytes(),
+    ))[..32]
+        .to_owned();
+    let span_id = hex::encode(Sha256::digest(
+        format!("{}\0{}\0agent", turn.session_id, turn.transcript_turn_id).as_bytes(),
+    ))[..16]
+        .to_owned();
     let mut fields = Map::new();
     fields.insert(
         "time_unix_nano".into(),
-        Value::String(source.time_unix_nano.clone()),
+        Value::String(terminal_time.clone()),
     );
     if let Some(observed) = &source.observed_time_unix_nano {
         fields.insert(
@@ -1508,18 +1581,23 @@ fn codex_turn_end_marker(
             Value::String(observed.clone()),
         );
     }
-    fields.insert(
-        "event.id".into(),
-        Value::String(format!("{}:turn-end", source.event_id)),
-    );
+    fields.insert("event.id".into(), Value::String(event_id));
     fields.insert("event.name".into(), Value::String("other".into()));
     fields.insert("user.id".into(), Value::String(source.user_id.clone()));
     if let Some(trace) = &source.trace_id {
         fields.insert("trace_id".into(), Value::String(trace.clone()));
     }
+    fields.insert("span_id".into(), Value::String(span_id));
     fields.insert(
         "parent_span_id".into(),
-        Value::String("0000000000000001".into()),
+        Value::String(
+            source
+                .extra
+                .get("agent.codex.parent_span_id")
+                .and_then(Value::as_str)
+                .unwrap_or("0000000000000001")
+                .to_owned(),
+        ),
     );
     fields.insert(
         "gen_ai.session.id".into(),
@@ -1551,12 +1629,9 @@ fn codex_turn_end_marker(
     }
     fields.insert(
         "agent.codex.turn_status".into(),
-        Value::String(status.as_str().to_owned()),
+        Value::String(turn.status.as_str().to_owned()),
     );
-    fields.insert(
-        "timestamp".into(),
-        Value::String(source.time_unix_nano.clone()),
-    );
+    fields.insert("timestamp".into(), Value::String(terminal_time.clone()));
     Some(build_agent_activity_entry(&Value::Object(fields)))
 }
 
@@ -1707,8 +1782,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             floor
         };
         self.validate_baseline_boundary(file_path, floor).await?;
-        let metadata = tokio::fs::metadata(file_path).await?;
-        let (inode, size, _) = file_meta_snapshot(&metadata);
+        let (inode, size, _) = file_meta_snapshot(file_path).await?;
         let offset = i64::try_from(floor.offset)?;
         anyhow::ensure!(
             offset <= size,
@@ -2505,7 +2579,7 @@ async fn marker_expired(path: &Path, now: i64, ttl: i64) -> bool {
     tokio::fs::metadata(path)
         .await
         .ok()
-        .map(|meta| now - file_meta_snapshot(&meta).2 > ttl)
+        .map(|meta| now - file_mtime_ms(&meta) > ttl)
         .unwrap_or(false)
 }
 
@@ -2538,10 +2612,9 @@ impl<'a> CodexTranscriptEngine<'a> {
             if skip.is_some_and(|skip| skip.contains(&file.file_path)) {
                 continue;
             }
-            let Ok(meta_fs) = tokio::fs::metadata(&file.file_path).await else {
+            let Ok((inode, size, _)) = file_meta_snapshot(&file.file_path).await else {
                 continue;
             };
-            let (inode, size, _) = file_meta_snapshot(&meta_fs);
             let checkpoint = self.read_checkpoint(rt, &self.state_key(&file.file_path));
             let owner = if checkpoint.as_ref().is_some_and(|item| item.inode == inode) {
                 if let Some(offset) = checkpoint.and_then(|item| item.owner_session_meta_offset) {
@@ -2975,10 +3048,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         });
         let mut emitted = 0;
         for (key, pending) in pending {
-            let stat = tokio::fs::metadata(&pending.file_path)
-                .await
-                .ok()
-                .map(|meta| file_meta_snapshot(&meta));
+            let stat = file_meta_snapshot(&pending.file_path).await.ok();
             let valid = stat
                 .as_ref()
                 .is_some_and(|(ino, size, _)| *ino == pending.inode && *size >= pending.end_offset);

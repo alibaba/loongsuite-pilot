@@ -783,10 +783,10 @@ mod tests {
             }
             async fn shutdown(&self) {}
         }
-        async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        async fn within<T>(stage: &str, future: impl std::future::Future<Output = T>) -> T {
             tokio::time::timeout(Duration::from_secs(4), future)
                 .await
-                .expect("native checkpoint chain did not settle")
+                .unwrap_or_else(|_| panic!("native checkpoint chain did not settle at {stage}"))
         }
         let root = tempfile::tempdir().unwrap();
         let session_dir = root.path().join("sessions");
@@ -820,7 +820,7 @@ mod tests {
         jsonl.start().await.unwrap();
         // Restore must finish before taking the journal lock; otherwise this
         // would test startup restoration instead of new source acceptance.
-        within(trace.start()).await.unwrap();
+        within("trace startup", trace.start()).await.unwrap();
         manager.set_flusher(Arc::new(MultiFlusher::new(vec![
             jsonl.clone(),
             trace.clone(),
@@ -861,7 +861,7 @@ mod tests {
                 manager.bind_entries("codex-transcript", entries.to_vec());
             }
         });
-        within(manager.start_input("codex-transcript")).await;
+        within("input startup", manager.start_input("codex-transcript")).await;
         let before = tokio::fs::read(&state_path).await.unwrap();
         let held = journal.state.lock().await;
         let record = |time: &str, kind: &str, payload: serde_json::Value| {
@@ -880,10 +880,20 @@ mod tests {
         ].join("\n")+"\n";
         tokio::fs::write(&rollout, prefix).await.unwrap();
         let cycling = Arc::clone(&input);
+        let cycling_state = Arc::clone(&state);
+        let cycling_key = key.clone();
         let mut cycle = tokio::spawn(async move {
-            cycling.run_cycle().await;
+            // A manual cycle may join the initial empty startup cycle.
+            // Drive the source until this new rollout has actually been read.
+            loop {
+                cycling.run_cycle().await;
+                if cycling_state.get(&cycling_key).last_offset().unwrap_or(0.0) > 0.0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
         });
-        within(async {
+        within("source offset before journal acceptance", async {
             while state.get(&key).last_offset().unwrap_or(0.0) <= 0.0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -905,8 +915,13 @@ mod tests {
         // The in-memory journal mutex is real storage serialization. Releasing
         // it permits the real append/file flush, then acceptance, then save.
         drop(held);
-        within(&mut cycle).await.unwrap();
-        within(&mut save).await.unwrap().unwrap();
+        within("source acceptance after journal unlock", &mut cycle)
+            .await
+            .unwrap();
+        within("shared checkpoint save", &mut save)
+            .await
+            .unwrap()
+            .unwrap();
         let groups = read(&journal, None).await;
         let pending: Vec<_> = groups.into_iter().flatten().collect();
         assert!(pending
@@ -924,8 +939,8 @@ mod tests {
         assert_eq!(disk["unrelated-input"]["lastOffset"], 9.0);
         let native_file = journal.file(&codex_turn_journal_group_key(&pending[0]));
         assert!(tokio::fs::metadata(native_file).await.unwrap().len() > 0);
-        within(manager.stop_all()).await;
-        within(trace.shutdown()).await.unwrap();
+        within("input shutdown", manager.stop_all()).await;
+        within("trace shutdown", trace.shutdown()).await.unwrap();
         jsonl.shutdown().await.unwrap();
         assert_eq!(
             exports.load(Ordering::SeqCst),

@@ -52,6 +52,7 @@ pub async fn command_exists(command: &str) -> bool {
         Duration::from_millis(COMMAND_EXISTS_TIMEOUT_MS),
         tokio::process::Command::new(bin)
             .arg(command)
+            .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status(),
@@ -251,3 +252,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "detect_utils_child_tests.rs"]
+mod child_contract_tests;

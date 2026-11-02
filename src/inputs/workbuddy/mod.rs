@@ -327,14 +327,13 @@ impl InputBody for WorkBuddyBody {
         let mut entries = Vec::new();
 
         for transcript_path in transcript_paths {
-            let meta = match tokio::fs::metadata(&transcript_path).await {
-                Ok(meta) => meta,
-                Err(_) => continue,
+            let Some(mut opened) = open_transcript_snapshot(&transcript_path).await else {
+                continue;
             };
-            let size = meta.len();
+            let size = opened.size;
             let size_f64 = size as f64;
-            let mtime = mtime_ms(&meta);
-            let identity = file_identity(&meta);
+            let mtime = opened.mtime_ms;
+            let identity = opened.identity;
             let prior = file_meta.get(&transcript_path);
             let same_snapshot = prior.is_some_and(|item| {
                 item.size == size_f64
@@ -365,7 +364,7 @@ impl InputBody for WorkBuddyBody {
             next_offsets.insert(transcript_path.clone(), committed);
             let mut handled = prior_handled;
             if stable_stop {
-                match read_jsonl_range(&transcript_path, committed, size).await {
+                match read_jsonl_range(&mut opened.file, committed, size).await {
                     Some((records, next_offset)) if next_offset == size => {
                         let session_id = basename_without_ext(&transcript_path, ".jsonl");
                         let hook_events = self
@@ -834,12 +833,41 @@ impl WorkBuddyBody {
     }
 }
 
-async fn read_jsonl_range(path: &str, start: u64, end: u64) -> Option<(Vec<Value>, u64)> {
+struct OpenedTranscript {
+    file: tokio::fs::File,
+    size: u64,
+    mtime_ms: f64,
+    identity: String,
+}
+
+// Keep the snapshot facts and the range read on the same open file. A path
+// can name a replacement by the time collection reaches the stable Stop.
+async fn open_transcript_snapshot(path: &str) -> Option<OpenedTranscript> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        let identity = crate::utils::file_identity::identity_from_open(&file).ok()?;
+        Some(OpenedTranscript {
+            file: tokio::fs::File::from_std(file),
+            size: metadata.len(),
+            mtime_ms: mtime_ms(&metadata),
+            identity: format!("{}:{}", identity.dev, identity.ino),
+        })
+    })
+    .await
+    .ok()?
+}
+
+async fn read_jsonl_range(
+    file: &mut tokio::fs::File,
+    start: u64,
+    end: u64,
+) -> Option<(Vec<Value>, u64)> {
     if start >= end {
         return Some((Vec::new(), start));
     }
     let len = usize::try_from(end - start).ok()?;
-    let mut file = tokio::fs::File::open(path).await.ok()?;
     file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
     let mut bytes = vec![0u8; len];
     let mut filled = 0;
@@ -998,19 +1026,6 @@ fn json_f64(value: f64) -> Value {
         Value::Number(number)
     } else {
         Value::from(0)
-    }
-}
-
-fn file_identity(meta: &std::fs::Metadata) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        format!("{}:{}", meta.dev(), meta.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        "0:0".to_string()
     }
 }
 

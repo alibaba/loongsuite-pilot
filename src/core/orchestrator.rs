@@ -637,17 +637,14 @@ impl Orchestrator {
                 Some(&fields(serde_json::json!({ "error": err.to_string() }))),
             ),
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") && self.config.status_bar.enabled {
             let status = StatusBarAppManager::new(
                 self.data_dir.clone(),
                 package_version,
                 ProcessOps::native(&self.data_dir),
             )
             .with_source_roots(vec![pilot_dir.clone()]);
-            if let Err(err) = status
-                .sync_desired_state(self.config.status_bar.enabled)
-                .await
-            {
+            if let Err(err) = status.sync_desired_state(true).await {
                 logger("Orchestrator").warn(
                     "status bar app start failed (non-fatal)",
                     Some(&fields(serde_json::json!({ "error": err }))),
@@ -1326,6 +1323,7 @@ impl Orchestrator {
         intercepts.extend(self.grok_intercepts(deployment));
         intercepts.extend(self.plugin_inject_intercepts(deployment));
         intercepts.extend(self.directory_plugin_intercepts(deployment));
+        intercepts.extend(self.copilot_intercepts(deployment));
         intercepts.extend(self.dsh_intercepts(deployment));
         HookWatchdog::new(self.config.hook_watchdog.clone(), targets, intercepts)
     }
@@ -1434,6 +1432,19 @@ impl Orchestrator {
         )
     }
 
+    fn copilot_intercepts(&self, deployment: &DeploymentManager) -> Vec<InterceptCheckTarget> {
+        // Copilot's current automatic plugin deployment uses Unix shell hooks.
+        if cfg!(windows) {
+            return Vec::new();
+        }
+        self.mode_intercepts(
+            deployment,
+            DeployMode::CopilotPlugin,
+            "copilot-plugin",
+            true,
+        )
+    }
+
     fn dsh_intercepts(&self, deployment: &DeploymentManager) -> Vec<InterceptCheckTarget> {
         self.mode_intercepts(deployment, DeployMode::DshYamlPatch, "dsh-yaml-patch", true)
     }
@@ -1450,6 +1461,7 @@ impl Orchestrator {
             if def.deploy_mode != mode
                 || (mode == DeployMode::DirectoryPlugin && def.directory_plugin.is_none())
                 || (mode == DeployMode::DshYamlPatch && def.dsh_yaml_patch.is_none())
+                || (mode == DeployMode::CopilotPlugin && def.copilot_plugin.is_none())
             {
                 continue;
             }
@@ -1480,7 +1492,13 @@ impl Orchestrator {
                     let deployment = Arc::clone(&deployment_arc);
                     let def = def_pre.clone();
                     let data_dir = data_dir.clone();
-                    Box::pin(async move { precondition_for(&def, &deployment, &data_dir).await })
+                    Box::pin(async move {
+                        if def.deploy_mode == DeployMode::CopilotPlugin {
+                            deployment.is_agent_detected(&def).await
+                        } else {
+                            precondition_for(&def, &deployment, &data_dir).await
+                        }
+                    })
                 }),
                 check: Arc::new({
                     let deployment =
@@ -1499,6 +1517,13 @@ impl Orchestrator {
                         let def = def_repair.clone();
                         Box::pin(async move {
                             let result = deployment.deploy_single(&def).await;
+                            if def.deploy_mode == DeployMode::CopilotPlugin
+                                && result.skipped == Some(true)
+                            {
+                                return Err(result.error.unwrap_or_else(|| {
+                                    "Copilot disappeared before plugin repair".into()
+                                }));
+                            }
                             if result.skipped == Some(true)
                                 && result.reason == Some(DeploySkipReason::NotDetected)
                             {
@@ -1524,6 +1549,11 @@ impl Orchestrator {
                         let deployment = Arc::clone(&deployment);
                         let def = def_cleanup.clone();
                         Box::pin(async move {
+                            if def.deploy_mode == DeployMode::CopilotPlugin
+                                && !deployment.has_record(&def.id)
+                            {
+                                return Ok(());
+                            }
                             if deployment.undeploy_agent(&def).await {
                                 Ok(())
                             } else {
@@ -4137,6 +4167,17 @@ mod tests {
             config.dashboard.port = 0;
             config.status_bar.runtime_refresh_interval_ms = 300_000;
             config.status_bar.metrics_summary_interval_ms = 300_000;
+            if mode == "custom-output" {
+                config.flushers.jsonl = Some(JsonlFlusherConfig {
+                    enabled: true,
+                    output_dir: home
+                        .join("configured-output")
+                        .to_string_lossy()
+                        .into_owned(),
+                    rotate_daily: true,
+                    max_file_size_mb: 10,
+                });
+            }
             let mut agents = serde_json::Map::new();
             for agent in [
                 "qoder",
@@ -4165,7 +4206,7 @@ mod tests {
                 agents.insert(agent.into(), serde_json::json!({"enabled":false}));
             }
             config.agents = serde_json::from_value(serde_json::Value::Object(agents)).unwrap();
-            if mode == "opencode-home" {
+            if mode == "opencode-home" || mode == "opencode-cli-home" {
                 config.agents.get_mut("opencode").unwrap().enabled = Some(true);
                 assert!(!home.join(".config/opencode/opencode.jsonc").exists());
             }
@@ -4244,6 +4285,12 @@ mod tests {
                 .unwrap();
             }
             config.user_id = "configured-user".into();
+            if mode == "opencode-cli-home" {
+                assert!(
+                    !crate::deployment::command_exists("pilot-uninstalled-fixture-cli").await,
+                    "the fixture locator must reject commands absent from PATH"
+                );
+            }
             let mut collector = Orchestrator::new(config);
             collector.test_interceptor_port = Some(0);
             let orchestrator = Arc::new(collector);
@@ -4384,7 +4431,7 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, OrchestratorEvent::ComponentFailure { .. })));
             }
-            if mode == "opencode-home" {
+            if mode == "opencode-home" || mode == "opencode-cli-home" {
                 let path = home.join(".config/opencode/opencode.jsonc");
                 let document = std::fs::read_to_string(&path).unwrap();
                 let document =
@@ -4405,6 +4452,14 @@ mod tests {
                 assert!(!home
                     .join("decoy-home/.config/opencode/opencode.jsonc")
                     .exists());
+                #[cfg(unix)]
+                if mode == "opencode-cli-home" {
+                    let lookup = std::fs::read_to_string(home.join("lookup.log")).unwrap();
+                    assert!(lookup
+                        .lines()
+                        .any(|line| line == "pilot-uninstalled-fixture-cli"));
+                    assert!(lookup.lines().any(|line| line == "opencode"));
+                }
             }
             let events_after_start = initial_events.len();
             assert!(orchestrator.status_bar.lock().unwrap().is_none());
@@ -4419,6 +4474,79 @@ mod tests {
                 .unwrap()
                 .address();
             assert_eq!(bound.is_none(), occupied.is_some());
+            if mode == "custom-output" {
+                let summary_file = data.join("logs/metrics-summary.json");
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !summary_file.exists() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                orchestrator.inputs.register_input(LiveInput::new(
+                    "summary-fixture",
+                    "orchestrator-fixture",
+                    "fixture",
+                    || false,
+                    || Box::pin(async { Ok(()) }),
+                    || Box::pin(async {}),
+                ));
+                let mut response = fixture_entry("configured-summary-response", "");
+                response.event_name = Some(crate::types::AgentEventName::LlmResponse);
+                response.time_unix_nano = chrono::Utc::now()
+                    .timestamp_nanos_opt()
+                    .unwrap()
+                    .to_string();
+                response.input_tokens = Some(120);
+                response.output_tokens = Some(30);
+                response.total_tokens = Some(150);
+                response.response_model = Some("configured-summary-model".into());
+                orchestrator
+                    .inputs
+                    .accept_entries("summary-fixture", vec![response])
+                    .await
+                    .unwrap();
+                let configured = home.join("configured-output");
+                let rows = std::fs::read_dir(&configured)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+                    .flat_map(|e| {
+                        std::fs::read_to_string(e.path())
+                            .unwrap()
+                            .lines()
+                            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                assert!(rows
+                    .iter()
+                    .any(|r| r["event.id"] == "configured-summary-response"));
+                let summary = orchestrator.summary_writer.lock().unwrap().take().unwrap();
+                summary.refresh().await;
+                *orchestrator.summary_writer.lock().unwrap() = Some(summary);
+                let document: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&summary_file).unwrap()).unwrap();
+                assert_eq!(document["ranges"]["today"]["totalTokens"], 150.0,
+                    "actual Orchestrator summary must scan configured JSONL output, not default logs/output");
+                assert!(orchestrator.status_bar.lock().unwrap().is_none());
+                assert!(orchestrator.summary_task.lock().unwrap().is_some());
+                assert!(bound.is_some());
+                let store = orchestrator.state_store.lock().unwrap().clone().unwrap();
+                store.set_offset("configured-summary-stop", 42.0);
+                orchestrator.stop().await;
+                assert!(!*orchestrator.running.lock().unwrap());
+                assert!(orchestrator.dashboard.lock().unwrap().is_none());
+                assert!(orchestrator.summary_task.lock().unwrap().is_none());
+                assert!(orchestrator.runtime_task.lock().unwrap().is_none());
+                assert!(!data.join("logs/runtime.json").exists());
+                let saved: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(data.join("logs/input-state.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved["configured-summary-stop"]["lastOffset"], 42.0);
+                return;
+            }
             if mode == "ordered-start" {
                 assert_eq!(
                     orchestrator.inputs.get_active_input_ids(),
@@ -4528,11 +4656,9 @@ mod tests {
                 );
             }
             let registration = Arc::new(Orchestrator::new(registration_config));
-            let entries = registration
-                .register_all_inputs(&Arc::new(StateStore::new(
-                    home.join("registration-state.json"),
-                )))
-                .await;
+            let registration_store =
+                Arc::new(StateStore::new(home.join("registration-state.json")));
+            let entries = registration.register_all_inputs(&registration_store).await;
             let find = |id: &str| entries.iter().find(|entry| entry.id() == id).unwrap();
             let doubao = find("doubao-work");
             assert_eq!(
@@ -4609,6 +4735,22 @@ mod tests {
             assert!(!find("qwen-work-cn-trace").enabled());
             assert!(find("qwen-work-cn-hook").enabled());
             assert_eq!(find("qwen-work-cn-hook").poll_interval_ms(), 1234);
+            // Prove the real registered trace body received custom dataDir:
+            // startup must baseline this physical sentinel history, without
+            // exporting it or probing any actual Agent source.
+            let history_dir = data.join("logs/qwen-work-cn/history");
+            std::fs::create_dir_all(&history_dir).unwrap();
+            let history_file = format!(
+                "qwen-work-cn-{}.jsonl",
+                crate::utils::get_today_date_string()
+            );
+            std::fs::write(history_dir.join(&history_file), "{}\n").unwrap();
+            let trace = registration.inputs.get_input("qwen-work-cn-trace").unwrap();
+            trace.start().await.unwrap();
+            let checkpoint = registration_store.get("qwen-work-cn-trace");
+            assert_eq!(checkpoint.last_file(), Some(history_file.as_str()));
+            assert_eq!(checkpoint.last_offset(), Some(3.0));
+            trace.stop().await;
             assert_eq!(
                 find("openclaw-plugin-log").watch_paths(),
                 [data.join("logs/openclaw").to_string_lossy().into_owned(),]
@@ -4758,6 +4900,8 @@ mod tests {
             "poll-env",
             "opencode-home",
             "ordered-start",
+            "custom-output",
+            "opencode-cli-home",
         ] {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
@@ -4773,9 +4917,45 @@ mod tests {
             .unwrap();
             std::fs::write(home.join(".loongsuite-pilot/config.json"), "{}").unwrap();
 
-            if mode == "opencode-home" {
+            if mode == "opencode-home" || mode == "opencode-cli-home" {
                 use sha2::Digest;
-                std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+                if mode == "opencode-cli-home" {
+                    std::fs::create_dir_all(home.join("bin")).unwrap();
+                    #[cfg(windows)]
+                    std::fs::write(home.join("bin/opencode.cmd"), "@exit /b 0\r\n").unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let executable = home.join("bin/opencode");
+                        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+                        std::fs::set_permissions(
+                            executable,
+                            std::fs::Permissions::from_mode(0o755),
+                        )
+                        .unwrap();
+                        // The minimal glibc verification image has no which.
+                        // Supply its lookup protocol, not a canned success:
+                        // delegate to the OS shell's actual PATH lookup.
+                        let locator = home.join("bin/which");
+                        let log = format!(
+                            "'{}'",
+                            home.join("lookup.log")
+                                .to_string_lossy()
+                                .replace('\'', "'\\''")
+                        );
+                        std::fs::write(&locator, format!(
+                            "#!/bin/sh\n[ \"$#\" -eq 1 ] || exit 79\nprintf '%s\\n' \"$1\" >> {log}\ncommand -v \"$1\" >/dev/null 2>&1\n"
+                        )).unwrap();
+                        std::fs::set_permissions(locator, std::fs::Permissions::from_mode(0o755))
+                            .unwrap();
+                    }
+                    assert!(
+                        !home.join(".config/opencode").exists(),
+                        "CLI-only detection must not be satisfied by an existing config directory"
+                    );
+                } else {
+                    std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+                }
                 std::fs::create_dir_all(home.join("decoy-home")).unwrap();
                 std::fs::write(
                     resources.join("agents.d/opencode.json"),
@@ -4851,6 +5031,23 @@ mod tests {
                 .env("TEMP", std::env::temp_dir());
             if mode == "poll-env" {
                 command.env("LOONGSUITE_PILOT_POLL_INTERVAL_MS", "3000");
+            }
+            if mode == "opencode-cli-home" {
+                // Only this declared Agent is enabled, and our inert stub comes
+                // first. Keep the fixture POSIX locator / system where host;
+                // HOME and all writable configuration paths remain isolated.
+                let mut search = vec![home.join("bin")];
+                #[cfg(windows)]
+                search.push(
+                    std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                        .join("System32"),
+                );
+                #[cfg(unix)]
+                search.extend([
+                    std::path::PathBuf::from("/usr/bin"),
+                    std::path::PathBuf::from("/bin"),
+                ]);
+                command.env("PATH", std::env::join_paths(search).unwrap());
             }
             let result = command.output().unwrap();
             assert!(

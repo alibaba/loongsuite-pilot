@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tokio::fs;
 
-use super::scan::file_meta_snapshot;
+use super::scan::file_mtime_ms;
 use super::utils::{as_record, string_value};
 
 pub const MAX_WAKEUP_MARKERS_FOR_DISCOVERY: usize = 256;
@@ -158,7 +158,7 @@ pub async fn collect_recent_rollout_files(
         }
         budget.remaining_rollout_files -= 1;
         if let Ok(meta) = fs::metadata(&path_text).await {
-            if file_meta_snapshot(&meta).2 >= modified_after_ms {
+            if file_mtime_ms(&meta) >= modified_after_ms {
                 files.push(path_text);
             }
         }
@@ -295,9 +295,30 @@ pub fn lexical_absolute(path: &str) -> String {
     normalize_lexical(&absolute)
 }
 
+// Canonical Windows paths carry a verbatim prefix, while native hook roots
+// commonly use drive/UNC spellings. Compare equivalent prefixes without changing
+// the actual path used for IO, or accepting device namespace aliases.
+fn comparable_root_path(path: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(disk) = path.strip_prefix(r"\\?\") {
+            let bytes = disk.as_bytes();
+            if bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':') {
+                return PathBuf::from(disk);
+            }
+        }
+    }
+    PathBuf::from(path)
+}
+
 fn lexical_relative(from: &str, to: &str) -> String {
-    let from_path = Path::new(from);
-    let to_path = Path::new(to);
+    let from_comparable = comparable_root_path(from);
+    let to_comparable = comparable_root_path(to);
+    let from_path = from_comparable.as_path();
+    let to_path = to_comparable.as_path();
     match to_path.strip_prefix(from_path) {
         Ok(relative) => {
             let text = relative.to_string_lossy();
@@ -430,5 +451,41 @@ mod cache_publication_tests {
         std::fs::write(child.join("rollout-restored.jsonl"), "{}\n").unwrap();
         assert!(collect_rollout_files(&directory, &mut files, &mut snapshots).await);
         assert_eq!(files.len(), 1);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_root_comparison_tests {
+    use super::*;
+    #[test]
+    fn verbatim_drive_and_unc_roots_match_only_the_same_native_home() {
+        assert!(is_codex_session_dir_for_home(
+            r"\\?\C:\Codex Home\u\synthetic\sessions",
+            r"C:\Codex Home"
+        ));
+        assert!(is_codex_session_dir_for_home(
+            r"C:\Codex Home\u\synthetic\sessions",
+            r"\\?\C:\Codex Home"
+        ));
+        assert!(is_codex_session_dir_for_home(
+            r"\\?\UNC\server\share\home\u\synthetic\sessions",
+            r"\\server\share\home"
+        ));
+        assert!(!is_codex_session_dir_for_home(
+            r"\\?\D:\Codex Home\u\synthetic\sessions",
+            r"C:\Codex Home"
+        ));
+        assert!(!is_codex_session_dir_for_home(
+            r"\\?\UNC\other\share\home\u\synthetic\sessions",
+            r"\\server\share\home"
+        ));
+        assert!(!is_codex_session_dir_for_home(
+            r"\\?\C:\Codex Home sibling\u\synthetic\sessions",
+            r"C:\Codex Home"
+        ));
+        assert_eq!(
+            comparable_root_path(r"\\.\C:\device"),
+            PathBuf::from(r"\\.\C:\device")
+        );
     }
 }

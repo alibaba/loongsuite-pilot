@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub const QODER_SEGMENTS_ROOT: &str = "~/.qoder/logs/sessions";
 pub const QODER_CN_SEGMENTS_ROOT: &str = "~/.qoder-cn/logs/sessions";
@@ -87,6 +88,7 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
     let key = format!("{segments_root}::{session_id}");
     evict(now, &key);
     let files = find_files(session_id, segments_root).await;
+    let live: HashSetPaths = files.iter().map(|file| file.path.clone()).collect();
     let plan = {
         let mut guard = sessions().lock().unwrap_or_else(|err| err.into_inner());
         if !guard.contains_key(&key) && files.is_empty() {
@@ -114,7 +116,7 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
         let state = guard.get_mut(&key).unwrap();
         state.last_access_ms = now;
         files
-            .iter()
+            .into_iter()
             .map(|file| {
                 let existing = state.files.get(&file.path);
                 let offset = match existing {
@@ -127,28 +129,25 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
                     }
                     _ => 0,
                 };
-                (file.path.clone(), file.dev, file.ino, file.size, offset)
+                (file, offset)
             })
             .collect::<Vec<_>>()
     };
     let mut appended = Vec::new();
-    for (path, dev, ino, size, offset) in plan {
-        if size <= offset {
+    for (mut found, offset) in plan {
+        if found.size <= offset && offset > 0 {
             continue;
         }
-        let found = FoundFile {
-            path: path.clone(),
-            dev,
-            ino,
-            size,
-        };
+        let path = found.path.clone();
+        let dev = found.dev;
+        let ino = found.ino;
         let mut scratch = FileState {
             dev,
             ino,
             committed_offset: offset,
             events: Vec::new(),
         };
-        if let Some(events) = read_appended(&found, &mut scratch).await {
+        if let Some(events) = read_appended(&mut found, &mut scratch).await {
             appended.push((
                 path,
                 dev,
@@ -163,7 +162,6 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
     let Some(state) = guard.get_mut(&key) else {
         return (Vec::new(), true);
     };
-    let live: HashSetPaths = files.iter().map(|file| file.path.clone()).collect();
     let mut changed = false;
     for (path, dev, ino, committed, reset, events) in appended {
         if reset {
@@ -201,6 +199,7 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
 }
 
 struct FoundFile {
+    opened: tokio::fs::File,
     path: String,
     dev: u64,
     ino: u64,
@@ -232,14 +231,9 @@ async fn find_files(session_id: &str, segments_root: &str) -> Vec<FoundFile> {
             if !name.ends_with(".jsonl") {
                 continue;
             }
-            let path = entry.path();
-            if let Ok(meta) = tokio::fs::metadata(&path).await {
-                files.push(FoundFile {
-                    path: path.to_string_lossy().into_owned(),
-                    dev: file_dev(&meta),
-                    ino: file_ino(&meta),
-                    size: meta.len(),
-                });
+            let path = entry.path().to_string_lossy().into_owned();
+            if let Some(opened) = open_segment_file(path).await {
+                files.push(opened);
             }
         }
     }
@@ -247,18 +241,47 @@ async fn find_files(session_id: &str, segments_root: &str) -> Vec<FoundFile> {
     files
 }
 
-async fn read_appended(file: &FoundFile, state: &mut FileState) -> Option<Vec<SegmentEvent>> {
-    let bytes = tokio::fs::read(&file.path).await.ok()?;
-    let start = state.committed_offset as usize;
-    if start >= bytes.len() {
+async fn open_segment_file(path: String) -> Option<FoundFile> {
+    tokio::task::spawn_blocking(move || {
+        let opened = std::fs::File::open(&path).ok()?;
+        let identity = crate::utils::file_identity::identity_from_open(&opened).ok()?;
+        Some(FoundFile {
+            path,
+            opened: tokio::fs::File::from_std(opened),
+            dev: identity.dev,
+            ino: identity.ino,
+            size: identity.size,
+        })
+    })
+    .await
+    .ok()?
+}
+
+async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> Option<Vec<SegmentEvent>> {
+    let start = state.committed_offset;
+    if start >= file.size {
         return Some(Vec::new());
     }
-    let slice = &bytes[start..file.size.min(bytes.len() as u64) as usize];
+    file.opened
+        .seek(std::io::SeekFrom::Start(start))
+        .await
+        .ok()?;
+    let mut bytes = vec![0; usize::try_from(file.size - start).ok()?];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let read = file.opened.read(&mut bytes[filled..]).await.ok()?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    bytes.truncate(filled);
+    let slice = &bytes[..];
     let Some(newline) = slice.iter().rposition(|byte| *byte == b'\n') else {
         return Some(Vec::new());
     };
     let text = String::from_utf8_lossy(&slice[..=newline]);
-    state.committed_offset = start as u64 + newline as u64 + 1;
+    state.committed_offset = start + newline as u64 + 1;
     let mut events = Vec::new();
     for line in text.split('\n') {
         let line = line.trim();
@@ -454,33 +477,13 @@ fn finite(value: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
-fn file_ino(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
-}
-fn file_dev(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.dev()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
-}
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "segment_identity_tests.rs"]
+mod segment_identity_tests;

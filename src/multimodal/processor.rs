@@ -54,9 +54,51 @@ struct PathCacheEntry {
     result: Option<UriResult>,
 }
 
+#[cfg(test)]
+type PathIoHook = Arc<dyn Fn(&str) -> super::http::BoxFut<()> + Send + Sync>;
+
 struct PendingUpload {
     target_path: String,
     done: oneshot::Receiver<()>,
+}
+
+struct AbortPathOnDrop(Arc<AtomicBool>);
+impl Drop for AbortPathOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Owns one coalesced read slot. Dropping the outer future must release both
+/// capacity and waiters, including deadline/caller cancellation and unwinding.
+struct PathReadLease {
+    processor: Arc<MultimodalProcessor>,
+    key: String,
+    completed: bool,
+}
+impl PathReadLease {
+    fn finish(&mut self, result: Option<UriResult>) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        let waiters = self
+            .processor
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .path_waiters
+            .remove(&self.key)
+            .unwrap_or_default();
+        for waiter in waiters {
+            let _ = waiter.send(result.clone());
+        }
+    }
+}
+impl Drop for PathReadLease {
+    fn drop(&mut self) {
+        self.finish(None);
+    }
 }
 
 pub struct MultimodalProcessor {
@@ -67,6 +109,10 @@ pub struct MultimodalProcessor {
     started: Instant,
     pending_bytes_limit: usize,
     path_inflight_limit: usize,
+    #[cfg(test)]
+    before_stat: Option<PathIoHook>,
+    #[cfg(test)]
+    before_read: Option<PathIoHook>,
 }
 
 struct Inner {
@@ -116,6 +162,10 @@ impl MultimodalProcessor {
             started: Instant::now(),
             pending_bytes_limit: MAX_MULTIMODAL_PENDING_BYTES,
             path_inflight_limit: MAX_MULTIMODAL_PATH_INFLIGHT,
+            #[cfg(test)]
+            before_stat: None,
+            #[cfg(test)]
+            before_read: None,
         });
         if base.is_empty() {
             processor.schedule_sniff();
@@ -202,6 +252,7 @@ impl MultimodalProcessor {
         }
         let deadline = opts.deadline_ms.unwrap_or(PATH_TO_URI_DEADLINE_MS as i64);
         let flag = Arc::new(AtomicBool::new(false));
+        let _abort_on_drop = AbortPathOnDrop(flag.clone());
         let flag2 = Arc::clone(&flag);
         let this = Arc::clone(self);
         let file_path = file_path.to_string();
@@ -250,6 +301,10 @@ impl MultimodalProcessor {
             );
             return None;
         }
+        #[cfg(test)]
+        if let Some(hook) = &self.before_stat {
+            hook(&key).await;
+        }
         let stated = lstat_regular_image_file(&key, Some(signal)).await;
         let Some(stated) = stated else {
             if !signal.load(Ordering::SeqCst) {
@@ -260,6 +315,11 @@ impl MultimodalProcessor {
             }
             return None;
         };
+        // Authorization belongs to each call, including cache and inflight
+        // hits. A permitted owner cannot confer its roots on another waiter.
+        if !is_real_path_inside_roots(&key, &roots, Some(signal)).await {
+            return None;
+        }
         let day = yyyymmdd_from_unix_ms(time_unix_ms, chrono::Local::now());
         let cache_key = format!("{key}\0{day}");
         let cached = self
@@ -269,10 +329,7 @@ impl MultimodalProcessor {
             .path_uri_cache
             .get_copied(&cache_key);
         if let Some(cached) = cached {
-            if cached.mtime_ms == stated.mtime_ms
-                && cached.size == stated.size
-                && is_real_path_inside_roots(&key, &roots, Some(signal)).await
-            {
+            if cached.mtime_ms == stated.mtime_ms && cached.size == stated.size {
                 return cached.result;
             }
         }
@@ -303,19 +360,15 @@ impl MultimodalProcessor {
             Some(false) => return None,
             None => {}
         }
+        let mut lease = PathReadLease {
+            processor: self.clone(),
+            key: slot_key,
+            completed: false,
+        };
         let result = self
             .read_path(&key, &cache_key, time_unix_ms, &roots, &stated, signal)
             .await;
-        let waiters = self
-            .inner
-            .lock()
-            .unwrap()
-            .path_waiters
-            .remove(&slot_key)
-            .unwrap_or_default();
-        for waiter in waiters {
-            let _ = waiter.send(result.clone());
-        }
+        lease.finish(result.clone());
         let _ = tx;
         result
     }
@@ -329,6 +382,10 @@ impl MultimodalProcessor {
         stated: &super::resolve::ListedFile,
         signal: &Arc<AtomicBool>,
     ) -> Option<UriResult> {
+        #[cfg(test)]
+        if let Some(hook) = &self.before_read {
+            hook(key).await;
+        }
         let loaded =
             open_normalized_local_image(key, MAX_MULTIMODAL_DATA_SIZE, Some(roots), Some(signal))
                 .await;
@@ -693,3 +750,7 @@ mod tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "processor_contract_tests.rs"]
+mod migration_contract_tests;

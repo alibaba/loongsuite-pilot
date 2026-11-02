@@ -1453,3 +1453,7 @@ exit 0
 #[cfg(test)]
 #[path = "updater_watchdog_history_health_tests.rs"]
 mod history_health_tests;
+
+#[cfg(test)]
+#[path = "updater_watchdog_history_failure_tests.rs"]
+mod history_failure_tests;

@@ -179,6 +179,10 @@ struct CandidateSelection {
 
 #[derive(Debug, Default)]
 pub struct CodexSubagentLinker {
+    #[cfg(test)]
+    relationship_queries: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    delegation_queries: std::sync::atomic::AtomicUsize,
     spawns: IndexedFacts<CodexSpawnDescriptor>,
     children: IndexedFacts<CodexChildThreadDescriptor>,
     bindings: IndexedFacts<work::WorkBinding>,
@@ -189,6 +193,15 @@ pub struct CodexSubagentLinker {
 }
 
 impl CodexSubagentLinker {
+    #[cfg(test)]
+    pub(crate) fn test_query_counts(&self) -> (usize, usize) {
+        (
+            self.relationship_queries
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.delegation_queries
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -233,6 +246,9 @@ impl CodexSubagentLinker {
     }
 
     pub fn snapshot(&self) -> CodexSubagentLinkSnapshot {
+        #[cfg(test)]
+        self.relationship_queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.snapshot_cache
             .get((self.spawns.revision(), self.children.revision()), || {
                 self.build_snapshot()

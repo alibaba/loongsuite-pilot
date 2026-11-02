@@ -91,13 +91,17 @@ jobs:
           failures=0
           for filter in \
             inputs::base::tests \
-            inputs::codex_transcript::input::engine::history_contracts \
+            inputs::codex_transcript:: \
             inputs::doubao_work:: \
+            inputs::qoder_work_trace:: \
+            inputs::qoder_trace:: \
+            inputs::rest_support:: \
+            inputs::workbuddy:: \
             checkpoints::source_ownership::tests \
             hook_process::cursor:: \
             hook_process::cursor_assemble:: \
             hook_process::claude_code:: \
-            core::orchestrator::watchdog_contract_tests \
+            core::orchestrator:: \
             core::legacy_sls_failed_log_cleanup::tests \
             flushers:: \
             core::input_manager:: \
@@ -114,6 +118,7 @@ jobs:
             deployment::codex_trust_writer:: \
             deployment::dsh_yaml_patch_strategy::tests \
             deployment::legacy_uninstall::tests \
+            deployment::legacy_cli_cleanup:: \
             updater::package_archive::tests \
             updater::runtime::tests \
             utils::restart_breadcrumb::tests \
