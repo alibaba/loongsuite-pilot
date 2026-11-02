@@ -1,0 +1,317 @@
+[
+  {
+    "line": 211,
+    "writes": [
+      {
+        "operation": "fs.writeFile",
+        "records": [
+          {
+            "type": "session_meta",
+            "uuid": "meta-ignored",
+            "sessionId": "sess-hook",
+            "cwd": "/tmp/project"
+          },
+          {
+            "type": "user",
+            "uuid": "user-1",
+            "timestamp": "2026-05-01T18:15:22.122Z",
+            "message": {
+              "role": "user",
+              "content": "hello from qoder hook"
+            },
+            "promptId": "turn-1",
+            "sessionId": "sess-hook",
+            "entrypoint": "cli",
+            "cwd": "/tmp/project"
+          },
+          {
+            "type": "assistant",
+            "uuid": "asst-1",
+            "timestamp": "2026-05-01T18:15:27.000Z",
+            "sessionId": "sess-hook",
+            "cwd": "/tmp/project",
+            "message": {
+              "role": "assistant",
+              "id": "msg-1",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hello back"
+                }
+              ]
+            }
+          },
+          {
+            "type": "last-prompt",
+            "sessionId": "sess-hook",
+            "lastPrompt": "hello from qoder hook"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "line": 344,
+    "writes": [
+      {
+        "operation": "fs.writeFile",
+        "records": [
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:53:21.156Z",
+            "data": {
+              "hookEvent": "UserPromptSubmit",
+              "hookName": "submit"
+            }
+          },
+          {
+            "type": "user",
+            "timestamp": "2026-06-18T09:53:21.156Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "create and test a solution"
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T09:54:08.143Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "I will create the file."
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T09:54:08.144Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "call_write",
+                  "name": "Write",
+                  "input": {
+                    "file_path": "/tmp/a.py"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:54:08.495Z",
+            "data": {
+              "hookEvent": "PreToolUse",
+              "hookName": "Write"
+            }
+          },
+          {
+            "type": "user",
+            "timestamp": "2026-06-18T09:54:10.906Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "call_write",
+                  "content": "created"
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:54:11.356Z",
+            "data": {
+              "hookEvent": "PostToolUse",
+              "hookName": "Write"
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T09:54:20.952Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Let me run the tests."
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T09:54:29.523Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "call_bash",
+                  "name": "Bash",
+                  "input": {
+                    "command": "python /tmp/a.py"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:54:29.937Z",
+            "data": {
+              "hookEvent": "PreToolUse",
+              "hookName": "Bash"
+            }
+          },
+          {
+            "type": "user",
+            "timestamp": "2026-06-18T09:54:30.078Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "call_bash",
+                  "content": "ok"
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:54:30.594Z",
+            "data": {
+              "hookEvent": "PostToolUse",
+              "hookName": "Bash"
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T09:54:40.148Z",
+            "sessionId": "sess-delayed-ide",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Done."
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T09:54:40.696Z",
+            "data": {
+              "hookEvent": "Stop",
+              "hookName": "Stop"
+            }
+          },
+          {
+            "type": "last-prompt",
+            "sessionId": "sess-delayed-ide",
+            "lastPrompt": "create and test a solution"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "line": 713,
+    "writes": [
+      {
+        "operation": "fs.writeFile",
+        "records": [
+          {
+            "type": "user",
+            "timestamp": "2026-06-18T08:00:00.000Z",
+            "sessionId": "sess-multi",
+            "message": {
+              "role": "user",
+              "content": "hello"
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T08:00:01.000Z",
+            "sessionId": "sess-multi",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Hi there."
+                }
+              ]
+            }
+          },
+          {
+            "type": "last-prompt",
+            "sessionId": "sess-multi",
+            "lastPrompt": "hello"
+          }
+        ]
+      },
+      {
+        "operation": "fs.appendFile",
+        "records": [
+          {
+            "type": "user",
+            "timestamp": "2026-06-18T08:01:00.000Z",
+            "sessionId": "sess-multi",
+            "message": {
+              "role": "user",
+              "content": "完成力扣第143题"
+            }
+          },
+          {
+            "type": "assistant",
+            "timestamp": "2026-06-18T08:01:05.000Z",
+            "sessionId": "sess-multi",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "I'll solve leetcode 143."
+                }
+              ]
+            }
+          },
+          {
+            "type": "progress",
+            "timestamp": "2026-06-18T08:01:10.000Z",
+            "data": {
+              "hookEvent": "Stop",
+              "hookName": "Stop"
+            }
+          },
+          {
+            "type": "last-prompt",
+            "sessionId": "sess-multi",
+            "lastPrompt": "完成力扣第143题"
+          }
+        ]
+      }
+    ]
+  }
+]

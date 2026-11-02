@@ -480,3 +480,7 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "hook_history_migration_contract_tests.rs"]
+mod work_hook_history_migration_contract_tests;

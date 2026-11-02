@@ -92,7 +92,9 @@ impl UpdaterMetrics {
                 .date_string
                 .unwrap_or_else(|| Arc::new(get_today_date_string)),
             now_ms: opts.now_ms.unwrap_or_else(|| Arc::new(now_millis)),
-            alarm_sender: opts.alarm_sender.unwrap_or_else(|| Arc::new(|_, _| {})),
+            alarm_sender: opts
+                .alarm_sender
+                .unwrap_or_else(|| Arc::new(crate::internal::sender::send_alarm)),
             event_queue: Mutex::new(Vec::new()),
             alarm_queue: Mutex::new(Vec::new()),
             user_id_alarm_emitted: AtomicBool::new(false),
@@ -492,7 +494,10 @@ mod tests {
         metrics.check_collector_health();
         metrics.flush().await;
         let alarms = read_lines(harness.dir.path(), "pilot-alarms");
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(alarms[0]["alarm_type"], "SERVICE_NOT_RUNNING_ALARM");
         let message = alarms[0]["alarm_message"].as_str().unwrap();
+        assert!(message.contains("no matching collector command found"));
         assert!(message.contains("cause=native_module_missing"));
         assert!(message.contains("version=9.9.9"));
     }
@@ -529,4 +534,5 @@ mod tests {
         metrics.flush().await;
         assert!(read_lines(harness.dir.path(), "pilot-alarms").is_empty());
     }
+    include!("updater_metrics_history_tests.rs");
 }

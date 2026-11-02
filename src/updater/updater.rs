@@ -3714,4 +3714,5 @@ mod tests {
         assert!(!quiet.is_scheduled());
     }
     include!("updater_contract_tests.rs");
+    include!("updater_metrics_timer_history_tests.rs");
 }

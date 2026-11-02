@@ -541,7 +541,11 @@ fn collect_observability(dir: &Path, files: &[String], category: Category) -> Ve
             if !meta.is_file() {
                 return None;
             }
-            let date_str = extracted.unwrap_or_else(|| local_date_string(Local::now()));
+            let date_str = extracted.unwrap_or_else(|| {
+                meta.modified()
+                    .map(|modified| local_date_string(modified.into()))
+                    .unwrap_or_else(|_| local_date_string(Local::now()))
+            });
             Some(DatedLogFile {
                 file: file.clone(),
                 date_str,
@@ -823,3 +827,7 @@ mod tests {
         assert!(today.exists() && unrelated.exists());
     }
 }
+
+#[cfg(test)]
+#[path = "log_retention_history_tests.rs"]
+mod history_tests;

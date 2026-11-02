@@ -133,6 +133,7 @@ pub async fn run_updater_main() -> i32 {
             .unwrap_or_else(|| "unknown".into())
     });
     let version = read_installed_version(&data_dir);
+    crate::internal::configure_telemetry(&data_dir).await;
     let metrics = Arc::new(UpdaterMetrics::new(MetricsOptions {
         data_dir: data_dir.clone(),
         version,

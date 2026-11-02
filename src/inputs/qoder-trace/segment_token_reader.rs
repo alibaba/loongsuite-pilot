@@ -87,12 +87,16 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
     let now = now_ms();
     let key = format!("{segments_root}::{session_id}");
     evict(now, &key);
-    let files = find_files(session_id, segments_root).await;
+    let scan = find_files(session_id, segments_root).await;
+    let complete = scan.complete;
+    let retryable = scan.retryable;
+    let mut stable_failure = scan.stable_failure;
+    let files = scan.files;
     let live: HashSetPaths = files.iter().map(|file| file.path.clone()).collect();
     let plan = {
         let mut guard = sessions().lock().unwrap_or_else(|err| err.into_inner());
         if !guard.contains_key(&key) && files.is_empty() {
-            return (Vec::new(), false);
+            return (Vec::new(), retryable && !stable_failure);
         }
         if !guard.contains_key(&key) {
             if guard.len() >= SESSION_MAX_SIZE {
@@ -138,6 +142,8 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
         if found.size <= offset && offset > 0 {
             continue;
         }
+        #[cfg(test)]
+        test_io::body_open();
         let path = found.path.clone();
         let dev = found.dev;
         let ino = found.ino;
@@ -147,20 +153,20 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
             committed_offset: offset,
             events: Vec::new(),
         };
-        if let Some(events) = read_appended(&mut found, &mut scratch).await {
-            appended.push((
-                path,
-                dev,
-                ino,
-                scratch.committed_offset,
-                offset == 0,
-                events,
-            ));
-        }
+        let read = read_appended(&mut found, &mut scratch).await;
+        stable_failure |= read.stable_failure;
+        appended.push((
+            path,
+            dev,
+            ino,
+            scratch.committed_offset,
+            offset == 0,
+            read.events,
+        ));
     }
     let mut guard = sessions().lock().unwrap_or_else(|err| err.into_inner());
     let Some(state) = guard.get_mut(&key) else {
-        return (Vec::new(), true);
+        return (Vec::new(), retryable && !stable_failure);
     };
     let mut changed = false;
     for (path, dev, ino, committed, reset, events) in appended {
@@ -186,16 +192,18 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
         }
     }
     let before = state.files.len();
-    state
-        .files
-        .retain(|path, _| live.iter().any(|item| item == path));
+    if complete {
+        state
+            .files
+            .retain(|path, _| live.iter().any(|item| item == path));
+    }
     if state.files.len() != before {
         changed = true;
     }
     if changed {
         state.data = build_data(&state.files);
     }
-    (state.data.clone(), true)
+    (state.data.clone(), retryable && !stable_failure)
 }
 
 struct FoundFile {
@@ -207,45 +215,150 @@ struct FoundFile {
 }
 type HashSetPaths = Vec<String>;
 
-async fn find_files(session_id: &str, segments_root: &str) -> Vec<FoundFile> {
+struct FileScan {
+    files: Vec<FoundFile>,
+    complete: bool,
+    retryable: bool,
+    stable_failure: bool,
+}
+impl FileScan {
+    fn record_error(&mut self, error: &std::io::Error) {
+        if is_missing(error) {
+            return;
+        }
+        self.complete = false;
+        if is_transient(error) {
+            self.retryable = true;
+        } else {
+            self.stable_failure = true;
+        }
+    }
+}
+fn is_missing(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+fn is_transient(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::ResourceBusy
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.raw_os_error().is_some_and(|code| {
+        [
+            libc::EAGAIN,
+            libc::EBUSY,
+            libc::EINTR,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ESTALE,
+        ]
+        .contains(&code)
+    }) {
+        return true;
+    }
+    #[cfg(windows)]
+    if error
+        .raw_os_error()
+        .is_some_and(|code| [4, 32, 33, 170].contains(&code))
+    {
+        return true;
+    }
+    false
+}
+async fn find_files(session_id: &str, segments_root: &str) -> FileScan {
     let root = resolve_home(segments_root);
-    let mut files = Vec::new();
-    let Ok(mut cwd_dirs) = tokio::fs::read_dir(&root).await else {
-        return files;
+    let mut scan = FileScan {
+        files: Vec::new(),
+        complete: true,
+        retryable: false,
+        stable_failure: false,
     };
-    while let Ok(Some(cwd)) = cwd_dirs.next_entry().await {
-        if !cwd
-            .file_type()
-            .await
-            .map(|kind| kind.is_dir())
-            .unwrap_or(false)
-        {
-            continue;
+    let root_read = async {
+        #[cfg(test)]
+        test_io::root()?;
+        tokio::fs::read_dir(&root).await
+    }
+    .await;
+    let mut cwd_dirs = match root_read {
+        Ok(entries) => entries,
+        Err(error) => {
+            scan.record_error(&error);
+            return scan;
+        }
+    };
+    loop {
+        let cwd = match cwd_dirs.next_entry().await {
+            Ok(Some(cwd)) => cwd,
+            Ok(None) => break,
+            Err(error) => {
+                scan.record_error(&error);
+                break;
+            }
+        };
+        match cwd.file_type().await {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) => {
+                scan.record_error(&error);
+                continue;
+            }
         }
         let seg_dir = cwd.path().join(session_id).join("segments");
-        let Ok(mut entries) = tokio::fs::read_dir(&seg_dir).await else {
-            continue;
+        let directory_read = async {
+            #[cfg(test)]
+            test_io::directory()?;
+            tokio::fs::read_dir(&seg_dir).await
+        }
+        .await;
+        let mut entries = match directory_read {
+            Ok(entries) => {
+                scan.retryable = true;
+                entries
+            }
+            Err(error) => {
+                scan.record_error(&error);
+                continue;
+            }
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".jsonl") {
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    scan.record_error(&error);
+                    break;
+                }
+            };
+            if !entry.file_name().to_string_lossy().ends_with(".jsonl") {
                 continue;
             }
             let path = entry.path().to_string_lossy().into_owned();
-            if let Some(opened) = open_segment_file(path).await {
-                files.push(opened);
+            match open_segment_file(path).await {
+                Ok(opened) => scan.files.push(opened),
+                Err(error) => scan.record_error(&error),
             }
         }
     }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    files
+    scan.files.sort_by(|a, b| a.path.cmp(&b.path));
+    scan
 }
-
-async fn open_segment_file(path: String) -> Option<FoundFile> {
+async fn open_segment_file(path: String) -> std::io::Result<FoundFile> {
+    #[cfg(test)]
+    {
+        test_io::open()?;
+        test_io::stat()?;
+    }
     tokio::task::spawn_blocking(move || {
-        let opened = std::fs::File::open(&path).ok()?;
-        let identity = crate::utils::file_identity::identity_from_open(&opened).ok()?;
-        Some(FoundFile {
+        let opened = std::fs::File::open(&path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&opened)?;
+        Ok(FoundFile {
             path,
             opened: tokio::fs::File::from_std(opened),
             dev: identity.dev,
@@ -254,53 +367,64 @@ async fn open_segment_file(path: String) -> Option<FoundFile> {
         })
     })
     .await
-    .ok()?
+    .map_err(std::io::Error::other)?
 }
-
-async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> Option<Vec<SegmentEvent>> {
+struct AppendedRead {
+    events: Vec<SegmentEvent>,
+    stable_failure: bool,
+}
+async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> AppendedRead {
+    let mut result = AppendedRead {
+        events: Vec::new(),
+        stable_failure: false,
+    };
     let start = state.committed_offset;
     if start >= file.size {
-        return Some(Vec::new());
+        return result;
     }
-    file.opened
-        .seek(std::io::SeekFrom::Start(start))
-        .await
-        .ok()?;
-    let mut bytes = vec![0; usize::try_from(file.size - start).ok()?];
+    if let Err(error) = file.opened.seek(std::io::SeekFrom::Start(start)).await {
+        result.stable_failure = !is_transient(&error);
+        return result;
+    }
+    let Ok(length) = usize::try_from(file.size - start) else {
+        result.stable_failure = true;
+        return result;
+    };
+    let mut bytes = vec![0; length];
     let mut filled = 0;
     while filled < bytes.len() {
-        let read = read_chunk(&mut file.opened, &mut bytes[filled..])
-            .await
-            .ok()?;
-        if read == 0 {
-            break;
+        match read_chunk(&mut file.opened, &mut bytes[filled..]).await {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) => {
+                result.stable_failure = !is_transient(&error);
+                break;
+            }
         }
-        filled += read;
     }
     bytes.truncate(filled);
-    let slice = &bytes[..];
-    let Some(newline) = slice.iter().rposition(|byte| *byte == b'\n') else {
-        return Some(Vec::new());
+    let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return result;
     };
-    let text = String::from_utf8_lossy(&slice[..=newline]);
+    let text = String::from_utf8_lossy(&bytes[..=newline]);
     state.committed_offset = start + newline as u64 + 1;
-    let mut events = Vec::new();
     for line in text.split('\n') {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if let Some(event) = to_event(&record) {
-            events.push(event);
+        if let Ok(record) = serde_json::from_str::<Value>(line) {
+            if let Some(event) = to_event(&record) {
+                result.events.push(event);
+            }
         }
     }
-    Some(events)
+    result
 }
 
 async fn read_chunk(file: &mut tokio::fs::File, bytes: &mut [u8]) -> std::io::Result<usize> {
+    #[cfg(test)]
+    test_io::before_read()?;
     #[cfg(test)]
     let bytes = {
         let limit = test_io::read_limit(bytes.len());
@@ -512,3 +636,7 @@ mod segment_incremental_migration_contract_tests;
 #[cfg(test)]
 #[path = "segment_io_test_support.rs"]
 mod test_io;
+
+#[cfg(test)]
+#[path = "segment_transient_migration_contract_tests.rs"]
+mod segment_transient_migration_contract_tests;

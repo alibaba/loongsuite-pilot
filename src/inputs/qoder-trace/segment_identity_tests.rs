@@ -134,9 +134,9 @@ async fn actual_segment_range_uses_the_handle_that_produced_dev_inode_and_size()
         committed_offset: 0,
         events: Vec::new(),
     };
-    let events = read_appended(&mut opened, &mut state)
-        .await
-        .expect("production incremental reader");
+    let read = read_appended(&mut opened, &mut state).await;
+    assert!(!read.stable_failure, "production incremental reader");
+    let events = read.events;
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
