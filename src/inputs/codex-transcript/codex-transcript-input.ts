@@ -654,6 +654,8 @@ export class CodexTranscriptInput extends BaseInput {
       );
       let terminalTurnId: string | null = null;
       let terminalEndOffset: number | null = null;
+      let deferredTurnStart = false;
+      let nextTurnStartedAtMs: number | undefined;
       const processScannedLine = (line: JsonLine): void | false => {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
@@ -682,7 +684,17 @@ export class CodexTranscriptInput extends BaseInput {
 
         const turnId = turnIdForStart(line.record, payload);
         if (turnId) {
-          if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
+          if (checkpoint.activeTurn && checkpoint.activeTurn.turnId !== turnId) {
+            // The previous terminal may have been quarantined. Close its
+            // retained steps before replacing it, and leave this new start
+            // uncommitted so it is processed again after recovery succeeds.
+            terminalTurnId = checkpoint.activeTurn.turnId;
+            terminalEndOffset = line.startOffset;
+            deferredTurnStart = true;
+            nextTurnStartedAtMs = timestampMs(line.record, Date.now());
+            return false;
+          }
+          if (!checkpoint.activeTurn) {
             checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
           }
           updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
@@ -741,15 +753,15 @@ export class CodexTranscriptInput extends BaseInput {
       const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
       runtime?.observeCommittedBatch({
         bytes: nextScanOffset - scanStartOffset,
-        records: scan.records,
-        parseSuccessRecords: scan.parseSuccessRecords,
+        records: scan.records - Number(deferredTurnStart),
+        parseSuccessRecords: scan.parseSuccessRecords - Number(deferredTurnStart),
         parseFailedRecords: scan.parseFailedRecords,
         maxRecordBytes: scan.maxRecordBytes,
       });
       scannedBytes += nextScanOffset - scanStartOffset;
       let blocked = false;
 
-      if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
+      if (checkpoint.activeTurn && (terminalTurnId || nextScanOffset > checkpoint.activeTurn.startOffset)) {
           if (
             isDirectSubagent
             && terminalTurnId
@@ -772,6 +784,9 @@ export class CodexTranscriptInput extends BaseInput {
             checkpoint,
             nextScanOffset,
             terminalTurnId !== null,
+            deferredTurnStart ? 'interrupted' : undefined,
+            undefined,
+            nextTurnStartedAtMs,
           );
           emittedCount += this.emitEntryBatches(recovered.entries);
           if (
@@ -800,6 +815,10 @@ export class CodexTranscriptInput extends BaseInput {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
               processedTerminalCount++;
+            } else {
+              // A deferred next-turn start may make no byte progress. Yield
+              // until pending fusion is resolved rather than spinning here.
+              blocked = true;
             }
         }
       }
@@ -921,6 +940,7 @@ export class CodexTranscriptInput extends BaseInput {
     terminal: boolean,
     inferredTerminalStatus?: 'interrupted',
     attachmentParentThreadId?: string,
+    nextTurnStartedAtMs?: number,
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -968,8 +988,25 @@ export class CodexTranscriptInput extends BaseInput {
         this.publishTranscriptOwnerMeta(filePath, meta);
       }
     }
+    // A different turn proves this turn ended, but cannot reveal whether its
+    // unreadable terminal meant success or cancellation. Infer interruption at
+    // the next start; a recovery-only boundary also handles an empty retained
+    // range after every response was already committed. Never persist it as a
+    // source record or include the new turn's input in the previous turn.
+    const extractionRecords = nextTurnStartedAtMs === undefined ? records.items : [
+      ...records.items,
+      {
+        startOffset: endOffset,
+        endOffset,
+        record: {
+          timestamp: new Date(nextTurnStartedAtMs).toISOString(),
+          type: 'event_msg',
+          payload: { type: 'turn_aborted', turn_id: activeTurn.turnId },
+        },
+      },
+    ];
     const extraction = extractCodexPartialTurnWithBoundaries(
-      records.items,
+      extractionRecords,
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
@@ -1076,8 +1113,9 @@ export class CodexTranscriptInput extends BaseInput {
     // A Codex model wave may finish with `stop` and then resume in the same
     // transcript turn (for example after a subagent completion notification or
     // a failed spawn retry). Emit a distinct lifecycle marker only after the
-    // authoritative task_complete / turn_aborted boundary. This also closes a
-    // turn whose final LLM response was already emitted in an earlier poll.
+    // task_complete / turn_aborted boundary, or before a different turn starts
+    // when the terminal was unreadable. This also closes a turn whose final
+    // LLM response was already emitted in an earlier poll.
     const readyEntries = terminal && (built.entries.length > 0 || activeTurn.emittedTraceId)
       ? [...built.entries, codexTurnEndMarker(built.entries.length > 0 ? built.entries : [auditBase], turn)]
       : built.entries;
@@ -2044,7 +2082,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     let ownerSessionMetaOffset: number | null = null;
     let activeTurn: CodexActiveTranscriptTurn | null = null;
-    const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
+    const { nextOffset } = await scanJsonLinesThroughQuarantine(filePath, 0, stat.size, line => {
       const payload = asRecord(line.record.payload);
       if (!payload) return;
       if (line.record.type === 'session_meta') {
@@ -2709,7 +2747,7 @@ async function readJsonLines(
 }> {
   if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
   const items: JsonLine[] = [];
-  const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
+  const { nextOffset } = await scanJsonLinesThroughQuarantine(filePath, startOffset, endOffset, line => {
     items.push(line);
   }, runtime);
   return { items, nextOffset };
@@ -2764,6 +2802,7 @@ async function scanJsonLines(
   parseSuccessRecords: number;
   parseFailedRecords: number;
   maxRecordBytes: number;
+  quarantined?: boolean;
   incompleteTail?: IncompleteJsonlTail;
 }> {
   if (endOffset <= startOffset) {
@@ -2826,6 +2865,16 @@ async function scanJsonLines(
             maxRecordBytes: MAX_JSONL_RECORD_BYTES,
             reason: 'record-too-large',
           });
+          // Let the caller recover the current turn before any later start
+          // can replace it. The skipped record might itself be a terminal.
+          return {
+            nextOffset: lineEndOffset,
+            records,
+            parseSuccessRecords,
+            parseFailedRecords,
+            maxRecordBytes,
+            quarantined: true,
+          };
         } else {
           // Concatenate once per completed line, rather than copying the whole
           // accumulated prefix for every 1 MiB read (quadratic for large lines).
@@ -2892,6 +2941,26 @@ async function scanJsonLines(
   } finally {
     await handle.close();
   }
+}
+
+// Range readers and startup baselining own their entire requested range.
+// Resume explicitly at each quarantine boundary; live scanning instead returns
+// to its turn-recovery state machine at that point.
+async function scanJsonLinesThroughQuarantine(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  onLine: Parameters<typeof scanJsonLines>[3],
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<{ nextOffset: number }> {
+  let nextOffset = startOffset;
+  while (nextOffset < endOffset) {
+    const scan = await scanJsonLines(filePath, nextOffset, endOffset, onLine, runtime);
+    if (scan.nextOffset <= nextOffset) break;
+    nextOffset = scan.nextOffset;
+    if (!scan.quarantined) break;
+  }
+  return { nextOffset };
 }
 
 function sameFileVersion(a: fsSync.Stats, b: fsSync.Stats): boolean {

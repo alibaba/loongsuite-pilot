@@ -414,7 +414,110 @@ function transcriptCheckpoint(
   return stateStore.get(`codex-transcript:${transcript}`).extra?.codexTranscript as Record<string, unknown>;
 }
 
+async function appendOversizedTerminal(transcript: string, terminal = 'task_complete'): Promise<void> {
+  const handle = await fs.open(transcript, 'a');
+  try {
+    await handle.write(`{"type":"event_msg","payload":{"type":"${terminal}","turn_id":"turn-1","padding":"`);
+    const chunk = Buffer.alloc(1024 * 1024, 0x78);
+    for (let i = 0; i < 129; i++) await handle.write(chunk);
+    await handle.write('"}}\n');
+  } finally {
+    await handle.close();
+  }
+}
+
 describe('CodexTranscriptInput', () => {
+  it('closes an already emitted turn at the next start without duplicating its responses', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-missing-terminal-'));
+    tempDirs.push(root);
+    const { input, sessionDir, entries, stateStore } = await createDormantInput(root);
+    const prefix = completedTurn().trimEnd().split('\n').slice(0, -3).join('\n') + '\n';
+    const transcript = await writeTranscript(sessionDir, prefix);
+    await processTranscriptOnce(input, transcript);
+    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(2);
+    expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+    await fs.appendFile(transcript, completedTurn().trimEnd().split('\n').slice(1)
+      .map(line => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:')).join('\n') + '\n');
+    for (let i = 0; i < 3; i++) await processTranscriptOnce(input, transcript);
+    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(2);
+    expect(entries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(2);
+    expect(entries.find(entry => entry['gen_ai.turn.end'] === true)).toMatchObject({
+      'agent.codex.transcript_turn_id': 'turn-1', 'agent.codex.turn_status': 'interrupted',
+      time_unix_nano: String(BigInt(Date.parse('2026-06-24T06:01:01.000Z')) * 1_000_000n),
+    });
+    expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+      scanOffset: (await fs.stat(transcript)).size, activeTurn: null,
+    });
+  });
+
+  it.each(['task_complete', 'turn_aborted'])('recovers an unfinished step before replacing a turn with an oversized %s', async terminal => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-quarantined-terminal-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    // No token_count/final phase: this ordinary step cannot be committed until
+    // a terminal boundary is recovered. Its tool call and result must survive.
+    const lines = completedTurnWithLargeToolOutput('ordinary result').trimEnd().split('\n');
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, 6).join('\n') + '\n');
+    await appendOversizedTerminal(transcript, terminal);
+    const boundary = (await fs.stat(transcript)).size;
+    // Also cover a persisted old turn when the next start arrives after restart.
+    if (terminal === 'turn_aborted') {
+      for (let i = 0; i < 3; i++) await processTranscriptOnce(first.input, transcript);
+      expect(transcriptCheckpoint(first.stateStore, transcript).scanOffset).toBe(boundary);
+      await first.stateStore.save();
+    }
+    const restarted = terminal === 'turn_aborted' ? await createDormantInput(root) : first;
+    // Cover both turn_context and task_started as the first next-turn record.
+    await fs.appendFile(transcript, completedTurn().trimEnd().split('\n').slice(terminal === 'turn_aborted' ? 2 : 1)
+      .map(line => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:')).join('\n') + '\n');
+    for (let i = 0; i < 5; i++) await processTranscriptOnce(restarted.input, transcript);
+    const entries = restarted === first ? first.entries : [...first.entries, ...restarted.entries];
+    expect(responsesForTurn(entries, 'turn-1')).toHaveLength(1);
+    const oldEntries = entries.filter(entry => entry['agent.codex.transcript_turn_id'] === 'turn-1');
+    expect(oldEntries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(1);
+    expect(oldEntries.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
+    expect(oldEntries.find(entry => entry['gen_ai.turn.end'] === true))
+      .toMatchObject({ 'agent.codex.turn_status': 'interrupted' });
+    expect(responsesForTurn(entries, 'turn-2')).toHaveLength(3);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+    expect(transcriptCheckpoint(restarted.stateStore, transcript)).toMatchObject({
+      scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
+    });
+  });
+
+  it.each(['baseline', 'fork-tail'])('finishes %s across a quarantined terminal without retaining the previous turn', async mode => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-quarantined-baseline-'));
+    tempDirs.push(root);
+    const { input, sessionDir, entries, stateStore } = await createDormantInput(root);
+    const transcript = await writeTranscript(sessionDir, completedTurn().trimEnd().split('\n').slice(0, -1).join('\n') + '\n');
+    await appendOversizedTerminal(transcript);
+    await fs.appendFile(transcript, completedTurn().trimEnd().split('\n').slice(1)
+      .map(line => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:')).join('\n') + '\n');
+    const size = (await fs.stat(transcript)).size;
+    if (mode === 'baseline') {
+      await (input as unknown as { baselineFile(file: string, key: string): Promise<void> })
+        .baselineFile(transcript, `codex-transcript:${transcript}`);
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({ scanOffset: size, activeTurn: null });
+    } else {
+      const checkpoint: CodexTranscriptCheckpoint = {
+        inode: (await fs.stat(transcript)).ino, scanOffset: size,
+        activeTurn: null, pendingTerminal: null, pendingFusion: null, pendingSubagent: null,
+        ownerSessionMetaOffset: 0, forkBootstrap: { state: 'baseline-tail', searchOffset: 0 },
+      };
+      const rebuild = (input as unknown as {
+        rebuildForkBaselineTail(file: string, checkpoint: CodexTranscriptCheckpoint): Promise<boolean>;
+      }).rebuildForkBaselineTail.bind(input);
+      expect(await rebuild(transcript, checkpoint)).toBe(false);
+      expect(checkpoint.forkBootstrap?.searchOffset).toBeLessThan(size);
+      // Persist the candidate and search offset exactly as a restart would.
+      const restored = JSON.parse(JSON.stringify(checkpoint)) as CodexTranscriptCheckpoint;
+      for (let i = 0; i < 3 && restored.forkBootstrap; i++) await rebuild(transcript, restored);
+      expect(restored.forkBootstrap).toBeUndefined();
+      expect(restored.activeTurn).toBeNull();
+    }
+    expect(entries).toEqual([]);
+  });
+
   it('does not reread static tails, scans only appended bytes, and preserves split UTF-8 on completion', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-tail-continuation-'));
     tempDirs.push(root);
