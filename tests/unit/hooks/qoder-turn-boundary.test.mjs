@@ -12,7 +12,7 @@ import {
 } from '../../../src/normalization/invocation-identity.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
+const PROCESSOR = path.resolve(__dirname, '../../helpers/qoder-hook-collector-driver.mjs');
 
 let dataDir;
 let transcriptPath;

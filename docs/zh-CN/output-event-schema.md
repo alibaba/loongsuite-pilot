@@ -223,6 +223,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `gcp.gen_ai` | Google GenAI endpoint，具体后端未知时使用。 |
 | `deepseek` | DeepSeek。 |
 | `qwen` | 阿里云通义千问。 |
+| `bytedance.doubao` | 豆包工作原生服务；客户端轮次观测不表示已采集模型内部调用。 |
 | `groq` | Groq。 |
 | `mistral_ai` | Mistral AI。 |
 | `cohere` | Cohere。 |
@@ -231,6 +232,17 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `ibm.watsonx.ai` | IBM Watsonx AI。 |
 
 如果以上值都不适用，使用小写 dotted provider 名称，例如 `baidu.ernie` 或 `zhipu.chatglm`。
+
+## 豆包工作客户端轮次元数据
+
+实验性 `doubao-work` 事件与 OTLP Resource 包含 `loongsuite.doubao_work.observation_scope=client_message`、
+`loongsuite.doubao_work.business_outcome=unknown` 和 `loongsuite.doubao_work.client_outcome`
+（`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
+见[支持范围与配置](doubao-work.md)。
+
+本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
+
+缺少可用轨迹的工具仍直接归属 AGENT / TASK，使用 `genai.observed-tools.v1` 部分观测契约。完整原生 sandbox 执行在请求区间内映射为 TASK，内部轮次属于该本地片段，不充当完整子 Agent 生命周期；区间外后台执行仅保留日志，不拉长请求。内容在转换前统一脱敏，复用时只导出当前轮次，但 LLM 输入可以包含此前可见上下文。所选技能/伙伴只表示选择上下文。
 
 ## Finish Reasons
 

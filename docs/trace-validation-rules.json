@@ -702,7 +702,7 @@
       "applies": "all",
       "severity": "error",
       "toleranceMs": 0,
-      "exception": "TOOL to delegated AGENT requires causal start ordering but permits the child to finish after the tool."
+      "exception": "TOOL to delegated AGENT requires causal start ordering but permits asynchronous child completion."
     },
     {
       "id": "time.reasonable_duration",

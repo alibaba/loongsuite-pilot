@@ -4,6 +4,13 @@ import * as path from 'node:path';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import { MetricsSummaryWriter } from '../../../src/status-bar/metrics-summary-writer.js';
 import type { StatusBarConfig } from '../../../src/types/index.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES } from '../../../src/utils/segmented-jsonl-writer.js';
+import { scanJsonlTail } from '../../../src/status-bar/jsonl-tail-reader.js';
+
+vi.mock('../../../src/status-bar/jsonl-tail-reader.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/status-bar/jsonl-tail-reader.js')>();
+  return { ...actual, scanJsonlTail: vi.fn(actual.scanJsonlTail) };
+});
 
 const logger = vi.hoisted(() => ({
   info: vi.fn(),
@@ -125,6 +132,117 @@ describe('MetricsSummaryWriter', () => {
     expect(todayRange.totalToolCalls).toBe(2);
     expect(todayRange.totalEvents).toBe(4);
     expect(todayRange.totalSessions).toBe(1);
+  });
+
+  it('transfers scanned offsets on rotation without double counting during the rename gap', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = `copilot-${today()}.jsonl`, closed = `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`;
+    await writeJsonlFile(outputDir, active, [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    await fs.rename(path.join(outputDir, active), path.join(outputDir, closed));
+    await writer.refresh();
+    let summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(1200);
+    await writeJsonlFile(outputDir, active, [makeLlmResponse()]); await writer.refresh();
+    summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(2400);
+    const restarted = new MetricsSummaryWriter(tmpDir, makeConfig()); await restarted.refresh();
+    summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(2400);
+  });
+
+  it('preserves counted tokens when retention removes a segment before the next refresh', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = path.join(outputDir, `copilot-${today()}.jsonl`);
+    const closed = path.join(outputDir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+    await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    for (let i = 0; i < 2; i++) {
+      await fs.rename(active, closed);
+      await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+      await fs.unlink(closed);
+      await writer.refresh();
+      const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+      expect(summary.ranges.today.totalTokens).toBe((i + 2) * 1200);
+    }
+    const restarted = new MetricsSummaryWriter(tmpDir, makeConfig()); await restarted.refresh();
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(3600);
+  });
+
+  it('resumes a retired inode that later appears under its segment name without double counting', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = path.join(outputDir, `copilot-${today()}.jsonl`);
+    const hidden = path.join(tmpDir, 'hidden-segment.jsonl');
+    const closed = path.join(outputDir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+    await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    await fs.rename(active, hidden);
+    await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+    await writer.refresh();
+    await fs.rename(hidden, closed);
+    await fs.appendFile(closed, `${JSON.stringify(makeLlmResponse())}\n`);
+    await writer.refresh();
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(3600);
+    await writer.refresh();
+    const unchanged = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(unchanged.ranges.today.totalTokens).toBe(3600);
+  });
+
+  it('retries a rotation between stat and open without attributing new-file bytes to the old inode', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const active = path.join(outputDir, `copilot-${today()}.jsonl`);
+    const closed = path.join(outputDir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+    await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    await fs.appendFile(active, `${JSON.stringify(makeLlmResponse())}\n`);
+    const statSpy = vi.spyOn(writer as any, 'safeStat').mockImplementation(async (filePath: unknown) => {
+      const stat = await fs.stat(String(filePath));
+      if (filePath === active) {
+        await fs.rename(active, closed);
+        await writeJsonlFile(outputDir, path.basename(active), [makeLlmResponse()]);
+      }
+      return stat;
+    });
+    await writer.refresh();
+    statSpy.mockRestore();
+    const unchanged = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(unchanged.ranges.today.totalTokens).toBe(1200);
+    expect(logger.warn).toHaveBeenCalledWith('metrics summary refresh failed', {
+      error: 'Error: JSONL file identity changed before scan',
+    });
+    await writer.refresh();
+    const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(summary.ranges.today.totalTokens).toBe(3600);
+    await writer.refresh();
+    const stable = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(stable.ranges.today.totalTokens).toBe(3600);
+  });
+
+  it('skips sparse oversized current and historical files before opening and preserves observed totals', async () => {
+    const outputDir = path.join(tmpDir, 'logs', 'output');
+    const yesterdayDate = new Date(); yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterday = [yesterdayDate.getFullYear(), String(yesterdayDate.getMonth() + 1).padStart(2, '0'), String(yesterdayDate.getDate()).padStart(2, '0')].join('-');
+    const current = path.join(outputDir, `copilot-${today()}.jsonl`);
+    const historical = path.join(outputDir, `copilot-${yesterday}.jsonl`);
+    await writeJsonlFile(outputDir, path.basename(current), [makeLlmResponse()]);
+    await writeJsonlFile(outputDir, path.basename(historical), [makeLlmResponse()]);
+    const writer = new MetricsSummaryWriter(tmpDir, makeConfig()); await writer.refresh();
+    for (const file of [current, historical]) {
+      const handle = await fs.open(file, 'r+');
+      try { await handle.truncate(LOCAL_LOG_EMERGENCY_FILE_BYTES + 1); }
+      finally { await handle.close(); }
+    }
+    const cached = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    vi.mocked(scanJsonlTail).mockClear();
+    await writer.refresh();
+    const refreshed = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(refreshed.ranges.today.totalTokens).toBe(cached.ranges.today.totalTokens);
+    expect(refreshed.ranges.sevenDays.totalTokens).toBe(cached.ranges.sevenDays.totalTokens);
+    expect(currentDayScanBytes().at(-1)).toBe(0);
+    expect(scanJsonlTail).not.toHaveBeenCalled();
+    expect(logger.warn.mock.calls.filter(([message]) => message === 'metrics summary skipped oversized output file')).toHaveLength(2);
   });
 
   it.each([
@@ -362,7 +480,7 @@ describe('MetricsSummaryWriter', () => {
     expect(summary.ranges.today.totalEvents).toBe(2);
   });
 
-  it('rebuilds only a replaced current-day file', async () => {
+  it('counts a replacement inode without retracting already observed current-day events', async () => {
     const outputDir = path.join(tmpDir, 'logs', 'output');
     const codexPath = path.join(outputDir, `codex-${today()}.jsonl`);
     const claudePath = path.join(outputDir, `claude-code-${today()}.jsonl`);
@@ -394,12 +512,12 @@ describe('MetricsSummaryWriter', () => {
     await writer.refresh();
 
     const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
-    expect(summary.ranges.today.totalTokens).toBe(2500);
-    expect(summary.ranges.today.totalEvents).toBe(2);
-    expect(summary.ranges.today.totalSessions).toBe(2);
+    expect(summary.ranges.today.totalTokens).toBe(3500);
+    expect(summary.ranges.today.totalEvents).toBe(3);
+    expect(summary.ranges.today.totalSessions).toBe(3);
   });
 
-  it('rebuilds a current-day file after it is truncated in place', async () => {
+  it('counts new content after in-place truncation while retaining already observed events', async () => {
     const outputDir = path.join(tmpDir, 'logs', 'output');
     const filePath = path.join(outputDir, `codex-${today()}.jsonl`);
     const original = makeLlmResponse({
@@ -419,9 +537,13 @@ describe('MetricsSummaryWriter', () => {
     await writer.refresh();
 
     const summary = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
-    expect(summary.ranges.today.totalTokens).toBe(50);
-    expect(summary.ranges.today.totalEvents).toBe(1);
-    expect(summary.ranges.today.totalSessions).toBe(1);
+    expect(summary.ranges.today.totalTokens).toBe(123506);
+    expect(summary.ranges.today.totalEvents).toBe(2);
+    expect(summary.ranges.today.totalSessions).toBe(2);
+    await writer.refresh();
+    const restarted = new MetricsSummaryWriter(tmpDir, makeConfig()); await restarted.refresh();
+    const stable = JSON.parse(await fs.readFile(path.join(tmpDir, 'logs', 'metrics-summary.json'), 'utf8'));
+    expect(stable.ranges.today.totalTokens).toBe(123506);
   });
 
   it('falls back to one full rebuild when current-day state is corrupt', async () => {

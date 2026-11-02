@@ -509,6 +509,29 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('registers passive Doubao collection with source, agent and listener gates', async () => {
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, logDir: '/synthetic/doubao/logs' };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      try {
+        expect(orch.getInputManager().getInput('doubao-work')).toBeDefined();
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        expect(detection?.watchPaths).toEqual(['/synthetic/doubao/logs']);
+        const gate = vi.fn(() => true);
+        (orch as any).isAgentGatedEnabled = gate;
+        const control = vi.fn((_id: string, configured: boolean) => configured);
+        (orch as any).agentControlManager.resolveEnabled = control;
+        expect(detection?.enabled()).toBe(true);
+        expect(gate).toHaveBeenCalledWith('doubao-work');
+        config.listeners['doubao-work'].enabled = false;
+        expect(detection?.enabled()).toBe(false);
+        config.listeners['doubao-work'].enabled = true;
+        gate.mockReturnValue(false);
+        expect(detection?.enabled()).toBe(false);
+      } finally { await orch.stop(); }
+    });
+
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));

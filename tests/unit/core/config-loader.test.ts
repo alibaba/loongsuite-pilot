@@ -329,6 +329,16 @@ describe('ConfigLoader', () => {
       expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('resolves the passive Doubao source override without changing other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: { 'doubao-work': { enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' } },
+      });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('merges file-level listener overrides', async () => {

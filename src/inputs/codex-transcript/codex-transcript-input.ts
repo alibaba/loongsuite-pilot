@@ -8,6 +8,7 @@ import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
 import { isReservedKey } from '../../normalization/global-attributes.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
+import { createLogger } from '../../utils/logger.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
 import {
@@ -54,11 +55,16 @@ import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_SESSION_DIR = '~/.codex/sessions';
 const READ_CHUNK_SIZE = 1024 * 1024;
+// Bound retained bytes before Buffer -> string conversion. Completed records
+// above this limit are explicitly quarantined; the native rollout is untouched.
+const MAX_JSONL_RECORD_BYTES = 128 * 1024 * 1024;
+const jsonlLogger = createLogger('CodexTranscriptInput');
 const MAX_EMIT_BATCH_ENTRIES = 256;
 const MAX_EMIT_BATCH_BYTES = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
+const MAX_CACHED_INCOMPLETE_TAILS = 2048;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
@@ -102,6 +108,21 @@ interface JsonLine {
   startOffset: number;
   endOffset: number;
   record: Record<string, unknown>;
+}
+
+interface IncompleteJsonlTail {
+  startOffset: number;
+  endOffset: number;
+  /** Small end-of-prefix witness for append validation; never retain the body. */
+  anchor: string;
+}
+
+interface CachedIncompleteJsonlTail extends IncompleteJsonlTail {
+  inode: number;
+  device: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  fileSize: number;
 }
 
 interface SegmentRecoveryDiagnostics {
@@ -193,6 +214,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly multimodalProcessor: MultimodalProcessor | null;
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
+  private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
   private wakeupWatcher: FSWatcher | null = null;
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -313,6 +335,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
+    this.incompleteTails.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
   }
@@ -426,8 +449,10 @@ export class CodexTranscriptInput extends BaseInput {
     if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) return cached.files;
     const files: string[] = [];
     const dirMtimes = new Map<string, number>();
-    await collectRolloutFiles(this.sessionDir, files, dirMtimes);
-    this.cachedDefaultRollout = dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    const complete = await collectRolloutFiles(this.sessionDir, files, dirMtimes, (dir, error) => {
+      this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
+    });
+    this.cachedDefaultRollout = complete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
     return files;
   }
 
@@ -618,6 +643,10 @@ export class CodexTranscriptInput extends BaseInput {
       && processedTerminalCount < MAX_TERMINALS_PER_FILE_CYCLE
       && scannedBytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
     ) {
+      // Physical newline discovery is speculative, separate from the durable
+      // complete-line checkpoint. Unchanged tails require no content reads;
+      // appends are searched only beyond the previously inspected prefix.
+      if (!await this.incompleteTailReady(filePath, checkpoint.scanOffset, stat, runtime)) break;
       const scanStartOffset = checkpoint.scanOffset;
       const scanEndOffset = Math.min(
         stat.size,
@@ -625,6 +654,8 @@ export class CodexTranscriptInput extends BaseInput {
       );
       let terminalTurnId: string | null = null;
       let terminalEndOffset: number | null = null;
+      let deferredTurnStart = false;
+      let nextTurnStartedAtMs: number | undefined;
       const processScannedLine = (line: JsonLine): void | false => {
         const payload = asRecord(line.record.payload);
         if (!payload) return;
@@ -653,7 +684,17 @@ export class CodexTranscriptInput extends BaseInput {
 
         const turnId = turnIdForStart(line.record, payload);
         if (turnId) {
-          if (!checkpoint.activeTurn || checkpoint.activeTurn.turnId !== turnId) {
+          if (checkpoint.activeTurn && checkpoint.activeTurn.turnId !== turnId) {
+            // The previous terminal may have been quarantined. Close its
+            // retained steps before replacing it, and leave this new start
+            // uncommitted so it is processed again after recovery succeeds.
+            terminalTurnId = checkpoint.activeTurn.turnId;
+            terminalEndOffset = line.startOffset;
+            deferredTurnStart = true;
+            nextTurnStartedAtMs = timestampMs(line.record, Date.now());
+            return false;
+          }
+          if (!checkpoint.activeTurn) {
             checkpoint.activeTurn = createActiveTurn(turnId, line.startOffset, timestampMs(line.record, Date.now()));
           }
           updateActiveTurnMetadata(checkpoint.activeTurn, line.record, payload);
@@ -688,21 +729,39 @@ export class CodexTranscriptInput extends BaseInput {
           runtime,
         );
       }
+      if (scan.incompleteTail?.endOffset === stat.size) {
+        const current = await fs.stat(filePath);
+        if (sameFileVersion(stat, current)) {
+          this.incompleteTails.delete(filePath);
+          this.incompleteTails.set(filePath, {
+            ...scan.incompleteTail,
+            inode: stat.ino,
+            device: stat.dev,
+            mtimeMs: stat.mtimeMs,
+            ctimeMs: stat.ctimeMs,
+            fileSize: stat.size,
+          });
+          // Bound metadata even when many abandoned sessions have partial tails.
+          if (this.incompleteTails.size > MAX_CACHED_INCOMPLETE_TAILS) {
+            this.incompleteTails.delete(this.incompleteTails.keys().next().value!);
+          }
+        }
+      }
       if (scan.nextOffset === scanStartOffset) break;
       checkpointChanged = true;
 
       const nextScanOffset = terminalEndOffset ?? scan.nextOffset;
       runtime?.observeCommittedBatch({
         bytes: nextScanOffset - scanStartOffset,
-        records: scan.records,
-        parseSuccessRecords: scan.parseSuccessRecords,
+        records: scan.records - Number(deferredTurnStart),
+        parseSuccessRecords: scan.parseSuccessRecords - Number(deferredTurnStart),
         parseFailedRecords: scan.parseFailedRecords,
         maxRecordBytes: scan.maxRecordBytes,
       });
       scannedBytes += nextScanOffset - scanStartOffset;
       let blocked = false;
 
-      if (checkpoint.activeTurn && nextScanOffset > checkpoint.activeTurn.startOffset) {
+      if (checkpoint.activeTurn && (terminalTurnId || nextScanOffset > checkpoint.activeTurn.startOffset)) {
           if (
             isDirectSubagent
             && terminalTurnId
@@ -725,6 +784,9 @@ export class CodexTranscriptInput extends BaseInput {
             checkpoint,
             nextScanOffset,
             terminalTurnId !== null,
+            deferredTurnStart ? 'interrupted' : undefined,
+            undefined,
+            nextTurnStartedAtMs,
           );
           emittedCount += this.emitEntryBatches(recovered.entries);
           if (
@@ -753,6 +815,10 @@ export class CodexTranscriptInput extends BaseInput {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
               processedTerminalCount++;
+            } else {
+              // A deferred next-turn start may make no byte progress. Yield
+              // until pending fusion is resolved rather than spinning here.
+              blocked = true;
             }
         }
       }
@@ -770,6 +836,60 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
     return emittedCount;
+  }
+
+  private async incompleteTailReady(
+    filePath: string,
+    startOffset: number,
+    stat: fsSync.Stats,
+    runtime: InputRuntimeAccumulator | null,
+  ): Promise<boolean> {
+    const tail = this.incompleteTails.get(filePath);
+    if (!tail) return true;
+    this.incompleteTails.delete(filePath);
+    if (
+      tail.startOffset !== startOffset || tail.inode !== stat.ino || tail.device !== stat.dev
+      || stat.size < tail.fileSize
+      || (stat.size === tail.fileSize && (stat.mtimeMs !== tail.mtimeMs || stat.ctimeMs !== tail.ctimeMs))
+    ) return true;
+    if (stat.size === tail.endOffset) {
+      if (stat.mtimeMs !== tail.mtimeMs || stat.ctimeMs !== tail.ctimeMs) return true;
+      this.incompleteTails.set(filePath, tail);
+      return false;
+    }
+    const handle = await fs.open(filePath, 'r');
+    try {
+      const read = async (position: number, length: number): Promise<Buffer> => {
+        const chunk = Buffer.alloc(length);
+        const started = runtime?.now();
+        const { bytesRead } = await handle.read(chunk, 0, length, position);
+        if (runtime && started !== undefined) runtime.observeRead(bytesRead, length, runtime.now() - started);
+        return chunk.subarray(0, bytesRead);
+      };
+      const anchorBytes = tail.anchor.length / 2;
+      const anchor = await read(tail.endOffset - anchorBytes, anchorBytes);
+      if (anchor.toString('hex') !== tail.anchor) return true;
+      let position = tail.endOffset;
+      let last = anchor;
+      const searchEnd = Math.min(stat.size, position + MAX_SCAN_BYTES_PER_FILE_CYCLE);
+      while (position < searchEnd) {
+        const chunk = await read(position, Math.min(READ_CHUNK_SIZE, searchEnd - position));
+        if (chunk.length === 0) return true;
+        if (chunk.includes(0x0a)) return true;
+        position += chunk.length;
+        last = chunk.length >= 64 ? chunk.subarray(-64) : Buffer.concat([last, chunk]).subarray(-64);
+      }
+      if (sameFileVersion(stat, await handle.stat())) {
+        this.incompleteTails.set(filePath, {
+          ...tail, endOffset: position, anchor: last.toString('hex'),
+          mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+          fileSize: stat.size,
+        });
+      }
+      return false;
+    } finally {
+      await handle.close();
+    }
   }
 
   /**
@@ -820,6 +940,7 @@ export class CodexTranscriptInput extends BaseInput {
     terminal: boolean,
     inferredTerminalStatus?: 'interrupted',
     attachmentParentThreadId?: string,
+    nextTurnStartedAtMs?: number,
   ): Promise<SegmentRecoveryResult> {
     const activeTurn = checkpoint.activeTurn;
     if (!activeTurn) {
@@ -867,8 +988,25 @@ export class CodexTranscriptInput extends BaseInput {
         this.publishTranscriptOwnerMeta(filePath, meta);
       }
     }
+    // A different turn proves this turn ended, but cannot reveal whether its
+    // unreadable terminal meant success or cancellation. Infer interruption at
+    // the next start; a recovery-only boundary also handles an empty retained
+    // range after every response was already committed. Never persist it as a
+    // source record or include the new turn's input in the previous turn.
+    const extractionRecords = nextTurnStartedAtMs === undefined ? records.items : [
+      ...records.items,
+      {
+        startOffset: endOffset,
+        endOffset,
+        record: {
+          timestamp: new Date(nextTurnStartedAtMs).toISOString(),
+          type: 'event_msg',
+          payload: { type: 'turn_aborted', turn_id: activeTurn.turnId },
+        },
+      },
+    ];
     const extraction = extractCodexPartialTurnWithBoundaries(
-      records.items,
+      extractionRecords,
       meta,
       sessionIdFromTranscriptPath(filePath),
       activeTurn.turnId,
@@ -975,8 +1113,9 @@ export class CodexTranscriptInput extends BaseInput {
     // A Codex model wave may finish with `stop` and then resume in the same
     // transcript turn (for example after a subagent completion notification or
     // a failed spawn retry). Emit a distinct lifecycle marker only after the
-    // authoritative task_complete / turn_aborted boundary. This also closes a
-    // turn whose final LLM response was already emitted in an earlier poll.
+    // task_complete / turn_aborted boundary, or before a different turn starts
+    // when the terminal was unreadable. This also closes a turn whose final
+    // LLM response was already emitted in an earlier poll.
     const readyEntries = terminal && (built.entries.length > 0 || activeTurn.emittedTraceId)
       ? [...built.entries, codexTurnEndMarker(built.entries.length > 0 ? built.entries : [auditBase], turn)]
       : built.entries;
@@ -1943,7 +2082,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     let ownerSessionMetaOffset: number | null = null;
     let activeTurn: CodexActiveTranscriptTurn | null = null;
-    const { nextOffset } = await scanJsonLines(filePath, 0, stat.size, line => {
+    const { nextOffset } = await scanJsonLinesThroughQuarantine(filePath, 0, stat.size, line => {
       const payload = asRecord(line.record.payload);
       if (!payload) return;
       if (line.record.type === 'session_meta') {
@@ -2442,28 +2581,31 @@ async function collectRolloutFiles(
   dir: string,
   files: string[],
   dirMtimes?: Map<string, number>,
-): Promise<void> {
+  onError?: (dir: string, error: unknown) => void,
+): Promise<boolean> {
   let entries: Dirent[];
   try {
+    // Snapshot before readdir: a producer may publish a rollout (or a dated
+    // subdirectory) after readdir took its listing. Recording the later mtime
+    // would cache that stale listing indefinitely, missing all new turns.
+    // With the earlier mtime, the next poll invalidates and rescans it.
+    const mtime = dirMtimes ? (await fs.stat(dir)).mtimeMs : undefined;
     entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
+    if (dirMtimes && mtime !== undefined) dirMtimes.set(dir, mtime);
+  } catch (error) {
+    onError?.(dir, error);
+    return false;
   }
-  if (dirMtimes) {
-    try {
-      dirMtimes.set(dir, (await fs.stat(dir)).mtimeMs);
-    } catch {
-      return;
-    }
-  }
+  let complete = true;
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await collectRolloutFiles(entryPath, files, dirMtimes);
+      if (!await collectRolloutFiles(entryPath, files, dirMtimes, onError)) complete = false;
     } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
       files.push(entryPath);
     }
   }
+  return complete;
 }
 
 async function collectRecentRolloutFiles(
@@ -2605,7 +2747,7 @@ async function readJsonLines(
 }> {
   if (endOffset <= startOffset) return { items: [], nextOffset: startOffset };
   const items: JsonLine[] = [];
-  const { nextOffset } = await scanJsonLines(filePath, startOffset, endOffset, line => {
+  const { nextOffset } = await scanJsonLinesThroughQuarantine(filePath, startOffset, endOffset, line => {
     items.push(line);
   }, runtime);
   return { items, nextOffset };
@@ -2660,6 +2802,8 @@ async function scanJsonLines(
   parseSuccessRecords: number;
   parseFailedRecords: number;
   maxRecordBytes: number;
+  quarantined?: boolean;
+  incompleteTail?: IncompleteJsonlTail;
 }> {
   if (endOffset <= startOffset) {
     return {
@@ -2674,12 +2818,13 @@ async function scanJsonLines(
   try {
     let nextOffset = startOffset;
     let position = startOffset;
-    let pending = Buffer.alloc(0);
+    let pending: Buffer[] = [];
     let pendingStartOffset = startOffset;
     let records = 0;
     let parseSuccessRecords = 0;
     let parseFailedRecords = 0;
     let maxRecordBytes = 0;
+    let tailAnchor = '';
 
     while (position < endOffset) {
       const length = Math.min(READ_CHUNK_SIZE, endOffset - position);
@@ -2691,30 +2836,71 @@ async function scanJsonLines(
       }
       if (bytesRead <= 0) break;
       position += bytesRead;
+      tailAnchor = chunk.subarray(Math.max(0, bytesRead - 64), bytesRead).toString('hex');
 
-      const data = pending.length > 0
-        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
-        : chunk.subarray(0, bytesRead);
-      const dataStartOffset = pendingStartOffset;
       let cursor = 0;
-      while (cursor < data.length) {
-        const newline = data.indexOf(0x0a, cursor);
+      const chunkStartOffset = position - bytesRead;
+      while (cursor < bytesRead) {
+        const newline = chunk.subarray(0, bytesRead).indexOf(0x0a, cursor);
+        const partEnd = newline < 0 ? bytesRead : newline;
+        const recordBytes = chunkStartOffset + partEnd - pendingStartOffset;
+        if (recordBytes <= MAX_JSONL_RECORD_BYTES) {
+          pending.push(chunk.subarray(cursor, partEnd));
+        } else {
+          // Keep only offsets while seeking the newline: never retain, decode,
+          // or parse an unbounded record, including a fully persisted one.
+          pending = [];
+        }
         if (newline < 0) break;
-        const text = data.subarray(cursor, newline).toString('utf8').trim();
-        if (text) {
+        const lineEndOffset = chunkStartOffset + newline + 1;
+        if (recordBytes > MAX_JSONL_RECORD_BYTES) {
           records++;
-          maxRecordBytes = Math.max(maxRecordBytes, newline - cursor + 1);
+          parseFailedRecords++;
+          maxRecordBytes = Math.max(maxRecordBytes, recordBytes + 1);
+          jsonlLogger.warn('Codex JSONL record exceeds size limit; quarantined in source transcript', {
+            fileId: crypto.createHash('sha256').update(filePath).digest('hex').slice(0, 16),
+            startOffset: pendingStartOffset,
+            endOffset: lineEndOffset,
+            recordBytes,
+            maxRecordBytes: MAX_JSONL_RECORD_BYTES,
+            reason: 'record-too-large',
+          });
+          // Let the caller recover the current turn before any later start
+          // can replace it. The skipped record might itself be a terminal.
+          return {
+            nextOffset: lineEndOffset,
+            records,
+            parseSuccessRecords,
+            parseFailedRecords,
+            maxRecordBytes,
+            quarantined: true,
+          };
+        } else {
+          // Concatenate once per completed line, rather than copying the whole
+          // accumulated prefix for every 1 MiB read (quadratic for large lines).
+          const data = pending.length === 1 ? pending[0]! : Buffer.concat(pending, recordBytes);
+          pending = [];
+          // Conversion itself can throw, so it belongs inside the parse guard.
           try {
+            const text = data.toString('utf8').trim();
+            if (!text) {
+              nextOffset = lineEndOffset;
+              pendingStartOffset = lineEndOffset;
+              cursor = newline + 1;
+              continue;
+            }
+            records++;
+            maxRecordBytes = Math.max(maxRecordBytes, recordBytes + 1);
             const record: unknown = JSON.parse(text);
             if (record && typeof record === 'object' && !Array.isArray(record)) {
               parseSuccessRecords++;
               const keepGoing = await onLine({
-                startOffset: dataStartOffset + cursor,
-                endOffset: dataStartOffset + newline + 1,
+                startOffset: pendingStartOffset,
+                endOffset: lineEndOffset,
                 record: record as Record<string, unknown>,
               });
               if (keepGoing === false) {
-                nextOffset = dataStartOffset + newline + 1;
+                nextOffset = lineEndOffset;
                 return {
                   nextOffset,
                   records,
@@ -2731,12 +2917,11 @@ async function scanJsonLines(
             parseFailedRecords++;
           }
         }
-        nextOffset = dataStartOffset + newline + 1;
+        pending = [];
+        nextOffset = lineEndOffset;
+        pendingStartOffset = lineEndOffset;
         cursor = newline + 1;
       }
-
-      pending = cursor < data.length ? Buffer.from(data.subarray(cursor)) : Buffer.alloc(0);
-      pendingStartOffset = dataStartOffset + cursor;
     }
 
     return {
@@ -2745,10 +2930,42 @@ async function scanJsonLines(
       parseSuccessRecords,
       parseFailedRecords,
       maxRecordBytes,
+      ...(position > pendingStartOffset ? {
+        incompleteTail: {
+          startOffset: pendingStartOffset,
+          endOffset: position,
+          anchor: tailAnchor,
+        },
+      } : {}),
     };
   } finally {
     await handle.close();
   }
+}
+
+// Range readers and startup baselining own their entire requested range.
+// Resume explicitly at each quarantine boundary; live scanning instead returns
+// to its turn-recovery state machine at that point.
+async function scanJsonLinesThroughQuarantine(
+  filePath: string,
+  startOffset: number,
+  endOffset: number,
+  onLine: Parameters<typeof scanJsonLines>[3],
+  runtime?: InputRuntimeAccumulator | null,
+): Promise<{ nextOffset: number }> {
+  let nextOffset = startOffset;
+  while (nextOffset < endOffset) {
+    const scan = await scanJsonLines(filePath, nextOffset, endOffset, onLine, runtime);
+    if (scan.nextOffset <= nextOffset) break;
+    nextOffset = scan.nextOffset;
+    if (!scan.quarantined) break;
+  }
+  return { nextOffset };
+}
+
+function sameFileVersion(a: fsSync.Stats, b: fsSync.Stats): boolean {
+  return a.ino === b.ino && a.dev === b.dev && a.size === b.size
+    && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 }
 
 async function findOwnerSessionMetaOffset(

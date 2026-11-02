@@ -8,6 +8,8 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
 }
 
 /**

@@ -2,18 +2,20 @@ import * as path from 'node:path';
 import { BaseFlusher } from './base-flusher.js';
 import { projectLogEntry } from '../normalization/entry-builder.js';
 import type { AgentActivityEntry, JsonlFlusherConfig } from '../types/index.js';
-import { appendLine, ensureDir, getTodayDateString } from '../utils/fs-utils.js';
-import { createLogger } from '../utils/logger.js';
-
-const logger = createLogger('JsonlFlusher');
+import { ensureDir, getTodayDateString } from '../utils/fs-utils.js';
+import { appendSegmentedJsonl, DEFAULT_JSONL_SEGMENT_BYTES } from '../utils/segmented-jsonl-writer.js';
 
 export class JsonlFlusher extends BaseFlusher {
   readonly name = 'jsonl';
   private readonly config: JsonlFlusherConfig;
+  private readonly maxFileBytes: number;
+  private readonly writes = new Map<string, Promise<void>>();
 
   constructor(config: JsonlFlusherConfig) {
     super();
     this.config = config;
+    this.maxFileBytes = Number.isFinite(config.maxFileSizeMb) && config.maxFileSizeMb > 0
+      ? Math.max(1, Math.floor(config.maxFileSizeMb * 1024 * 1024)) : DEFAULT_JSONL_SEGMENT_BYTES;
   }
 
   async start(): Promise<void> {
@@ -25,7 +27,7 @@ export class JsonlFlusher extends BaseFlusher {
     const filePath = this.resolveFilePath(agentType);
     const projected = projectLogEntry(entry, { dropAgentScopedFields: true });
     const line = JSON.stringify(projected);
-    await appendLine(filePath, line);
+    await this.append(filePath, line);
   }
 
   async sendBatch(entries: AgentActivityEntry[]): Promise<void> {
@@ -35,17 +37,24 @@ export class JsonlFlusher extends BaseFlusher {
   }
 
   async flush(): Promise<void> {
-    // JSONL writes are immediate per-line, nothing buffered
+    await Promise.all(this.writes.values());
   }
 
   async shutdown(): Promise<void> {
-    // nothing to tear down
+    await this.flush();
   }
 
   override async sendRaw(topic: string, payload: Record<string, unknown>): Promise<void> {
     const filePath = path.join(this.config.outputDir, `${topic}-${getTodayDateString()}.jsonl`);
     const line = JSON.stringify({ logTime: new Date().toISOString(), topic, ...payload });
-    await appendLine(filePath, line);
+    await this.append(filePath, line);
+  }
+
+  private async append(filePath: string, line: string): Promise<void> {
+    const writing = appendSegmentedJsonl(filePath, line, this.maxFileBytes);
+    this.writes.set(filePath, writing);
+    try { await writing; }
+    finally { if (this.writes.get(filePath) === writing) this.writes.delete(filePath); }
   }
 
   private resolveFilePath(agentType: string): string {

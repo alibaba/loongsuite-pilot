@@ -2,6 +2,8 @@
 
 本 skill 的业务语义入口，覆盖应用事实、意图审计、风险事件、可选组织维表、指标口径和公共 CTE。报表 spec 通过 logical source 引用数据源。
 
+字段契约中的值为原始编码。生成展示标签时，按需查阅 [value-labels.md](value-labels.md) 中对应字段的映射表；查询写法见本文“枚举展示与交互”。
+
 ## Data Source Bindings
 
 - **Project / Region**：报表目标 Project 及其所属 Region。
@@ -275,7 +277,7 @@ WITH event_raw AS (
 | `service_name` / `agent_type` / `user` | string | 应用、Agent 类型和用户平铺列；应用名可能缺失。 |
 | `evidence_session_id` | string | 意图所属 Session。 |
 | `evidence_event_id` | string | 代表性用户输入事件。 |
-| `intent_category` / `intent_subcategory` | string | 普通意图分类与子类；风险意图不使用这两列。 |
+| `intent_category` / `intent_subcategory` | string | 普通意图分类与子类；风险意图不使用这两列。内置字面与父子关系见 `value-labels.md`，自定义意图按所属 taxonomy 取标签。 |
 | `usage_total_tokens` | int64 | 按意图占比分摊的 Session Token；同一 Session 各意图行之和为其已分摊总量，不能再次重复累加 Session 总量。 |
 | `risk_type` / `risk_subtype` / `severity` | string | 风险意图的风险分类及严重性。 |
 | `reason` / `entities` | string / json | 识别摘要与实体快照，可能包含敏感内容。 |
@@ -306,8 +308,8 @@ WITH event_raw AS (
 | `source_ip` | string | Agent 主机 IP 实体的平铺查询列，优先取自 `host.ip`；`host.ip` 为空或缺失时，兼容使用 `__source__`。该字段不表示网络对端或外联目标。 |
 | `severity` | enum | 风险严重性，表示风险成立后可能造成的影响，从高到低取 `critical`、`high`、`medium`、`low`，页面上对应严重、高危、中危和低危。 |
 | `confidence` | number | 系统对当前风险判断的确定程度，取值为 0 到 1。取值由相应的检测规则和当前证据确定。 |
-| `risk_type` | string | 风险类型，对应产品中的主分类。该字段是配置风险筛选、通知规则和二次分析时最常用的分类字段。 |
-| `risk_subtype` | string | 风险子类，在所属 `risk_type` 下标识具体风险事实。对于敏感数据暴露事件，它通常表示敏感数据类型；对于敏感文件变更事件，它通常表示文件类型和动作。 |
+| `risk_type` | string | 风险类型，对应产品中的主分类。该字段是配置风险筛选、通知规则和二次分析时最常用的分类字段，字面见 `value-labels.md`。 |
+| `risk_subtype` | string | 风险子类，在所属 `risk_type` 下标识具体风险事实。对于敏感数据暴露事件，它通常表示敏感数据类型；对于敏感文件变更事件，它通常表示文件类型和动作。字面映射保留父类上下文，见 `value-labels.md`。 |
 | `data_exposure_surface` | enum | 敏感数据的暴露位置，可为空；取 `agent_input`、`model_input`、`model_output`、`tool_input`、`tool_output`、`agent_output` 或 `network_egress`。该字段不表示操作是否已执行。 |
 | `operation_stage` | enum | 当前证据能够确认的操作阶段，可为空；取 `intent`、`invoked`、`executed` 或 `completed`。历史空值显示为“阶段未记录”；该字段不表示操作成功或失败。 |
 | `risk_signature` | string | 精确风险签名，用于识别同一个具体风险实例。适合做单个风险的去重、明细聚合和复现定位。 |
@@ -405,6 +407,57 @@ LEFT JOIN 的事实时间、Agent、模型等条件在事实 CTE 中应用，避
 `active_user` / `event_user_day` 中的事件数及 Token 可在不重复的分组间相加；去重用户、Session、Turn、百分比及部门人数需要在目标粒度重算。若同一员工属于多个组织，只有已明确的分摊指标可跨组织相加。
 
 其他外表沿用相同方法：先声明表结构和关联键，再确认一对一、多对一或多对多关系及有效期，确定保留事实还是保留目标人群，最后聚合。涉及历史部门归属时按事实时间匹配对应的有效版本；不使用当前花名册替代历史归属而不作说明。
+
+## 枚举展示与交互
+
+### 展示约定
+
+- 默认中文，英文报表使用字典的 English 列。SQL 最终投影生成标签，图表只展示标签和指标；筛选、关联与聚合使用原始编码，不因翻译合并分类。
+- 未知非空编码保留原文；NULL、空串及字段契约中的字面 `null` 清洗后显示“未记录 / Not recorded”，操作阶段为空显示“阶段未记录 / Stage not recorded”。不同编码出现同名标签时，用分类上下文区分。
+- 子类映射保留父类。默认普通意图使用内置字典；自定义普通意图使用接入方确认的客户 taxonomy（含范围、版本和有效期），无法确定时保留原值，不假设存在未披露的 taxonomy 字段。风险意图使用风险字典，历史分类保留原编码。
+
+### 筛选与交互
+
+控件显示标签，实际筛选原值，例如“高危 → high”。控件支持独立显示名与替换值时直接配置这对值；下钻也传递原编码，按需保留非展示字段或显式反查映射。
+
+大盘顶部 `droplistpro` 的静态别名和动态列表协议需按目标控件核对，不能直接套用表格值映射。若无法分离标签和值，控件使用标签选项，SQL 参数层按同一字典转回编码后过滤。两种传值方式不混用。
+
+例如单选来源控件使用 `type=token`、`key=source_scope_label`、静态 `list=["全部", "应用侧", "运行时"]`。以下片段可接入查询，`i` 为风险事实别名：
+
+```sql
+WITH params AS (
+  SELECT CASE '${{source_scope_label|全部}}'
+    WHEN '应用侧' THEN 'application'
+    WHEN '运行时' THEN 'runtime'
+    ELSE '${{source_scope_label|全部}}' END AS source_code
+)
+-- 后续事实查询的 WHERE 条件：
+-- ('${{source_scope_label|全部}}' = '全部'
+--   OR i.source_scope = (SELECT source_code FROM params))
+```
+
+“全部 / All”表示不筛选，不对应事实中的 NULL；应避开真实标签中的同名值。多选和动态选项沿用控件的实际传值、转义和列表语法，映射保留父类及 taxonomy 上下文。验证候选、选中态、实际查询条件及结果，不能只检查配置字段。
+
+### SQL 展示投影
+
+下面展示“原值分组 → 标签投影”的通用模式。原值不出现在最终结果中；其他枚举按对应字典替换 CASE。筛选条件应在事实层作用于原始字段，关联也在标签投影之前完成。
+
+```sql
+* | WITH risk_counts AS (
+  SELECT nullif(nullif(severity, ''), 'null') AS severity_code, count(*) AS events
+  FROM "incident-event"
+  GROUP BY nullif(nullif(severity, ''), 'null')
+)
+SELECT CASE severity_code
+    WHEN 'critical' THEN '严重'
+    WHEN 'high' THEN '高危'
+    WHEN 'medium' THEN '中危'
+    WHEN 'low' THEN '低危'
+    ELSE coalesce(severity_code, '未记录') END AS "严重性",
+  events AS "事件数"
+FROM risk_counts
+ORDER BY events DESC
+```
 
 ## 参考文档
 

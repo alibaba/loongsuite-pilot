@@ -20,6 +20,8 @@ import {
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { QoderTranscriptSource } from '../qoder-trace/transcript-source.js';
+import { QoderLegacyHookReader } from '../qoder-trace/legacy-hook-reader.js';
 
 // Written by the runtime wrapper that launches qoderclicn. Kept separate from
 // the international build's file so a machine running both keeps the two
@@ -28,6 +30,7 @@ const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
+  dataDir?: string;
 }
 
 /**
@@ -48,6 +51,8 @@ export class QoderCnTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder-cn';
+  private readonly transcriptSource: QoderTranscriptSource;
+  private readonly legacyHookReader = new QoderLegacyHookReader();
 
   // Persists across collect() cycles: tracks the last anchor turn.id and its
   // max step counter per session so orphan turns from later cycles can be
@@ -57,6 +62,14 @@ export class QoderCnTraceInput extends BaseInput {
   constructor(opts: QoderCnTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cn/history');
+    this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder-cn',
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
+  }
+
+  override async stop(): Promise<void> {
+    this.transcriptSource.stop();
+    this.legacyHookReader.reset();
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -70,6 +83,7 @@ export class QoderCnTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.transcriptSource.start();
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -95,9 +109,26 @@ export class QoderCnTraceInput extends BaseInput {
     return readSegmentTokensForSession(sessionId, expectedRequestIds, QODER_CN_SEGMENTS_ROOT);
   }
 
+  protected readCliIntercept(): Promise<InterceptData> {
+    return readInterceptData(undefined, CN_INTERCEPT_FILE);
+  }
+
+  protected readIdeSqliteTokens(sessionId: string): ReturnType<typeof readSqliteTokensForSession> {
+    return readSqliteTokensForSession(sessionId);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
+    const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     const rawEntries = await this.readHookJsonl();
-    if (rawEntries.length === 0) return [];
+    const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
+    for (const record of native.records) {
+      const entry = await this.transformRecord(record);
+      if (entry) rawEntries.push(entry);
+    }
+    if (rawEntries.length === 0) {
+      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      return [];
+    }
 
     const turnGroups = this.groupByTurn(rawEntries);
 
@@ -207,7 +238,7 @@ export class QoderCnTraceInput extends BaseInput {
         // token counts and carry only `credits`, same as the international one.
         // The intercept joins on an exact gen_ai.response.id, so its usefulness
         // does not depend on whether segments have landed.
-        interceptData ??= await readInterceptData(undefined, CN_INTERCEPT_FILE);
+        interceptData ??= await this.readCliIntercept();
         enrichCliPrimary(
           sessionEntries,
           interceptData.systemPrompt?.content,
@@ -222,7 +253,7 @@ export class QoderCnTraceInput extends BaseInput {
       } else {
         // Intentionally ignores matchedDbPath: agent.type must never be derived from
         // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
-        const { rows: sqliteRows } = await readSqliteTokensForSession(sessionId);
+        const { rows: sqliteRows } = await this.readIdeSqliteTokens(sessionId);
         enrichIdeTurn(sessionEntries, sqliteRows);
       }
 
@@ -266,6 +297,7 @@ export class QoderCnTraceInput extends BaseInput {
     for (const [, turnEntries] of noSessionTurnGroups) {
       ordered.push(...turnEntries);
     }
+    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
     return ordered;
   }
 
@@ -294,37 +326,35 @@ export class QoderCnTraceInput extends BaseInput {
     if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
-    const handle = await fs.open(logFile, 'r');
     const entries: AgentActivityEntry[] = [];
-    try {
-      const buf = Buffer.alloc(stat.size - offset);
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+    {
+      const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      const completeBytes = batch.buffer;
+      const completeLength = batch.nextOffset - offset;
+      const skipped = batch.quarantine.filter(record => record.to !== null);
+      const skippedMax = Math.max(0, ...skipped.map(record => record.bytes));
+      if (batch.quarantine.length) {
+        const previous = Array.isArray(state.extra?.qoderLegacyQuarantine) ? state.extra.qoderLegacyQuarantine : [];
+        this.setState({ extra: { ...this.getState().extra,
+          qoderLegacyQuarantine: [...previous, ...batch.quarantine.map(record => ({ file: logFileName, ...record }))].slice(-32) } });
+        for (const record of batch.quarantine) this.logger.warn('oversized legacy Hook record quarantined; source retained', { file: logFile, ...record });
       }
-      const snapshot = buf.subarray(0, bytesRead);
-
-      // The hook may still be appending its last record when stat() returns.
-      // Parse and commit only bytes that end in a newline: committing stat.size
-      // would move the offset past a half-written line whose JSON.parse just
-      // failed, so that record could never be read again.
-      const lastNewline = snapshot.lastIndexOf(0x0a);
-      if (lastNewline < 0) return [];
-
-      const completeLength = lastNewline + 1;
-      const completeBytes = snapshot.subarray(0, completeLength);
-      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+      if (completeLength) this.setState({ lastFile: logFileName, lastOffset: batch.nextOffset });
+      if (!completeBytes.length) {
+        if (completeLength) runtime?.observeCommittedBatch({ records: skipped.length,
+          bytes: completeLength, parseSuccessRecords: 0, parseFailedRecords: skipped.length, maxRecordBytes: skippedMax });
+        return [];
+      }
 
       const completeText = completeBytes.toString('utf-8');
       // Multi-byte characters break the line.length shortcut for per-record
       // byte accounting, so those batches walk the buffer newline by newline.
       const asciiBatch = completeText.length === completeBytes.length;
       const lines = completeText.split('\n');
-      let records = 0;
+      let records = skipped.length;
       let parseSuccessRecords = 0;
-      let parseFailedRecords = 0;
-      let maxRecordBytes = 0;
+      let parseFailedRecords = skipped.length;
+      let maxRecordBytes = skippedMax;
       let recordStartOffset = 0;
 
       for (const line of lines) {
@@ -367,8 +397,6 @@ export class QoderCnTraceInput extends BaseInput {
         parseFailedRecords,
         maxRecordBytes,
       });
-    } finally {
-      await handle.close();
     }
 
     return filterBootstrapHistoryTurns(entries);

@@ -238,6 +238,7 @@ Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, DeepSeek Harness, MiMo Cod
 | `gcp.gen_ai` | Google GenAI endpoint when the concrete backend is unknown |
 | `deepseek` | DeepSeek |
 | `qwen` | Alibaba Cloud Qwen |
+| `bytedance.doubao` | Doubao Work native service; client-message observations do not imply model-level telemetry. |
 | `groq` | Groq |
 | `mistral_ai` | Mistral AI |
 | `cohere` | Cohere |
@@ -246,6 +247,17 @@ Claude Code, Qoder, Codex, OpenCode, Pi Coding Agent, DeepSeek Harness, MiMo Cod
 | `ibm.watsonx.ai` | IBM Watsonx AI |
 
 If none of the above values apply, use a lowercase dotted provider name such as `baidu.ernie` or `zhipu.chatglm`.
+
+## Doubao Work client-message metadata
+
+Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_work.observation_scope=client_message`,
+`loongsuite.doubao_work.business_outcome=unknown` and `loongsuite.doubao_work.client_outcome`
+(`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
+See [scope and configuration](doubao-work.md).
+
+Local tools produce paired `tool.call` / `tool.result` logs with unchanged source times. A uniquely correlated current trajectory reconstructs STEP → LLM / TOOL from assistant messages: inputs contain preceding visible messages; outputs include text/tool_calls; parallel tools share one STEP. LLM and untimed trajectory-tool timestamps are estimated from client submission, tool and completion anchors, with intermediate unknown boundaries linearly allocated. Default CMS LLM counts and latency can include these estimates, which are not precise model timing or actual provider request counts. Missing model, usage, provider response ID and model finish reasons are omitted.
+
+Tools without a usable transcript retain direct AGENT/TASK ownership and the `genai.observed-tools.v1` partial-observation contract. Contained native sandbox executions map to TASKs; their rounds describe a local fragment, not a complete delegated Agent lifecycle. Out-of-request background facts remain logs without stretching requests. Content is masked before conversion; reuse selects current outputs while LLM input may include earlier visible context. Selected Skill/partner IDs describe request context only.
 
 ## Finish Reasons
 

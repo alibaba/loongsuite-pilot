@@ -19,6 +19,8 @@ export class StateStore {
   private readonly filePath: string;
   private revision = 0;
   private persistedRevision = 0;
+  private readonly inputRevisions = new Map<string, number>();
+  private readonly extraRevisions = new Map<string, Map<string, number>>();
   private savePromise: Promise<void> | null = null;
   private readonly saveHolds = new Set<Promise<void>>();
   private saveFailure: { error: unknown } | null = null;
@@ -30,6 +32,8 @@ export class StateStore {
   async load(): Promise<void> {
     const data = await readJsonFile<StateFileShape | null>(this.filePath);
     this.states.clear();
+    this.inputRevisions.clear();
+    this.extraRevisions.clear();
     if (!data || typeof data !== 'object' || data === null) {
       this.revision = 0;
       this.persistedRevision = 0;
@@ -47,6 +51,24 @@ export class StateStore {
   get waitingForOutput(): boolean { return this.saveHolds.size > 0; }
 
   get saveFailed(): boolean { return this.saveFailure !== null; }
+
+  /** A settled save promise may have failed; only written revisions are durable. */
+  isPersisted(inputId: string, extraKey?: string): boolean {
+    const revision = extraKey === undefined ? this.inputRevisions.get(inputId)
+      : this.extraRevisions.get(inputId)?.get(extraKey);
+    return !this.saveFailure && (revision ?? 0) <= this.persistedRevision;
+  }
+
+  private trackExtraRevision(inputId: string, previous: InputState, next: InputState): void {
+    const before = previous.extra ?? {};
+    const after = next.extra ?? {};
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (before[key] === after[key]) continue;
+      let revisions = this.extraRevisions.get(inputId);
+      if (!revisions) { revisions = new Map(); this.extraRevisions.set(inputId, revisions); }
+      revisions.set(key, this.revision);
+    }
+  }
 
   /** Do not checkpoint source progress before its output has been durably accepted. */
   holdSaveUntil(promise: Promise<void>): void {
@@ -82,8 +104,11 @@ export class StateStore {
   }
 
   set(inputId: string, state: InputState): void {
+    const previous = this.get(inputId);
     this.states.set(inputId, cloneState(state));
     this.revision++;
+    this.inputRevisions.set(inputId, this.revision);
+    this.trackExtraRevision(inputId, previous, state);
   }
 
   update(inputId: string, partial: Partial<InputState>): void {
@@ -94,11 +119,18 @@ export class StateStore {
     }
     this.states.set(inputId, cloneState(merged));
     this.revision++;
+    this.inputRevisions.set(inputId, this.revision);
+    this.trackExtraRevision(inputId, current, merged);
   }
 
   delete(inputId: string): boolean {
+    const previous = this.get(inputId);
     const deleted = this.states.delete(inputId);
-    if (deleted) this.revision++;
+    if (deleted) {
+      this.revision++;
+      this.inputRevisions.set(inputId, this.revision);
+      this.trackExtraRevision(inputId, previous, {});
+    }
     return deleted;
   }
 
@@ -138,6 +170,16 @@ export class StateStore {
 
       await writeJsonFile(this.filePath, out);
       this.persistedRevision = targetRevision;
+      for (const [id, revision] of this.inputRevisions) {
+        if (!this.states.has(id) && revision <= this.persistedRevision) this.inputRevisions.delete(id);
+      }
+      for (const [id, revisions] of this.extraRevisions) {
+        const extra = this.states.get(id)?.extra ?? {};
+        for (const [key, revision] of revisions) {
+          if (!(key in extra) && revision <= this.persistedRevision) revisions.delete(key);
+        }
+        if (!revisions.size) this.extraRevisions.delete(id);
+      }
     }
   }
 }

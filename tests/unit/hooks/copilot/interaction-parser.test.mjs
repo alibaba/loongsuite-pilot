@@ -1,7 +1,26 @@
 import { describe,it,expect } from 'vitest';
 import { parseInteractions } from '../../../../assets/hooks/copilot/interaction-parser.mjs';
-import { conversation } from './hybrid-fixture.mjs';
+import { conversation, toolConversation } from './hybrid-fixture.mjs';
 describe('Copilot native OTel / transcript contract',()=>{
+ it('emits only newly observed request fragments and never copies inputs to the response',()=>{
+  const f=toolConversation();
+  const records=parseInteractions(f.events,f.spans,{requireOtel:true})[0].records;
+  const requests=records.filter(r=>r['event.name']==='llm.request');
+  expect(requests).toHaveLength(2);
+  expect(requests[0]['gen_ai.input.messages_delta'].map(m=>m.role)).toEqual(['user']);
+  expect(requests[1]['gen_ai.input.messages_delta'].map(m=>m.role)).toEqual(['assistant','tool']);
+  expect(requests[1]['gen_ai.input.messages_delta'][1].parts[0].response).toEqual({content:'sample file contents'});
+  for(const r of records.filter(r=>r['event.name'].startsWith('llm.'))){
+   expect(r['gen_ai.input.messages']).toBeUndefined();
+   if(r['event.name']==='llm.response')expect(r['gen_ai.input.messages_delta']).toBeUndefined();
+  }
+ });
+ it('does not repeat previous interactions in a later request',()=>{
+  const a=conversation(),b=conversation({interaction:'interaction-b',base:10});b.events[1].data.content='Next prompt.';
+  const batches=parseInteractions([...a.events,...b.events.slice(1)],[...a.spans,...b.spans],{requireOtel:true});
+  const request=batches[1].records.find(r=>r['event.name']==='llm.request');
+  expect(request['gen_ai.input.messages_delta']).toEqual([{role:'user',parts:[{type:'text',content:'Next prompt.'}]}]);
+ });
  it('separates repeated turn 0 by interaction and keeps real usage',()=>{
   const a=conversation(),b=conversation({interaction:'interaction-b',base:10});
   const batches=parseInteractions([...a.events,...b.events.slice(1)],[...a.spans,...b.spans],{requireOtel:true});
@@ -38,4 +57,16 @@ describe('Copilot native OTel / transcript contract',()=>{
   expect(response['error.type']).toBe('provider_error');expect(response['gen_ai.usage.input_tokens']).toBeUndefined();expect(response['gen_ai.output.messages']).toBeUndefined();
  });
 
+});
+
+it('uses transcript ordering for skewed native clocks without changing span timing', () => {
+ const f = toolConversation();
+ const nativeStart = [Date.UTC(2026, 8, 1) / 1000, 0];
+ for (const span of f.spans) { span.startTime = nativeStart; }
+ const records = parseInteractions(f.events, f.spans, { requireOtel: true })[0].records;
+ const requests = records.filter(r => r['event.name'] === 'llm.request');
+ expect(requests).toHaveLength(2);
+ expect(requests[0]['gen_ai.input.messages_delta'].map(m => m.role)).toEqual(['user']);
+ expect(requests[1]['gen_ai.input.messages_delta'].map(m => m.role)).toEqual(['assistant', 'tool']);
+ for (const request of requests) expect(request.time_unix_nano).toBe(String(BigInt(nativeStart[0]) * 1_000_000_000n));
 });
