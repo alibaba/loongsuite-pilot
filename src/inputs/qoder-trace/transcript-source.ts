@@ -24,15 +24,20 @@ export class QoderTranscriptSource {
   start(): void { this.collector.start(); }
   stop(): void { this.collector.stop(); }
 
-  async read(extra: unknown): Promise<QoderTranscriptBatch> {
+  async read(extra: unknown, persisted: boolean): Promise<QoderTranscriptBatch> {
     const state = extra && typeof extra === 'object'
       ? (extra as Record<string, unknown>).qoderTranscripts
       : undefined;
     const checkpoints = state && typeof state === 'object' && !Array.isArray(state)
       ? state as Record<string, unknown> : {};
-    // BaseInput serializes cycles and settles the previous StateStore save
-    // before this call. Only then may covered Hook observations be reclaimed.
-    await this.collector.acknowledge(checkpoints);
+    // A failed ordinary disk save leaves optimistic state in memory. Wait for
+    // BaseInput to retry that save before collecting more or reclaiming notices.
+    // Do not await the shared save here: output holds must remain stoppable.
+    if (!persisted && Object.keys(checkpoints).length) {
+      return { records: [], state: checkpoints, changed: false,
+        metrics: { bytesRead: 0, recordsParsed: 0, sourceFilesOpened: 0, peakCachedBytes: 0 } };
+    }
+    if (persisted) await this.collector.acknowledge(checkpoints);
     return this.collector.collect(checkpoints);
   }
 }

@@ -118,8 +118,9 @@ export class QoderCnTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     const rawEntries = await this.readHookJsonl();
-    const native = await this.transcriptSource.read(this.getState().extra);
+    const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
     for (const record of native.records) {
       const entry = await this.transformRecord(record);
       if (entry) rawEntries.push(entry);

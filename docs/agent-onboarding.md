@@ -363,6 +363,14 @@ existing Input StateStore; covered notices are reclaimed on the following cycle
 after its save. Source descriptors and scalar cursors grow with known sessions;
 there is no lifetime session admission cap or age-based deletion of unread data.
 
+Qoder acknowledges only the revision of `extra.qoderTranscripts` that actually
+reached disk. An ordinary write failure retains notices and pauses optimistic
+native progress while the existing cycle retries the save. A settled save promise
+or the output-hold-only `saveFailed` flag does not establish durability. Updates to
+unrelated fields do not invalidate a saved native cursor. Regression tests must
+exercise collect → output queue → successful save, rather than calling `collect`
+directly and assuming its in-memory state models a durable restart.
+
 Canonicalize the nearest existing ancestor before publishing a missing path,
 including symlink parents and dangling file links. File creation must not change
 its source key. Legacy retry locks get a short incomplete-write grace; expired

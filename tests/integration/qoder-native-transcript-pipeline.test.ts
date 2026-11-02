@@ -75,8 +75,15 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     };
     let input = createInput();
     await input.start();
+    await (input as any).cyclePromise;
+    await vi.waitFor(() => expect(flusher.batchCalls.flat().filter(row => row['event.name'] === 'llm.response')).toHaveLength(4));
     // Duplicate observations must not re-enrich/re-emit a committed turn.
-    wake(); expect(await (input as any).collect()).toEqual([]);
+    wake();
+    const queuedBeforeDuplicate = flusher.batchCalls.length;
+    // Exercise the real collect -> queue -> save cycle; direct collect() leaves
+    // its metadata checkpoint optimistic and does not model a durable restart.
+    await (input as any).runCycle();
+    expect(flusher.batchCalls.length).toBe(queuedBeforeDuplicate);
     await manager!.stopAll();
     const initial = flusher.batchCalls.flat();
     expect(new Set(initial.map(row => row['gen_ai.turn.id'])).size).toBe(2);
