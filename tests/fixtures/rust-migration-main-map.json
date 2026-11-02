@@ -10812,6 +10812,769 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/hook-processor.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "8db4d1ddcf01704f0def4893b39c4eae75d8f683864b5670d0d369847d64ef0f",
+      "note": "All25 fixedf84 declarations accounted:18 shared baseline business contracts plus7 timing contracts. OriginalNode optionalmodule loading/fakeclock mechanisms replaced explicitly by static Native producer/monotonic clock; actual child stdout/stderr/marker/context preservation tested under real3 timingIO faults. No restored JSloader or empty name-only tests. Real Linux native unit3+child3-faultmatrix+Shell wrapper4 passed; Windows/macOS new code unexecuted. Source each optionalJS failures are documented mechanism replacements, not a claim Native executed JS import errors.",
+      "cases": [
+        {
+          "source": {
+            "id": "L72:C3",
+            "title": "deploys early discovery hooks while retiring telemetry-heavy hooks",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact parsed production declaration discovery5 events, retired3 telemetry events and no replaceHookCommands. Static declaration is the source contract, no wrapper-string approximation. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_definition_exposes_only_discovery_and_retires_telemetry_hooks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "writes an atomic wakeup marker with the effective CODEX_HOME",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native dispatch: successful status, exact{}stdout, full marker session/turn/transcript/codex_home/session_dir and no telemetry JSONL. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_wakeup_marker_with_codex_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L112:C3",
+            "title": "records the isolated user session directory from transcript_path",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native path resolution picks CODEX_HOME/u/hash/sessions from full dated transcript path; exact successful code/home/session_dir/transcript preserved. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_records_isolated_user_session_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "writes the discovery marker for %s",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": [
+              "test.each(['session-start', 'user-prompt-submit', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All3 sourceeach variants session-start/user-prompt-submit/stop exercised; each successful code and exact session/codex_home/session_dir marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "normalizes SubagentStart to the child rollout identity",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual SubagentStart successful code and exact child session/turn/initial anchor/transcript/event, no parent marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "normalizes SubagentStop and preserves the SubagentStart anchor",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual SubagentStop afterStart uses child transcript and exact child session/turn/initial+recovery anchors/event. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C3",
+            "title": "records Stop as recovery evidence without claiming it is the initial turn",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop exact successful code/session/turn/recovery/hook_event, no fabricated initial anchor. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_stop_is_recovery_evidence_and_later_prompt_does_not_promote_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L222:C3",
+            "title": "does not promote a later UserPromptSubmit after terminal recovery evidence",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Later prompt after terminal evidence retains first recovery anchor and updates current turn without promoting initial anchor. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_stop_is_recovery_evidence_and_later_prompt_does_not_promote_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L240:C3",
+            "title": "writes AgentTeams resource attributes into the wakeup marker",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual resource collection writes exact two allowlisted AgentTeams fields, successful code and no token leakage. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_filters_resource_and_span_attributes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L260:C3",
+            "title": "writes filtered invocation span attributes for %s",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": [
+              "test.each(['user-prompt-submit', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both2 sourceeach variants actual native dispatch preserve exact session/turn/received_at and allowed span fields; reject core overwrite, secret,513-byte value and malformed field. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_both_invocation_events_preserve_filtered_context_and_isolate_each_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L301:C3",
+            "title": "does not persist invocation span attributes for SessionStart",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "SessionStart successfully acknowledges{}, writes discovery marker and does not create supplied invocation span context. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_filters_resource_and_span_attributes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L314:C3",
+            "title": "keeps invocation span attributes isolated by turn within one session",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two actual native prompt invocations in same session retain separate turn files with exact issue1/issue2 attributes. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_both_invocation_events_preserve_filtered_context_and_isolate_each_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L338:C3",
+            "title": "keeps only the latest wakeup for one session",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repeated Stop marker has exact session and latestturn2. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L348:C3",
+            "title": "ignores non-discovery events and malformed session identifiers",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Non-discovery and missing-session invocations create no extra marker: exact surviving directory has one preexisting legitimate marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C3",
+            "title": "acknowledges ignored events on stdout",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual ignored event returns code0 and exact{}stdout. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C3",
+            "title": "logs wakeup write failures without failing the hook",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real file blocks wakeup directory; actual native dispatch remains code0/{} and emits stage=wakeup_write error JSONL. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L376:C3",
+            "title": "logs span context write failures without blocking the wakeup marker",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real file blocks context directory; native dispatch remains code0/{} and publishes marker while logging stage=span_context_write. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_span_write_failure_still_publishes_wakeup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L400:C3",
+            "title": "records the duration of every call in the timing spool",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native calls record ordered session-start/stop samples with exacttwo keys, nonnegative integral duration, and onlycodex.jsonl remains after lock release. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/codex_timing_history.rs",
+                "test": "f84_l400_each_actual_discovery_call_records_exact_sample_shape_and_releases_the_writer_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L415:C3",
+            "title": "times ignored events too, with an invalid event name recorded as unknown",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual ignored pre-tool-use and invalid Not An Event both acknowledge{} and record exactlypre-tool-use/unknown. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/codex_timing_history.rs",
+                "test": "f84_l415_actual_ignored_and_invalid_events_acknowledge_and_record_pretool_or_unknown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L424:C3",
+            "title": "drops new samples once the spool reaches its cap",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real Native subprocess under exact1MiB full spool returns0/{} with empty stderr, preserves originalspool bytes and emits wakeup+context. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_timing_native_history.rs",
+                "test": "f84_native_timing_faults_preserve_stderr_free_response_wakeup_context_and_existing_spool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L437:C3",
+            "title": "keeps the response, span context and wakeup when the timing module has a %s failure",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": [
+              "test.each(['missing', 'syntax-error', 'initialization-error'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Node optional module missing/syntax/initialization import mechanisms and absent-JS-spool artifact expectation are replaced by a statically linked Native producer. The retained business guarantee is exercised at genuine producer fault boundaries: full spool/held lock/blocked directory all preserve real child exit0, exact{}stdout, empty stderr, customCODEX_HOME/wakeup/spancontext. Native has no runtime optional JS loader and no dormant replacement loader is added. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_timing_native_history.rs",
+                "test": "f84_native_timing_faults_preserve_stderr_free_response_wakeup_context_and_existing_spool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L467:C3",
+            "title": "captures through the response write but excludes optional module loading",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual controlled stdout write+flush wait, no spool beforeflush, exactresponse/marker/stop sample, and real monotonic duration at least elapsed-through-flush rounded to milliseconds. JS fake performance clock/optional-module loading stage replaced by Native monotonic clock and static linkage; no scheduling-sensitive upper bound. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/codex_timing_history.rs",
+                "test": "f84_l467_real_elapsed_duration_includes_response_write_and_flush_before_timing_production"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L504:C3",
+            "title": "keeps the response and wakeup when the timing lock remains held",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real child withheld timing lock exits0/stdout{}/stderr empty; wakeup+context retained, no spool, lockholder bytes unchanged. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_timing_native_history.rs",
+                "test": "f84_native_timing_faults_preserve_stderr_free_response_wakeup_context_and_existing_spool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L518:C3",
+            "title": "keeps the hook response when the timing spool cannot be written",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real child withhook-metrics path blocked byordinaryfile preserves0/{} and empty stderr while successfully writing discovery/context and no timing spool. Actual Linux strict+native tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_timing_native_history.rs",
+                "test": "f84_native_timing_faults_preserve_stderr_free_response_wakeup_context_and_existing_spool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L529:C3",
+            "title": "derives the shared Pilot data directory from the installed shell wrapper",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real installed shell wrapper+native binary with cleared environment/no runtimes preserves UTF8/BOM input, custom CODEX_HOME and bound shareddata directory, exact session/session_dir, no taskHOME fallback. Source conditional excludesWindows. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/powershell-wrapper.test.mjs",
+      "coverage": "partial",
+      "rust": [],
+      "source_hash": "b22eb1e1651d63e12092c548359af2a252091d4cdbf237e823ecf259237915e3",
+      "note": "All3 source declarations have concrete Native Windows acceptance code; retain partial until actual Windows CI runs new assertions. No Linux cfg-noop counted as Windows success. Only Node/MSYS lookup mechanism replaced by signed Native binary absolute.exe binding; UTF8/stdin/path/home/fail-open business retained. f84 L33/L121 timing assertions explicitly added to true wrapper roundtrip.",
+      "cases": [
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "preserves UTF-8 stdin and resolves an MSYS-style pinned Node path",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C3",
+            "title": "remains fail-open when node-bin is empty",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "derives the shared Pilot data directory while publishing a custom CODEX_HOME",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

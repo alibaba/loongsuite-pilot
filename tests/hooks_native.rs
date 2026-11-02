@@ -135,8 +135,19 @@ fn fixture(root: &Path) -> PathBuf {
     hooks
 }
 
-fn assert_codex_roundtrip(mut command: Command, root: &Path, hooks: &Path, script: &Path) {
-    command.arg(script).arg("stop");
+#[cfg(windows)]
+fn assert_codex_roundtrip(command: Command, root: &Path, hooks: &Path, script: &Path) {
+    assert_codex_roundtrip_event(command, root, hooks, script, "stop");
+}
+
+fn assert_codex_roundtrip_event(
+    mut command: Command,
+    root: &Path,
+    hooks: &Path,
+    script: &Path,
+    event: &str,
+) {
+    command.arg(script).arg(event);
     let marker = hooks
         .parent()
         .unwrap()
@@ -165,6 +176,14 @@ fn assert_codex_roundtrip(mut command: Command, root: &Path, hooks: &Path, scrip
         .unwrap()
         .join("state/codex/transcript-wakeups/native-hook.json");
     let value: Value = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
+    assert_eq!(value["session_id"], "native-hook");
+    assert_eq!(
+        value["session_dir"],
+        root.join("codex 中文🚀")
+            .join("sessions")
+            .to_string_lossy()
+            .as_ref()
+    );
     assert_eq!(value["turn_id"], "轮次 🚀");
     assert_eq!(value["transcript_path"], "C:/用户 文件/记录🚀.jsonl");
     assert_eq!(
@@ -172,6 +191,18 @@ fn assert_codex_roundtrip(mut command: Command, root: &Path, hooks: &Path, scrip
         root.join("codex 中文🚀").to_string_lossy().as_ref()
     );
     assert!(!root.join(".loongsuite-pilot").exists());
+    let spool = hooks
+        .parent()
+        .unwrap()
+        .join("state")
+        .join("hook-metrics")
+        .join("codex.jsonl");
+    let timings = fs::read_to_string(spool).unwrap();
+    let latest: Value = serde_json::from_str(timings.lines().last().unwrap()).unwrap();
+    assert_eq!(latest["hook_event"], event);
+    assert!(latest["duration_ms"]
+        .as_f64()
+        .is_some_and(|duration| duration.is_finite() && duration >= 0.0));
 }
 
 #[cfg(unix)]
@@ -179,12 +210,15 @@ fn assert_codex_roundtrip(mut command: Command, root: &Path, hooks: &Path, scrip
 fn shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes() {
     let root = tempfile::tempdir().unwrap();
     let hooks = fixture(root.path());
-    assert_codex_roundtrip(
-        Command::new("/bin/bash"),
-        root.path(),
-        &hooks,
-        &hooks.join("codex-loongsuite-pilot-hook.sh"),
-    );
+    for event in ["stop", "session-start"] {
+        assert_codex_roundtrip_event(
+            Command::new("/bin/bash"),
+            root.path(),
+            &hooks,
+            &hooks.join("codex-loongsuite-pilot-hook.sh"),
+            event,
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -573,6 +607,43 @@ fn powershell_bridge_preserves_raw_bytes_and_native_argument_boundaries() {
                     );
                     assert!(!done.exists(), "Hook waited for its detached descendant");
                 }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing() {
+    let root = tempfile::tempdir().unwrap();
+    let hooks = fixture(root.path());
+    let node_pin = hooks.parent().unwrap().join("node-bin");
+    for legacy_pin in [None, Some(""), Some("/c/Program Files/obsolete-node")] {
+        if node_pin.exists() {
+            fs::remove_file(&node_pin).unwrap();
+        }
+        if let Some(pin) = legacy_pin {
+            fs::write(&node_pin, pin).unwrap();
+        }
+        for shell in ["powershell.exe", "pwsh.exe"] {
+            let executable = which::which(shell)
+                .unwrap_or_else(|_| panic!("Windows acceptance requires {shell}"));
+            for event in ["stop", "session-start"] {
+                let mut command = Command::new(&executable);
+                command.args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ]);
+                assert_codex_roundtrip_event(
+                    command,
+                    root.path(),
+                    &hooks,
+                    &hooks.join("codex-loongsuite-pilot-hook.ps1"),
+                    event,
+                );
             }
         }
     }

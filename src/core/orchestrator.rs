@@ -4440,7 +4440,8 @@ mod tests {
                 assert_eq!(
                     document["plugin"],
                     serde_json::json!([format!(
-                        "file://{}/plugins/opencode",
+                        "file://{}{}/plugins/opencode",
+                        if cfg!(windows) { "/" } else { "" },
                         data.to_string_lossy().replace('\\', "/")
                     )])
                 );

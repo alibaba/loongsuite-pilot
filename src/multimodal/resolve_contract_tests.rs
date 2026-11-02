@@ -187,8 +187,11 @@ async fn authorized_actual_file_and_internal_directory_symlink_still_read_identi
 #[tokio::test]
 async fn static_outside_directory_symlink_never_passes_real_root_or_body_read() {
     let dir = tempfile::tempdir().unwrap();
-    let allowed = dir.path().join("allowed");
-    let outside = dir.path().join("outside");
+    // Keep the lexical positive control in the same namespace as the canonical
+    // roots (/var aliases on macOS and 8.3 aliases on Windows are distinct text).
+    let parent = std::fs::canonicalize(dir.path()).unwrap();
+    let allowed = parent.join("allowed");
+    let outside = parent.join("outside");
     std::fs::create_dir(&allowed).unwrap();
     std::fs::create_dir(&outside).unwrap();
     std::fs::write(outside.join("secret.png"), image(b"OUTSIDE-PRIVATE")).unwrap();

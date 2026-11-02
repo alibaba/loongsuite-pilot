@@ -924,3 +924,7 @@ mod failure_history_tests;
 #[cfg(test)]
 #[path = "hook_watchdog_intercept_history_tests.rs"]
 mod intercept_history_tests;
+
+#[cfg(test)]
+#[path = "hook_watchdog_shell_history_tests.rs"]
+mod shell_history_tests;

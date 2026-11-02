@@ -201,6 +201,90 @@ mod tests {
     }
 
     #[test]
+    fn codex_definition_exposes_only_discovery_and_retires_telemetry_hooks() {
+        let definition: Value =
+            serde_json::from_str(include_str!("../../agents.d/codex.json")).unwrap();
+        assert_eq!(
+            definition["hook"]["events"],
+            json!([
+                "SessionStart",
+                "UserPromptSubmit",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop"
+            ])
+        );
+        assert_eq!(
+            definition["hook"]["retiredEvents"],
+            json!(["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+        );
+        assert!(definition["hook"].get("replaceHookCommands").is_none());
+    }
+
+    #[test]
+    fn codex_both_invocation_events_preserve_filtered_context_and_isolate_each_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let long_value = "x".repeat(513);
+        let attributes=format!("multica.issue.id=issue-1,multica.agent.name=codex,gen_ai.agent.name=must-not-overwrite,multica.secret=must-not-leak,multica.long={long_value},malformed");
+        for sub in ["user-prompt-submit", "stop"] {
+            let (code, stdout) = invoke_in(
+                root.path(),
+                "codex",
+                &[sub],
+                &json!({"session_id":"cdx-span-context","turn_id":"turn-span-context"}).to_string(),
+                &[("LOONGSUITE_PILOT_SPAN_ATTRIBUTES", attributes.as_str())],
+            );
+            assert_eq!(code, 0);
+            assert_eq!(stdout.trim(), "{}");
+            let context = read_json(
+                &root
+                    .path()
+                    .join("state")
+                    .join("codex")
+                    .join("transcript-span-contexts")
+                    .join("cdx-span-context--turn-span-context.json"),
+            );
+            assert_eq!(context["session_id"], "cdx-span-context");
+            assert_eq!(context["turn_id"], "turn-span-context");
+            assert_eq!(
+                context["spanAttributes"],
+                json!({"multica.issue.id":"issue-1","multica.agent.name":"codex"})
+            );
+            assert!(context["received_at"].is_string());
+            let serialized = context.to_string();
+            for forbidden in ["must-not-overwrite", "must-not-leak", long_value.as_str()] {
+                assert!(!serialized.contains(forbidden));
+            }
+        }
+        for index in 1..=2 {
+            let attributes = format!("multica.issue.id=issue-{index}");
+            let (code, _) = invoke_in(
+                root.path(),
+                "codex",
+                &["user-prompt-submit"],
+                &json!({"session_id":"cdx-shared-session","turn_id":format!("turn-{index}")})
+                    .to_string(),
+                &[("LOONGSUITE_PILOT_SPAN_ATTRIBUTES", attributes.as_str())],
+            );
+            assert_eq!(code, 0);
+        }
+        for index in 1..=2 {
+            let context = read_json(
+                &root
+                    .path()
+                    .join("state")
+                    .join("codex")
+                    .join("transcript-span-contexts")
+                    .join(format!("cdx-shared-session--turn-{index}.json")),
+            );
+            assert_eq!(
+                context["spanAttributes"],
+                json!({"multica.issue.id":format!("issue-{index}")})
+            );
+        }
+    }
+
+    #[test]
     fn codex_writes_wakeup_marker_with_codex_home() {
         let root_dir = tempfile::tempdir().unwrap();
         let codex_home = root_dir.path().join("task-codex-home");
@@ -247,7 +331,7 @@ mod tests {
             .join("09")
             .join("17")
             .join("rollout-2026-09-17T02-43-12-session.jsonl");
-        let _ = invoke_in(
+        let (code, _) = invoke_in(
             root_dir.path(),
             "codex",
             &["stop"],
@@ -264,7 +348,12 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/cdx-isolated-home.json"),
         );
+        assert_eq!(code, 0);
         assert_eq!(marker["session_dir"], isolated.to_string_lossy().as_ref());
+        assert_eq!(
+            marker["transcript_path"],
+            transcript.to_string_lossy().as_ref()
+        );
         assert_eq!(marker["codex_home"], codex_home.to_string_lossy().as_ref());
     }
 
@@ -291,12 +380,13 @@ mod tests {
                     .join(format!("state/codex/transcript-wakeups/cdx-{sub}.json")),
             );
             assert_eq!(marker["session_id"], format!("cdx-{sub}"));
+            assert_eq!(marker["codex_home"], home.to_string_lossy().as_ref());
             assert_eq!(
                 marker["session_dir"],
                 home.join("sessions").to_string_lossy().as_ref()
             );
         }
-        let _ = invoke_in(
+        let (start_code, _) = invoke_in(
             root_dir.path(),
             "codex",
             &["subagent-start"],
@@ -314,14 +404,17 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/child-session.json"),
         );
+        assert_eq!(start_code, 0);
         assert_eq!(start["session_id"], "child-session");
+        assert_eq!(start["turn_id"], "child-turn");
+        assert_eq!(start["transcript_path"], "/tmp/rollout-child.jsonl");
         assert_eq!(start["initial_turn_id"], "child-turn");
         assert_eq!(start["hook_event"], "subagent-start");
         assert!(!root_dir
             .path()
             .join("state/codex/transcript-wakeups/parent-session.json")
             .exists());
-        let _ = invoke_in(
+        let (stop_code, _) = invoke_in(
             root_dir.path(),
             "codex",
             &["subagent-stop"],
@@ -340,6 +433,9 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/child-session.json"),
         );
+        assert_eq!(stop_code, 0);
+        assert_eq!(stop["session_id"], "child-session");
+        assert_eq!(stop["turn_id"], "child-turn");
         assert_eq!(stop["initial_turn_id"], "child-turn");
         assert_eq!(stop["recovery_turn_id"], "child-turn");
         assert_eq!(stop["transcript_path"], "/tmp/rollout-child.jsonl");
@@ -349,7 +445,7 @@ mod tests {
     #[test]
     fn codex_stop_is_recovery_evidence_and_later_prompt_does_not_promote_it() {
         let root_dir = tempfile::tempdir().unwrap();
-        let _ = invoke_in(
+        let (code, _) = invoke_in(
             root_dir.path(),
             "codex",
             &["stop"],
@@ -366,6 +462,10 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/fork-session.json"),
         );
+        assert_eq!(code, 0);
+        assert_eq!(marker["session_id"], "fork-session");
+        assert_eq!(marker["turn_id"], "latest-terminal-turn");
+        assert_eq!(marker["hook_event"], "stop");
         assert_eq!(marker["recovery_turn_id"], "latest-terminal-turn");
         assert!(marker.get("initial_turn_id").is_none());
         let _ = invoke_in(
@@ -403,7 +503,7 @@ mod tests {
     #[test]
     fn codex_filters_resource_and_span_attributes() {
         let root_dir = tempfile::tempdir().unwrap();
-        let _ = invoke_in(
+        let (resource_code, _) = invoke_in(
             root_dir.path(),
             "codex",
             &["stop"],
@@ -423,6 +523,7 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/cdx-agentteams.json"),
         );
+        assert_eq!(resource_code, 0);
         assert_eq!(
             marker["resourceAttributes"],
             json!({
@@ -505,6 +606,7 @@ mod tests {
                 .path()
                 .join("state/codex/transcript-wakeups/cdx-overwrite.json"),
         );
+        assert_eq!(marker["session_id"], "cdx-overwrite");
         assert_eq!(marker["turn_id"], "turn-2");
 
         let (code, stdout) = invoke_in(
@@ -528,7 +630,12 @@ mod tests {
             .flatten()
             .map(|entry| entry.file_name())
             .collect::<Vec<_>>();
-        assert!(names.iter().all(|name| name != "cdx-ignore.json"));
+        assert_eq!(
+            names.len(),
+            1,
+            "ignored or missing-session event published a marker"
+        );
+        assert_eq!(names[0], "cdx-overwrite.json");
 
         let wakeups = root_dir.path().join("state/codex/transcript-wakeups");
         let _ = fs::remove_dir_all(&wakeups);
@@ -1597,3 +1704,6 @@ mod tests {
         assert_eq!(rows[0].hook_event, "stop");
     }
 }
+
+#[cfg(test)]
+mod codex_timing_history;

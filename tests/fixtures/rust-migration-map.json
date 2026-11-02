@@ -62888,6 +62888,2777 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/inputs/codex-aborted-turn/codex-aborted-turn-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "501330c4ca5bbf2fc2f39660e2c04ef1132ac43c1b18a46a924549ae45705ae0",
+      "note": "All17 immutable source declarations individually audited and all substantive assertions ported to production CodexAbortedTurnInput with real start/normal polling/tempfiles/StateStore/callback JSON. Existing3 smoke/identity tests are not used as name-only substitutes. Baseline/f84 test and input/builder/extractor sources byte-identical. Private test-only allocation observer mirrors source Buffer.alloc spy and records actual read buffer length. No non-test production behavior change. Two initial failures were exact Rust JSON floating-vs-integer Number comparison mismatches; fixed only by exact numeric extraction1000.0/0.0, source assertion semantics retained. Linux20 module+1 existing cancellation converter actually passed; Windows/macOS pending actual runs.",
+      "cases": [
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "keeps turn_context fields when task_started follows the same turn context",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual post-start file polling recovers context-before-task_started with exact final model/cwd/interrupted status/cancelled reason/turn-end. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l57_same_turn_task_started_keeps_the_preceding_turn_context_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "writes a diagnostic instead of silently losing an unrecoverable aborted turn",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Malformed abort timestamp emits no entries and exactly one production diagnostic with exact type/turn/reason; full source offset consumed. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l85_malformed_abort_writes_exact_recovery_failure_diagnostic_instead_of_silent_loss"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "reads a preceding session_meta without allocating the full transcript tail",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual late post-baseline recovery of a turn after128KiB history uses actual production buffer allocation observations<=64KiB. Private cfg(test) thread-local observer records len after allocation, mirrors source Buffer.alloc spy; exact session/provider/model restored. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l118_late_abort_recovers_preceding_meta_without_allocating_the_full_historical_tail"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "assigns messages after a completed web search to the cancelled follow-up step",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual interleaved web-search fixture preserves exact s1 reasoning+toolcall structured output and places exact later reasoning in cancelled s2. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l152_completed_web_search_and_cancelled_followup_keep_exact_messages_in_separate_steps"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L189:C3",
+            "title": "creates a distinct step for each completed tool-call wave",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual multi-wave fixture exports exact complete response array for s1/s2 tool_call waves and s3 cancelled tail, including reasoning/tool IDs/names/arguments. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l189_each_completed_tool_wave_and_the_cancelled_tail_have_exact_distinct_steps"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L243:C3",
+            "title": "does not emit recovery entries for a normally completed transcript",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Normal completed transcript reaches preciseEOF checkpoint and exports no recovery entries. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l243_normally_completed_transcript_advances_checkpoint_without_recovery_entries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "writes one diagnostic when a completed turn has no Hook state",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing Hook witness emits no recovery entries and one exact diagnostic type/session/turn. Additional actual restart with new StateStore does not repeat diagnostic. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l263_missing_hook_state_writes_one_exact_gap_diagnostic_without_recovery_entries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L308:C3",
+            "title": "does not interfere with normal Codex hook collection when sharing a state store",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real CodexLogInput and recovery input share one StateStore under actual simultaneous polling. Existing Hook witness avoids diagnostics, exact normal Hook event emits once, recovery emits none and codex-log checkpoint advances. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l308_actual_codex_hook_and_recovery_inputs_share_a_store_without_interference"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L362:C3",
+            "title": "exports a transcript-backed cancelled turn with completed and pending tools",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual cancelled fixture preserves every source event-level assertion: final agent/cancelled/interrupted, absent final fabricated tokens/error/output, exact first-wave messages, second-wave120/12/132 usage, success structured result1000ms, pending cancelled result with no invented body/duration. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l362_cancelled_turn_preserves_completed_and_pending_tool_fields_without_fabricated_final_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L439:C3",
+            "title": "keeps a zero duration for a completed tool with matching timestamps",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Completed tool with matching native timestamps retains exact numeric duration0. Rust JSON floating representation compared through as_f64, matching JS Number semantics. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l439_completed_tool_with_matching_timestamps_keeps_zero_duration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L461:C3",
+            "title": "does not export transcript history that existed before the input starts",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual startup baselines preexisting aborted history to exactEOF with no output, no active turn and no fabricated emitted ledger. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l461_actual_start_baselines_preexisting_aborted_history_without_exporting_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L476:C3",
+            "title": "waits for a trailing newline before consuming turn_aborted",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Partial final abort without newline advances only through last complete source boundary and leaves active turn/no output; append newline triggers exactly one cancellation. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l476_incomplete_abort_is_not_consumed_until_newline_then_is_emitted_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L494:C3",
+            "title": "keeps a transcript-backed agent message when cancellation has no tool calls",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual fixture excluding tool calls preserves exact transcript-backed assistant reasoning message with cancelled finish. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l494_cancel_without_tool_calls_retains_the_actual_agent_reasoning_message"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L521:C3",
+            "title": "merges all user transcript messages into the recovered prompt",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All user records merge in native order into exact environment-context plus blank-line plus user-prompt text in Other input.messages_delta. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l521_all_user_transcript_messages_merge_in_native_order_into_the_recovered_prompt"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L553:C3",
+            "title": "recovers an active post-baseline turn after restart",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first start/stop captures active post-baseline prefix; independently loaded StateStore restores exact checkpoint, second start+append abort recovers once; third new Store/start does not duplicate recovery. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l553_actual_stop_and_new_store_start_resume_a_pending_post_baseline_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L578:C3",
+            "title": "uses the latest session_meta preceding the turn",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Latest preceding session_meta supplies exact Updated system instructions part on cancelled response. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l578_latest_preceding_session_meta_supplies_updated_system_instructions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L611:C3",
+            "title": "bounds persisted aborted-turn IDs to the most recent 100 turns",
+            "suites": [
+              "CodexAbortedTurnInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual ordinary poll processes101 aborted turns; exact100 persisted IDs retain turn101 and exclude turn1; independently loaded durable StateStore equals checkpoint. Linux actual strict+20 module tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-aborted-turn/history_contracts.rs",
+                "test": "l611_actual_101_turn_poll_keeps_only_the_latest_100_persisted_recovery_ids"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-cli-multimodal.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "b734fe402bd8a125c219e8d3ef182e33a4f6206447618483b0a4ab56e8703721",
+      "note": "Exact22 fixed ef8953 declarations, frozen f84 byte-identical/no new main declarations. Unified QoderTrace/QoderMultimodal CLI behavior carries all cases; no removed-class retirement. Controlled adapters faithfully preserve original fake-URI assertions; separate real hook JSONL->InputManager->MultimodalProcessor->JSONL fixture proves native invocation, file ownership/hash and payload/metadata on production route. Linux glibc2.34/Rust1.99.1 actual; Windows/macOS pending actual CI.",
+      "cases": [
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "parses paste Image:source and @ relative/absolute paths",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All6 original platform-specific cases: paste absolute source, relative and absolute @ paths with CJK suffix, display-size suffix, comma filename with and without original-size suffix; exact native path strings.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l50_paste_at_and_comma_paths_keep_actual_platform_resolution"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "parses Qoder CLI 1.1.61 文件： citations and ignores size-only Image blocks",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Chinese full-width/ASCII colon file citations select PNG/JPG, omit text file and size-only Image block; standalone ASCII citation accepted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l99_file_citations_ignore_size_only_blocks_and_text_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L123:C3",
+            "title": "unions attachment filename with @ / Image:source and unique-resolves",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native attachment filename selection is inline in extractor, not a deleted capability: image_file filename retained, skill_listing ignored; @ relative duplicate coalesces with absolute attachment, Image:source extra keeps exact union order.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l123_attachment_union_filters_types_and_deduplicates_after_resolution"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "parses Read image / Image file / ImageGen tool texts",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Read image relative path strips size suffix and joins cwd; absolute Image file and ImageGen text parse exact paths.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l152_read_image_image_file_and_imagegen_extract_actual_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "scans long non-matching @ prefixes in linear time and still finds a later path",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual @a repeated80000 scanner finds later exact absolute image within original200ms budget and noise-only yields empty. Lazy regex initialized before timer, matching source module timing.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l177_long_at_prefix_stays_within_original_200ms_budget"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L187:C3",
+            "title": "caps extracted and converted candidates before pathToUri, including missing files",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "MAX+20 real native missing-file candidates extract exact firstMAX; callback invoked exactly for thoseMAX, all None, raw tool text unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l187_missing_candidates_are_capped_before_callback_and_preserve_text"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L206:C3",
+            "title": "ignores glob listings and non-image @ mentions",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmarked filename listings, @someone mentions and bare CJK-adjacent path all return no candidates.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l206_unmarked_globs_mentions_and_bare_paths_are_not_images"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C3",
+            "title": "resolveImagePath joins cwd only for relative paths",
+            "suites": [
+              "extractInputImagePaths / extractToolImagePaths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual public resolve_image_path ignores supplied cwd for absolute path and joins native relative path to cwd.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l215_absolute_paths_ignore_cwd_and_relative_paths_join_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L228:C3",
+            "title": "input mode attaches paste source onto every carrier that has the path",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "CLI Other and llm.request carriers both receive clip URI; independent @at.png with agent cwd receives distinct at URI.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l228_every_path_carrier_gets_its_own_uri_and_relative_at_is_supported"
+              },
+              {
+                "file": "tests/qoder_trace_multimodal_pipeline.rs",
+                "test": "cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preserve_image_ownership"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L279:C3",
+            "title": "keeps @ image on the first llm.request when a later same-turn request has no image",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Same-turn first request retains its @image URI; later follow-up with no image has zero URI parts.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l279_later_same_turn_request_without_image_never_steals_first_image"
+              },
+              {
+                "file": "tests/qoder_trace_multimodal_pipeline.rs",
+                "test": "cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preserve_image_ownership"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L307:C3",
+            "title": "rewrites Read image and ImageGen results",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "CLI Read image result becomes original text part plus read-img URI; ImageGen All-mode result contains generated URI.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l307_read_and_imagegen_result_rewrites_preserve_original_text"
+              },
+              {
+                "file": "tests/qoder_trace_multimodal_pipeline.rs",
+                "test": "cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preserve_image_ownership"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L336:C3",
+            "title": "uploadMode gates tool.result: output skips; input enriches",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Output-only mode leaves exact Read result string; Input mode produces tool-gate URI parts.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l336_tool_results_obey_input_direction_and_skip_output_only"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C3",
+            "title": "rewrites Read tool.call file_path to text+uri parts",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Output Read call preserves original encoded JSON first text part, exact URI+mime+image part and exact gen_ai.output.multimodal_metadata array.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l356_read_call_keeps_encoded_json_and_exact_output_metadata"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L376:C3",
+            "title": "uploadMode gates tool.call: input skips; output enriches",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Input-only Read call keeps original argument object; Output mode adds expected URI parts.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l376_tool_calls_obey_output_direction_and_skip_input_only"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L397:C3",
+            "title": "resolves relative tool.call file_path against agent.qoder.cwd",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Relative Read file_path converted to exact cwd/rel.png callback argument and returned URI attached.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l397_relative_read_call_resolves_agent_cwd"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L413:C3",
+            "title": "does not extract tool.call file_path unless the tool is Read",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both Write and Writeable make zero callbacks, preserve exact arguments and omit output multimodal metadata.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l413_write_and_writeable_never_use_read_file_path_or_add_metadata"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L433:C3",
+            "title": "leaves non-image tool.call arguments unchanged",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Read notes.ts makes zero callbacks and retains exact non-image argument object.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l433_nonimage_read_arguments_stay_unchanged"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L443:C3",
+            "title": "uploadMode none / missing file / toUri null leave entries unchanged",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "None mode leaves whole serialized entry unchanged; actual missing file and explicit None URI callback retain exact original Read result strings.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l443_none_missing_and_null_callbacks_leave_original_entries_unchanged"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L469:C3",
+            "title": "caps converted images at MAX_MULTIMODAL_PARTS; extract already unique-paths",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "MAX+3 real callback-backed files result exactlyMAX URI parts; duplicate Read image/Image file text for same path adds exactly1 URI.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l469_conversion_is_capped_and_duplicate_image_surfaces_add_one_uri"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L494:C3",
+            "title": "times out a never-resolving pathToUri and still converts later images",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual production with_deadline at40ms releases pending first adapter; enrichment completes within original500ms, keeps exact original text and later ok URI. This source supplies the deadline-wrapped adapter; does not claim unconfigured custom adapters acquire new implicit deadline.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l494_real_40ms_deadline_releases_hung_callback_and_converts_later_image"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L527:C3",
+            "title": "does not throw when pathToUri throws; original result text remains",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Ordinary Result::Err processor boom is isolated without panic substitution; original Read result string remains and no image metadata appears.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l527_ordinary_callback_error_preserves_exact_original_text"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L543:C3",
+            "title": "relative Read image joins agent.qoder.cwd",
+            "suites": [
+              "enrichCliMultimodal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Relative Read image result uses exact cwd/rel.png callback argument and retains returned rel-img URI.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cli_multimodal_contracts.rs",
+                "test": "cli_l543_relative_read_result_resolves_agent_cwd"
+              },
+              {
+                "file": "tests/qoder_trace_multimodal_pipeline.rs",
+                "test": "cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preserve_image_ownership"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/hook-processor.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "8cc7d909d87782ac10faf13ca22434c77c179130d3911608c1ce3070904b01c8",
+      "note": "All18 immutable baseline declarations and both each matrices3+2 individually audited. Reuses existing7 actual native production-dispatch tests after filling missing substantive assertions; adds2 real tests, enhances existing true shell/PS process roundtrip fields. No production behavior changes or Node-mechanism retirement in this file. No title-only inference. Linux actual unit10+wrapper suite passed; new Windows/macOS assertions await actual platform run.",
+      "cases": [
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "deploys early discovery hooks while retiring telemetry-heavy hooks",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact parsed production declaration discovery5 events, retired3 telemetry events and no replaceHookCommands. Static declaration is the source contract, no wrapper-string approximation. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_definition_exposes_only_discovery_and_retires_telemetry_hooks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C3",
+            "title": "writes an atomic wakeup marker with the effective CODEX_HOME",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native dispatch: successful status, exact{}stdout, full marker session/turn/transcript/codex_home/session_dir and no telemetry JSONL. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_wakeup_marker_with_codex_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "records the isolated user session directory from transcript_path",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native path resolution picks CODEX_HOME/u/hash/sessions from full dated transcript path; exact successful code/home/session_dir/transcript preserved. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_records_isolated_user_session_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L117:C3",
+            "title": "writes the discovery marker for %s",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": [
+              "test.each(['session-start', 'user-prompt-submit', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All3 sourceeach variants session-start/user-prompt-submit/stop exercised; each successful code and exact session/codex_home/session_dir marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "normalizes SubagentStart to the child rollout identity",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual SubagentStart successful code and exact child session/turn/initial anchor/transcript/event, no parent marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "normalizes SubagentStop and preserves the SubagentStart anchor",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual SubagentStop afterStart uses child transcript and exact child session/turn/initial+recovery anchors/event. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_writes_discovery_markers_and_normalizes_subagents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L184:C3",
+            "title": "records Stop as recovery evidence without claiming it is the initial turn",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop exact successful code/session/turn/recovery/hook_event, no fabricated initial anchor. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_stop_is_recovery_evidence_and_later_prompt_does_not_promote_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L202:C3",
+            "title": "does not promote a later UserPromptSubmit after terminal recovery evidence",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Later prompt after terminal evidence retains first recovery anchor and updates current turn without promoting initial anchor. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_stop_is_recovery_evidence_and_later_prompt_does_not_promote_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L220:C3",
+            "title": "writes AgentTeams resource attributes into the wakeup marker",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual resource collection writes exact two allowlisted AgentTeams fields, successful code and no token leakage. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_filters_resource_and_span_attributes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L240:C3",
+            "title": "writes filtered invocation span attributes for %s",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": [
+              "test.each(['user-prompt-submit', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both2 sourceeach variants actual native dispatch preserve exact session/turn/received_at and allowed span fields; reject core overwrite, secret,513-byte value and malformed field. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_both_invocation_events_preserve_filtered_context_and_isolate_each_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L281:C3",
+            "title": "does not persist invocation span attributes for SessionStart",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "SessionStart successfully acknowledges{}, writes discovery marker and does not create supplied invocation span context. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_filters_resource_and_span_attributes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L294:C3",
+            "title": "keeps invocation span attributes isolated by turn within one session",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two actual native prompt invocations in same session retain separate turn files with exact issue1/issue2 attributes. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_both_invocation_events_preserve_filtered_context_and_isolate_each_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L318:C3",
+            "title": "keeps only the latest wakeup for one session",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repeated Stop marker has exact session and latestturn2. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L328:C3",
+            "title": "ignores non-discovery events and malformed session identifiers",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Non-discovery and missing-session invocations create no extra marker: exact surviving directory has one preexisting legitimate marker. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L336:C3",
+            "title": "acknowledges ignored events on stdout",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual ignored event returns code0 and exact{}stdout. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L343:C3",
+            "title": "logs wakeup write failures without failing the hook",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real file blocks wakeup directory; actual native dispatch remains code0/{} and emits stage=wakeup_write error JSONL. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_keeps_latest_wakeup_and_logs_write_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C3",
+            "title": "logs span context write failures without blocking the wakeup marker",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real file blocks context directory; native dispatch remains code0/{} and publishes marker while logging stage=span_context_write. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/mod.rs",
+                "test": "codex_span_write_failure_still_publishes_wakeup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L380:C3",
+            "title": "derives the shared Pilot data directory from the installed shell wrapper",
+            "suites": [
+              "codex transcript discovery hook"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real installed shell wrapper+native binary with cleared environment/no runtimes preserves UTF8/BOM input, custom CODEX_HOME and bound shareddata directory, exact session/session_dir, no taskHOME fallback. Source conditional excludesWindows. Actual Linux strict/native tests passed; Windows/macOS new assertions unexecuted.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/transcript-parser.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "faef1463a733260abcfc84e46cff44284e3304e7c21e2e4f80f972b4d95d67e5",
+      "note": "All immutable source declarations individually audited and substantive business assertions retained through actual native scanner/TypedExtractor or production normalization helpers. Native typed fields replace legacy Maps/Sets/optional JS return wrappers. Unchanged golden fixtures retained; no synthetic assistant evidence inserted, no fabricated LLM spans. Native cumulative cursor18629/37522 explicitly supplies preceding-turn incremental accounting state in pure parser tests; these tests do not claim final billing/export behavior. f84 definitions have no production callers and test source is identical to baseline. New generic legacy parser API is not recreated. Representation changes and patch command wrapper are documented percase; no wholefile retirement. Linux actual11 tests passed; Windows/macOS pending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L19:C3",
+            "title": "nextOffset == 文件大小",
+            "suites": [
+              "codex parseTranscript - 全量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual production scan of unchanged3737-byte/16-record fixture reports exactEOF with16 successes and0 failures. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l19_full_native_scan_reports_the_exact_original_fixture_eof"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L25:C3",
+            "title": "按 turn_id 正确分组 token 事件 (9.9 修复)",
+            "suites": [
+              "codex parseTranscript - 全量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native typed extraction returns exact3 turn IDs in source order with one unmatched usage each, retaining terminalCompleted status and no fabricated response evidence. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l25_l33_l41_l64_typed_turn_usage_preserves_exact_values_order_and_global_heartbeat_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "多 turn token 数值与 fixture 对齐 (锁定 9.9)",
+            "suites": [
+              "codex parseTranscript - 全量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact immutable native usage input values18391/18640/18904 retained per typed turn and order. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l25_l33_l41_l64_typed_turn_usage_preserves_exact_values_order_and_global_heartbeat_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "心跳事件被全局去重 (9.9 修复)",
+            "suites": [
+              "codex parseTranscript - 全量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native incremental cumulative cursor suppresses boundary heartbeat duplicates: total3 unmatched usage records over3 turns. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l25_l33_l41_l64_typed_turn_usage_preserves_exact_values_order_and_global_heartbeat_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L51:C3",
+            "title": "byteOffset >= 文件大小返回空",
+            "suites": [
+              "codex parseTranscript - 增量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual scanner atEOF and beyondEOF returns0 records without replay, exact next offset at requested boundary. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l51_l58_actual_incremental_scan_at_or_beyond_eof_returns_no_records_or_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "从 0 → nextOffset → 再读不重复",
+            "suites": [
+              "codex parseTranscript - 增量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "First actual full scan returnsEOF; second actual scan at that nextOffset returns no records/token events. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l51_l58_actual_incremental_scan_at_or_beyond_eof_returns_no_records_or_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "心跳事件被全局去重 — fixture 含 6 条 token_count 但只采纳 3 条 (9.9 修复)",
+            "suites": [
+              "codex parseTranscript - 增量读"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Immutable6 token_count records become3 distinct typed usage values under native cursor; latest usage input18904 retained. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l25_l33_l41_l64_typed_turn_usage_preserves_exact_values_order_and_global_heartbeat_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "提取 base_instructions + developer_instructions",
+            "suites": [
+              "codex parseTranscript - system_instructions / tool.definitions (9.6)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Typed metadata representation preserves exact base instruction string and developer instruction string, replacing old array wrapper without losing instruction content. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l75_native_typed_metadata_preserves_both_base_and_developer_instructions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "单 turn fixture 正常解析",
+            "suites": [
+              "codex parseTranscript - 单 turn / 多 step"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unchanged original single-turn fixture scans toEOF and extracts model/completed status/actualusage100/exactbase+developer/tools instead of a vacuous nonnull assertion. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l84_single_turn_original_fixture_is_parsed_with_usage_model_and_tools"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "多 step fixture 正常解析",
+            "suites": [
+              "codex parseTranscript - 单 turn / 多 step"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unchanged original multistep fixture scans toEOF and preserves two unmatched usage inputs200/300 withCompleted terminal status. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l90_multistep_original_fixture_preserves_both_unmatched_usage_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L97:C3",
+            "title": "解析 function/custom/web/tool_search 工具调用并保留原始 arguments",
+            "suites": [
+              "codex parseTranscript - tool response_item variants"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual scanner+TypedExtractor preserves function/custom/web/tool-search names/order, all input content and results, pending parent IDs and generated web_search prefix. Exact patch string is preserved inside native canonical command field; legacy parser raw-string wrapper is replaced, not silently dropped. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l97_native_extraction_retains_all_tool_variants_raw_payloads_results_and_parent_ids"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L186:C3",
+            "title": "returns turn ids that ended with turn_aborted",
+            "suites": [
+              "codex parseTranscript - interrupted turns"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual scanned abort records extract precise turn-aborted ID andInterrupted terminal status with exact native timestamp; replaces the old Set container representation. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "parser_l186_native_terminal_representation_preserves_the_exact_aborted_turn_id"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/tool-arguments.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "b844214e186ca92ef028d15e20cf633e843c56efe1cd61ba0bfec82180980193",
+      "note": "All immutable source declarations individually audited and substantive business assertions retained through actual native scanner/TypedExtractor or production normalization helpers. Native typed fields replace legacy Maps/Sets/optional JS return wrappers. Unchanged golden fixtures retained; no synthetic assistant evidence inserted, no fabricated LLM spans. Native cumulative cursor18629/37522 explicitly supplies preceding-turn incremental accounting state in pure parser tests; these tests do not claim final billing/export behavior. f84 definitions have no production callers and test source is identical to baseline. New generic legacy parser API is not recreated. Representation changes and patch command wrapper are documented percase; no wholefile retirement. Linux actual11 tests passed; Windows/macOS pending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L9:C3",
+            "title": "apply_patch null input is not wrapped as command null",
+            "suites": [
+              "codex tool argument helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real native normalizer and transcript_tool_call retain explicit/missing patch input as exactJSON Null, never fabricate a command object. Old merge(undefined,null) JS undefined return distinction belongs to the now-unconsumed dual-source merge API; Native represents authoritative absent transcript arguments asJSON Null. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "arguments_l9_native_missing_and_null_patch_inputs_never_become_command_null"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L15:C3",
+            "title": "single-source normalization keeps Bash command/workdir shape",
+            "suites": [
+              "codex tool argument helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native normalizer and function-call parser convert exec_command cmd to exact command/workdir shape while dropping timing-onlyyield field. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "arguments_l15_native_single_source_bash_normalization_keeps_exact_command_and_workdir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L26:C3",
+            "title": "merge prefers transcript JSON for non-Bash tools",
+            "suites": [
+              "codex tool argument helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native authoritative transcript parser preserves complete non-Bash JSON session_id1/charsq. The retired hook/transcript merge API has no f84 production callers; Native owns one transcript source, so no stale Hook object can override parsed fields. ActualLinux strict+native tests passed; Windows/macOS not executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/hook_parser_history.rs",
+                "test": "arguments_l26_native_authoritative_transcript_keeps_the_full_non_bash_json"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/core/hook-watchdog-intercept-shell.test.ts",
+      "source_hash": "6823ffd370aafc59a3330ed2e92d0def5878ccebc30a288e069dbf68e6cbcf07",
+      "coverage": "partial",
+      "rust": [],
+      "note": "修正E01无条件Windows bash忽略：7个bash声明在Windows也默认执行，通过独立Git Bash定位器选择已安装Git/usr/bin/bash.exe及同目录MSYS runtime，绝不解析System32 WSL stub；HOME/启动文件与PATH隔离。固定Linux真实bash7pass/zsh2ignored；Windows必须Native CI实跑，不能把Linux通过当Windows通过。原source AST/skipIf参数原样保留。",
+      "cases": [
+        {
+          "source": {
+            "id": "L56:C5",
+            "title": "sources cleanly under an active claude alias and does not clobber it",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "bash"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash开启expand_aliases后source实际Rust render，SRC_OK到达，用户claude alias参数保留，无wrapper调用；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l56_bash_active_claude_alias_sources_without_shadowing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C5",
+            "title": "defines the wrapper and composes BUN_OPTIONS when no alias exists",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "bash"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash无alias时生产block创建wrapper，以函数probe截获command，actual BUN_OPTIONS同时包含Pilot和用户preload且args=[claude hello]；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l64_bash_wrapper_composes_bun_options_and_forwards_arguments"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C5",
+            "title": "does not clobber a user-defined claude function",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "bash"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash用户claude函数不被覆盖，调用输出USER_FN；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l75_bash_user_claude_function_is_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L81:C5",
+            "title": "is idempotent across a double source",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "bash"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash同一生产block source两次仅一个wrapper调用并正常到达DONE；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l81_bash_double_source_is_idempotent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C5",
+            "title": "sources cleanly under an active claude alias and does not clobber it",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "zsh"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_ZSH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "同源zsh alias/guard/source断言已迁移；固定Linux容器无zsh，明确ignored，macOS默认执行/有zsh时显式--ignored执行，未将未执行标pass",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l90_zsh_active_claude_alias_sources_without_shadowing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C5",
+            "title": "defines the wrapper and composes BUN_OPTIONS when no alias exists",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "zsh"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_ZSH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "同源zsh wrapper/preload组合和真实command参数断言已迁移；当前容器缺zsh，明确ignored，不借用bash通过结果",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l98_zsh_wrapper_composes_bun_options_and_forwards_arguments"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C5",
+            "title": "sources cleanly under an active qodercli alias and preserves it",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "qodercli block (bash)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash激活qodercli用户alias后生产block仍可解析，SRC_OK和原user flag保留；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l110_bash_active_qodercli_alias_sources_and_is_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C5",
+            "title": "old bare block under an alias fails to source (documents the bug)",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "migration of an old bare-function block (bash)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实bash在alias激活时source旧bare block确实非零退出且有syntax error，不能到达末尾sentinel，复现旧bug；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l133_actual_old_bare_block_fails_under_an_active_alias"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L143:C5",
+            "title": "after migration the rc sources cleanly and the bare block is gone",
+            "suites": [
+              "rc intercept block sources safely in real shells",
+              "migration of an old bare-function block (bash)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "实际strip旧bare块再append生产Rust render，真实bash在活跃alias下解析成功，旧body消失、user alias参数保留；Windows通过已安装Git Bash同一真实shell验收，不作平台跳过",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/hook_watchdog_shell_history_tests.rs",
+                "test": "shell_l143_migrated_rc_sources_cleanly_and_the_old_bare_block_is_gone"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-cn-sqlite-reader.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "8aa2cf31c1ada61a563c22e1ec4d4d9eec3755e8a5f9f6d5606166e2eee26743",
+      "note": "Exact ef8953 source assertions carried; frozen f84 byte-identical/no added main declarations. Legacy hasNodeSqlite skip condition retained only in immutable source metadata: actual native bundled SQLite tests run, no Node required. Linux glibc2.34 Rust1.99.1 actual; native Windows/macOS layout branches pending actual CI. File-level parity does not claim incremental input DB rotation identity or retry-after-failed-first-baseline are fixed; those inherited source-boundary gaps remain separate pending follow-up.",
+      "cases": [
+        {
+          "source": {
+            "id": "L65:C3",
+            "title": "returns an empty result when no candidate DB is accessible",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual CN resolver under isolated synthetic home returns no candidates; real reader yields empty rows and no matched DB without creating any user database.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l65_l262_missing_candidates_return_empty_without_creating_database"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C3",
+            "title": "maps token_info, message_id, session_id, model_info to SqliteTokenData",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Real temporary chat_message projects exact session/message/request IDs,1780000000000 clock,100input/20output/80cache and qwen-plus model, matching exact physical DB path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l72_actual_sqlite_row_maps_all_token_message_model_and_clock_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "falls back to chat_record.extra.modelConfig.key when model_info missing model_key",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Real SQL LEFT JOIN with model_info lacking model_key falls back to chat_record.extra.modelConfig.key=auto.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l94_record_model_config_fills_missing_model_key"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "filters out rows with both token counts zero",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both token counts zero produces no token rows and does not report matched DB.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l111_zero_prompt_and_completion_do_not_claim_a_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L122:C3",
+            "title": "ignores non-assistant rows",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual user-role row with nonzero tokens excluded by real query.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l122_nonassistant_rows_do_not_enter_token_results"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "orders results by gmt_create ascending",
+            "suites": [
+              "readSqliteTokensForSession (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Opposite insertion/clock order returns exact message sequence msg-5b,msg-5a.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l131_real_query_orders_clock_ascending_not_insertion_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L149:C3",
+            "title": "reads tokens from the IDE plugin layout when it is the only layout present",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Only synthetic ~/.qoder-cn/shared_client database exists; actual resolver returns it, real reader returns11tokens and exact matched path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l149_plugin_only_layout_is_actually_queried"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "reads tokens from the standalone-app layout when it is the only layout present",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Only native app-support QoderCN layout exists; real reader returns22tokens and exact matched path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l164_standalone_only_layout_is_actually_queried"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "reads tokens from the spaced app-support directory variant",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Only spaced Qoder CN app-support directory exists; actual resolver/reader finds row and exact path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l177_spaced_app_support_layout_is_actually_queried"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L191:C3",
+            "title": "picks the candidate that actually holds the session when both layouts exist",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "First plugin candidate has another session; real query continues to standalone target33token row and reports standalone path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l191_unrelated_plugin_session_does_not_hide_matching_standalone_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L212:C3",
+            "title": "continues past a readable candidate that returns zero rows for the session",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Readable schema-correct but empty first plugin candidate does not hide matching standalone row.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l212_empty_readable_plugin_does_not_hide_matching_standalone_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C3",
+            "title": "continues past a candidate whose query throws",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Readable non-SQLite plugin file causes real query failure, then standalone55token row succeeds; original corrupt bytes unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l226_corrupt_plugin_query_falls_through_to_real_standalone_database"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L243:C3",
+            "title": "pages a session larger than one synchronous read",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual1001-row session with all clocks100 crosses real1000page boundary, exact first/last IDs and uniqueness count retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l243_real_session_pages_same_clock_ties_beyond_one_thousand_rows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L262:C3",
+            "title": "does not throw when every candidate is inaccessible",
+            "suites": [
+              "readSqliteTokensForSession candidate probing (qoder-cn)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Every CN candidate inaccessible: actual async reader returns exact empty/no-match result without throwing or creating DBs.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/qoder_cn_reader_contract_tests.rs",
+                "test": "cn_source_l65_l262_missing_candidates_return_empty_without_creating_database"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-cn-sqlite-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "6df41e8afcf25959be7a2217604eded78e6a842843486c949686a56e9c8ddf42",
+      "note": "Exact ef8953 source assertions carried; frozen f84 byte-identical/no added main declarations. Legacy hasNodeSqlite skip condition retained only in immutable source metadata: actual native bundled SQLite tests run, no Node required. Linux glibc2.34 Rust1.99.1 actual; native Windows/macOS layout branches pending actual CI. File-level parity does not claim incremental input DB rotation identity or retry-after-failed-first-baseline are fixed; those inherited source-boundary gaps remain separate pending follow-up.",
+      "cases": [
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "baselines at the last rowid without scanning json_valid",
+            "suites": [
+              "QoderCnSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderCnSqliteInput/HostedInput baselines MAX(rowid)=2 including malformed last token_info, emits zero and persists cursor2 across fresh StateStore load. Static native baseline SQL contains no json_valid scan.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cn_sqlite_contracts.rs",
+                "test": "cn_source_l36_actual_initial_baseline_includes_malformed_last_row_without_emission"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "reads at most one page and resumes from the rowid cursor",
+            "suites": [
+              "QoderCnSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Explicit known rowid0 starts at first record; actual input emits exactly1000 then persisted fresh StateStore/new input emits1, exact event IDs and cursors1000/1001. Other native namespace offset77 and adjacent-large-integer extra survive unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_cn_sqlite_contracts.rs",
+                "test": "cn_source_l46_actual_one_page_cursor_resumes_after_fresh_store_reload"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/codex/powershell-wrapper.test.mjs",
+      "coverage": "partial",
+      "rust": [],
+      "source_hash": "b23788059563b126f8e4ab658213a3cc924df5805385a93b6cb9022dc750cb09",
+      "note": "All3 source declarations have concrete Native Windows acceptance code; retain partial until actual Windows CI runs new assertions. No Linux cfg-noop counted as Windows success. Only Node/MSYS lookup mechanism replaced by signed Native binary absolute.exe binding; UTF8/stdin/path/home/fail-open business retained. f84 L33/L121 timing assertions explicitly added to true wrapper roundtrip.",
+      "cases": [
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "preserves UTF-8 stdin and resolves an MSYS-style pinned Node path",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "remains fail-open when node-bin is empty",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C3",
+            "title": "derives the shared Pilot data directory while publishing a custom CODEX_HOME",
+            "suites": [
+              "Codex PowerShell hook wrapper"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }
