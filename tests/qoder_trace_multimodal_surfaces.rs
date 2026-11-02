@@ -100,7 +100,11 @@ fn extract_l1665_destinations_and_cwd() {
     ] {
         assert_eq!(
             extract_markdown_image_paths(text, Some(&cwd)),
-            vec![dir.path().join(relative).to_string_lossy().into_owned()]
+            vec![relative
+                .split('/')
+                .fold(dir.path().to_path_buf(), |path, part| path.join(part))
+                .to_string_lossy()
+                .into_owned()]
         );
     }
     for (name, angle) in [("a.png", false), ("My Image.png", true)] {

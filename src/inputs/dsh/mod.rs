@@ -1105,3 +1105,7 @@ mod tests {
             .contains("continue"));
     }
 }
+
+#[cfg(test)]
+#[path = "history_contracts.rs"]
+mod history_contracts;

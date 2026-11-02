@@ -2587,13 +2587,16 @@ fn first_native_install_publishes_command_before_owned_legacy_cleanup_and_preser
             let resolution = bounded(command);
             success(&resolution);
             let resolved = PathBuf::from(String::from_utf8(resolution.stdout).unwrap().trim());
+            let expected = if mode == "owned" {
+                bin.join("loongsuite-pilot.cmd")
+            } else {
+                legacy
+            };
+            // Discovery expands 8.3 aliases; both files must exist at exactly
+            // the same canonical location, including the expected PS1/CMD name.
             assert_eq!(
-                resolved,
-                if mode == "owned" {
-                    bin.join("loongsuite-pilot.cmd")
-                } else {
-                    legacy
-                }
+                fs::canonicalize(resolved).unwrap(),
+                fs::canonicalize(expected).unwrap()
             );
         }
         #[cfg(not(windows))]

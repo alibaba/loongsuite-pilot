@@ -443,11 +443,22 @@ mod tests {
         let bin = service.parent().unwrap();
         let legacy = bin.join("loongsuite-pilot.ps1");
         fs::write(&legacy, official()).unwrap();
-        assert_eq!(resolve(bin, root.path()), legacy);
+        // PowerShell command discovery expands Windows 8.3 aliases. Compare
+        // the full canonical file location while preserving PS1/CMD precedence.
+        assert_eq!(
+            fs::canonicalize(resolve(bin, root.path())).unwrap(),
+            fs::canonicalize(&legacy).unwrap()
+        );
         assert!(cleanup(&service, &cache, &data).unwrap());
-        assert_eq!(resolve(bin, root.path()), bin.join("loongsuite-pilot.cmd"));
+        assert_eq!(
+            fs::canonicalize(resolve(bin, root.path())).unwrap(),
+            fs::canonicalize(bin.join("loongsuite-pilot.cmd")).unwrap()
+        );
         fs::write(&legacy, b"Write-Output 'user customization'\n").unwrap();
         assert!(!cleanup(&service, &cache, &data).unwrap());
-        assert_eq!(resolve(bin, root.path()), legacy);
+        assert_eq!(
+            fs::canonicalize(resolve(bin, root.path())).unwrap(),
+            fs::canonicalize(&legacy).unwrap()
+        );
     }
 }

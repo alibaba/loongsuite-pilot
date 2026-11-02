@@ -71,7 +71,7 @@ async fn actual_aborted_turn_equal_length_rotation_baselines_new_file_and_restar
 ) {
     let root = tempfile::tempdir().expect("synthetic root");
     let (store, input) = make_input(root.path()).await;
-    let source = root.path().join("sessions/rollout-synthetic.jsonl");
+    let source = root.path().join("sessions").join("rollout-synthetic.jsonl");
     let path = source.to_string_lossy().into_owned();
     std::fs::write(&source, FIXTURE).expect("new original source");
     assert_recovered(
@@ -197,7 +197,7 @@ async fn actual_aborted_turn_restart_metadata_and_turn_recovery_use_one_handle_d
 ) {
     let root = tempfile::tempdir().expect("synthetic root");
     let (store, input) = make_input(root.path()).await;
-    let source = root.path().join("sessions/rollout-synthetic.jsonl");
+    let source = root.path().join("sessions").join("rollout-synthetic.jsonl");
     let path = source.to_string_lossy().into_owned();
     let split = FIXTURE
         .rfind("{\"timestamp\"")

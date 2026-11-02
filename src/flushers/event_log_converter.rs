@@ -141,6 +141,7 @@ fn convert_group(
     result: &mut ConvertResult,
 ) -> Result<(), String> {
     let first = records[0];
+    let is_dsh = first.agent_type == "dsh";
     let pairs = pair_events(records, &mut result.warnings);
     if pairs.is_empty()
         && !records
@@ -179,7 +180,19 @@ fn convert_group(
         .position(|record| record.event_name == Some(AgentEventName::LlmRequest))
         .map(|index| index + 1)
         .unwrap_or(records.len());
-    if let Some(input) = materialize_input(&records[..first_request]) {
+    // DSH keeps injected plugin context on LLM requests. Its explicit
+    // top-level user events alone define the ENTRY/AGENT human input.
+    let top_input = if is_dsh {
+        let human_records: Vec<_> = records
+            .iter()
+            .copied()
+            .filter(|record| record.event_name == Some(AgentEventName::Other))
+            .collect();
+        materialize_input(&human_records)
+    } else {
+        materialize_input(&records[..first_request])
+    };
+    if let Some(input) = top_input {
         root.attributes.insert(
             "gen_ai.input.messages".into(),
             Value::String(input.to_string()),
@@ -278,6 +291,28 @@ fn convert_group(
                     continue;
                 }
                 leaf.attributes.insert(key, value);
+            }
+        }
+        // The DSH adapter reports disjoint usage already folded into input
+        // and output. Derive only the missing total from those evidenced
+        // counts; cache and reasoning must not be added again.
+        if is_dsh
+            && pair.kind == "LLM"
+            && !leaf.attributes.contains_key("gen_ai.usage.total_tokens")
+        {
+            let total = leaf
+                .attributes
+                .get("gen_ai.usage.input_tokens")
+                .and_then(Value::as_i64)
+                .zip(
+                    leaf.attributes
+                        .get("gen_ai.usage.output_tokens")
+                        .and_then(Value::as_i64),
+                )
+                .and_then(|(input, output)| input.checked_add(output));
+            if let Some(total) = total {
+                leaf.attributes
+                    .insert("gen_ai.usage.total_tokens".into(), Value::from(total));
             }
         }
         leaf.attributes

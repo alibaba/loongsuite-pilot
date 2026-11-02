@@ -51,7 +51,7 @@ fn assert_wave(entries: &[AgentActivityEntry], tag: &str, tokens: i64) {
 async fn actual_qoder_work_log_same_length_replacement_and_restart_append_keep_correct_identity() {
     let root = tempfile::tempdir().expect("synthetic root");
     let (store, input) = make_input(root.path()).await;
-    let source = root.path().join("logs/synthetic/main.log");
+    let source = root.path().join("logs").join("synthetic").join("main.log");
     let path = source.to_string_lossy().into_owned();
     let key = format!("{}:{path}", input.inner.id());
     let old = wave("synthetic-old", 11);
@@ -150,7 +150,7 @@ async fn actual_qoder_work_log_same_length_replacement_and_restart_append_keep_c
 async fn actual_qoder_work_log_startup_baselines_last_result_and_reads_new_turns() {
     let root = tempfile::tempdir().expect("synthetic root");
     let (store, input) = make_input(root.path()).await;
-    let source = root.path().join("logs/synthetic/main.log");
+    let source = root.path().join("logs").join("synthetic").join("main.log");
     let old = wave("synthetic-old", 11);
     std::fs::write(&source, &old).expect("historical completed turn");
     input
@@ -193,7 +193,7 @@ async fn actual_qoder_work_log_startup_baselines_last_result_and_reads_new_turns
 async fn actual_qoder_work_log_baseline_and_range_read_remain_on_opened_file_during_replacement() {
     let root = tempfile::tempdir().expect("synthetic root");
     let (store, input) = make_input(root.path()).await;
-    let source = root.path().join("logs/synthetic/main.log");
+    let source = root.path().join("logs").join("synthetic").join("main.log");
     let old = wave("synthetic-old", 11);
     std::fs::write(&source, &old).expect("original");
     let path = source.to_string_lossy().into_owned();

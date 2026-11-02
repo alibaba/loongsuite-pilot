@@ -792,6 +792,10 @@ mod tests {
         let session_dir = root.path().join("sessions");
         tokio::fs::create_dir(&session_dir).await.unwrap();
         let rollout = session_dir.join("rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+        // Keep an actual empty live source in the initial directory scan.
+        // Later bytes must exercise journal acceptance, not race the OS's
+        // directory-mtime publication for a newly created file.
+        tokio::fs::write(&rollout, "").await.unwrap();
         let key = format!("codex-transcript:{}", rollout.to_string_lossy());
         let state_path = root.path().join("state.json");
         let state = Arc::new(StateStore::new(&state_path));
