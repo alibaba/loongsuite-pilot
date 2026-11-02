@@ -80,15 +80,20 @@ export function extractUserIdentity(extra) {
   const user = extra.user;
   if (!user || typeof user !== 'object' || Array.isArray(user)) return undefined;
   const name = nonEmptyIdentityValue(user.name);
-  const email = nonEmptyIdentityValue(user.email);
-  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  const email = accountEmail(user.email);
+  return userIdentityFields(name, email);
 }
 
-// CN IDE exposes email beside `user`; phone-only Alibaba Cloud accounts may
-// have a name without an email. Never treat a login name/phone/account ID as email.
+// Phone-only Alibaba Cloud accounts may have a name without an email.
+// Never treat a login name, phone, or account ID as email.
 function accountEmail(value) {
   const email = nonEmptyIdentityValue(value);
   return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
+}
+
+function userIdentityFields(name, email) {
+  if (!name && !email) return undefined;
+  return { name: name || '', email: email || '' };
 }
 
 function readQoderAppUserIdentity(agentId) {
@@ -115,7 +120,7 @@ function readQoderAppUserIdentity(agentId) {
     if (!Number.isFinite(snapshotAt) || snapshotAt > Date.now() + 5 * 60_000) return undefined;
     const name = nonEmptyIdentityValue(status.name);
     const email = accountEmail(status.email);
-    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    return userIdentityFields(name, email);
   } catch {
     return undefined;
   } finally {
@@ -125,14 +130,15 @@ function readQoderAppUserIdentity(agentId) {
   }
 }
 
-function resolveQoderCliExecutable(home, cliDirName, executablePrefix) {
+function resolveQoderCliExecutable(home, cliDirName, executablePrefix, version) {
+  const normalized = typeof version === 'string' ? version.trim() : '';
+  if (!/^\d+(?:\.\d+)*$/.test(normalized)) return undefined;
   try {
-    const cliDir = path.join(home, 'bin', cliDirName);
-    const version = fs.readFileSync(path.join(cliDir, 'version.txt'), 'utf-8').trim();
-    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
     const executable = path.join(
-      cliDir,
-      `${executablePrefix}-${version}${process.platform === 'win32' ? '.exe' : ''}`,
+      home,
+      'bin',
+      cliDirName,
+      `${executablePrefix}-${normalized}${process.platform === 'win32' ? '.exe' : ''}`,
     );
     fs.accessSync(executable, fs.constants.X_OK);
     if (!fs.statSync(executable).isFile()) return undefined;
@@ -142,8 +148,8 @@ function resolveQoderCliExecutable(home, cliDirName, executablePrefix) {
   }
 }
 
-async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }) {
-  const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix);
+async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }, version) {
+  const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix, version);
   if (!executable) return undefined;
 
   const authPath = path.join(home, '.auth', 'user');
@@ -174,7 +180,7 @@ async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix,
     } else {
       const name = nonEmptyIdentityValue(cached.name);
       const email = accountEmail(cached.email);
-      return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+      return userIdentityFields(name, email);
     }
   }
 
@@ -252,10 +258,7 @@ async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix,
     try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
   }
   if (!status || status === timedOut || !status.loggedIn) return undefined;
-  return {
-    ...(status.name ? { name: status.name } : {}),
-    ...(status.email ? { email: status.email } : {}),
-  };
+  return userIdentityFields(status.name, status.email);
 }
 
 async function readRetryUserIdentity() {
@@ -265,7 +268,7 @@ async function readRetryUserIdentity() {
     const parsed = JSON.parse(value);
     const name = nonEmptyIdentityValue(parsed?.name);
     const email = nonEmptyIdentityValue(parsed?.email);
-    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    return userIdentityFields(name, email);
   } catch {
     return undefined;
   }
@@ -599,20 +602,18 @@ async function main() {
   // and the eventual processor input.
   const snapshot = readTranscriptSnapshot(transcriptPath);
   let userIdentity;
-  if (agentId === 'qoder-cn') {
+  if (agentId === 'qoder' || agentId === 'qoder-cn') {
     const product = parentBusinessInfo?.product;
+    const cliIdentity = agentId === 'qoder-cn' ? QODER_CN_CLI_IDENTITY : QODER_CLI_IDENTITY;
     if (product === 'cli') {
-      userIdentity = await resolveQoderCliUserIdentity(QODER_CN_CLI_IDENTITY);
-    }
-  } else if (agentId === 'qoder') {
-    const isCli = snapshot.rows.some(row => inferVariant(row, agentId) === 'qoder-cli');
-    if (isCli) {
-      userIdentity = await resolveQoderCliUserIdentity(QODER_CLI_IDENTITY);
+      userIdentity = await resolveQoderCliUserIdentity(cliIdentity, parentBusinessInfo?.version)
+        ?? readQoderAppUserIdentity(agentId);
+    } else if (product === 'app') {
+      userIdentity = readQoderAppUserIdentity(agentId);
     } else {
       userIdentity = extractUserIdentity(extra);
     }
   }
-  if (!userIdentity) userIdentity = readQoderAppUserIdentity(agentId);
   const runtimeConfig = {
     ...loadHookRuntimeConfig(path.join(HOOKS_DIR, '..')),
     ...(userIdentity ? { userIdentity } : {}),
@@ -1581,8 +1582,8 @@ function finalizeRecords(records, cwd, userIdentity) {
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
-    if (userIdentity?.name) record['user.name'] = userIdentity.name;
-    if (userIdentity?.email) record['user.email'] = userIdentity.email;
+    record['user.name'] = userIdentity?.name || '';
+    record['user.email'] = userIdentity?.email || '';
     Object.assign(record, SPAN_ATTRIBUTES, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
   }
   return records;

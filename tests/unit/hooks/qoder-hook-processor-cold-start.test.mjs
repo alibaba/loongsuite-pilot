@@ -151,7 +151,6 @@ function installFakeQoderCli(root, { cliDirName = 'qodercli', executablePrefix =
   fs.mkdirSync(cliDir, { recursive: true });
   fs.mkdirSync(path.join(root, '.auth'), { recursive: true });
   fs.mkdirSync(path.join(root, 'projects', 'workspace'), { recursive: true });
-  fs.writeFileSync(path.join(cliDir, 'version.txt'), '1.0.0\n');
   const executable = path.join(cliDir, `${executablePrefix}-1.0.0`);
   fs.writeFileSync(executable, `#!/bin/sh
 count=0
@@ -600,7 +599,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(1),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
-    const first = runProcessor('session-old', fake.env);
+    const first = runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } });
     expect(first.status).toBe(0);
     expect(readHistory().every(record =>
       record['user.name'] === 'cli-user' && record['user.email'] === 'cli@example.com',
@@ -612,7 +611,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
     const before = readHistory().length;
-    const second = runProcessor('session-old', fake.env);
+    const second = runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } });
     expect(second.status).toBe(0);
     expect(readHistory().slice(before).every(record =>
       record['user.name'] === 'cli-user' && record['user.email'] === 'cli@example.com',
@@ -627,7 +626,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...turnRows(1, 'cli prompt'),
       lastPrompt(1),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
 
     fs.writeFileSync(fake.mode, 'switched');
     fs.writeFileSync(fake.auth, 'auth-b-changed');
@@ -636,7 +635,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
     const before = readHistory().length;
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readHistory().slice(before).every(record =>
       record['user.name'] === 'other' && record['user.email'] === 'other@example.com',
     )).toBe(true);
@@ -652,13 +651,13 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(1),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
     fs.appendFileSync(transcriptPath, [
       ...turnRows(2, 'still logged out'),
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readCounter(fake.counter)).toBe(1);
 
     fs.writeFileSync(fake.mode, 'bad');
@@ -667,7 +666,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...turnRows(3, 'invalid status prompt'),
       lastPrompt(3),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readCounter(fake.counter)).toBe(2);
 
     fs.writeFileSync(fake.mode, 'slow');
@@ -677,7 +676,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(4),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
     const startedAt = Date.now();
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(Date.now() - startedAt).toBeLessThan(10_000);
     expect(readHistory().some(record =>
       record['user.name'] === 'slow' || record['user.email'] === 'slow@example.com',
@@ -695,7 +694,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     const startedAt = Date.now();
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(Date.now() - startedAt).toBeLessThan(6_000);
     expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
     expect(readCounter(fake.counter)).toBe(1);
@@ -704,7 +703,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...turnRows(2, 'same auth after timeout'),
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readCounter(fake.counter)).toBe(1);
   });
 
@@ -717,7 +716,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(1),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readCounter(fake.counter)).toBe(1);
     expect(readHistory().some(record => record['user.name'] || record['user.email'])).toBe(false);
 
@@ -725,7 +724,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       ...turnRows(2, 'same auth after invalid status'),
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
-    expect(runProcessor('session-old', fake.env).status).toBe(0);
+    expect(runProcessor('session-old', fake.env, { parent_business_info: { product: 'cli', version: '1.0.0' } }).status).toBe(0);
     expect(readCounter(fake.counter)).toBe(1);
   });
 
@@ -748,12 +747,39 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     expect(runProcessor('session-old', fake.env, {
+      parent_business_info: { product: 'cli', version: '1.0.0' },
       extra: { user: { name: 'hook-user', email: 'hook@example.com' } },
     }).status).toBe(0);
     expect(readHistory().every(record =>
       record['user.name'] === 'desktop-user' && record['user.email'] === 'desktop@example.com',
     )).toBe(true);
     expect(readCounter(fake.counter)).toBe(1);
+  });
+
+  it('uses the Desktop account when a CLI Stop has no parent_business_info.version', () => {
+    const fake = installFakeQoderCli(path.join(dataDir, '.qoder'));
+    fs.writeFileSync(path.join(dataDir, '.qoder', '.qoder-app-status.json'), JSON.stringify({
+      schema_version: 1,
+      product: 'qoder',
+      writer: 'main',
+      logged_in: true,
+      snapshot_at: new Date().toISOString(),
+      name: 'desktop-user',
+      email: 'desktop@example.com',
+    }));
+    transcriptPath = fake.transcript;
+    fs.writeFileSync(transcriptPath, [
+      ...turnRows(1, 'cli missing version prompt'),
+      lastPrompt(1),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    expect(runProcessor('session-old', fake.env, {
+      parent_business_info: { product: 'cli' },
+    }).status).toBe(0);
+    expect(readHistory().every(record =>
+      record['user.name'] === 'desktop-user' && record['user.email'] === 'desktop@example.com',
+    )).toBe(true);
+    expect(readCounter(fake.counter)).toBe(0);
   });
 
   it('keeps IDE hook identity and does not query the CLI', () => {
@@ -815,7 +841,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     expect(runProcessor('cn-session', fake.env, {
-      parent_business_info: { product: 'cli' },
+      parent_business_info: { product: 'cli', version: '1.0.0' },
       extra: { user: { name: 'hook-user', email: 'hook@example.com' } },
     }, 'qoder-cn').status).toBe(0);
     expect(readHistory('qoder-cn').length).toBeGreaterThan(0);
@@ -831,7 +857,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       lastPrompt(2),
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
     expect(runProcessor('cn-session', fake.env, {
-      parent_business_info: { product: 'cli' },
+      parent_business_info: { product: 'cli', version: '1.0.0' },
     }, 'qoder-cn').status).toBe(0);
     expect(readCounter(fake.counter)).toBe(1);
   });
@@ -887,7 +913,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(readHistory('qoder-cn').some(record => record['user.name'] || record['user.email'])).toBe(false);
   });
 
-  it('reads the Qoder CN desktop account when qoderclicn status fails instead of reading the hook payload', () => {
+  it('reads the Qoder CN desktop account when qoderclicn status fails', () => {
     const fake = installFakeQoderCli(path.join(dataDir, '.qoder-cn'), {
       cliDirName: 'qoderclicn',
       executablePrefix: 'qoderclicn',
@@ -909,7 +935,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     expect(runProcessor('cn-bad-session', fake.env, {
-      parent_business_info: { product: 'cli' },
+      parent_business_info: { product: 'cli', version: '1.0.0' },
       extra: { user: { name: 'hook-user', email: 'hook@example.com' } },
     }, 'qoder-cn').status).toBe(0);
     expect(readHistory('qoder-cn').length).toBeGreaterThan(0);
@@ -919,7 +945,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(readCounter(fake.counter)).toBe(1);
   });
 
-  it('reads the Desktop account when a Qoder CN Stop has no product and ignores the hook payload', () => {
+  it('reads the Qoder CN hook account when a Stop has no product and ignores the git email', () => {
     const fake = installFakeQoderCli(path.join(dataDir, '.qoder-cn'), {
       cliDirName: 'qoderclicn',
       executablePrefix: 'qoderclicn',
@@ -947,7 +973,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     }, 'qoder-cn').status).toBe(0);
     expect(readHistory('qoder-cn').length).toBeGreaterThan(0);
     expect(readHistory('qoder-cn').every(record =>
-      record['user.name'] === 'desktop-user' && record['user.email'] === 'desktop@example.com',
+      record['user.name'] === 'ide-user' && record['user.email'] === '',
     )).toBe(true);
     expect(readCounter(fake.counter)).toBe(0);
   });
@@ -1022,7 +1048,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     expect(runProcessor('cn-product-cli-session', fake.env, {
-      parent_business_info: { product: 'cli' },
+      parent_business_info: { product: 'cli', version: '1.0.0' },
       extra: { user: { name: 'hook-user', email: 'hook@example.com' } },
     }, 'qoder-cn').status).toBe(0);
     expect(readHistory('qoder-cn').length).toBeGreaterThan(0);
@@ -1045,11 +1071,11 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     expect(runProcessor('cn-phone-session', fake.env, {
-      parent_business_info: { product: 'cli' },
+      parent_business_info: { product: 'cli', version: '1.0.0' },
     }, 'qoder-cn').status).toBe(0);
     expect(readHistory('qoder-cn').length).toBeGreaterThan(0);
     expect(readHistory('qoder-cn').every(record =>
-      record['user.name'] === 'phone-user' && !record['user.email'],
+      record['user.name'] === 'phone-user' && record['user.email'] === '',
     )).toBe(true);
     const cache = JSON.parse(fs.readFileSync(
       path.join(dataDir, 'state', 'hooks', 'qoder-cn-cli-user-identity.json'),
