@@ -5249,3 +5249,5 @@ async fn ordinary_home_and_canonical_transcript_marker_collect_real_isolated_roo
         completed().len() as i64
     );
 }
+
+include!("workspace_privacy_history.rs");

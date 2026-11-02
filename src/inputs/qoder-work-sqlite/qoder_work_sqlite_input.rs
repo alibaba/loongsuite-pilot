@@ -41,6 +41,14 @@ impl QoderWorkSqliteInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
     pub fn bind_collector(
         &self,
@@ -131,39 +139,49 @@ impl InputBody for QoderWorkSqliteBody {
         CollectionMethod::SqlitePolling
     }
 
-    async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
-        let state = rt.state();
-        if state
-            .extra()
-            .and_then(|extra| extra.get("lastUpdatedAt").and_then(Value::as_f64))
-            .is_some()
-        {
-            return Ok(());
-        }
-        match read_max_updated_at(&self.db_path).await {
-            Ok(baseline) => {
-                let mut extra = match state.extra() {
-                    Some(Value::Object(map)) => map,
-                    _ => Map::new(),
-                };
-                extra.insert("lastUpdatedAt".into(), json!(baseline));
-                rt.set_state_fields(None, None, Some(Value::Object(extra)));
-            }
-            Err(err) => rt.warn(
-                "failed to baseline qoder-work sqlite cursor",
-                json!({ "error": err }).as_object(),
-            ),
-        }
-        Ok(())
-    }
-
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let state = rt.state();
-        let cursor = state
-            .extra()
-            .and_then(|extra| extra.get("lastUpdatedAt").and_then(Value::as_f64))
-            .unwrap_or(0.0);
-        let rows = match read_new_message_rows(&self.db_path, cursor).await {
+        let extra = state.extra();
+        let Some(cursor) = extra
+            .as_ref()
+            .and_then(|extra| extra.get("lastUpdatedAt"))
+            .and_then(Value::as_f64)
+        else {
+            // Only a successful native query establishes initial ownership.
+            let baseline = read_latest_cursor(&self.db_path)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let mut object = match extra {
+                Some(Value::Object(map)) => map,
+                _ => Map::new(),
+            };
+            object.insert("lastUpdatedAt".into(), json!(baseline.0));
+            object.insert("lastUpdatedRowId".into(), json!(baseline.1));
+            rt.set_state_fields(None, None, Some(Value::Object(object)));
+            return Ok(Vec::new());
+        };
+        let cursor_row_id = if let Some(row_id) = extra
+            .as_ref()
+            .and_then(|extra| extra.get("lastUpdatedRowId"))
+            .and_then(Value::as_f64)
+        {
+            row_id
+        } else {
+            // Legacy scalar checkpoints excluded all rows at their timestamp.
+            // Adopt that precise current exclusion boundary once; later inserts
+            // at the same timestamp receive larger rowids and remain visible.
+            let row_id = read_max_row_id_at(&self.db_path, cursor)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let mut object = match extra.clone() {
+                Some(Value::Object(map)) => map,
+                _ => Map::new(),
+            };
+            object.insert("lastUpdatedRowId".into(), json!(row_id));
+            rt.set_state_fields(None, None, Some(Value::Object(object)));
+            row_id
+        };
+        let rows = match read_new_message_rows(&self.db_path, cursor, cursor_row_id).await {
             Ok(rows) => rows,
             Err(err) => {
                 rt.error(
@@ -179,9 +197,13 @@ impl InputBody for QoderWorkSqliteBody {
         let mut emitted = string_list(state.extra().as_ref(), "emittedToolResultIds");
         let mut entries = Vec::new();
         let mut max_update = cursor;
+        let mut max_row_id = cursor_row_id;
         for row in &rows {
-            if row.updated_at > max_update {
+            if row.updated_at > max_update
+                || (row.updated_at == max_update && row.row_id > max_row_id)
+            {
                 max_update = row.updated_at;
+                max_row_id = row.row_id;
             }
             match transform_row(row, self.agent_type, &mut emitted) {
                 Ok(row_entries) => entries.extend(row_entries),
@@ -196,6 +218,7 @@ impl InputBody for QoderWorkSqliteBody {
             _ => Map::new(),
         };
         extra.insert("lastUpdatedAt".into(), json!(max_update));
+        extra.insert("lastUpdatedRowId".into(), json!(max_row_id));
         if emitted.len() > TOOL_RESULT_DEDUPE_LIMIT {
             emitted = emitted.split_off(emitted.len() - TOOL_RESULT_DEDUPE_LIMIT);
         }
@@ -206,6 +229,7 @@ impl InputBody for QoderWorkSqliteBody {
 }
 
 struct MessageRow {
+    row_id: f64,
     id: String,
     session_id: Option<String>,
     sub_chat_id: String,
@@ -359,26 +383,36 @@ fn extract_user_text(parts: &[Value]) -> String {
         .join("\n")
 }
 
-async fn read_new_message_rows(db_path: &str, cursor: f64) -> Result<Vec<MessageRow>, String> {
+async fn read_new_message_rows(
+    db_path: &str,
+    cursor: f64,
+    row_id: f64,
+) -> Result<Vec<MessageRow>, String> {
     let sql = format!(
         "
-    SELECT m.id AS id, sc.session_id AS sessionId, m.sub_chat_id AS subChatId,
+    SELECT m.rowid AS rowId, m.id AS id, sc.session_id AS sessionId, m.sub_chat_id AS subChatId,
       m.sequence AS sequence, m.role AS role, m.parts AS parts,
       m.updated_at AS updatedAt, sc.model_level AS modelLevel
     FROM messages m
     LEFT JOIN sub_chats sc ON sc.id = m.sub_chat_id
-    WHERE m.updated_at > ?
+    WHERE (m.updated_at > ? OR (m.updated_at = ? AND m.rowid > ?))
       AND m.parts IS NOT NULL AND m.parts != '' AND m.parts != '[]'
-    ORDER BY m.updated_at ASC, m.sequence ASC
+    ORDER BY m.updated_at ASC, m.rowid ASC
     LIMIT {SQL_BATCH_LIMIT}
   "
     );
-    let rows = query_readonly(db_path, &sql, &[json!(cursor)]).await?;
+    let rows = query_readonly(
+        db_path,
+        &sql,
+        &[json!(cursor), json!(cursor), json!(row_id)],
+    )
+    .await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
             let Value::Object(map) = row else { return None };
             Some(MessageRow {
+                row_id: map.get("rowId").and_then(Value::as_f64).unwrap_or(0.0),
                 id: string_or(map.get("id"), ""),
                 session_id: map
                     .get("sessionId")
@@ -398,16 +432,29 @@ async fn read_new_message_rows(db_path: &str, cursor: f64) -> Result<Vec<Message
         .collect())
 }
 
-async fn read_max_updated_at(db_path: &str) -> Result<f64, String> {
+async fn read_latest_cursor(db_path: &str) -> Result<(f64, f64), String> {
+    let rows=query_readonly(db_path,
+        "SELECT updated_at AS updatedAt,rowid AS rowId FROM messages ORDER BY updated_at DESC,rowid DESC LIMIT 1",&[]).await?;
+    Ok(rows
+        .first()
+        .map(|row| {
+            (
+                row.get("updatedAt").and_then(Value::as_f64).unwrap_or(0.0),
+                row.get("rowId").and_then(Value::as_f64).unwrap_or(0.0),
+            )
+        })
+        .unwrap_or((0.0, 0.0)))
+}
+async fn read_max_row_id_at(db_path: &str, cursor: f64) -> Result<f64, String> {
     let rows = query_readonly(
         db_path,
-        "SELECT COALESCE(MAX(updated_at), 0) AS maxUpdate FROM messages",
-        &[],
+        "SELECT COALESCE(MAX(rowid),0) AS maxRowId FROM messages WHERE updated_at = ?",
+        &[json!(cursor)],
     )
     .await?;
     Ok(rows
         .first()
-        .and_then(|row| row.get("maxUpdate"))
+        .and_then(|row| row.get("maxRowId"))
         .and_then(Value::as_f64)
         .unwrap_or(0.0))
 }
@@ -494,3 +541,7 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "sqlite_migration_contract_tests.rs"]
+mod work_sqlite_migration_contract_tests;

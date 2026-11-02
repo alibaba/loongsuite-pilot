@@ -62,6 +62,14 @@ impl CopilotLogInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     pub fn new(options: CopilotLogInputOptions) -> Self {
         let body = CopilotLogBody {
             session_dir: options

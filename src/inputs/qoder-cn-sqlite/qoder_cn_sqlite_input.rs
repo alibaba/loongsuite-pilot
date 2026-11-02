@@ -10,6 +10,20 @@ use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(test)]
+type BeforeQuery = std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>;
+#[cfg(test)]
+tokio::task_local! { static BEFORE_QUERY: BeforeQuery; }
+#[cfg(test)]
+fn run_before_query_hook() {
+    let _ = BEFORE_QUERY.try_with(|hook| {
+        let action = hook.lock().unwrap().take();
+        if let Some(action) = action {
+            action();
+        }
+    });
+}
+
 const SOURCE: &str = "qoder-cn-sqlite-chat-message";
 const UNKNOWN_MODEL: &str = "unknown";
 
@@ -21,6 +35,7 @@ pub struct QoderCnSqliteInput {
 
 pub struct QoderCnSqliteBody {
     db_path: String,
+    recovery: super::source_ownership::SourceRecovery,
 }
 
 pub struct QoderCnSqliteOptions {
@@ -33,6 +48,14 @@ pub struct QoderCnSqliteOptions {
 impl QoderCnSqliteInput {
     pub(crate) fn collector_runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
         self.inner.runtime.runtime_info()
+    }
+
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
     }
 
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
@@ -58,9 +81,10 @@ impl QoderCnSqliteInput {
             .unwrap_or_else(|| resolve_qoder_cn_db_path(&data_root));
         let poll = env_poll_or(opts.poll_interval_ms, "QODER_CN_ANALYTICS_POLL_INTERVAL")
             .or(Some(DEFAULT_POLL_INTERVAL_MS));
+        let recovery = super::source_ownership::SourceRecovery::new(opts.state_store.file_path());
         Self {
             inner: hosted_sqlite(
-                QoderCnSqliteBody { db_path },
+                QoderCnSqliteBody { db_path, recovery },
                 "QoderCnSqliteInput",
                 opts.state_store,
                 poll,
@@ -126,33 +150,16 @@ impl SqliteBody for QoderCnSqliteBody {
         &self.db_path
     }
 
-    async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
-        if rt.state().last_row_id().is_some() {
-            return Ok(());
-        }
-        match read_max_eligible_row_id(&self.db_path).await {
-            Ok(max_row_id) => rt.state_store.set_row_id(rt.id.as_str(), max_row_id),
-            Err(err) => rt.warn(
-                "failed to baseline QoderCN SQLite cursor",
-                json!({ "error": err }).as_object(),
-            ),
-        }
-        Ok(())
-    }
-
     async fn read_new_rows(
         &self,
         rt: &InputRuntime,
         last_row_id: f64,
     ) -> anyhow::Result<Vec<Map<String, Value>>> {
-        // A failed startup baseline leaves no owned cursor. Retry that boundary
-        // before reading rows; defaulting it to zero would replay old history.
-        // An explicit stored zero is already owned and must still collect.
-        if rt.state().last_row_id().is_none() {
-            let floor = read_max_eligible_row_id(&self.db_path)
-                .await
-                .map_err(anyhow::Error::msg)?;
-            rt.state_store.set_row_id(rt.id.as_str(), floor);
+        let prepared = self
+            .recovery
+            .prepare(rt, &self.db_path, last_row_id)
+            .await?;
+        if prepared.reset {
             return Ok(Vec::new());
         }
         let sql = format!(
@@ -174,9 +181,14 @@ impl SqliteBody for QoderCnSqliteBody {
       LIMIT {SQLITE_SYNC_PAGE}
     "
         );
-        let rows = query_readonly(&self.db_path, &sql, &[json!(last_row_id)])
+        #[cfg(test)]
+        run_before_query_hook();
+        let rows = query_readonly(&self.db_path, &sql, &[json!(prepared.cursor)])
             .await
             .map_err(anyhow::Error::msg)?;
+        prepared
+            .verify_source(&self.db_path, &self.recovery)
+            .await?;
         Ok(rows
             .into_iter()
             .filter_map(|row| match row {
@@ -264,7 +276,7 @@ impl SqliteBody for QoderCnSqliteBody {
     }
 }
 
-async fn read_max_eligible_row_id(db_path: &str) -> Result<f64, String> {
+pub(super) async fn read_max_eligible_row_id(db_path: &str) -> Result<f64, String> {
     let rows = query_readonly(
         db_path,
         "SELECT COALESCE(MAX(rowid), 0) AS maxRowId FROM chat_message",
@@ -290,3 +302,7 @@ fn finite_number(value: Option<&Value>) -> Option<f64> {
         .and_then(Value::as_f64)
         .filter(|number| number.is_finite())
 }
+
+#[cfg(test)]
+#[path = "source_recovery_race_tests.rs"]
+mod source_recovery_race_tests;

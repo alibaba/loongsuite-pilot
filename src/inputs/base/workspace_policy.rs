@@ -91,6 +91,25 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
+// Fingerprints are a cross-component disk protocol. In particular Windows
+// canonical paths may carry verbatim prefixes, while hook paths do not.
+fn marker_directory(path: &Path) -> String {
+    let value = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        let value = value.replace('\\', "/").to_lowercase();
+        if let Some(rest) = value.strip_prefix("//?/unc/") {
+            format!("//{rest}")
+        } else {
+            value.strip_prefix("//?/").unwrap_or(&value).to_owned()
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
+
 fn real_path(value: &Path) -> PathBuf {
     match fs::canonicalize(value) {
         Ok(resolved) => normalize_directory(&resolved.to_string_lossy()).unwrap_or(resolved),
@@ -149,13 +168,17 @@ impl Default for WorkspacePolicy {
 
 impl WorkspacePolicy {
     pub fn new(excluded: Vec<String>, state_directory: Option<PathBuf>) -> Self {
+        // Match hook/manager validation: deduplicate the original rule spelling,
+        // before normalization, so both sides choose the same durable namespace.
+        let mut unique = BTreeSet::new();
         let roots = excluded
             .into_iter()
+            .filter(|value| unique.insert(value.clone()))
             .filter_map(|value| normalize_directory(&value))
             .collect::<Vec<_>>();
         let mut sorted = roots
             .iter()
-            .map(|path| path.to_string_lossy().into_owned())
+            .map(|path| marker_directory(path))
             .collect::<Vec<_>>();
         sorted.sort();
         let fingerprint =

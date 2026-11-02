@@ -154,6 +154,14 @@ impl WukongInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     pub fn new(opts: WukongInputOptions) -> Self {
         let cli_path = opts.cli_path.clone().unwrap_or_else(Self::get_cli_path);
         Self::build(opts, Arc::new(ProcessRunner { cli_path }))

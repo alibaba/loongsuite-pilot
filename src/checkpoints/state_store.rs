@@ -106,6 +106,13 @@ impl InputState {
         self
     }
 
+    /// Attach input-owned metadata while preserving unknown fields and every legal extra type.
+    /// Persist the returned state through StateStore to retain normal mutation tracking.
+    pub(crate) fn with_checkpoint_extension(mut self, key: &str, value: serde_json::Value) -> Self {
+        self.insert(key, json_file::from_value(value));
+        self
+    }
+
     pub fn with_extra(mut self, extra: serde_json::Value) -> Self {
         self.insert(EXTRA, normalize_extra(json_file::from_value(extra)));
         self

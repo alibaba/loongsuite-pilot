@@ -137,6 +137,14 @@ impl DoubaoWorkInput {
             ..self.inner.runtime.runtime_info()
         }
     }
+
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
     pub async fn start(&self) -> std::result::Result<(), String> {
         self.inner.start().await
     }

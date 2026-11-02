@@ -2668,6 +2668,18 @@ impl Orchestrator {
         Av: std::future::Future<Output = bool> + Send + 'static,
         E: Fn() -> bool + Send + Sync + 'static,
     {
+        // The final manager filter is too late for attachment IO. Configure
+        // every hosted source before binding or starting its first collection.
+        input.set_workspace_policy(crate::inputs::base::WorkspacePolicy::new(
+            self.config
+                .privacy
+                .as_ref()
+                .map(|privacy| privacy.exclude_workspaces.clone())
+                .unwrap_or_default(),
+            Some(std::path::PathBuf::from(
+                self.data_dir_join("state/workspace-exclusions"),
+            )),
+        ));
         let input = Arc::new(input);
         let live = live_from_parts(
             spec.listener,
@@ -3097,6 +3109,7 @@ fn counter_to_snapshot(counter: &InputCounter, agent: &str, running: bool) -> In
 
 trait HostedSurface: Send + Sync {
     fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo;
+    fn set_workspace_policy(&self, policy: crate::inputs::base::WorkspacePolicy);
     fn collector_running(&self) -> bool;
     fn start(
         &self,
@@ -3115,6 +3128,7 @@ macro_rules! hosted_surface {
     ($ty:ty) => {
         impl HostedSurface for $ty {
             fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo { self.collector_runtime_info() }
+            fn set_workspace_policy(&self, policy: crate::inputs::base::WorkspacePolicy) { self.set_collector_workspace_policy(policy); }
             fn collector_running(&self) -> bool { self.collector_running() }
             fn start(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> { Box::pin(self.start()) }
             fn stop(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> { Box::pin(self.stop()) }
@@ -3856,6 +3870,9 @@ mod tests {
     }
 
     impl HostedSurface for FixtureSurface {
+        fn set_workspace_policy(&self, policy: crate::inputs::base::WorkspacePolicy) {
+            self.inner.runtime.set_workspace_policy(policy);
+        }
         fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
             self.inner.runtime.runtime_info()
         }
@@ -5461,3 +5478,7 @@ mod tests {
         assert!(!enabled(&config, &bits));
     }
 }
+
+#[cfg(test)]
+#[path = "orchestrator_privacy_wiring_tests.rs"]
+mod privacy_wiring_contracts;

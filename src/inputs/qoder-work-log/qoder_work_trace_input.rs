@@ -38,6 +38,14 @@ impl QoderWorkLogTraceInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
     pub fn bind_collector(
         &self,

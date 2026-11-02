@@ -62,6 +62,14 @@ impl CodexAbortedTurnInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     pub fn new(opts: CodexAbortedTurnInputOptions) -> Self {
         let poll = opts.poll_interval_ms.or(Some(DEFAULT_POLL_INTERVAL_MS));
         Self {

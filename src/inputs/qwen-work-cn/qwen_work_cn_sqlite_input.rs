@@ -34,6 +34,14 @@ impl QwenWorkCnSqliteInput {
         self.inner.runtime.runtime_info()
     }
 
+    /// Apply validated collector exclusions before any collection or upload.
+    pub(crate) fn set_collector_workspace_policy(
+        &self,
+        policy: crate::inputs::base::WorkspacePolicy,
+    ) {
+        self.inner.runtime.set_workspace_policy(policy);
+    }
+
     /// Collector subscription. Forwards to the hosted runtime without exposing its body type.
     pub fn bind_collector(
         &self,
@@ -168,6 +176,23 @@ impl InputBody for QwenWorkCnSqliteBody {
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let state = rt.state();
         let extra = state.extra();
+        if extra
+            .as_ref()
+            .and_then(|extra| extra.get("lastUpdatedAt"))
+            .and_then(Value::as_f64)
+            .is_none()
+        {
+            // Failed initialization remains unowned. Retry its compound floor
+            // before any historical row can enter the delivery path.
+            let baseline = read_latest_cursor(&self.db_path)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let mut object = plain_object(extra.as_ref());
+            object.insert("lastUpdatedAt".into(), json!(baseline.0));
+            object.insert("lastUpdatedRowId".into(), json!(baseline.1));
+            rt.set_state_fields(None, None, Some(Value::Object(object)));
+            return Ok(Vec::new());
+        }
         let cursor_updated_at = extra
             .as_ref()
             .and_then(|value| value.get("lastUpdatedAt"))
@@ -468,3 +493,7 @@ fn now_ms() -> i64 {
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "sqlite_migration_contract_tests.rs"]
+mod work_sqlite_migration_contract_tests;
