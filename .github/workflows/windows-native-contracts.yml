@@ -97,6 +97,11 @@ jobs:
             inputs::qoder_trace:: \
             inputs::rest_support:: \
             inputs::workbuddy:: \
+            inputs::codex_aborted_turn:: \
+            inputs::dsh_log:: \
+            inputs::qoder_work_log:: \
+            inputs::qwen_work_cn:: \
+            multimodal::resolve::tests::windows_ \
             checkpoints::source_ownership::tests \
             hook_process::cursor:: \
             hook_process::cursor_assemble:: \

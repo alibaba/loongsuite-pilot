@@ -55901,9 +55901,9 @@
     },
     {
       "legacy": "tests/unit/multimodal/processor.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "37固定声明中本批20complete/17pending；ef8953与f84相同无新增。13新增真实processor合同；发现并修复并发roots继承泄漏、超时/外部取消遗留slot和waiter挂起，保留全部生产预算；只复用逐行核对的3个已有blob/constructor/idempotence断言。Linux实际，其他平台待CI。",
+      "note": "固定ef8953 processor37声明全部逐实际断言映射Rust，f84字节相同/新增0。MM01-04累计31新增测试，92多模态合同实际Linux PASS；普通错误与unwind分开，真实TempDir file/受控Uploader/实际SlsUploader+受控HTTP/PUT origin完成。Windows/macOS尚需实际平台CI，IO不能中断OS调用且permit持有至真实完成，不把静态映射或Linux运行当全平台验收。",
       "source_hash": "c043de1300d1cdffea92774463fd2c8f71b01dec344a08b12ac3a242418fee2e",
       "cases": [
         {
@@ -56012,6 +56012,84 @@
         },
         {
           "source": {
+            "id": "L68:C3",
+            "title": "returns optimistic uri and enqueues upload",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "hello字节真实processor乐观返回完整日期/已知SHA256 URI及mime/modality/size，受控Uploader实际收到完全相同bytes/content-type/meta/expected_size。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "optimistic_blob_uri_metadata_and_exact_bytes_survive_a_typed_upload_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "returns uri even when upload will fail (dangling uri)",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Uploader普通typed false失败时仍返回相同完整乐观URI，shutdown后真实已尝试一次、收到一条完全相同payload，保留原dangling URI合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "optimistic_blob_uri_metadata_and_exact_bytes_survive_a_typed_upload_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "rejects oversized payloads",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实构造30MiB+1解码payload；base64长度仍在预解码阈值内，确保落到decoded-size拒绝路径，零上传/零pending bytes。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "malformed_overlong_and_decoded_oversize_blobs_never_enter_the_upload_queue"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L112:C3",
             "title": "rejects empty content",
             "suites": [
@@ -56038,6 +56116,196 @@
         },
         {
           "source": {
+            "id": "L118:C3",
+            "title": "rejects overlong base64 strings before decode",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MAX_BASE64_CHARS+1字符串拒绝，零Uploader调用/零queue；源码长度门禁仍在decode前，生产阈值不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "malformed_overlong_and_decoded_oversize_blobs_never_enter_the_upload_queue"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L126:C3",
+            "title": "rejects content that cannot decode to bytes",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实!!!!无法解码到字节，processor返回None且Uploader调用数0、无payload入队。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "malformed_overlong_and_decoded_oversize_blobs_never_enter_the_upload_queue"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C3",
+            "title": "keeps optimistic uri when uploader throws",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "普通Rust Uploader bool=false表示失败，与额外task unwind明确区分：两条路径均保持已返回的乐观URI和可完成shutdown；unwind另外真实验证RAII清key/bytes后允许实际retry。没有catch panic伪装普通Result错误。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "optimistic_blob_uri_metadata_and_exact_bytes_survive_a_typed_upload_failure"
+              },
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "unwinding_an_upload_task_releases_its_dedupe_key_and_byte_budget_for_a_real_retry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "returns dangling uri when pending uploads hit the queue limit",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不降低生产1024预算，实际入队1024个唯一blob并hold全部Uploader；overflow仍返回URI却不入队；释放后精确1024条actual payload且没有overflow。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "the_actual_1024_upload_budget_returns_a_dangling_overflow_uri_without_enqueuing_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "returns dangling uri when pending bytes hit the limit",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "生产预算仍1GiB，仅独立测试override64bytes；40字节首payload接受、第二40字节仍返回dangling URI但不增加计费，最终实际上传1条40字节原payload。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "the_pending_byte_budget_counts_only_accepted_payloads_and_keeps_optimistic_overflow_uris"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C3",
+            "title": "dedupes in-flight uploads for the same targetPath",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同origin/date/hash blob在前一上传hold期间返回完全相同URI，仅一次实际Uploader调用/6字节pending charge。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "the_same_inflight_blob_shares_one_real_upload_and_one_pending_byte_charge"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L246:C3",
+            "title": "rejects new blobs after shutdown starts",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "shutdown已接受且inflight仍drain时新blob拒绝；另真实std线程在hash后屏障与shutdown并发，最终admission lock重新核对closing，0晚enqueue/0Uploader调用。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "accepted_shutdown_drains_inflight_work_before_close_and_rejects_blobs_during_the_drain"
+              },
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "a_concurrent_blob_cannot_be_admitted_after_the_shutdown_flag_has_committed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L257:C3",
             "title": "rejects empty storageBasePath at construction",
             "suites": [
@@ -56058,6 +56326,62 @@
               {
                 "file": "src/multimodal/processor.rs",
                 "test": "with_deadline_and_blob_uri"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L266:C3",
+            "title": "shutdown drains in-flight uploads then closes uploader",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际hold已入队Uploader，shutdown开始时close数0，释放真实pending后才close且payload1条，重复shutdown仍只close1次。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "accepted_shutdown_drains_inflight_work_before_close_and_rejects_blobs_during_the_drain"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L291:C3",
+            "title": "shutdown times out but still closes uploader and rejects new work",
+            "suites": [
+              "MultimodalProcessor.blobToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留源20ms shutdown deadline：hold不能阻止到时close、新工作拒绝、晚完成不记录；额外caller取消回归证明accepted close由owned worker完成，不会strand shutting_down。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "a_twenty_millisecond_shutdown_deadline_closes_once_and_late_upload_completion_stays_rejected"
+              },
+              {
+                "file": "src/multimodal/processor_lifecycle_tests.rs",
+                "test": "cancelling_the_shutdown_caller_does_not_abandon_the_accepted_close_operation"
               }
             ]
           }
@@ -56376,6 +56700,32 @@
         },
         {
           "source": {
+            "id": "L541:C3",
+            "title": "does not upload when a timed-out pathToUri later finishes reading",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际processor授权临时PNG并进入真实文件worker观察屏障，暂停时钟40ms返回None而worker尚未释放；1个测试IO配额仍由真实worker持有，第二有效文件请求拒绝，不可无限排orphan；释放worker后真实完成且0晚上传，permit释放后同一第二文件可真实读取/上传。旧同步实现红灯卡Tokio线程至500ms安全watchdog；新实现整体canonicalize/open/handle metadata/identity/read/post-metadata在owned worker，3s/30MiB/1024生产budget不变。仅取消续体/上传，不声称能中断阻塞OS read。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_contract_tests.rs",
+                "test": "a_timed_out_real_file_worker_retains_its_io_permit_until_late_completion_without_uploading"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L587:C3",
             "title": "times out a never-resolving stat and returns null",
             "suites": [
@@ -56422,6 +56772,678 @@
               {
                 "file": "src/multimodal/processor_contract_tests.rs",
                 "test": "shutdown_rejects_new_paths_without_even_starting_the_stat_phase"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L624:C3",
+            "title": "retries a missed delegatedOss sniff until the bucket is known",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实SlsUploader.discover经受控HTTP发出presign探测：首次403在1000ms发生，2999ms仍仅一次、3000ms第二次成功；cold期间blob拒绝，成功后生成bucket-b URI且实际SlsUploader PUT参数expected_origin精确匹配已发现OSS origin/body/key，60s后不再多探测。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_delegated_tests.rs",
+                "test": "cold_delegated_sls_presign_failure_retries_then_pins_the_discovered_origin_on_upload"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L682:C3",
+            "title": "retries when the injected storage resolver rejects",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "native普通错误通道StorageBaseResult::Err明确对应源Promise rejection，未用panic代替；1000ms错误后2000ms重试，随后真实SlsUploader+HTTP discovery恢复bucket及PUT expected_origin，验证普通失败隔离。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_delegated_tests.rs",
+                "test": "an_injected_storage_error_uses_the_result_error_channel_then_real_sls_rediscovery_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L709:C3",
+            "title": "relearns the delegatedOss bucket and rate-limits repeated origin mismatches",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实SlsUploader从expected origin A开始，第二次受控PUT返回规定origin-mismatch错误触发processor失效；pending URI拒绝，1000ms真实presign发现B，原已成功object在SlsUploader清成功cache后再次以expected origin B上传；59999ms重复失配不清origin不重学，60000ms才允许失效，60999/61000ms精确第二次探测。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_delegated_tests.rs",
+                "test": "delegated_origin_mismatch_relearns_the_bucket_and_enforces_the_exact_monotonic_cooldown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L797:C3",
+            "title": "rediscovery cooldown ignores a backward system clock jump",
+            "suites": [
+              "MultimodalProcessor.pathToUri"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "在真实SlsUploader同一bucket重学链中，注入默认事件wall clock跨日后退且实际URI默认日期随之变化，证明clock seam生效；monotonic仍59999ms冷却、60000ms允许、再1000ms探测，所有PUT expected_origin遵守新bucket。没有修改机器系统时间。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/multimodal/processor_delegated_tests.rs",
+                "test": "delegated_origin_cooldown_survives_an_observable_backward_wall_clock_jump"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/dsh-log/dsh-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "bc827ee7614991b02ecb76ec3611bfbf7da7a13c2d653a42d05b72e3156a0221",
+      "note": "All14 immutable DSH input source declarations individually checked and natively passed; 2 it.each declarations execute all3+2 variants (17 expanded scenarios). Real filesystem, actual StateStore saves/new loads, native production input/transform; no fake output hook. Baseline/f84 source and production DSH input identical. Generic actual start/stop and OTLP span flow supplemental acceptance follows independently; not implied by these direct collect source cases. Linux actually passed; Windows/macOS unexecuted.",
+      "cases": [
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "collects embedded streams across restart with one paired request and response per step",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three independent StateStore/load cycles: paired request/response for each embedded step, exact time5000000ns/TTFT3000000ns/tool_calls then stop, step2delta contains prioranswer1 notprivateprompt; full input omits currentanswer2; rescan0; persisted no prompt. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l89_three_real_store_restarts_pair_each_embedded_step_and_restore_only_new_delta"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C3",
+            "title": "keeps aggregators isolated when two session files advance across poll cycles",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real files A/B advance over two polls; exactly2requests isolated session/provider and prompt presence/other prompt absence. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l140_actual_two_file_poll_cycles_keep_provider_and_prompt_state_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "rehydrates an active turn after restart without persisting prompt content",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real activeprefix save/load; persisted text excludes privateprompt; new chunk restores provider, fullinput anddelta privateprompt from source. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l164_new_store_rehydrates_active_prompt_without_persisting_its_text"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "rebuilds the request delta cursor when restarting between ReAct steps",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual assistant tool-call plus native toolresult and step2 context persisted/replayed; new step2 request delta exactroles assistant/tool, no privateprompt, fullinput retains original prompt. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l183_restart_between_tool_steps_restores_assistant_tool_delta_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L234:C3",
+            "title": "restores the last header after a completed turn and pairs a headerless next turn",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Completedturn checkpoint contains lastheaderoffset but no private system/prompt; fresh store headerless next turn emits exactother/request/response and restores provider/model/system/privateSystem and currentusercontent. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l234_completed_turn_checkpoint_restores_private_header_for_headerless_next_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L302:C3",
+            "title": "does not checkpoint a malformed header over the last valid header",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Malformed header null after validheader is not checkpointed; fresh store headerless turn retains exactvalidprovider/model/system. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l302_malformed_header_does_not_replace_last_valid_header_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L331:C3",
+            "title": "migrates a legacy checkpoint by locating the last header once",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "On-disk legacy checkpoint removes lastHeaderOffset; fresh store bounded native scan locates originalheader, supplies model, saves numeric headeroffset migration. Actual Linux GLIBC2.34/Rust1.99.1 strict+11 DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l331_legacy_checkpoint_missing_header_offset_locates_last_header_and_persists_migration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C3",
+            "title": "persists a null header offset after a legacy scan finds no header",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real saved checkpoint with no sourceheader removes headeroffset; new Store scan emits0 and migration explicitly persists key:null. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l363_legacy_header_scan_without_match_persists_null_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L386:C3",
+            "title": "drops an invalid last-header checkpoint (%s)",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": [
+              "it.each(['out-of-range', 'wrong-record-type', 'session-mismatch'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All3 source it.each variants: offset beyondEOF, wrongrecordtype offset0, cross-session validheader; real checkpoint bytes edited, new Store plus headerless native turn requires request present/model+system omitted/null headeroffset aftersave. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l389_invalid_header_offsets_outside_range_wrong_type_and_other_session_fail_closed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L442:C3",
+            "title": "does not reuse a stale header after the session file is %s",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": [
+              "it.each(['truncated', 'replaced'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both source it.each variants: same-file truncation and atomic file replacement; old10k prompt/header/session retired; newsource request session-new with no inherited model/system; persisted boundSessionId new+headeroffset null. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l434_truncate_or_replace_discards_old_session_header_and_rebinds_new_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L482:C3",
+            "title": "does not duplicate an already emitted request after restart replay",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native block-start emitted1request before save; new Store replays activeprefix and later block-start emits0 duplicate requests. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l482_active_turn_replay_does_not_duplicate_already_emitted_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L497:C3",
+            "title": "rehydrates the first-output boundary for TTFT after restart",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Reasoningdelta at15ms over5ms request boundary survives actual checkpoint/new Store replay; laterresponse20ms emits0newrequests and exactTTFT10000000ns. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l497_restart_restores_first_native_output_boundary_for_ttft_without_new_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L530:C3",
+            "title": "restores tool call names across restart",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Assistant toolcall plus explicit tool/call replay restores name read for laternative result call-a; actual new Store and fixture read. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l530_restart_replays_tool_call_names_for_later_native_result"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L568:C3",
+            "title": "does not advance past a partial final JSONL record",
+            "suites": [
+              "DshLogInput state isolation and restart recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Completeprefix plus half-final JSON source emits0requests and checkpoints exact completeprefix byteEOF; new Store after remainingbytes+newline emits1request and checkpoint exact fullEOF. Actual Linux GLIBC2.34/Rust1.99.1 strict+18 native DSH tests passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh-log/history_contracts.rs",
+                "test": "l568_new_store_preserves_complete_prefix_offset_until_split_final_json_record_is_finished"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/dsh-log/dsh-event-transform.test.ts",
+      "coverage": "partial",
+      "rust": [],
+      "source_hash": "6a806eb88535f4f64b20d94eba2322e75ca37cf40d4fda1c8b835729a6965639",
+      "note": "Only7 of45 individually checked existing native contracts mapped here; remaining38 stay unclaimed until actual assertions/tests land. No new source or runtime mock. f84 transform/source tests identical to immutable baseline.",
+      "cases": [
+        {
+          "source": {
+            "id": "L142:C3",
+            "title": "includes cache writes in input without double-counting reasoning",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "maps_disjoint_usage_without_double_counting_reasoning"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L262:C3",
+            "title": "does not fabricate tokens/messages when fields are missing",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "does_not_fabricate_missing_usage_or_model"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L276:C3",
+            "title": "returns null for session/created and other telemetry events",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "skips_telemetry_and_incomplete_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "returns null when record lacks type or time",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "skips_telemetry_and_incomplete_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L287:C3",
+            "title": "omits gen_ai.input.messages when accumulator is empty (no fabrication)",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "omits_input_messages_when_accumulator_is_empty"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L307:C3",
+            "title": "records TTFT when the first assistant chunk is already an output delta",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "records_ttft_from_request_context_to_first_delta"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L404:C3",
+            "title": "reuses the last session header when a later turn omits request/header",
+            "suites": [
+              "dsh-event-transform (real fixture)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual production transform test compared subassert-by-subassert with immutable source; exact usage4fields / missing3fields / null telemetry / malformed input / absent full+delta input /60ms native TTFT / header reuse tuple as appropriate. Actual Linux fullworkspace2686 passed; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/dsh/mod.rs",
+                "test": "reuses_last_session_header"
               }
             ]
           }

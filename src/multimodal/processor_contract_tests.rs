@@ -567,3 +567,147 @@ async fn shutdown_rejects_new_paths_without_even_starting_the_stat_phase() {
     assert_eq!(stats.load(Ordering::SeqCst), 0);
     assert_eq!(recorder.close_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_real_file_worker_retains_its_io_permit_until_late_completion_without_uploading(
+) {
+    struct Gate {
+        entered: AtomicBool,
+        entry: tokio::sync::Notify,
+        released: Mutex<bool>,
+        cv: std::sync::Condvar,
+        watchdog_fired: AtomicBool,
+    }
+    struct Release {
+        gate: Arc<Gate>,
+        watchdog: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.gate.released.lock().unwrap() = true;
+            self.gate.cv.notify_all();
+            if let Some(thread) = self.watchdog.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = image(root.path(), "held.png", b"held-private-image");
+    let other = image(root.path(), "other.png", b"other-image");
+    let recorder = Arc::new(Recorder::default());
+    let mut processor = processor(&recorder);
+    Arc::get_mut(&mut processor).unwrap().io_slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let gate = Arc::new(Gate {
+        entered: AtomicBool::new(false),
+        entry: tokio::sync::Notify::new(),
+        released: Mutex::new(false),
+        cv: std::sync::Condvar::new(),
+        watchdog_fired: AtomicBool::new(false),
+    });
+    let worker = gate.clone();
+    let (done_sender, done_receiver) = std::sync::mpsc::channel();
+    let hook: super::super::resolve::ImageReadWorkerHook = Arc::new(move |entering, _| {
+        if entering {
+            worker.entered.store(true, Ordering::SeqCst);
+            worker.entry.notify_one();
+            let mut released = worker.released.lock().unwrap();
+            while !*released {
+                released = worker.cv.wait(released).unwrap();
+            }
+        } else {
+            let _ = done_sender.send(());
+        }
+    });
+    let watchdog_gate = gate.clone();
+    let watchdog = std::thread::spawn(move || {
+        let released = watchdog_gate.released.lock().unwrap();
+        let (mut released, timeout) = watchdog_gate
+            .cv
+            .wait_timeout_while(released, Duration::from_millis(500), |v| !*v)
+            .unwrap();
+        if timeout.timed_out() && !*released {
+            watchdog_gate.watchdog_fired.store(true, Ordering::SeqCst);
+            *released = true;
+            watchdog_gate.cv.notify_all();
+            watchdog_gate.entry.notify_one();
+        }
+    });
+    let release = Release {
+        gate: gate.clone(),
+        watchdog: Some(watchdog),
+    };
+    // Keep paused time from auto-advancing while real filesystem metadata runs.
+    let keepalive = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let owned = processor.clone();
+    let mut opts = options(root.path());
+    opts.deadline_ms = Some(40);
+    let owner = tokio::spawn(async move {
+        super::super::resolve::IMAGE_READ_WORKER_HOOK
+            .scope(
+                hook,
+                owned.path_to_uri(path.to_str().unwrap(), Some(1_700_000_000_000.0), opts),
+            )
+            .await
+    });
+    gate.entry.notified().await;
+    assert!(
+        gate.entered.load(Ordering::SeqCst),
+        "the real file worker must actually start"
+    );
+    assert!(
+        !owner.is_finished(),
+        "synchronous filesystem work must not pin the Tokio deadline thread until watchdog release"
+    );
+    tokio::time::advance(Duration::from_millis(39)).await;
+    tokio::task::yield_now().await;
+    assert!(!owner.is_finished());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(owner.await.unwrap().is_none());
+    assert!(!gate.watchdog_fired.load(Ordering::SeqCst));
+    assert_eq!(
+        processor.io_slots.available_permits(),
+        0,
+        "caller cancellation cannot free an active OS worker's permit"
+    );
+    assert!(
+        processor
+            .path_to_uri(
+                other.to_str().unwrap(),
+                Some(1_700_000_000_000.0),
+                options(root.path())
+            )
+            .await
+            .is_none(),
+        "an occupied physical IO budget cannot enqueue another orphan worker"
+    );
+    assert!(recorder.items.lock().unwrap().is_empty());
+    *gate.released.lock().unwrap() = true;
+    gate.cv.notify_all();
+    done_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let released_at = std::time::Instant::now();
+    while processor.io_slots.available_permits() == 0 {
+        assert!(released_at.elapsed() < Duration::from_secs(2));
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        recorder.items.lock().unwrap().is_empty(),
+        "late completion cannot upload"
+    );
+    assert!(processor
+        .path_to_uri(
+            other.to_str().unwrap(),
+            Some(1_700_000_000_000.0),
+            options(root.path())
+        )
+        .await
+        .is_some());
+    processor.shutdown(1000).await;
+    assert_eq!(recorder.items.lock().unwrap().len(), 1);
+    keepalive.abort();
+    let _ = keepalive.await;
+    drop(release);
+}

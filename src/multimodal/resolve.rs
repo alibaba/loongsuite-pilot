@@ -357,36 +357,157 @@ pub struct OpenedImage {
     pub resolved_path: String,
 }
 
+#[cfg(test)]
+pub(crate) type ImageReadWorkerHook = Arc<dyn Fn(bool, &str) + Send + Sync>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static IMAGE_READ_WORKER_HOOK: ImageReadWorkerHook;
+}
+#[cfg(test)]
+struct ImageReadWorkerObserver {
+    hook: Option<ImageReadWorkerHook>,
+    path: String,
+}
+#[cfg(test)]
+impl ImageReadWorkerObserver {
+    fn new(hook: Option<ImageReadWorkerHook>, path: &str) -> Self {
+        if let Some(hook) = &hook {
+            hook(true, path);
+        }
+        Self {
+            hook,
+            path: path.to_owned(),
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for ImageReadWorkerObserver {
+    fn drop(&mut self) {
+        if let Some(hook) = &self.hook {
+            hook(false, &self.path);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ImageReadCancellation {
+    local: Arc<AtomicBool>,
+    parent: Option<Arc<AtomicBool>>,
+}
+impl ImageReadCancellation {
+    fn aborted(&self) -> bool {
+        self.local.load(Ordering::SeqCst)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+}
+struct CancelImageReadOnDrop(Arc<AtomicBool>);
+impl Drop for CancelImageReadOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 pub async fn open_normalized_local_image(
     resolved_path: &str,
     max_bytes: usize,
     allowed_root_paths: Option<&[String]>,
     signal: Option<&Arc<AtomicBool>>,
 ) -> Option<OpenedImage> {
-    if let Some(roots) = allowed_root_paths {
-        if roots.is_empty() || !is_real_path_inside_roots(resolved_path, roots, signal).await {
+    static IO_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    open_normalized_local_image_scoped(
+        resolved_path,
+        max_bytes,
+        allowed_root_paths,
+        signal,
+        IO_SLOTS
+            .get_or_init(|| {
+                Arc::new(tokio::sync::Semaphore::new(
+                    super::types::MAX_MULTIMODAL_PATH_INFLIGHT,
+                ))
+            })
+            .clone(),
+    )
+    .await
+}
+
+/// The permit moves with the entire physical operation, including queued work
+/// and OS open/read calls. Dropping a caller cancels its continuation, never the
+/// permit of a worker that is still running.
+pub(crate) async fn open_normalized_local_image_scoped(
+    resolved_path: &str,
+    max_bytes: usize,
+    allowed_root_paths: Option<&[String]>,
+    signal: Option<&Arc<AtomicBool>>,
+    io_slots: Arc<tokio::sync::Semaphore>,
+) -> Option<OpenedImage> {
+    let permit = io_slots.try_acquire_owned().ok()?;
+    let local = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelImageReadOnDrop(local.clone());
+    let cancellation = ImageReadCancellation {
+        local,
+        parent: signal.cloned(),
+    };
+    if cancellation.aborted() {
+        return None;
+    }
+    let path = resolved_path.to_owned();
+    let roots = allowed_root_paths.map(<[String]>::to_vec);
+    #[cfg(test)]
+    let hook = IMAGE_READ_WORKER_HOOK.try_with(Arc::clone).ok();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        #[cfg(test)]
+        let before_read = || ImageReadWorkerObserver::new(hook, &path);
+        #[cfg(not(test))]
+        let before_read = || {};
+        read_image_blocking(
+            &path,
+            max_bytes,
+            roots.as_deref(),
+            &cancellation,
+            before_read,
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn read_image_blocking<T>(
+    resolved_path: &str,
+    max_bytes: usize,
+    roots: Option<&[String]>,
+    cancellation: &ImageReadCancellation,
+    before_read: impl FnOnce() -> T,
+) -> Option<OpenedImage> {
+    if cancellation.aborted() {
+        return None;
+    }
+    if let Some(roots) = roots {
+        if roots.is_empty() || !real_path_inside_roots_blocking(resolved_path, roots, cancellation)
+        {
             return None;
         }
     }
-    if signal.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-        return None;
-    }
     let mut file = open_nofollow(resolved_path).ok()?;
-    if signal.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+    if cancellation.aborted() {
         return None;
     }
     let st = file.metadata().ok()?;
-    if !st.is_file() || st.len() == 0 {
+    if !st.is_file() || st.len() == 0 || st.len() > max_bytes as u64 {
         return None;
     }
-    if let Some(roots) = allowed_root_paths {
-        if !opened_matches(&st, resolved_path, roots, signal).await {
+    if let Some(roots) = roots {
+        if !opened_matches(&file, resolved_path, roots, cancellation) {
             return None;
         }
     }
-    let to_read = (st.len() as usize).min(max_bytes.saturating_add(1));
-    let bytes = read_fully(&mut file, to_read, signal)?;
-    if bytes.len() > max_bytes {
+    let _observation = before_read();
+    let bytes = read_fully(&mut file, st.len() as usize, cancellation)?;
+    if cancellation.aborted() {
         return None;
     }
     let after = file.metadata().ok()?;
@@ -400,39 +521,63 @@ pub async fn open_normalized_local_image(
     let mime = sniff_image_mime(&bytes)?;
     Some(OpenedImage {
         size: bytes.len(),
-        mime_type: mime.to_string(),
+        mime_type: mime.to_owned(),
         bytes,
         mtime_ms: mtime_ms(&st),
-        resolved_path: resolved_path.to_string(),
+        resolved_path: resolved_path.to_owned(),
     })
 }
 
-async fn opened_matches(
-    opened: &std::fs::Metadata,
-    resolved_path: &str,
+fn real_path_inside_roots_blocking(
+    path: &str,
     roots: &[String],
-    signal: Option<&Arc<AtomicBool>>,
+    cancellation: &ImageReadCancellation,
 ) -> bool {
-    if !is_real_path_inside_roots(resolved_path, roots, signal).await {
+    if cancellation.aborted() {
         return false;
     }
-    let Ok(current) = tokio::fs::metadata(resolved_path).await else {
+    let Ok(real) = std::fs::canonicalize(path) else {
         return false;
     };
-    let left = file_id(opened);
-    let right = file_id(&current);
-    left.dev == right.dev && left.ino == right.ino
+    !cancellation.aborted()
+        && is_path_inside_roots(&strip_extended_prefix(&real.to_string_lossy()), roots)
+}
+
+fn opened_matches(
+    opened: &std::fs::File,
+    resolved_path: &str,
+    roots: &[String],
+    cancellation: &ImageReadCancellation,
+) -> bool {
+    if !real_path_inside_roots_blocking(resolved_path, roots, cancellation) {
+        return false;
+    }
+    // MetadataExt file_index is unstable on Windows; compare the exact handles
+    // with the project's existing cross-platform file identity adapter.
+    let Ok(left) = crate::utils::file_identity::identity_from_open(opened) else {
+        return false;
+    };
+    let Ok(current) = open_nofollow(resolved_path) else {
+        return false;
+    };
+    let Ok(right) = crate::utils::file_identity::identity_from_open(&current) else {
+        return false;
+    };
+    !cancellation.aborted() && left.dev == right.dev && left.ino == right.ino
 }
 
 fn read_fully(
     file: &mut std::fs::File,
     byte_length: usize,
-    signal: Option<&Arc<AtomicBool>>,
+    cancellation: &ImageReadCancellation,
 ) -> Option<Vec<u8>> {
+    if cancellation.aborted() {
+        return None;
+    }
     let mut buf = vec![0u8; byte_length];
     let mut offset = 0;
     while offset < byte_length {
-        if signal.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        if cancellation.aborted() {
             return None;
         }
         match file.read(&mut buf[offset..]) {
@@ -441,7 +586,7 @@ fn read_fully(
             Err(_) => return None,
         }
     }
-    if offset == 0 || signal.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+    if offset == 0 || cancellation.aborted() {
         return None;
     }
     buf.truncate(offset);
@@ -449,48 +594,50 @@ fn read_fully(
 }
 
 fn open_nofollow(path: &str) -> std::io::Result<std::fs::File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "image path is not a regular file",
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
     #[cfg(unix)]
     {
-        use std::os::fd::FromRawFd;
-        let c_path = std::ffi::CString::new(path)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-        let flags = nofollow_flag();
-        let fd = unsafe { libc_open(c_path.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let meta = std::fs::symlink_metadata(path)?;
-        if meta.file_type().is_symlink() {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        if metadata.file_attributes() & 0x400 != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "symlink",
+                "image path is a reparse point",
             ));
         }
-        std::fs::File::open(path)
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
     }
-}
-
-#[cfg(unix)]
-fn nofollow_flag() -> i32 {
-    if cfg!(target_os = "linux") {
-        0x20000
-    } else if cfg!(target_os = "macos") {
-        0x0100
-    } else {
-        0
+    let file = options.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "opened image is not a regular file",
+        ));
     }
-}
-
-#[cfg(unix)]
-unsafe fn libc_open(path: *const std::ffi::c_char, flags: i32) -> i32 {
-    unsafe extern "C" {
-        fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if opened.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "opened image is a reparse point",
+            ));
+        }
     }
-    unsafe { open(path, flags) }
+    Ok(file)
 }
 
 fn mtime_ms(meta: &std::fs::Metadata) -> f64 {
@@ -637,25 +784,79 @@ fn windows_drive(path: &str) -> bool {
 }
 
 fn node_resolve(path: &str, cwd: Option<&str>) -> String {
-    if is_absolute(path) {
-        return node_normalize(path);
+    #[cfg(windows)]
+    {
+        let base = cwd
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(r"C:\")));
+        let combined = base.join(strip_extended_prefix(path));
+        let absolute = std::path::absolute(&combined).unwrap_or(combined);
+        node_normalize(&absolute.to_string_lossy())
     }
-    let base = cwd.unwrap_or("");
-    let base = if base.is_empty() {
-        std::env::current_dir()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/".to_string())
+    #[cfg(not(windows))]
+    {
+        if is_absolute(path) {
+            return node_normalize(path);
+        }
+        let base = cwd.unwrap_or("");
+        let base = if base.is_empty() {
+            std::env::current_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/".to_string())
+        } else {
+            base.to_string()
+        };
+        if base.ends_with('/') {
+            node_normalize(&format!("{base}{path}"))
+        } else {
+            node_normalize(&format!("{base}/{path}"))
+        }
+    }
+}
+
+// Keep the drive prefix out of the component stack: repeated normalization
+// must never manufacture C:\C:\x. The lexical contract also runs on Unix CI.
+fn normalize_windows_local_path(path: &str) -> String {
+    let win = as_win_path(path);
+    let win = if win_extended_drive(&win) {
+        &win[4..]
     } else {
-        base.to_string()
+        &win
     };
-    if base.ends_with('/') {
-        node_normalize(&format!("{base}{path}"))
+    // Preserve UNC/device admission: normalizing must not turn these into local paths.
+    if win.starts_with(r"\\") {
+        return win.to_owned();
+    }
+    let drive = if windows_drive(win) { &win[..2] } else { "" };
+    let body = if drive.is_empty() { win } else { &win[2..] };
+    let rooted = body.starts_with('\\');
+    let mut parts = Vec::new();
+    for part in body.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last| *last != "..") => {
+                parts.pop();
+            }
+            ".." if !rooted => parts.push(part),
+            ".." => {}
+            _ => parts.push(part),
+        }
+    }
+    let joined = parts.join(r"\");
+    if rooted {
+        format!("{drive}\\{joined}")
+    } else if joined.is_empty() {
+        ".".to_owned()
     } else {
-        node_normalize(&format!("{base}/{path}"))
+        joined
     }
 }
 
 fn node_normalize(path: &str) -> String {
+    if cfg!(windows) {
+        return normalize_windows_local_path(path);
+    }
     let absolute = is_absolute(path);
     let mut stack: Vec<&str> = Vec::new();
     for part in path.split(['/', '\\']) {
@@ -672,14 +873,7 @@ fn node_normalize(path: &str) -> String {
     }
     let joined = stack.join("/");
     if absolute {
-        if cfg!(windows) && windows_drive(path) {
-            let drive = &path[..2];
-            if joined.is_empty() {
-                format!("{drive}\\")
-            } else {
-                format!("{drive}\\{}", joined.replace('/', "\\"))
-            }
-        } else if joined.is_empty() {
+        if joined.is_empty() {
             "/".to_string()
         } else {
             format!("/{joined}")
@@ -694,6 +888,14 @@ fn node_normalize(path: &str) -> String {
 fn inside(root: &str, candidate: &str) -> bool {
     let root = node_normalize(root);
     let candidate = node_normalize(candidate);
+    let (root, candidate) = if cfg!(windows) {
+        (
+            root.replace('\\', "/").to_ascii_lowercase(),
+            candidate.replace('\\', "/").to_ascii_lowercase(),
+        )
+    } else {
+        (root, candidate)
+    };
     if candidate == root {
         return true;
     }
@@ -727,6 +929,58 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn windows_drive_normalization_is_idempotent_and_clamps_parent_at_drive_root() {
+        for (raw, expected) in [
+            (r"C:\images\shot.png", r"C:\images\shot.png"),
+            ("C:/images/../shot.png", r"C:\shot.png"),
+            (r"\\?\C:\images\shot.png", r"C:\images\shot.png"),
+            (r"C:\..\..\shot.png", r"C:\shot.png"),
+            (r"C:\", r"C:\"),
+            (r"..\..\shot.png", r"..\..\shot.png"),
+        ] {
+            let normalized = normalize_windows_local_path(raw);
+            assert_eq!(normalized, expected);
+            assert_eq!(normalize_windows_local_path(&normalized), expected);
+        }
+        assert!(is_unc_or_device_path(&normalize_windows_local_path(
+            r"\\server\share\a.png"
+        )));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_normalized_drive_image_passes_real_root_and_handle_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        std::fs::write(&image, bytes).unwrap();
+        let roots = merge_allowed_root_paths(&[dir.path().to_string_lossy().into_owned()], None);
+        let once = normalize_local_image_path(&image.to_string_lossy()).unwrap();
+        let twice = normalize_local_image_path(&once).unwrap();
+        assert_eq!(once, twice);
+        let canonical =
+            strip_extended_prefix(&std::fs::canonicalize(&image).unwrap().to_string_lossy());
+        assert!(is_path_inside_roots(&canonical, &roots));
+        assert!(!is_path_inside_roots(
+            &format!("{}-sibling\\shot.png", roots[0]),
+            &roots
+        ));
+        assert!(is_path_inside_roots(
+            &canonical.to_ascii_uppercase(),
+            &roots
+        ));
+        let opened =
+            open_normalized_local_image(&once, MAX_MULTIMODAL_DATA_SIZE, Some(&roots), None)
+                .await
+                .unwrap();
+        assert_eq!(opened.bytes, bytes);
+        assert_eq!(
+            resolve_image_path("shot.png", Some(&dir.path().to_string_lossy())),
+            once
+        );
     }
 
     #[test]

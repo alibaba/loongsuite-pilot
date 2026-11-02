@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ use crate::utils::create_logger;
 use super::http::log_meta;
 use super::resolve::{
     decode_blob_content, ext_from_mime, is_real_path_inside_roots, join_storage_uri,
-    lstat_regular_image_file, normalize_local_image_path, open_normalized_local_image,
+    lstat_regular_image_file, normalize_local_image_path, open_normalized_local_image_scoped,
     yyyymmdd_from_unix_ms,
 };
 use super::types::{
@@ -101,6 +102,49 @@ impl Drop for PathReadLease {
     }
 }
 
+/// Always settle the accepted upload's accounting, including task unwind.
+struct UploadLease {
+    processor: Arc<MultimodalProcessor>,
+    key: String,
+    size: usize,
+    done: Option<oneshot::Sender<()>>,
+}
+impl Drop for UploadLease {
+    fn drop(&mut self) {
+        {
+            let mut inner = self
+                .processor
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if inner.pending_keys.remove(&self.key) {
+                inner.pending_bytes = inner.pending_bytes.saturating_sub(self.size);
+            }
+            inner
+                .pending
+                .retain(|pending| pending.target_path != self.key);
+        }
+        if let Some(done) = self.done.take() {
+            let _ = done.send(());
+        }
+    }
+}
+struct SniffLease {
+    processor: Arc<MultimodalProcessor>,
+    active: bool,
+}
+impl Drop for SniffLease {
+    fn drop(&mut self) {
+        if self.active {
+            self.processor
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .sniff_pending = false;
+        }
+    }
+}
+
 pub struct MultimodalProcessor {
     inner: Mutex<Inner>,
     uploader: Arc<dyn Uploader>,
@@ -109,10 +153,16 @@ pub struct MultimodalProcessor {
     started: Instant,
     pending_bytes_limit: usize,
     path_inflight_limit: usize,
+    io_slots: Arc<tokio::sync::Semaphore>,
+    shutdown_changed: tokio::sync::Notify,
     #[cfg(test)]
     before_stat: Option<PathIoHook>,
     #[cfg(test)]
     before_read: Option<PathIoHook>,
+    #[cfg(test)]
+    before_upload_admission: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    test_wall_now: Option<Arc<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>>,
 }
 
 struct Inner {
@@ -162,10 +212,16 @@ impl MultimodalProcessor {
             started: Instant::now(),
             pending_bytes_limit: MAX_MULTIMODAL_PENDING_BYTES,
             path_inflight_limit: MAX_MULTIMODAL_PATH_INFLIGHT,
+            io_slots: Arc::new(tokio::sync::Semaphore::new(MAX_MULTIMODAL_PATH_INFLIGHT)),
+            shutdown_changed: tokio::sync::Notify::new(),
             #[cfg(test)]
             before_stat: None,
             #[cfg(test)]
             before_read: None,
+            #[cfg(test)]
+            before_upload_admission: None,
+            #[cfg(test)]
+            test_wall_now: None,
         });
         if base.is_empty() {
             processor.schedule_sniff();
@@ -184,6 +240,7 @@ impl MultimodalProcessor {
     pub fn with_limits(mut self, pending_bytes: usize, path_inflight: usize) -> Self {
         self.pending_bytes_limit = pending_bytes;
         self.path_inflight_limit = path_inflight;
+        self.io_slots = Arc::new(tokio::sync::Semaphore::new(path_inflight));
         self
     }
 
@@ -320,7 +377,7 @@ impl MultimodalProcessor {
         if !is_real_path_inside_roots(&key, &roots, Some(signal)).await {
             return None;
         }
-        let day = yyyymmdd_from_unix_ms(time_unix_ms, chrono::Local::now());
+        let day = yyyymmdd_from_unix_ms(time_unix_ms, self.wall_now());
         let cache_key = format!("{key}\0{day}");
         let cached = self
             .inner
@@ -386,9 +443,14 @@ impl MultimodalProcessor {
         if let Some(hook) = &self.before_read {
             hook(key).await;
         }
-        let loaded =
-            open_normalized_local_image(key, MAX_MULTIMODAL_DATA_SIZE, Some(roots), Some(signal))
-                .await;
+        let loaded = open_normalized_local_image_scoped(
+            key,
+            MAX_MULTIMODAL_DATA_SIZE,
+            Some(roots),
+            Some(signal),
+            self.io_slots.clone(),
+        )
+        .await;
         if loaded.is_none() || signal.load(Ordering::SeqCst) {
             if loaded.is_none() && !signal.load(Ordering::SeqCst) {
                 logger().warn(
@@ -444,38 +506,43 @@ impl MultimodalProcessor {
             .clone()
             .unwrap_or_else(|| "application/octet-stream".into());
         let sha = hex::encode(Sha256::digest(&bytes));
-        let day = yyyymmdd_from_unix_ms(meta.time_unix_ms, chrono::Local::now());
+        let day = yyyymmdd_from_unix_ms(meta.time_unix_ms, self.wall_now());
         let target_path = format!("{day}/{sha}.{}", ext_from_mime(&mime));
-        let base = self.inner.lock().unwrap().storage_base_path.clone();
-        let uri = join_storage_uri(&base, &target_path);
-        let result = UriResult {
-            uri,
-            mime_type: mime.clone(),
-            modality: meta.modality.clone().filter(|value| !value.is_empty()),
-            size: bytes.len(),
-            sha256: sha,
-        };
-        {
+        #[cfg(test)]
+        if let Some(hook) = &self.before_upload_admission {
+            hook();
+        }
+        let (result, uploaded_key, done) = {
             let mut inner = self.inner.lock().unwrap();
-            if inner.pending_keys.contains(&target_path) {
-                return Some(result);
+            // Hashing and file IO can overlap shutdown or origin invalidation.
+            // Admission and the storage URI snapshot must share this lock.
+            if inner.shutting_down || inner.storage_base_path.is_empty() {
+                return None;
             }
-            if inner.pending.len() >= MAX_MULTIMODAL_PENDING_UPLOADS {
-                return Some(result);
-            }
-            if self.pending_bytes_limit > 0
-                && inner.pending_bytes + bytes.len() > self.pending_bytes_limit
+            let result = UriResult {
+                uri: join_storage_uri(&inner.storage_base_path, &target_path),
+                mime_type: mime.clone(),
+                modality: meta.modality.clone().filter(|value| !value.is_empty()),
+                size: bytes.len(),
+                sha256: sha,
+            };
+            let key = format!("{}\0{target_path}", inner.storage_base_path);
+            if inner.pending_keys.contains(&key)
+                || inner.pending.len() >= MAX_MULTIMODAL_PENDING_UPLOADS
+                || (self.pending_bytes_limit > 0
+                    && bytes.len() > self.pending_bytes_limit.saturating_sub(inner.pending_bytes))
             {
                 return Some(result);
             }
-            inner.pending_keys.insert(target_path.clone());
+            let (tx, rx) = oneshot::channel();
+            inner.pending_keys.insert(key.clone());
             inner.pending_bytes += bytes.len();
-        }
-        let (tx, rx) = oneshot::channel();
-        self.inner.lock().unwrap().pending.push(PendingUpload {
-            target_path: target_path.clone(),
-            done: rx,
-        });
+            inner.pending.push(PendingUpload {
+                target_path: key.clone(),
+                done: rx,
+            });
+            (result, key, tx)
+        };
         let uploader = Arc::clone(&self.uploader);
         let this = Arc::clone(self);
         let item = UploadItem {
@@ -486,9 +553,14 @@ impl MultimodalProcessor {
             source_uri: None,
             expected_size: result.size,
         };
-        let uploaded_size = result.size;
-        let uploaded_key = target_path.clone();
+        let lease = UploadLease {
+            processor: this.clone(),
+            key: uploaded_key,
+            size: result.size,
+            done: Some(done),
+        };
         super::http::spawn_with_http_context(async move {
+            let _lease = lease;
             let _ = uploader
                 .upload(
                     item,
@@ -501,45 +573,67 @@ impl MultimodalProcessor {
                     },
                 )
                 .await;
-            let _ = tx.send(());
-            let mut inner = this.inner.lock().unwrap();
-            inner.pending_keys.remove(&uploaded_key);
-            inner.pending_bytes = inner.pending_bytes.saturating_sub(uploaded_size);
-            inner
-                .pending
-                .retain(|pending| pending.target_path != uploaded_key);
         });
         Some(result)
     }
 
+    /// Once accepted, close owns its drain even if the calling future is cancelled.
     pub async fn shutdown(self: &Arc<Self>, timeout_ms: u64) {
-        {
+        let pending: Vec<_> = {
             let mut inner = self.inner.lock().unwrap();
             if inner.shutting_down {
                 return;
             }
             inner.shutting_down = true;
+            inner.sniff_pending = false;
             inner.path_uri_cache.clear();
             inner.path_waiters.clear();
-        }
-        let timeout = if timeout_ms == 0 {
-            MULTIMODAL_SHUTDOWN_TIMEOUT_MS
-        } else {
-            timeout_ms
-        };
-        let pending: Vec<_> = {
-            let mut inner = self.inner.lock().unwrap();
             inner
                 .pending
                 .drain(..)
                 .map(|pending| pending.done)
                 .collect()
         };
-        if !pending.is_empty() {
-            let wait = futures_join(pending);
-            let _ = with_deadline(wait, timeout as i64, || ()).await;
+        self.shutdown_changed.notify_waiters();
+        let timeout = if timeout_ms == 0 {
+            MULTIMODAL_SHUTDOWN_TIMEOUT_MS
+        } else {
+            timeout_ms
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
+        let uploader = self.uploader.clone();
+        let (done, closed) = oneshot::channel();
+        super::http::spawn_with_http_context(async move {
+            if !pending.is_empty() {
+                tokio::select! {
+                    _ = futures_join(pending) => {}
+                    _ = tokio::time::sleep_until(deadline) => {}
+                }
+            }
+            uploader.shutdown().await;
+            let _ = done.send(());
+        });
+        let _ = closed.await;
+    }
+
+    async fn wait_for_shutdown(&self) {
+        loop {
+            let changed = self.shutdown_changed.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+            if self.inner.lock().unwrap().shutting_down {
+                return;
+            }
+            changed.await;
         }
-        let _ = self.uploader.shutdown().await;
+    }
+
+    fn wall_now(&self) -> chrono::DateTime<chrono::Local> {
+        #[cfg(test)]
+        if let Some(now) = &self.test_wall_now {
+            return now();
+        }
+        chrono::Local::now()
     }
 
     fn note_origin_mismatch(self: &Arc<Self>) {
@@ -578,8 +672,13 @@ impl MultimodalProcessor {
             delay
         };
         let this = Arc::clone(self);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(delay);
         super::http::spawn_with_http_context(async move {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
+            tokio::select! {
+                biased;
+                _ = this.wait_for_shutdown() => return,
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
             this.sniff().await;
         });
     }
@@ -588,8 +687,20 @@ impl MultimodalProcessor {
         let Some(resolve) = &self.resolve_storage_base else {
             return;
         };
-        let sniffed = resolve().await;
+        if self.inner.lock().unwrap().shutting_down {
+            return;
+        }
+        let mut lease = SniffLease {
+            processor: self.clone(),
+            active: true,
+        };
+        let sniffed = tokio::select! {
+            biased;
+            _ = self.wait_for_shutdown() => return,
+            result = resolve() => result,
+        };
         let mut inner = self.inner.lock().unwrap();
+        lease.active = false;
         inner.sniff_pending = false;
         if inner.shutting_down {
             return;
@@ -754,3 +865,11 @@ mod tests {
 #[cfg(test)]
 #[path = "processor_contract_tests.rs"]
 mod migration_contract_tests;
+
+#[cfg(test)]
+#[path = "processor_lifecycle_tests.rs"]
+mod migration_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "processor_delegated_tests.rs"]
+mod migration_delegated_tests;
