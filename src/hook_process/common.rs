@@ -1,9 +1,6 @@
-//! Shared hook-process helpers ported from `assets/hooks/shared/*` and
-//! `assets/hooks/agent-event-normalizer.mjs`.
-//!
-//! Windows ANSI double-decode lives only in the JavaScript decoder. This
-//! runtime strips a UTF-8 BOM and decodes the remaining bytes as UTF-8, which
-//! matches the non-Windows path of `decode-payload.mjs`.
+//! Shared native Hook-process helpers.
+//! Payload decoding preserves UTF-8/BOM and repairs Windows host ANSI
+//! double-encoding in the native process, including partial byte loss.
 
 use crate::inputs::base::{validate_excluded_workspaces, WorkspacePolicy};
 use serde_json::{Map, Value};
@@ -62,12 +59,7 @@ pub fn home_dir(env: &Env) -> PathBuf {
 }
 
 pub fn decode_payload(buf: &[u8]) -> String {
-    let buf = if buf.len() >= 3 && buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf {
-        &buf[3..]
-    } else {
-        buf
-    };
-    String::from_utf8_lossy(buf).into_owned()
+    super::payload_decoder::decode_for_platform(buf, cfg!(windows))
 }
 
 pub fn parse_json_object(bytes: &[u8]) -> Result<Obj, String> {

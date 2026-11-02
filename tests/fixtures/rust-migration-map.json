@@ -91911,6 +91911,3946 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/deployment/dsh-runtime-locator.test.ts",
+      "source_hash": "87661debd4a24955475186b5dbedb0dfcdd5f9cba3961931b450738ae6f8a2a6",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All12 exact EF declarations and original5-option parameter scenarios carried through real temp procfs/files/native DSH strategy. f84/2b source hashes equal EF. Mock detectAgent(true) replaced by actual temporary presentpath; source nonLinux runtime option is explicitly simulated without claiming physicalMacWindows execution. No retirement. Productionfix onlydefaultmacOS platform label, retains Linux/procfsownership and scoped DSHenv.",
+      "cases": [
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "does not treat a blank DSH_HOME as the default home before process discovery",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real temp procfs Node DSH process PID324 wins when service DSH_HOME is whitespace; exacthome/patch/source/pid and result excludes APIkey metadata/value.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_blank_env_still_discovers_the_real_process_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "uses the Pilot service DSH_HOME without requiring a PATH command or default home",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit service env chooses nonexisting customhome with exactpatch/source and no process/PATH prerequisite.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_explicit_service_env_does_not_need_path_or_existing_default_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C3",
+            "title": "discovers a non-standard home from the environment of a running DSH process",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real temp procfs cmdline/environ yields exactnonstandardhome/PID321/source/patch without leaking secret keyname/value.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_process_environment_preserves_home_source_pid_without_exposing_secrets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "discovers DSH when Node starts with %s before the entry script",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": [
+              "it.each([\n    ['a V8 heap limit', ['--max-old-space-size=4096']],\n    ['source maps', ['--enable-source-maps']],\n    ['the inspector', ['--inspect']],\n    ['a short require preload', ['-r', '/code/preload.cjs']],\n    ['a long require preload', ['--require', '/code/preload.cjs']],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Each original5 Node options (heap/source-map/inspector/shortrequire/longrequire) before actualDSHentry is parsed from temp cmdline and yields exacthome/source/PID322.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_all_five_real_node_option_layouts_discover_the_entry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C3",
+            "title": "writes the managed patch to the home discovered from a running DSH process",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual DshYamlPatchStrategy with temp plugin + procfs writes marked cordis.patch.yml at discovered processhome and exact enabled newline .collection-enabled beside plugin.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_actual_strategy_writes_managed_patch_and_exact_enabled_marker_in_discovered_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L161:C3",
+            "title": "resolves a relative process DSH_HOME against that DSH process cwd",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real temp procfs cwd symlink resolves relative .state/dsh against that process cwd. Source Windows early-return is preserved as Windows nonapplicability; test runs only unix.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_relative_process_home_resolves_against_that_process_cwd"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L172:C3",
+            "title": "accepts several DSH processes when they use the same home",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two matching procfs entries samehome choose exacthome and lowestPID401 despite reverse directory insertion order.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_same_home_processes_choose_the_lowest_real_pid"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "rejects several distinct running DSH homes instead of choosing one",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Distinctprocess homes result Err containing originalambiguous message rather than choosing one.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_distinct_homes_are_an_explicit_ambiguous_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "ignores unrelated Node processes and preserves standard detection fallback",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unrelated Node process cannot supplyDSHhome. Real existing detection path replaces source mocktrue; defaultsyntheticHOME/.dsh/sourceStandardDetection/patch preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_unrelated_node_process_cannot_override_real_standard_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L203:C3",
+            "title": "keeps persisted lifecycle ownership ahead of changed runtime discovery",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Persisted absolutepatch exacthome/path/source wins over new explicit config, serviceenv, and active otherprocess.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_persisted_patch_remains_owner_despite_new_config_env_and_running_process"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L222:C3",
+            "title": "uses an explicit patchPath before environment or process discovery",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit configuredpatch/source wins over serviceenv and runningprocess.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_explicit_patch_precedes_env_and_running_process"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L233:C3",
+            "title": "does not inspect procfs on non-Linux platforms",
+            "suites": [
+              "DshRuntimeLocator"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Darwin locator ignores matching procfs (miss) and still checks real standarddetection (successwhenpathpresent). Nativefactory OS label fixed macos→darwin; actualLinuxcontrol checks runningtarget; MacWindowsactualCIpending.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_runtime_locator_history_contract_tests.rs",
+                "test": "source_non_linux_does_not_use_matching_proc_and_still_checks_standard_detection"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deployment/cli-probe-detector.test.ts",
+      "source_hash": "889fe51ee1221b76332127abc229c26499eab406c93a8df1afecebbd15ce5292",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All8 EF declarations/9originalparameter scenarios exact; f84/2b bytes unchanged. Real Native metadata/procfs/controlledcommand childfixtures and realCLI preserve business assertions. Error identity is adapted to nativeResultString (explicit), no cases retired. ActualLinux only; Windows/macOS applicability awaits CI. ExistingembeddingAPI kept; CLI uses checkedResult. No Core/normalization/sourceframework modifications.",
+      "cases": [
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "discovers OpenClaw for the installer without calling which or generic detection",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real isolated child env sets absoluteOpenClaw entry and packageversion2026.3.8; actual resolver/probe detects exactversion while controlledgenericdetector callcount stays0. Native resolver does not execute CLI. Process-global env is never mutated by paralleltests.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_openclaw_explicit_metadata_hint_never_executes_or_uses_generic_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "exposes a replacement only to an installer probe (%s)",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": [
+              "it.each(['package', 'child-behind-broken-parent'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both original package and childbehindbrokenparent layouts executed in separate childenv: missingpinnedentry is rejected runtime with oldpath diagnostic; installer recovers exactentry/replacingmissingentryreason, originalconfigbytes stay unchanged; genericdetector0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_only_installer_replaces_missing_pinned_entry_in_both_package_layouts_without_config_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "automatically selects a unique OpenClaw PATH candidate and exposes its persistent entry",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual PATH-only package with executablepermission and version2026.6.10, unrelatedcwd(as original), isolatedHOME/config; probe chooses exactpersistententry and nevercalls genericdetector. WindowsNode path.delimiter/PATHEXT shellprecedence restored with original128directorycap; actualWindowsexecutionpending.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_unique_path_candidate_persists_its_actual_entry_without_generic_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C3",
+            "title": "detects a Node-launched DSH from procfs when the installer environment misses it",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real temp procfsNodeDSH PID321 home yields exact original4-fieldCliProbeResult/reason, excludes secretkeyname/value, controlledgenericdetectorcalls0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_dsh_procfs_reason_has_exact_home_pid_without_generic_detector_or_secret"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L169:C3",
+            "title": "returns a normal miss when no DSH runtime is discoverable",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Suppliedempty temp procfs plus isolatedabsentgeneric detection yields exact normalmiss id/displayName/detectedfalse/emptyreason; errors not fabricated.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_missing_dsh_runtime_is_a_normal_empty_reason_miss"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C3",
+            "title": "contains an ambiguous DSH failure and preserves other Agent results",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp procfs twoDSHhomes ambiguity becomes onlyDSH emptyreasonmiss, followingGeneric CLI is really discovered through controlledowned which/where lookup and exactcommandreason. Linuxminimalimage which fixture records actualargv without running discoveredcommand; firstsuccessfulcommand also shortcircuits laterinvalidNUL.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_ambiguous_dsh_does_not_destroy_other_agents_detection_results"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L205:C3",
+            "title": "preserves generic Agent detection errors",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ControlledfallibleNative detector Err preserves exactfailureString; JS Error object reference identity becomes stable nativeResult error value, not a retirement. Real admitted localAgentJSON with NULcommand and originalNode execFile oracle rejects; pre-fix publicNativeCLI emitted success/miss, checkedNativeCLI now exits1 with samegenericfailure diagnostic. Paths/earliercommand success shortcircuits laterinvalidcommands exactlyas old asyncdetector. Existing nonfallibleNative embeddingfunctions remain compatible; throwingNode equivalence is public try_* and actualCLI.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_generic_detector_error_is_preserved_by_fallible_native_probe"
+              },
+              {
+                "file": "tests/cli_probe_error_contract.rs",
+                "test": "public_probe_reports_generic_detection_errors_but_list_only_remains_read_only_metadata"
+              },
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "native_existing_path_short_circuits_a_later_invalid_command"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L212:C3",
+            "title": "preserves list-only behavior without consulting runtime discovery",
+            "suites": [
+              "CLI probe detector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual listOnlyprobe returns exactdefaultmetadata even suppliedDSHenvwouldotherwise detect and controlledgenericdetectorcount0. Real publicCLI --list succeeds with samebadNULconfig, yieldsmetadatafalse/emptyreason and createsno userconfig; ordinaryprobe with sameconfig errors.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/cli_probe_detector_history_contract_tests.rs",
+                "test": "source_list_only_returns_metadata_without_runtime_or_generic_detection"
+              },
+              {
+                "file": "tests/cli_probe_error_contract.rs",
+                "test": "public_probe_reports_generic_detection_errors_but_list_only_remains_read_only_metadata"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deployment/openclaw-version-resolver.test.ts",
+      "source_hash": "af547300d9298266e832e9300032acbfb97ff52e67a8dc92a089b69fb6fc7d15",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All41 EF declarations and original parameter arrays passed through actual native metadata, scoped original-equivalent IO/race controls and real PluginInjectStrategy lifecycles with real bundled resources. f84/2b source hashes are identical. No Node release/runtime dependency or external service is involved. Linux actual execution only; macOS/Windows applicability requires their CI. No retirements. Unknown ownership, other entries and user resources remain protected.",
+      "cases": [
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "resolves a real executable link under %s without child processes",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['npm/lib/node_modules/openclaw', 'pnpm/.pnpm/openclaw@2026.3.8/node_modules/openclaw'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both actual npm/pnpm file symlink layouts resolve exact version 3.8, legacy adapter, conversationAccess=false, and the canonical package.json source. No child process is required.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l27_real_npm_and_pnpm_executable_links_resolve_metadata_without_execution"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L38:C3",
+            "title": "distinguishes enterprise bundle version from the nested OpenClaw version",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Enterprise wrapper version 1.0 and the nested bundle CLI version never replace the real nested OpenClaw 3.8 metadata.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l38_enterprise_wrapper_version_is_not_the_nested_openclaw_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C3",
+            "title": "resolves a pnpm global shell wrapper without reading or executing the script",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A real pnpm global shell wrapper exits 99 if executed. Metadata discovery instead yields the canonical global/5/node_modules package.json.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l44_pnpm_shell_wrapper_finds_fixed_package_without_reading_or_running_script"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "does not fall through to a second PATH installation when the first is unidentifiable",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "An actual executable opaque first PATH entry causes a miss despite a second valid entry; shell precedence and the fail-closed boundary remain enforced.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l50_first_opaque_path_entry_is_not_bypassed_by_later_installation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "reads a source container working directory without a PATH command",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "An actual cwd source package detects version 3.8 without a PATH command.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l57_source_container_cwd_needs_no_path_command"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "discovers a fixed openclaw child from its container workdir (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['2026.3.8', '2026.6.10'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both 3.8 and 6.10 versions in fixed cwd/openclaw select the exact executable, version and auto-entry binding despite unrelated parent metadata.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l61_both_versions_are_found_only_in_the_fixed_child_of_container_cwd"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "does not recursively search arbitrary nested directories",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "An actual vendor/openclaw package is not recursively searched.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l68_arbitrary_nested_vendor_directory_is_not_recursively_searched"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C3",
+            "title": "checks the fixed child after unidentified parent metadata (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['broken', 'unreadable', 'directory'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All three broken/unreadable/directory parent metadata scenarios select only the valid fixed child with exact executable/version/binding. Scoped read EACCES forces the original unreadable branch even under a root test user.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l72_all_unidentified_parent_metadata_kinds_still_allow_only_the_fixed_child"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "does not bypass an unidentified parent with a %s launch entry",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['present', 'loop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Broken parent metadata plus either a present unknown entry or a real self-symlink loop causes None despite a valid fixed child.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l83_unidentified_parent_with_present_or_looped_launch_entry_blocks_fixed_child"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L91:C3",
+            "title": "rechecks an unidentified parent entry before selecting its fixed child",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A scoped second-stat callback physically creates the unknown parent entry. Actual resolver returns None, exactly two parent checks occur, the file exists, and onProblem reports appeared/inaccessible.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l91_real_parent_appearance_on_second_stat_revokes_recovered_child"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "does not escape unidentified parent metadata to PATH when the child is %s",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['missing', 'unrelated'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both missing and unrelated fixed children behind broken parent metadata prevent escape to a valid PATH candidate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l108_unidentified_parent_does_not_escape_to_path_when_child_missing_or_unrelated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C3",
+            "title": "keeps the conflict guard after recovering a child from unidentified parent metadata",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Recovering the child behind broken parent metadata still rejects a distinct 6.10 PATH installation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l116_recovering_child_keeps_the_distinct_path_installation_conflict_guard"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L123:C3",
+            "title": "does not bypass a confirmed unsupported cwd package via its fixed child",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A confirmed unsupported 3.2 cwd package cannot be bypassed through a valid fixed child.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l123_confirmed_unsupported_parent_is_not_bypassed_by_fixed_child"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L127:C3",
+            "title": "reports child stat %s instead of silently selecting PATH",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['EACCES', 'EPERM', 'ELOOP'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All original EACCES/EPERM/ELOOP raw native error classes hit the exact child stat once and block fallback to a valid PATH installation. Diagnostics include the exact JSON-quoted child path and symbolic error code. Original native Display-only diagnostics failed all three code assertions; minimal formatting now preserves them.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l127_all_three_child_stat_error_codes_are_reported_without_path_escape"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C3",
+            "title": "rejects distinct cwd and child installations (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['2026.3.8', '2026.6.10'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Distinct cwd and child packages conflict for both same-version 3.8 and newer-version 6.10 children.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l141_distinct_cwd_and_child_installations_are_rejected_for_both_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "deduplicates a child installation also exposed on PATH",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The child candidate and a PATH symlink to the same real package are deduplicated, preserving the first exact child executable and auto-entry binding.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l146_child_and_path_links_to_same_installation_are_deduplicated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C3",
+            "title": "does not bypass an invalid fixed child (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['missing-entry', 'unsupported', 'broken-metadata'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Each missing-entry, unsupported-version and broken-metadata fixed child blocks an otherwise valid PATH installation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l153_all_invalid_fixed_children_block_other_valid_path_installations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L161:C3",
+            "title": "rejects conflicting source-container and PATH installations, but honors a bound launch entry",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Distinct Gateway 3.8 and PATH 6.10 installations are rejected unbound. Explicit Gateway binding yields version 3.8 and no conversation access.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l161_explicit_binding_wins_while_unbound_distinct_cwd_path_conflict_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C3",
+            "title": "does not select another installation or stale environment when the selected package is unsupported",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A selected unsupported 3.2 package is not replaced by another 5.12 package or stale SERVICE_VERSION.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l170_unsupported_selected_package_is_not_replaced_by_other_or_stale_env_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C3",
+            "title": "rejects non-absolute explicit bindings (%s) without PATH/cwd fallback",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['', 'openclaw.mjs', './app/openclaw.mjs'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Empty, relative and ./ explicit bindings reject without cwd or PATH fallback.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l175_nonabsolute_explicit_bindings_never_fall_back_to_cwd_or_path"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L179:C3",
+            "title": "automatically deploys a unique %s entry without CLI_PATH",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['path', 'cwd', 'bundle'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All three original PATH/cwd/bundle sources select bound6.10/auto-entry, then actual PluginInjectStrategy detects, needs deployment, copies the real bundled assets, successfully deploys, becomes healthy and writes conversationAccess=true. Independent subprocess env avoids unsafe global mutation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l179_all_three_unique_unbound_installations_use_real_strategy_and_conversation_schema"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L201:C3",
+            "title": "persists Gateway %s despite PATH %s across collector cwd changes and lost environment",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each([['2026.3.8', '2026.6.10', false], ['2026.6.10', '2026.3.8', true]])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both original Gateway/PATH version permutations run actual initial deployment and exact capability flags, then fresh native strategy processes with changed cwd, absent CLI hint and saved custom Pilot config retain binding, health, successful idempotent bytes and flags. Removing the persisted launch entry prevents silent PATH rebinding, keeps needsDeploy=true, deploy=false and original config bytes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l201_both_gateway_versions_persist_across_fresh_strategy_processes_cwd_and_env_loss"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L230:C3",
+            "title": "detects the standard home bundle with an empty service PATH",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The actual standard HOME bundle binds its exact source entry, version3.8 and auto-entry with empty service PATH.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l230_standard_home_bundle_is_bound_with_empty_service_path"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L235:C3",
+            "title": "only lets the installer recover a confirmed missing saved entry",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing persisted entry is rejected at runtime with exact old-path diagnostic; installer alone recovers exact new entry/binding/recoveredFrom. Original config bytes stay unchanged and an explicit missing binding still cannot recover.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l235_only_installer_recovers_confirmed_missing_saved_entry_without_rewriting_config"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L249:C3",
+            "title": "does not recover an existing %s entry",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['unsupported', 'broken', 'directory', 'unreadable'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All four existing unsupported, broken, directory and unreadable old entries prevent installer rebinding. The unreadable case uses scoped EACCES at real package read rather than relying on root permissions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l249_all_existing_old_entry_failures_block_installer_rebinding"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L261:C3",
+            "title": "does not recover a missing entry when new candidates conflict",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A missing saved entry cannot recover when actual new cwd and child packages conflict.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l261_missing_saved_entry_cannot_be_recovered_when_new_candidates_conflict"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L267:C3",
+            "title": "skips an implicit leftover only after its entry is confirmed missing (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['2026.3.2', '2026.3.8'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "For both unsupported3.2 and supported3.8 leftover metadata, only confirmed missing implicit entry may yield to valid PATH6.10. Explicit missing bundle and relative explicit bundle both reject.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l267_only_confirmed_missing_implicit_bundle_entry_may_yield_to_valid_path"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L277:C3",
+            "title": "does not bypass an existing implicit bundle with %s metadata",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['unsupported', 'broken', 'unreadable', 'missing-metadata'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All four existing implicit bundle metadata failures (unsupported, broken, unreadable, missing) block valid PATH fallback. Unreadable is an actual scoped std::io::Error at that package read.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l277_all_existing_implicit_bundle_metadata_failures_block_path_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L289:C3",
+            "title": "deduplicates bundle and PATH symlinks to the same package",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real bundle and PATH symlinks to the same canonical package deduplicate and remain host-bound.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l289_bundle_and_path_symlinks_to_same_package_are_deduplicated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L295:C3",
+            "title": "rejects distinct bundle/PATH installs even when their versions match (%s)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['2026.3.8', '2026.6.10'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Distinct physical bundle and PATH packages reject even when both share 3.8 or both share6.10.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l295_distinct_bundle_and_path_packages_are_rejected_even_at_same_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L301:C3",
+            "title": "requires an actual source entry rather than package metadata alone",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both a missing source entry and a directory at that entry are rejected even when valid package metadata exists.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l301_package_metadata_alone_or_directory_entry_is_not_an_actual_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L308:C3",
+            "title": "leaves existing Gateway config byte-for-byte unchanged when auto discovery is ambiguous",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real conflicting cwd/PATH installations make detect=false and deploy=false; existing third-party config bytes and exact mtime remain unchanged. Removing that config still cannot cause invalid discovery to recreate it.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l308_ambiguous_auto_discovery_preserves_config_bytes_mtime_and_missing_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L328:C3",
+            "title": "reads a saved entry from the custom config and rechecks versions on upgrade/downgrade",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Saved BOM custom config yields persisted binding and false conversation access, rechecks upgrade6.10 true then downgrade3.8 false. Broken custom config rejects cwd fallback while explicit binding still overrides it.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l328_saved_bom_custom_config_rechecks_upgrades_downgrades_and_explicit_binding"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L342:C3",
+            "title": "prefers installed metadata over stale environment version",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual installed 3.8 metadata wins over stale environment version 5.12.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l342_installed_metadata_beats_stale_environment_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L347:C3",
+            "title": "fails closed for invalid/oversized metadata and symlink loops",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Broken JSON, metadata larger than 256 KiB, and an actual self-symlink loop all fail closed under explicit binding.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l347_broken_oversized_metadata_and_symlink_loops_fail_closed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C3",
+            "title": "never grants installation/schema capabilities from environment versions alone",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both SERVICE/BUNDLED environment versions 3.8/6.10, and VERSION/npm_package_version alone, never authorize installation or capabilities.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l356_environment_versions_alone_never_authorize_schema_or_installation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L364:C3",
+            "title": "checks fixed sibling packages after unidentified wrapper metadata fails (%#)",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each(['{broken', ' '.repeat(256 * 1024 + 1)])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both broken and oversized wrapper metadata still check the fixed wrapper/node_modules sibling package and recover 3.8.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l364_invalid_wrapper_metadata_still_checks_fixed_sibling_packages"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L370:C3",
+            "title": "does not bypass a confirmed unsupported OpenClaw package via a nested candidate",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "A confirmed unsupported 3.2 wrapper cannot be bypassed by nested OpenClaw 6.10.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l370_confirmed_unsupported_wrapper_is_not_bypassed_by_nested_openclaw"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L375:C3",
+            "title": "maps the capability boundary %s",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": [
+              "it.each([\n    ['2026.3.7', null, null], ['2026.3.8-beta.1', null, null],\n    ['2026.3.8', 'legacy', false], ['2026.3.8-1', 'legacy', false],\n    ['2026.4.24-beta.1', 'legacy', false], ['2026.4.24', 'legacy', true],\n    ['2026.5.11', 'legacy', true], ['2026.5.12-beta.1', 'legacy', true],\n    ['v2026.5.12', 'modern', true], ['2027.1.1', 'modern', true],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All 10 original version boundaries are asserted. The actual pre-fix native implementation returned None for 4.24-beta.1 and 5.12-beta.1; the frozen EF Node oracle confirms legacy/false and legacy/true. Remove only the extra global prerelease ban, preserving the minimum and each stable feature boundary. Correct the existing contrary native 5.12-beta assertion.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_version_resolver_history_contract_tests.rs",
+                "test": "source_l375_all_ten_original_capability_boundaries_are_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L386:C3",
+            "title": "repairs 3.8, upgrades, downgrades, retries unknown versions and uninstalls while preserving user config",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real managed installation repairs3.8 legacy hooks while preserving captureMessageContent=false, upgrades5.12 flags then downgrades3.8, rejects unknown version without writing, and explicitly uninstalls the verified official plugin entry leaving exactly thirdParty. Later invalid deployment cannot recreate a missing config. Native pre-fix retained its own verified entry contrary to the source assertion; removal now requires official agent/plugin IDs, verified managed resource bytes, exact own reference deletion and no remaining unknown load paths. Five real negative controls preserve modified resources, unreferenced entries, unknown shared paths, unmanaged specs and legacy-only aliases.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l386_actual_managed_install_repairs_upgrade_downgrade_unknown_and_own_uninstall"
+              },
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "native_verified_self_cleanup_retains_unknown_ownership_and_user_resources"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L422:C3",
+            "title": "uses the container config path for both injection and cleanup",
+            "suites": [
+              "OpenClaw read-only version discovery and injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Official OPENCLAW_CONFIG_PATH overrides the custom fallback path for actual deployment, health and removal: profile file entries become empty and unused path never appears. Native pre-fix wrote only fallback path. Added native empty CONFIG hint plus official STATE_DIR control preserves the original truthy-env precedence.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l422_official_container_config_path_controls_both_injection_and_cleanup"
+              },
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "native_empty_config_hint_allows_official_state_directory_precedence"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/intercept-token-reader.test.ts",
+      "source_hash": "c0037d2e4b050e2db0d6913b0f394ab7e2dd87b52e6b8e5abd785a92d2c37615",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84/main533 byte-identical6. 既有Native reader语义已等价，仅补真实FS与实际默认/custom入口回归，不增加生产实现。前5原resolveHome mock边界换显式temp path，末条隔离进程覆盖真实HOME/default/custom path selection。",
+      "cases": [
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "returns empty data when file does not exist",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实缺失文件tokens[]/systemPromptNone。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l27_missing_file_returns_empty_tokens_and_no_system_prompt"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "parses token records correctly",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两行25000/24000/50/10/25050与26000/25000/100/20/26100，sinceNow-1000，稳定顺序/ID/原各字段精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l33_two_token_rows_preserve_original_order_and_exact_counts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "parses system_prompt records",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实system_prompt与token混排，原content精确且tokens1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l52_system_prompt_and_token_are_both_read"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "filters out records older than sinceTs",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原old=Now-10000、recent=Now，sinceNow-5000，只留recent1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l67_since_timestamp_filters_old_record_and_keeps_recent_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L81:C3",
+            "title": "handles malformed lines gracefully",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原invalidJSON+合法good+截断JSON三行，合法token保留1/idgood。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l81_malformed_lines_do_not_hide_the_valid_middle_token"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L96:C3",
+            "title": "reads a custom filename so qodercli and qoderwork intercept files stay separate",
+            "suites": [
+              "intercept-token-reader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实隔离子进程HOME读read_intercept_data默认/自定义filename，默认cli不误读work，work读chatcmpl-qw-1/prompt300；env_clear/syntheticHOME，20s有界CandidateProcess，无主测试进程env突变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/intercept_token_reader_history.rs",
+                "test": "history_l96_real_default_and_custom_filename_are_separate_in_an_isolated_process"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/performance/pii-mask.perf.test.ts",
+      "source_hash": "0c7baced549133fb94a96c4e94593535bd44b3afdc237bf525d92137e0968a62",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84/main533逐字同hash。标准独立Cargo bench目标，用原生优化bench profile执行真实test harness；非ignore/缩输入/阈值条件。原12workloads、5warmup、100/20/50iterations、50/100ms p95和所有精确mask断言保留。Debug139ms与release6.35ms原始数据分开，不以未优化debug推断发布性能退化，不改生产mask。",
+      "cases": [
+        {
+          "source": {
+            "id": "L65:C3",
+            "title": "reports baseline and five-type costs for large and dense text",
+            "suites": [
+              "PII masking performance benchmark"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际cargo bench --offline --locked --bench pii_mask_history -- --test --nocapture，原12负载/轮数/阈值、五PII各250、anchorSecret300、previewPhone/IP、unanchored不误mask全部通过。CPU为实际process user+kernel时间，heapDelta为原生全局allocator live bytes净差（不是Node GC堆）；两项为语言可观测指标适配，未当wallTime或伪造数据。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/performance_native/pii_mask_history.rs",
+                "test": "history_l65_original_twelve_masking_workloads_keep_all_iterations_p95_and_exact_content_assertions"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/agent-event-normalizer.test.mjs",
+      "source_hash": "6b5ea236a472a1951e0e20ab768c4ff27434575da92afdf478100b86a4fe19c0",
+      "coverage": "complete",
+      "rust": [],
+      "note": "11 original AST declarations: 9 real behavior complete, 2 narrowly retired unused internal DTO/factory APIs. The original L21/L174 assertions did NOT pass; this records a v2 internal API migration decision backed by all three pinned source call indexes (0 calls), actual frozen-main Node producer execution, and real Native producer/final Input behavior, not user permission to drop provider/lifecycle behavior. Arbitrary external consumers have not been surveyed. Review evidence: normalizer-unused-helper-call-index.json, normalizer-actual-node-producer-evidence.json, normalizer-two-projection-retirement-review.md, batch04-final-input-evidence.json.",
+      "cases": [
+        {
+          "source": {
+            "id": "L10:C3",
+            "title": "keeps the legacy helper callable during mixed-version hook upgrades (%s)",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": [
+              "it.each([false, 'false'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原false/stringfalse两参数均写真实临时runtime config并读实际Native loader，原record全对象deepEqual及sentinel保留；Native真实finalizer相同非丢内容合同，Node函数export方式由Native函数调用替代，无业务退休。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l10_both_legacy_false_forms_keep_the_full_record_in_native_finalization"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "normalizes Cursor tool calls to canonical dotted keys",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Retire only the unused JS buildCursorHookRecord factory DTO projection (including tool provider=openai without model) as a v2 internal API. ef/f84/2b AST index: 1 definition, 0 production calls each. Actual f84 Node React tool producer omits model/provider; real Native builder→JSONL→public CursorHookInput likewise yields request.model=unknown/provider=unknown while preserving typed tool/session/turn fields. Original helper provider assertion failed and is not claimed equivalent. Real model→provider inference remains covered by L240. External asset consumers not surveyed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Retire only the unused JS buildCursorHookRecord factory DTO projection (including tool provider=openai without model) as a v2 internal API. ef/f84/2b AST index: 1 definition, 0 production calls each. Actual f84 Node React tool producer omits model/provider; real Native builder→JSONL→public CursorHookInput likewise yields request.model=unknown/provider=unknown while preserving typed tool/session/turn fields. Original helper provider assertion failed and is not claimed equivalent. Real model→provider inference remains covered by L240. External asset consumers not surveyed.",
+            "replacement": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l21_current_producer_tool_fields_preserve_content_with_explicit_legacy_provider_gap"
+              },
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l21_real_cursor_input_final_provider_still_documents_unresolved_projection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "ignores legacy content policy before history write",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native tool.result builder在旧captureMessageContent=false真实config上下文保留typed {secret:value}，去agent.raw/tool_output/tool_input/text/prompt，保留原sess-2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l58_tool_result_retains_typed_secret_content_before_history_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C3",
+            "title": "keeps canonical source content when legacy content policy is disabled",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native Qoder canonical builder在旧false真实runtime config上下文保留typed {stdout:secret stdout}，去agent.raw/toolUseResult/message，保留原sess-policy。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/qoder_agent_event_history_tests.rs",
+                "test": "history_l82_legacy_disabled_content_policy_keeps_typed_result_and_drops_raw_aliases"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "normalizes Qoder transcript rows to canonical records",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原row1/response1/u-qoder/qoder-cli/qwen/sess-q/variant/raw_type/content_type/完整assistant hello messages字段逐个相等；原所有source aliases/agent.raw/raw_type旧键均不存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/qoder_agent_event_history_tests.rs",
+                "test": "history_l113_assistant_qoder_rows_preserve_exact_canonical_fields_without_source_aliases"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C3",
+            "title": "returns null for Qoder non-event metadata rows",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原session_meta及progress两种metadata row均真实builder返回None，无虚造模型事件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/qoder_agent_event_history_tests.rs",
+                "test": "history_l155_both_metadata_row_kinds_do_not_create_a_model_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L174:C3",
+            "title": "strips token/cost fields from stop events to avoid duplication with afterAgentResponse",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Retire only the unused internal buildCursorHookRecord standalone stop DTO (Other/status/loop_count projection). All three pinned production call indexes contain 0 calls. Actual f84 Node React producer and Native parent-turn assembler do not emit a separate stop record; both retain typed tool content, response associations and exactly 15809 input/141 output/7424 cache/15950 total tokens once across LLM responses, with no usage on other events. Original stop DTO assertions failed; real lifecycle/usage business behavior is retained. External asset consumers not surveyed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Retire only the unused internal buildCursorHookRecord standalone stop DTO (Other/status/loop_count projection). All three pinned production call indexes contain 0 calls. Actual f84 Node React producer and Native parent-turn assembler do not emit a separate stop record; both retain typed tool content, response associations and exactly 15809 input/141 output/7424 cache/15950 total tokens once across LLM responses, with no usage on other events. Original stop DTO assertions failed; real lifecycle/usage business behavior is retained. External asset consumers not surveyed.",
+            "replacement": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l174_current_producer_omits_legacy_stop_projection_without_duplicate_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L216:C3",
+            "title": "preserves token/cost fields on afterAgentResponse events",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原afterAgentResponse真实LLM response builder保留input15809/output141/cache7424/total15950及event llm.response/hook标签，原数值不改。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l216_after_agent_response_preserves_original_usage_exactly"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L240:C3",
+            "title": "shares provider fallback rules with collector normalization",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "直接调用真实collector provider inference，原claude-sonnet→anthropic/gpt5.5→openai/qwen-max→qwen三参数实际断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/cursor_agent_event_history_tests.rs",
+                "test": "history_l240_provider_fallback_matches_collector_for_the_original_three_models"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L246:C3",
+            "title": "user-type rows produce no model fields (user-hook format)",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原user hello row无request/response model字段，Other/qwen/sess-user精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/qoder_agent_event_history_tests.rs",
+                "test": "history_l246_user_rows_have_no_model_fields_but_keep_qwen_provider_and_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L268:C3",
+            "title": "assistant thinking+text rows preserve response.id from message.id",
+            "suites": [
+              "asset hook agent event normalizer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原thinking与text两row/原message.id msg-shared-id都为llm.response并保留同response.id，不拆响应身份。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/qoder_agent_event_history_tests.rs",
+                "test": "history_l268_thinking_and_text_fragments_keep_one_original_message_response_id"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/shared/decode-payload.test.mjs",
+      "coverage": "complete",
+      "source_hash": "e7e29ee3c9e77aa398724630a41074db04db7b8fba0b3eeb4cbae3fd4bc64331",
+      "rust": [],
+      "note": "Actual old native decoder11PASS/5FAIL -> native repair16PASS; original16 descriptors and all sample/500 corpus assertions preserved. encoding_rs0.8.44 added without changing any existing locked package versions. Windows host double-encoding repair is native; raw clean UTF8 remains untouched off Windows. Actual Windows CI pending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L30:C3",
+            "title": "returns empty string for empty or nullish input",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_empty_nullish_input_maps_to_native_empty_bytes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "strips a UTF-8 BOM regardless of platform",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_bom_is_removed_on_every_platform"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C3",
+            "title": "leaves clean ASCII untouched on every platform",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_clean_ascii_is_unchanged_on_every_platform"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "preserves clean UTF-8 CJK on non-Windows platforms",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_clean_cjk_is_preserved_off_windows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "never rewrites bytes on non-Windows (platform gate short-circuits before gbkEncode)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_gbk_mojibake_is_preserved_off_windows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "repairs UTF-8→GBK double-encoded multi-char CJK on Windows",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_gbk_multichar_and_ascii_mix_are_repaired_on_windows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L81:C3",
+            "title": "leaves clean ASCII untouched on Windows (non-ASCII precheck skips correction)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_windows_ascii_short_circuit_is_unchanged"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "preserves clean UTF-8 CJK on Windows (inflation criterion rejects false correction)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_windows_clean_cjk_inflation_gate_prevents_false_repair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L112:C3",
+            "title": "still repairs genuine multi-char double-encoded CJK on Windows",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_inflation_gate_keeps_all_genuine_multichar_repairs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "repairs CP936 mojibake containing € (single-byte 0x80 mapping)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_cp936_single_byte_euro_does_not_abort_repair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "repairs CP1252 double-encoded payloads on Windows",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_windows_cp1252_payloads_are_repaired"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "does not run the CP1252 repair off Windows",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_cp1252_correction_is_never_run_off_windows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L166:C3",
+            "title": "repairs around a destroyed byte, keeping one U+FFFD marker (CP936)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_cp936_destroyed_bytes_keep_one_replacement_while_other_text_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L184:C3",
+            "title": "keeps the original when the only non-ASCII char was destroyed",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_only_destroyed_non_ascii_is_preserved_as_original"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "preserves clean payloads containing € or a literal U+FFFD on Windows",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_clean_euro_replacement_and_latin_are_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L198:C3",
+            "title": "never corrupts clean CJK payloads (bulk sweep)",
+            "suites": [
+              "decodePayload"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original sample strings and platform gate preserved; CP936/CP1252 fixture bytes generated with the frozen Node TextDecoder algorithm, including real U+FFFD loss. Native decoder is called by the actual Hook common boundary. Empty/nullish untyped buffer inputs become an absent/empty native byte slice; Rust does not expose the former nullable JS helper API. Native code-page repair rejects non-inflating or ASCII-only recoveries and preserves the original500-case clean-CJK corpus. Simulated platform injection matches original process.platform override; actual Windows execution is a separate CI requirement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/payload_decoder.rs",
+                "test": "tests::source_original_five_hundred_case_cjk_sweep_is_never_corrupted"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-ide-lag-repro.test.ts",
+      "source_hash": "2c6afdfed171470f86e48ad7b9aa5d22a69b3523e082776eecb907a3101fd723",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l41_empty_sqlite_leaves_response_id_model_and_usage_uninvented"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l52_partial_sqlite_does_not_misattribute_unmatched_late_response"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l86_aligned_sqlite_supplies_real_response_model_id_and_conserved_usage"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l151_extra_sqlite_rows_aggregate_tail_into_last_real_response"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l171_missing_latest_sqlite_row_leaves_last_response_zero_with_no_id"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l189_short_sqlite_prefix_applies_by_order_without_timestamp_guessing"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l203_ordered_match_ignores_response_drift_with_and_without_hook_match_timestamp"
+        },
+        {
+          "file": "tests/qoder_ide_lag_history.rs",
+          "test": "lag_l214_accurate_current_hook_timestamp_rejects_stale_prior_turn_usage"
+        }
+      ],
+      "note": "ef8953/f84/2b三ref精确AST/hash一致；Linux真实执行，Windows/macOS待实际CI。保留原纯enricher职责，所有原字段断言逐条对应。",
+      "cases": [
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "SQLite not yet persisted (empty rows) → response.id empty + model auto + token empty",
+            "suites": [
+              "qoder IDE enrichment — production lag symptom"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实enrich_ide_turn空SQLite数组后response.id/total_tokens仍None，model仍auto，无伪造usage。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l41_empty_sqlite_leaves_response_id_model_and_usage_uninvented"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "latest response row not yet persisted (partial lag) → symptom on the unmatched response",
+            "suites": [
+              "qoder IDE enrichment — production lag symptom"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两响应相距约44s，真实SQLite只有首row，第二response仍无ID/auto/total0，不错误计费。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l52_partial_sqlite_does_not_misattribute_unmatched_late_response"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "control: SQLite present and aligned → enrichment succeeds (no symptom)",
+            "suites": [
+              "qoder IDE enrichment — production lag symptom"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原34824+1272与cache30000已对齐SQLite fixture，真实enricher给msg-good/ultimate/total36096。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l86_aligned_sqlite_supplies_real_response_model_id_and_conserved_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L151:C3",
+            "title": "JSONL=3 < SQLite=4 → aggregates the tail rows into the last response",
+            "suites": [
+              "qoder IDE enrichment — deterministic usage conservation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3response/4SQLite rows，前三ID为m1,m2,m4，末response聚合220tokens，aggregated_tail/sqlite_row_count2、所有model ultimate精确。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l151_extra_sqlite_rows_aggregate_tail_into_last_real_response"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L171:C3",
+            "title": "JSONL=4 > SQLite=3 (latest row not persisted) → first 3 matched, 4th stays empty",
+            "suites": [
+              "qoder IDE enrichment — deterministic usage conservation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原4response/3SQLite rows，前缀m1/m3正确；第四无ID/model auto/usage0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l171_missing_latest_sqlite_row_leaves_last_response_zero_with_no_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L189:C3",
+            "title": "SQLite fewer than responses → applies the available prefix without timestamp guessing",
+            "suites": [
+              "qoder IDE enrichment — deterministic usage conservation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3response/2SQLite rows即使中间时间洞，结构前缀依次m1/m3/None，不靠近邻时间抢配。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l189_short_sqlite_prefix_applies_by_order_without_timestamp_guessing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L203:C3",
+            "title": "ordered structural matching does not depend on response timestamp drift",
+            "suites": [
+              "qoder IDE enrichment — deterministic usage conservation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原6000/60000ms漂移，具match_ts与无match_ts两fixture都按结构配m1；有match_ts usage110。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l203_ordered_match_ignores_response_drift_with_and_without_hook_match_timestamp"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L214:C3",
+            "title": "does not attach a stale prior-Turn SQLite group when the current hook has an accurate timestamp",
+            "suites": [
+              "qoder IDE enrichment — deterministic usage conservation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原当前准确match_ts晚60000ms、旧row999/99，拒绝旧ID并usage0，隔离跨turn误计费。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_lag_history.rs",
+                "test": "lag_l214_accurate_current_hook_timestamp_rejects_stale_prior_turn_usage"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-ide-sqlite-retry.test.ts",
+      "source_hash": "72526dfafd548a72bb1d02168db7d7132fc4112e0ff1a033fbbf2f44382e85ee",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l121_complete_batch_uses_one_read_without_a_delay"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l130_partial_snapshot_waits_exactly_one_second_and_applies_final_snapshot_once"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l150_empty_snapshot_recovers_qoder_and_idea_identity"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l164_missing_snapshot_retries_once_emits_once_and_consumes_real_hook_checkpoint"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l183_failed_reread_preserves_first_partial_usage_and_idea_identity"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l198_three_sessions_share_one_wait_and_reread_only_gaps_in_source_order"
+        },
+        {
+          "file": "tests/qoder_ide_retry_history.rs",
+          "test": "retry_l214_stop_during_delay_prevents_sqlite_reread"
+        }
+      ],
+      "note": "ef8953/f84/2b三ref精确AST/hash一致；Linux真实执行，Windows/macOS待实际CI。真实Hook文件/StateStore/Native Input/Reader seam；修复每session分别等待与HashMap随机读序，改为源序首读+一次全batch可取消delay+仅gap重读。",
+      "cases": [
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "outputs an already complete batch without waiting or rereading",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实temp Hook JSONL/StateStore/InputBody→reader，完整快照只读1次，实际Tokio paused Instant耗时0，响应ID两条精确。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l121_complete_batch_uses_one_read_without_a_delay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L130:C3",
+            "title": "waits exactly 1 second for a partially visible batch and applies the final snapshot once",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Input首次partial1row；读取后实际timer推进999ms仍只1读，再1ms恰2读且总等1秒；最终逐字段匹配原source+正式enrich_ide_turn有效投影，response tokens110/220。Rust required空默认键原TS对象未存在，因此不作为toMatchObject预期键，额外推导provider可保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l130_partial_snapshot_waits_exactly_one_second_and_applies_final_snapshot_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "recovers an initially empty SQLite snapshot for %s",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": [
+              "it.each(['qoder', 'qoder-idea'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原qoder/qoder-idea参数真实Input空快照→1s后正式reader第二快照，恰2读/message1/usage110，正式IDEA DB路径重标qoder-idea。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l150_empty_snapshot_recovers_qoder_and_idea_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "stops after one retry, emits once, and does not replay the consumed Hook batch",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实HostedInput start/collector订阅，首次空reader时尚未输出；1s只retry1次，实际恰1batch/2response；同Input继续collect与10s timer后不重读/不再输出，真实checkpoint消费。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l164_missing_snapshot_retries_once_emits_once_and_consumes_real_hook_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "keeps the first partial snapshot and its IDEA identity when the retry cannot read the DB",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Input首次1row/重试EMPTY，保留首usage110/message1及两响应IDEA身份，第二response仍无ID。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l183_failed_reread_preserves_first_partial_usage_and_idea_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L198:C3",
+            "title": "shares one wait across sessions and only rereads sessions with a gap",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实三session Hook顺序a/b/ready；全部首读先于共享delay，paused clock合计只1s；最终calls顺序/次数[(a,2),(b,2),(ready,1)]且每个response有真实ID，未完整session不再读。原vi timer对象身份改为真实延迟/读次数/输出断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l198_three_sessions_share_one_wait_and_reread_only_gaps_in_source_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L214:C3",
+            "title": "skips the reread when stopped during the delay",
+            "suites": [
+              "QoderTraceInput one delayed SQLite retry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Input处于1s等待时调用正式stop，再推进时钟并等collect结束，reader总次数仍1，不读第二快照。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_ide_retry_history.rs",
+                "test": "retry_l214_stop_during_delay_prevents_sqlite_reread"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-client-request-id.test.mjs",
+      "source_hash": "17dfb8d9b0de04b104e9cafd07ed706d9e6cdc60956fd8548ab3a0adf7f2ae90",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l38_closing_stream_usage_preserves_client_request_id_separate_from_provider_id"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l64_same_row_provider_and_client_ids_remain_distinct"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l80_no_usage_does_not_invent_client_id"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l94_missing_empty_or_numeric_client_request_id_is_not_exported"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l114_each_tool_step_keeps_its_own_cli_request_id"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "client_l157_client_id_survives_actual_log_projection_while_scoped_match_timestamp_is_removed"
+        }
+      ],
+      "note": "ef8953/f84/2b源码hash和AST相同；真实兼容入口所用private split/builder与正式日志projection，未恢复Node runtime，无retired/预算放宽；Linux实跑，Windows/macOS待CI。",
+      "cases": [
+        {
+          "source": {
+            "id": "L38:C3",
+            "title": "lifts usage.request_id off the row that closes the response",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原stream首row provider responseID、末row usage.request_id分离保留，精确两个不同ID。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l38_closing_stream_usage_preserves_client_request_id_separate_from_provider_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "reads the id when it shares a row with message.id",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同一assistant row同时有provider/client ID，正式builder精确lift client UUID。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l64_same_row_provider_and_client_ids_remain_distinct"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C3",
+            "title": "leaves the field absent when the transcript has no usage",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无usage时clientID字段不存在，不产生默认值。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l80_no_usage_does_not_invent_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "ignores a usage object without a usable request_id",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "三原usage变体missing request_id/空串/数值42，clientID均不导出。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l94_missing_empty_or_numeric_client_request_id_is_not_exported"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L114:C3",
+            "title": "gives each step of a turn its own client request id",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两tool步骤与tool_result实际Native边界构建，两个response clientID依次step1/step2；Native以content工具边界取代JS外传progress参数，断言与物理rows同源。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l114_each_tool_step_keeps_its_own_cli_request_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "spells the field so it survives flusher serialisation",
+            "suites": [
+              "qoder hook agent.client_request_id"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "先确认同一真实response具有数字agent.qoder.match_ts，再serde到正式ActivityEntry/production project_log_entry(drop scoped=true)，clientID精确保留、scoped match_ts消失。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "client_l157_client_id_survives_actual_log_projection_while_scoped_match_timestamp_is_removed"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-control-message-turns.test.mjs",
+      "source_hash": "89e32355bd6c61e86d47e5786684a5534a6b6180538f6c87dbb99332f5d02474",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l64_trio_does_not_open_a_turn"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l75_trailing_caveat_does_not_leak_into_other_or_request_parts"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l104_control_only_segment_has_no_turn"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l109_meta_image_marker_remains_on_prompt"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l120_all_three_clipboard_meta_parts_survive_other_and_request"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l150_interrupted_real_prompt_still_has_one_turn"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l159_tool_result_stays_with_prompt"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l169_real_prompt_with_control_like_xml_suffix_is_retained"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l180_prompt_without_prompt_id_and_xml_suffix_is_retained"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l188_prose_wrapping_complete_envelope_is_retained"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l197_unclosed_control_tag_is_prose"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l204_mismatched_closing_tag_is_prose"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l210_single_command_name_envelope_is_a_real_prompt"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l218_array_content_with_first_envelope_and_more_is_real_input"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l229_non_cli_control_shape_is_retained"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l238_forty_adjacent_envelopes_with_suffix_finish_below_200ms"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l254_mid_turn_trio_never_merges_into_cli_input_parts"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "control_l281_cn_sdk_uses_same_filter_and_preserves_agent_type"
+        }
+      ],
+      "note": "ef8953/f84/2b源码hash和AST相同；真实兼容入口所用private split/builder与正式日志projection，未恢复Node runtime，无retired/预算放宽；Linux实跑，Windows/macOS待CI。",
+      "cases": [
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "drops the whole /model control trio instead of opening a turn for it",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原CLI完整caveat/command/stdout三行先于真实prompt/assistant，split精确仅保留原二行单turn。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l64_trio_does_not_open_a_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "keeps control text out of a preceding real turn input",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实turn尾caveat不进入other/request parts，两者精确仅您好，逐record无控制文字。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l75_trailing_caveat_does_not_leak_into_other_or_request_parts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "emits no records at all when a segment holds only control rows",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "全control三行实际split为零turn，不用空mock输出。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l104_control_only_segment_has_no_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L109:C3",
+            "title": "keeps an isMeta image marker on its prompt",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "isMeta图像marker原Value保留在同一turn。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l109_meta_image_marker_remains_on_prompt"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L120:C3",
+            "title": "keeps every clipboard text block from one pasted-image meta row",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3clipboard文本块与prompt全量保序，other与request parts精确4项。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l120_all_three_clipboard_meta_parts_survive_other_and_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "still yields one turn for a real prompt that got no model activity",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无model活动的真实prompt保持单turn/原Value。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l150_interrupted_real_prompt_still_has_one_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L159:C3",
+            "title": "leaves tool_result rows attached to their prompt",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "tool_result仍在原prompt+assistant的同一turn，完整Value精确。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l159_tool_result_stays_with_prompt"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L169:C3",
+            "title": "keeps a real prompt that starts with control-like XML",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "具promptId且控制样XML尾有真实提问，保留完整prompt。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l169_real_prompt_with_control_like_xml_suffix_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L180:C3",
+            "title": "keeps a promptId-less prompt that starts with control-like XML",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无promptId的控制样XML尾有真实提问，保留完整prompt。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l180_prompt_without_prompt_id_and_xml_suffix_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L188:C3",
+            "title": "keeps a prompt that wraps a complete envelope in its own words",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "人类语句包裹完整控制envelope，保留完整prompt。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l188_prose_wrapping_complete_envelope_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L197:C3",
+            "title": "keeps a prompt whose control tag is never closed",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "控制tag不闭合属于真实prose，完整保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l197_unclosed_control_tag_is_prose"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C3",
+            "title": "keeps a prompt whose closing tag does not match its opener",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "开闭tag不匹配属于prose，完整保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l204_mismatched_closing_tag_is_prose"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L210:C3",
+            "title": "keeps a prompt that is exactly one command-name envelope",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "单command-name envelope不是CLI真正控制trio，完整保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l210_single_command_name_envelope_is_a_real_prompt"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L218:C3",
+            "title": "keeps a row whose first content block is an envelope but which carries more",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "isMeta数组content首block虽envelope但另有提问，原完整Value仍是prompt。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l218_array_content_with_first_envelope_and_more_is_real_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L229:C3",
+            "title": "keeps a control-shaped row that did not come from the CLI",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "非CLI control-shaped isMeta行不误删，完整Value保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l229_non_cli_control_shape_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "classifies adjacent envelopes with a trailing suffix without stalling",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原40相邻envelope+后缀真实提问，split保留完整Value且实际耗时<200ms，未改预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l238_forty_adjacent_envelopes_with_suffix_finish_below_200ms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L254:C3",
+            "title": "keeps a mid-turn control trio out of the merged CLI input parts",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实prompt中间control trio被过滤，other agent=qoder-cli且other/request parts只杭州天气。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l254_mid_turn_trio_never_merges_into_cli_input_parts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L281:C3",
+            "title": "applies the shared CLI control-row filtering to QoderCN SDK transcripts",
+            "suites": [
+              "qoder slash-command control rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同一共享过滤在qoder-cn SDK，单turn，正式builder每record agent=qoder-cn且逐parts无command-message/name/local-command。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "control_l281_cn_sdk_uses_same_filter_and_preserves_agent_type"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-legacy-duplicate-other.test.mjs",
+      "source_hash": "7fd8c1b87344616373897936fcca751c6a3db34b7ac1bc04ba7a94299d1fb9e6",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "legacy_l64_prompt_only_uses_empty_boundary_path_and_emits_one_other"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "legacy_l75_interrupted_tool_result_survives_with_exactly_one_other"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "legacy_l84_surviving_other_has_one_event_id"
+        },
+        {
+          "file": "src/hook_process/qoder_compat_contract_tests.rs",
+          "test": "legacy_l93_normal_assistant_turn_remains_on_nonlegacy_path"
+        }
+      ],
+      "note": "ef8953/f84/2b源码hash和AST相同；真实兼容入口所用private split/builder与正式日志projection，未恢复Node runtime，无retired/预算放宽；Linux实跑，Windows/macOS待CI。",
+      "cases": [
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "emits exactly one other for a prompt-only turn",
+            "suites": [
+              "qoder legacy fallback does not duplicate the turn entry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "先断言真实build_llm_boundaries为空保证走fallback；实际records名字精确仅other，原中文prompt完整保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "legacy_l64_prompt_only_uses_empty_boundary_path_and_emits_one_other"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "keeps tool results on an interrupted turn, still with one other",
+            "suites": [
+              "qoder legacy fallback does not duplicate the turn entry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "先断言真实boundary为空；实际records名字精确other/tool.result且工具ID=toolu_1，不丢中断结果。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "legacy_l75_interrupted_tool_result_survives_with_exactly_one_other"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "gives the surviving other a single event.id",
+            "suites": [
+              "qoder legacy fallback does not duplicate the turn entry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实prompt-only builder恰一个other且eventID集合恰1，避免重复entry。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "legacy_l84_surviving_other_has_one_event_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L93:C3",
+            "title": "leaves a normal turn with an assistant reply untouched",
+            "suites": [
+              "qoder legacy fallback does not duplicate the turn entry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "有assistant时真实boundary非空，不走legacy，正常other恰1且有llm.response。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_compat_contract_tests.rs",
+                "test": "legacy_l93_normal_assistant_turn_remains_on_nonlegacy_path"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

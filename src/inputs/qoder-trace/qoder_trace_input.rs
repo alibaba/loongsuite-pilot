@@ -391,7 +391,7 @@ impl InputBody for QoderTraceBody {
         }
         let groups = group_by_turn(&raw);
         let mut intercept = None;
-        let mut ide_sessions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut ide_sessions: IndexMap<String, Vec<usize>> = IndexMap::new();
         let mut cli_fallback: HashMap<String, Vec<Vec<usize>>> = HashMap::new();
         for indexes in groups.values() {
             let variant = infer_variant(&raw, indexes);
@@ -449,21 +449,37 @@ impl InputBody for QoderTraceBody {
                 }
             }
         }
-        for indexes in ide_sessions.values() {
-            let session = raw[indexes[0]].session_id.clone();
-            let mut result = self.readers.read_ide_tokens(&session).await;
+        // Read every session's initial snapshot before spending the one shared
+        // delay. A lagging session must not serialize waits for the rest.
+        let mut ide_batches = Vec::with_capacity(ide_sessions.len());
+        for (session, indexes) in &ide_sessions {
+            let result = self.readers.read_ide_tokens(session).await;
             let mut probe: Vec<AgentActivityEntry> =
                 indexes.iter().map(|index| raw[*index].clone()).collect();
             enrich_ide_turn(&mut probe, &result.rows);
-            if needs_ide_retry(&probe) && !self.stopped.load(Ordering::SeqCst) {
-                tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
-                if !self.stopped.load(Ordering::SeqCst) {
-                    let retry = self.readers.read_ide_tokens(&session).await;
-                    if retry.rows.len() >= result.rows.len() {
-                        result = retry;
-                        probe = indexes.iter().map(|index| raw[*index].clone()).collect();
-                        enrich_ide_turn(&mut probe, &result.rows);
-                    }
+            let retry = needs_ide_retry(&probe);
+            ide_batches.push((session, indexes, result, probe, retry));
+        }
+        if ide_batches.iter().any(|(_, _, _, _, retry)| *retry)
+            && !self.stopped.load(Ordering::SeqCst)
+        {
+            let stopped = self.stop_notify.notified();
+            tokio::pin!(stopped);
+            stopped.as_mut().enable();
+            if !self.stopped.load(Ordering::SeqCst) {
+                tokio::select! {
+                    _ = &mut stopped => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(1_000)) => {},
+                }
+            }
+        }
+        for (session, indexes, mut result, mut probe, retry_needed) in ide_batches {
+            if retry_needed && !self.stopped.load(Ordering::SeqCst) {
+                let retry = self.readers.read_ide_tokens(session).await;
+                if retry.rows.len() >= result.rows.len() {
+                    result = retry;
+                    probe = indexes.iter().map(|index| raw[*index].clone()).collect();
+                    enrich_ide_turn(&mut probe, &result.rows);
                 }
             }
             let relabel = indexes

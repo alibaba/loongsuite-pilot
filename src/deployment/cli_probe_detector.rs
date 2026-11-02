@@ -29,10 +29,82 @@ pub struct CliProbeOptions {
     pub dsh_runtime_locator: Option<DshRuntimeLocator>,
 }
 
+#[async_trait::async_trait]
+trait GenericProbeDetector: Send + Sync {
+    async fn detect(&self, detection: &crate::types::AgentDetectionConfig) -> Result<bool, String>;
+}
+struct NativeGenericProbeDetector;
+#[async_trait::async_trait]
+impl GenericProbeDetector for NativeGenericProbeDetector {
+    async fn detect(&self, detection: &crate::types::AgentDetectionConfig) -> Result<bool, String> {
+        // Preserve the original paths-first and commands-in-order short circuit.
+        let paths_only = crate::types::AgentDetectionConfig {
+            paths: detection.paths.clone(),
+            commands: Vec::new(),
+        };
+        if detect_agent(&paths_only).await {
+            return Ok(true);
+        }
+        for command in &detection.commands {
+            // execFile rejects NUL argv before launching which/where. It is an
+            // error only if collection actually reaches this command.
+            if command.contains('\0') {
+                return Err(
+                    "generic detector failed: detection command contains an embedded NUL".into(),
+                );
+            }
+            if command_exists(command).await {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Fallible native equivalent of the original async/throwing probe API.
+/// Actual CLI probes use this path so generic errors are not silently misses.
+pub async fn try_probe_agent_definition(
+    def: &AgentDefinition,
+    options: &CliProbeOptions,
+) -> Result<CliProbeResult, String> {
+    probe_agent_definition_with_detector(def, options, &NativeGenericProbeDetector).await
+}
+
+/// Preserve the existing nonfallible embedding API; the public CLI uses try_*.
 pub async fn probe_agent_definition(
     def: &AgentDefinition,
     options: &CliProbeOptions,
 ) -> CliProbeResult {
+    try_probe_agent_definition(def, options)
+        .await
+        .unwrap_or_else(|_| CliProbeResult {
+            id: def.id.clone(),
+            display_name: def.display_name.clone(),
+            detected: false,
+            reason: String::new(),
+            openclaw_cli_path: None,
+        })
+}
+
+pub async fn try_probe_agent_definitions(
+    definitions: &[AgentDefinition],
+    options: &CliProbeOptions,
+) -> Result<Vec<CliProbeResult>, String> {
+    let mut results = Vec::new();
+    for def in definitions {
+        if def.detection.paths.is_empty() && def.detection.commands.is_empty() {
+            continue;
+        }
+        results.push(try_probe_agent_definition(def, options).await?);
+    }
+    Ok(results)
+}
+
+async fn probe_agent_definition_with_detector(
+    def: &AgentDefinition,
+    options: &CliProbeOptions,
+    detector: &dyn GenericProbeDetector,
+) -> Result<CliProbeResult, String> {
     let mut result = CliProbeResult {
         id: def.id.clone(),
         display_name: def.display_name.clone(),
@@ -41,7 +113,7 @@ pub async fn probe_agent_definition(
         openclaw_cli_path: None,
     };
     if options.list_only {
-        return result;
+        return Ok(result);
     }
     if def.id == "openclaw" {
         let mut env = HashMap::new();
@@ -87,13 +159,13 @@ pub async fn probe_agent_definition(
         } else {
             openclaw_binding_problem(host.as_ref(), detail.as_deref())
         };
-        return result;
+        return Ok(result);
     }
     if def.deploy_mode == crate::types::DeployMode::DshYamlPatch {
         let locator = options.dsh_runtime_locator.as_ref();
         let owned = DshRuntimeLocator::new();
         let locator = locator.unwrap_or(&owned);
-        return match locator.locate(def, None).await {
+        return Ok(match locator.locate(def, None).await {
             Ok(Some(target)) => {
                 result.detected = true;
                 result.reason = if target.source
@@ -106,14 +178,14 @@ pub async fn probe_agent_definition(
                 result
             }
             _ => result,
-        };
+        });
     }
-    let detected = detect_agent(&def.detection).await;
+    let detected = detector.detect(&def.detection).await?;
     result.detected = detected;
     if detected {
         result.reason = find_detection_reason(def).await;
     }
-    result
+    Ok(result)
 }
 
 pub async fn probe_agent_definitions(
@@ -193,3 +265,7 @@ mod tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "cli_probe_detector_history_contract_tests.rs"]
+mod history_contract_tests;

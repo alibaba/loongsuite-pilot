@@ -159,14 +159,14 @@ where
             .into_owned(),
     ] {
         if package_dir != cwd {
-            match tokio::fs::metadata(&package_dir).await {
+            match resolver_metadata(Path::new(&package_dir)).await {
                 Ok(meta) if meta.is_dir() => {}
                 Ok(_) => continue,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
                     return problem(format!(
                         "OpenClaw child directory lookup failed ({}): {}",
-                        err,
+                        describe_fs_error(&err),
                         serde_json::to_string(&package_dir).unwrap_or_default()
                     ));
                 }
@@ -264,38 +264,65 @@ where
             }
         }
     }
-    let path_var = env.get("PATH").cloned().unwrap_or_default();
-    for directory in path_var
-        .split(':')
+    let env_value = |key: &str| {
+        env.get(key).or_else(|| {
+            cfg!(windows)
+                .then(|| {
+                    env.iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                        .map(|(_, value)| value)
+                })
+                .flatten()
+        })
+    };
+    let path_var = env_value("PATH").cloned().unwrap_or_default();
+    let extensions = if cfg!(windows) {
+        std::iter::once(String::new())
+            .chain(
+                env_value("PATHEXT")
+                    .filter(|value| !value.is_empty())
+                    .map(String::as_str)
+                    .unwrap_or(".COM;.EXE;.BAT;.CMD")
+                    .split(';')
+                    .map(str::to_lowercase),
+            )
+            .collect::<Vec<_>>()
+    } else {
+        vec![String::new()]
+    };
+    'path_search: for directory in path_var
+        .split(if cfg!(windows) { ';' } else { ':' })
         .filter(|item| !item.is_empty())
         .take(128)
     {
         if !is_absolute(directory) {
             continue;
         }
-        let candidate = Path::new(directory).join("openclaw");
-        if tokio::fs::metadata(&candidate)
-            .await
-            .ok()
-            .is_some_and(|meta| meta.is_file())
-        {
-            #[cfg(unix)]
+        for extension in &extensions {
+            let candidate = Path::new(directory).join(format!("openclaw{extension}"));
+            if tokio::fs::metadata(&candidate)
+                .await
+                .ok()
+                .is_some_and(|meta| meta.is_file())
             {
-                use std::os::unix::fs::PermissionsExt;
-                if std::fs::metadata(&candidate)
-                    .map(|meta| meta.permissions().mode() & 0o111 != 0)
-                    .unwrap_or(false)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if std::fs::metadata(&candidate)
+                        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+                        .unwrap_or(false)
+                    {
+                        let selected = from_entry(&candidate.to_string_lossy(), env).await?;
+                        candidates.push(selected);
+                        break 'path_search;
+                    }
+                }
+                #[cfg(not(unix))]
                 {
                     let selected = from_entry(&candidate.to_string_lossy(), env).await?;
                     candidates.push(selected);
-                    break;
+                    break 'path_search;
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                let selected = from_entry(&candidate.to_string_lossy(), env).await?;
-                candidates.push(selected);
-                break;
             }
         }
     }
@@ -336,8 +363,45 @@ where
     Some(host)
 }
 
+async fn resolver_metadata(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    #[cfg(test)]
+    resolver_io_test_hooks::before("stat", path)?;
+    tokio::fs::metadata(path).await
+}
+async fn resolver_read(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    resolver_io_test_hooks::before("read", path)?;
+    tokio::fs::read(path).await
+}
+fn describe_fs_error(error: &std::io::Error) -> String {
+    #[cfg(windows)]
+    let symbol = match error.raw_os_error() {
+        Some(5) => Some("EACCES"),
+        Some(1314) => Some("EPERM"),
+        Some(1921) => Some("ELOOP"),
+        _ => None,
+    };
+    #[cfg(target_os = "macos")]
+    let symbol = match error.raw_os_error() {
+        Some(13) => Some("EACCES"),
+        Some(1) => Some("EPERM"),
+        Some(62) => Some("ELOOP"),
+        _ => None,
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let symbol = match error.raw_os_error() {
+        Some(13) => Some("EACCES"),
+        Some(1) => Some("EPERM"),
+        Some(40) => Some("ELOOP"),
+        _ => None,
+    };
+    symbol
+        .map(|code| format!("{code}: {error}"))
+        .unwrap_or_else(|| error.to_string())
+}
+
 async fn confirmed_missing(entry: &str) -> bool {
-    match tokio::fs::metadata(entry).await {
+    match resolver_metadata(Path::new(entry)).await {
         Ok(_) => false,
         Err(err) => err.kind() == std::io::ErrorKind::NotFound,
     }
@@ -367,7 +431,7 @@ async fn read_json(file: &str, limit: u64) -> PackageRead {
 }
 
 async fn read_package(file: &str) -> PackageRead {
-    let bytes = match tokio::fs::read(file).await {
+    let bytes = match resolver_read(Path::new(file)).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return PackageRead::Missing,
         Err(_) => return PackageRead::Unreadable,
@@ -471,3 +535,15 @@ fn is_fs_root(dir: &str) -> bool {
 fn _resolve_hint(cwd: &str, value: &str) -> String {
     node_resolve_from(cwd, value)
 }
+
+#[cfg(test)]
+#[path = "openclaw_version_resolver_history_contract_tests.rs"]
+mod history_contract_tests;
+
+#[cfg(test)]
+#[path = "openclaw_resolver_io_test_hooks.rs"]
+mod resolver_io_test_hooks;
+
+#[cfg(test)]
+#[path = "openclaw_strategy_history_contract_tests.rs"]
+mod strategy_history_contract_tests;

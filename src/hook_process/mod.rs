@@ -12,6 +12,7 @@ mod copilot;
 mod cursor;
 mod grok_build;
 mod kiro_cli;
+mod payload_decoder;
 mod qoder;
 mod qoder_wakeup;
 mod qoder_work;

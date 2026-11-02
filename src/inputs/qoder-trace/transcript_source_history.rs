@@ -576,3 +576,15 @@ async fn cli_identity_real_native_status_cache_and_context_negative_controls() {
         .all(|r| r.get("user.name").is_none()));
     assert_eq!(std::fs::read(&marker).unwrap(), b"x");
 }
+
+#[path = "transcript_source_tail_resource_history.rs"]
+mod tail_resource_contracts;
+
+#[path = "transcript_source_collector_remaining_history.rs"]
+mod collector_remaining_contracts;
+
+#[path = "transcript_source_migration_history.rs"]
+mod migration_contracts;
+
+#[path = "transcript_source_recovery_history.rs"]
+mod review_recovery_contracts;

@@ -57,7 +57,12 @@ impl DshRuntimeLocator {
         }
         Self {
             proc_root: "/proc".into(),
-            platform: if cfg!(windows) { "win32" } else { "linux" }.into(),
+            platform: match std::env::consts::OS {
+                "windows" => "win32",
+                "macos" => "darwin",
+                other => other,
+            }
+            .into(),
             env,
             cwd: std::env::current_dir()
                 .map(|path| path.to_string_lossy().into_owned())
@@ -403,3 +408,7 @@ mod tests {
         assert!(!is_dsh_command(b"node\0server.js\0"));
     }
 }
+
+#[cfg(test)]
+#[path = "dsh_runtime_locator_history_contract_tests.rs"]
+mod history_contract_tests;

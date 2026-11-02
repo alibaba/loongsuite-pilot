@@ -1,0 +1,59 @@
+[
+  {
+    "ref": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+    "filesScanned": 320,
+    "definitions": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 318,
+        "column": 1
+      }
+    ],
+    "callSites": [],
+    "allNameReferences": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 318,
+        "column": 17
+      }
+    ]
+  },
+  {
+    "ref": "f84e3881958b39c5c7cbe8a035f50ccd80a25783",
+    "filesScanned": 352,
+    "definitions": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 359,
+        "column": 1
+      }
+    ],
+    "callSites": [],
+    "allNameReferences": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 359,
+        "column": 17
+      }
+    ]
+  },
+  {
+    "ref": "2b24a8bfae325307159a6818db289caf6d0bcf4e",
+    "filesScanned": 358,
+    "definitions": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 359,
+        "column": 1
+      }
+    ],
+    "callSites": [],
+    "allNameReferences": [
+      {
+        "path": "assets/hooks/agent-event-normalizer.mjs",
+        "line": 359,
+        "column": 17
+      }
+    ]
+  }
+]

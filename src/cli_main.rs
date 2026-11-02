@@ -594,7 +594,14 @@ async fn run_probe(args: &[String]) -> i32 {
         installer,
         dsh_runtime_locator: None,
     };
-    let results = crate::deployment::probe_agent_definitions(&definitions, &options).await;
+    let results = match crate::deployment::try_probe_agent_definitions(&definitions, &options).await
+    {
+        Ok(results) => results,
+        Err(error) => {
+            eprintln!("loongsuite-pilot probe: {error}");
+            return 1;
+        }
+    };
     let body = match serde_json::to_string(&results) {
         Ok(body) => body,
         Err(_) => {

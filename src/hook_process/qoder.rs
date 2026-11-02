@@ -4998,6 +4998,10 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "qoder_compat_contract_tests.rs"]
+mod compat_contract_tests;
+
+#[cfg(test)]
 #[path = "qoder_identity_tests.rs"]
 mod identity_tests;
 
@@ -5016,3 +5020,7 @@ mod retry_window_history_tests;
 #[cfg(test)]
 #[path = "qoder_collected_typed_arguments_tests.rs"]
 mod collected_typed_arguments_tests;
+
+#[cfg(test)]
+#[path = "../normalization/qoder_agent_event_history_tests.rs"]
+mod qoder_agent_event_history_tests;

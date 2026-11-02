@@ -46,7 +46,8 @@ mod worker_process;
 
 pub use agent_def_loader::{AgentDefLoader, AgentDefLoaderOptions};
 pub use cli_probe_detector::{
-    probe_agent_definition, probe_agent_definitions, CliProbeOptions, CliProbeResult,
+    probe_agent_definition, probe_agent_definitions, try_probe_agent_definition,
+    try_probe_agent_definitions, CliProbeOptions, CliProbeResult,
 };
 pub use codex_trust_writer::{
     compute_hook_trust_hash, compute_installed_hook_trust_hash, hook_state_key,

@@ -143,7 +143,10 @@ async fn actual_native_hook_notice_reaches_both_real_inputs_without_legacy_jsonl
                 .unwrap();
         assert_eq!(notice["observedSize"], content.len());
         assert_eq!(notice["agentId"], agent);
-        assert_eq!(notice["transcriptPath"], json!(file));
+        assert_eq!(
+            std::fs::canonicalize(notice["transcriptPath"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
         assert!(!notice.to_string().contains("synthetic answer"));
         let store = Arc::new(StateStore::new(root.join("input-state.json")));
         let entries = Arc::new(Mutex::new(Vec::new()));

@@ -46,18 +46,9 @@ pub fn open_claw_capabilities(version: &str) -> Option<OpenClawCapabilities> {
     if !at_least(version, MIN_OPENCLAW_VERSION) {
         return None;
     }
-    // Non-numeric prereleases (for example `-beta`) are not a supported build,
-    // even when the numeric core is newer than the floor.
-    if let Some(pre) = version
-        .trim()
-        .trim_start_matches('v')
-        .split_once('-')
-        .map(|(_, rest)| rest.split('+').next().unwrap_or(rest))
-    {
-        if !regex::Regex::new(r"^\d+(?:\.\d+)*$").unwrap().is_match(pre) {
-            return None;
-        }
-    }
+    // The minimum-version comparison admits newer-core prereleases. Each
+    // feature gate still compares its own stable boundary, so e.g. a 5.12
+    // preview keeps the legacy adapter while retaining 4.24 conversation access.
     Some(OpenClawCapabilities {
         version: version.trim().to_string(),
         adapter: if at_least(version, "2026.5.12") {
@@ -85,6 +76,8 @@ mod tests {
         assert_eq!(mid.adapter, "legacy");
         let modern = open_claw_capabilities("v2026.5.12-1").unwrap();
         assert_eq!(modern.adapter, "modern");
-        assert!(open_claw_capabilities("2026.5.12-beta").is_none());
+        let preview = open_claw_capabilities("2026.5.12-beta").unwrap();
+        assert_eq!(preview.adapter, "legacy");
+        assert!(preview.conversation_access);
     }
 }

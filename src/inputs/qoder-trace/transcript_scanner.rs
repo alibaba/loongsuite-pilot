@@ -20,7 +20,33 @@ pub struct FileVersion {
     pub modified: u128,
     pub changed: (i64, i64),
 }
+#[cfg(test)]
+type BeforeOpen = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+thread_local! {static OPEN_FAULT:std::cell::RefCell<Option<BeforeOpen>>=const{std::cell::RefCell::new(None)};}
+#[cfg(test)]
+pub(super) struct OpenFaultGuard;
+#[cfg(test)]
+impl Drop for OpenFaultGuard {
+    fn drop(&mut self) {
+        OPEN_FAULT.with(|f| *f.borrow_mut() = None)
+    }
+}
+#[cfg(test)]
+pub(super) fn inject_open_fault(f: impl FnMut(&Path) + 'static) -> OpenFaultGuard {
+    OPEN_FAULT.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(f));
+    });
+    OpenFaultGuard
+}
 pub fn open_regular(path: &Path) -> std::io::Result<File> {
+    #[cfg(test)]
+    OPEN_FAULT.with(|fault| {
+        if let Some(hook) = fault.borrow_mut().as_mut() {
+            hook(path)
+        }
+    });
     let mut o = OpenOptions::new();
     o.read(true);
     #[cfg(unix)]

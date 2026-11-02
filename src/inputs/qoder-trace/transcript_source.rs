@@ -25,6 +25,8 @@ use std::sync::{
 };
 #[path = "transcript_process_birth.rs"]
 mod process_birth;
+#[cfg(test)]
+type OwnerPidProbe = Arc<dyn Fn(u32) -> Result<(), i32> + Send + Sync>;
 const MAX_SOURCES: usize = 64;
 const MAX_CONTEXTS: usize = 256;
 const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
@@ -90,6 +92,8 @@ struct Collector {
     cli_identity_pending: HashSet<String>,
     #[cfg(test)]
     identity_env: Option<std::collections::HashMap<String, String>>,
+    #[cfg(test)]
+    owner_pid_probe: Option<OwnerPidProbe>,
     resolver: Arc<dyn QoderPromptOwnershipResolver>,
     last: Option<(Value, bool, Result<TranscriptBatch, String>)>,
     scan_bytes: usize,
@@ -135,6 +139,26 @@ fn now() -> i64 {
 fn mtime(v: &FileVersion) -> f64 {
     v.modified as f64 / 1_000_000.0
 }
+#[cfg(test)]
+type AfterMetadataRead = Box<dyn FnMut(&Path)>;
+#[cfg(test)]
+thread_local! {static METADATA_READ_FAULT:std::cell::RefCell<Option<AfterMetadataRead>>=const{std::cell::RefCell::new(None)};}
+#[cfg(test)]
+struct MetadataReadFaultGuard;
+#[cfg(test)]
+impl Drop for MetadataReadFaultGuard {
+    fn drop(&mut self) {
+        METADATA_READ_FAULT.with(|f| *f.borrow_mut() = None)
+    }
+}
+#[cfg(test)]
+fn inject_metadata_read_fault(f: impl FnMut(&Path) + 'static) -> MetadataReadFaultGuard {
+    METADATA_READ_FAULT.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(f));
+    });
+    MetadataReadFaultGuard
+}
 fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
     let mut f = scanner::open_regular(path)?;
     let version = scanner::version(&f)?;
@@ -146,7 +170,14 @@ fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
     if bytes.len() > limit {
         anyhow::bail!("Qoder metadata grew past limit")
     };
-    Ok((serde_json::from_slice(&bytes)?, version))
+    let value = serde_json::from_slice(&bytes)?;
+    #[cfg(test)]
+    METADATA_READ_FAULT.with(|fault| {
+        if let Some(hook) = fault.borrow_mut().as_mut() {
+            hook(path)
+        }
+    });
+    Ok((value, version))
 }
 fn valid_source(v: &Value, agent: &str, key: &str) -> bool {
     v["schema"] == 1
@@ -226,6 +257,8 @@ impl QoderTranscriptSource {
                 cli_identity_pending: HashSet::new(),
                 #[cfg(test)]
                 identity_env: None,
+                #[cfg(test)]
+                owner_pid_probe: None,
                 resolver,
                 last: None,
                 scan_bytes: scanner::SCAN_BYTES,
@@ -660,7 +693,15 @@ impl Collector {
                 if stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                self.report(&key, &error.to_string());
+                let reason = if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                    e.kind() == std::io::ErrorKind::InvalidInput
+                        && e.to_string() == "JSONL source is not a regular file"
+                }) {
+                    "not-regular-file".to_owned()
+                } else {
+                    error.to_string()
+                };
+                self.report(&key, &reason);
             }
         }
         if !self.cli_identity_pending.is_empty() && !stopped.load(Ordering::SeqCst) {
@@ -1648,6 +1689,15 @@ stopped,
         }
         map.insert(key.to_owned(), self.inspection_sequence);
     }
+    fn owner_process_alive(&self, pid: u32) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = &self.owner_pid_probe {
+            // The same production normalization used by the native Unix and
+            // Windows zero-signal probes; only the OS result is fault-injected.
+            return crate::utils::pid_utils::process_alive_from_kill(probe(pid));
+        }
+        crate::utils::is_process_alive(pid)
+    }
     fn legacy_worker_alive(&mut self, transcript: &Path, key: &str) -> anyhow::Result<bool> {
         let lock = qoder_legacy_retry_lock_path(&self.data_dir, transcript);
         let (value, stat) = match snapshot(&lock, MAX_NOTICES) {
@@ -1670,7 +1720,7 @@ stopped,
             self.owner_pending.shift_remove(key);
             return Ok(self.time() as f64 - mtime(&stat) < 1000.0);
         };
-        if !crate::utils::is_process_alive(pid as u32) {
+        if !self.owner_process_alive(pid as u32) {
             self.owner_pending.shift_remove(key);
             return Ok(false);
         }

@@ -83,34 +83,28 @@ impl PluginInjectStrategy {
         config: &PluginInjectConfig,
         create_if_missing: bool,
     ) -> Result<Option<String>, String> {
-        let default_paths = ["~/.openclaw/openclaw.json", "~/.openclaw/config.json"];
-        let uses_default_paths = config
-            .config_paths
-            .iter()
-            .map(|path| resolve_home(path))
-            .eq(default_paths.iter().map(|path| resolve_home(path)));
-        let config_paths = if self.is_openclaw_nested(config) && uses_default_paths {
-            if let Ok(path) = std::env::var("OPENCLAW_CONFIG_PATH") {
-                if !path.is_empty() {
-                    vec![path]
-                } else {
-                    config.config_paths.clone()
-                }
-            } else if let Ok(state) = std::env::var("OPENCLAW_STATE_DIR") {
-                if !state.is_empty() {
-                    vec![
-                        Path::new(&state)
-                            .join("openclaw.json")
-                            .to_string_lossy()
-                            .into_owned(),
-                        Path::new(&state)
-                            .join("config.json")
-                            .to_string_lossy()
-                            .into_owned(),
-                    ]
-                } else {
-                    config.config_paths.clone()
-                }
+        // Official OpenClaw runtime hints describe the active container/profile
+        // even when a definition carries a different fallback config path.
+        let config_paths = if self.is_openclaw_nested(config) {
+            if let Some(path) = std::env::var("OPENCLAW_CONFIG_PATH")
+                .ok()
+                .filter(|value| !value.is_empty())
+            {
+                vec![path]
+            } else if let Some(state) = std::env::var("OPENCLAW_STATE_DIR")
+                .ok()
+                .filter(|value| !value.is_empty())
+            {
+                vec![
+                    Path::new(&state)
+                        .join("openclaw.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                    Path::new(&state)
+                        .join("config.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]
             } else {
                 config.config_paths.clone()
             }
@@ -552,11 +546,22 @@ impl PluginInjectStrategy {
         json: &mut Value,
         resolved_spec: &str,
         config: &PluginInjectConfig,
+        verified_own_resources: bool,
     ) -> bool {
         if !json.get("plugins").is_some_and(Value::is_object) {
             return false;
         }
         let mut mutated = false;
+        // Replaced legacy aliases alone do not prove that this install owns the
+        // entry. Require its exact current path before considering extra options.
+        let exact_own_path = json
+            .pointer("/plugins/load/paths")
+            .and_then(Value::as_array)
+            .is_some_and(|paths| {
+                paths
+                    .iter()
+                    .any(|path| self.path_matches(path, resolved_spec, &config.plugin_id))
+            });
         if json["plugins"]
             .get("load")
             .and_then(|load| load.get("paths"))
@@ -576,8 +581,14 @@ impl PluginInjectStrategy {
                 mutated = true;
             }
         }
+        let exclusive_owned_entry = verified_own_resources
+            && exact_own_path
+            && json
+                .pointer("/plugins/load/paths")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
         if mutated
-            && self.removable_openclaw_entry(json, config)
+            && (exclusive_owned_entry || self.removable_openclaw_entry(json, config))
             && json["plugins"]
                 .get("entries")
                 .and_then(Value::as_object)
@@ -750,7 +761,18 @@ impl PluginInjectStrategy {
         let mut json = parse_plugin_config(&raw, config)?;
         let resolved = self.resolve_spec(&config.plugin_spec);
         let mutated = if self.is_openclaw_nested(config) {
-            self.openclaw_remove(&mut json, &resolved, config)
+            // Explicit uninstall may clean this official plugin's own entry
+            // after its actual managed resources and exact reference prove
+            // ownership. Modified/unmanaged resources keep the old guard.
+            let verified_own_resources = def.id == "openclaw"
+                && config.plugin_id == "loongsuite-pilot-openclaw"
+                && super::plugin_assets::PluginAssets::load(
+                    def,
+                    Path::new(&self.pilot_dir),
+                    Path::new(&self.data_dir),
+                )
+                .is_ok_and(|assets| assets.managed() && assets.healthy());
+            self.openclaw_remove(&mut json, &resolved, config, verified_own_resources)
         } else {
             self.flat_array_remove(&mut json, &resolved, config)
         };
@@ -1467,7 +1489,7 @@ mod tests {
             serde_json::json!(["user-plugin", "loongsuite-pilot-openclaw"])
         );
         assert!(!strategy.openclaw_inject(&mut json, &spec, &config, &host));
-        assert!(strategy.openclaw_remove(&mut json, &spec, &config));
+        assert!(strategy.openclaw_remove(&mut json, &spec, &config, false));
         write_plugin_config(path.to_str().unwrap(), Some(&written), &json, false)
             .await
             .unwrap();
@@ -1631,7 +1653,7 @@ mod tests {
                 "load": {"paths": [own, "/user/plugin.mjs"]},
                 "entries": {&config.plugin_id: entry}
             }});
-            assert!(first.openclaw_remove(&mut json, &own, config));
+            assert!(first.openclaw_remove(&mut json, &own, config, false));
             assert!(json["plugins"]["entries"].get(&config.plugin_id).is_none());
             assert_eq!(
                 json["plugins"]["load"]["paths"],

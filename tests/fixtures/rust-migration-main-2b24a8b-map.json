@@ -999,30 +999,29 @@
     {
       "legacy": "tests/unit/inputs/qoder-transcript-tail-safety.test.mjs",
       "source_hash": "6127250ddba4d11ffe5cfa362a5759b1ad1e9d1d4865ce64d5983aaffe5d43c7",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::append_witness_keeps_split_utf8_and_reads_only_the_suffix_before_rehydration"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "tail_l42_static_three_mib_incomplete_source_stops_body_reads_without_committing"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::in_place_rewrite_before_append_invalidates_witness_and_uses_repaired_text"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "tail_l57_appended_utf8_bytes_are_witnessed_then_full_response_decoded_once_after_lf"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::malformed_complete_line_is_quarantined_but_partial_json_never_becomes_a_committed_record"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "tail_l89_budget_and_oversized_record_quarantine_drain_then_repaired_turn_is_independent"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::oversized_record_spans_bounded_cycles_then_quarantines_exactly_one_complete_line"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "tail_l110_complete_bad_line_is_retained_in_source_and_repair_recovers_without_idle_reads"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::unchanged_three_mib_partial_tail_has_zero_body_reads_and_serializable_witness_only"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "tail_l123_in_place_changed_witness_before_append_rehydrates_current_text"
         }
       ],
-      "note": "固定main#533 2b24a8b新增source；当前仅scanner前置真实执行，未执行的整链保持partial。Linux10新增及Qoder12相关/strict绿，Windows/macOS未实跑。",
       "cases": [
         {
           "source": {
@@ -1035,8 +1034,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent真实Source：原user已接受后追加3MiB未闭assistant；两轮无事件后4轮静态poll的bytesRead全部0，offset恰原完整前缀，实际warned为空。",
           "platforms": [
             "linux",
             "macos",
@@ -1046,8 +1045,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::unchanged_three_mib_partial_tail_has_zero_body_reads_and_serializable_witness_only"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "tail_l42_static_three_mib_incomplete_source_stops_body_reads_without_committing"
               }
             ]
           }
@@ -1063,8 +1062,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent在2MiB结果的中文字节中截断；仅追加1byte时无事件且实际读<1024；补其余UTF8+LF/Stop/last-prompt后恰1response且完整原文、读<body+4096、event IDs全唯一；idle无输出，序列化state重建Source后无输出且0读。",
           "platforms": [
             "linux",
             "macos",
@@ -1074,8 +1073,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::append_witness_keeps_split_utf8_and_reads_only_the_suffix_before_rehydration"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "tail_l57_appended_utf8_bytes_are_witnessed_then_full_response_decoded_once_after_lf"
               }
             ]
           }
@@ -1091,8 +1090,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "原64KiB scan/128KiB maxTurn fixture：256KiB巨行分6轮每轮读<=64KiB+256且无事件，record-byte-limit警告、3轮idle0读、offset实际前进且1quarantine；保持同原user/uuid修复文件，恰1response后不重复。生产4MiB/16MiB上限未改。",
           "platforms": [
             "linux",
             "macos",
@@ -1102,8 +1101,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::oversized_record_spans_bounded_cycles_then_quarantines_exactly_one_complete_line"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "tail_l89_budget_and_oversized_record_quarantine_drain_then_repaired_turn_is_independent"
               }
             ]
           }
@@ -1119,8 +1118,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent真实完整{broken}行被invalid-json-line标记，原生源字节原封保留；后续0读；以同原user/uuid修复当前文件后恰1response，不借不同prompt逃过旧缓存。",
           "platforms": [
             "linux",
             "macos",
@@ -1130,8 +1129,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::malformed_complete_line_is_quarantined_but_partial_json_never_becomes_a_committed_record"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "tail_l110_complete_bad_line_is_retained_in_source_and_repair_recovers_without_idle_reads"
               }
             ]
           }
@@ -1147,8 +1146,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent真实160KiB未闭记录；同句柄倒数1byte从x覆写y后再append完整JSON+LF/last-prompt，旧witness必须失效，恰1response且输出包含128个x后跟y。",
           "platforms": [
             "linux",
             "macos",
@@ -1158,30 +1157,70 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::in_place_rewrite_before_append_invalidates_witness_and_uses_repaired_text"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "tail_l123_in_place_changed_witness_before_append_rehydrates_current_text"
               }
             ]
           }
         }
-      ]
+      ],
+      "note": "固定最新main#533 2b24a8b，本文件全部5声明逐原assert真实Source已执行。两Agent参数按原describe.each保留；outside cases依原CN参数，FIFO原skipIf Windows保留相同平台范围。Linux实际通过/strict绿，Windows/macOS未运行待CI；并非raw scanner-only承接。"
     },
     {
       "legacy": "tests/unit/inputs/qoder-transcript-resource-boundaries.test.mjs",
       "source_hash": "4a6d9e58f88516c7ee6640dffd1658830b8cc39887db17b0d001d7f7334f728d",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::fifo_source_is_rejected_without_waiting_for_a_writer"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "resource_l29_more_than_33_mib_history_reads_less_than_two_mib_for_current_turn"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::multibyte_points_crossing_64k_reads_are_not_decoded_until_the_complete_record"
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "resource_l47_unicode_crosses_64k_chunk_boundaries_without_text_loss"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "resource_l58_real_metadata_publisher_capacity_still_collects_without_another_hook"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "resource_l75_dense_8192_records_mark_incomplete_then_following_turn_is_whole"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+          "test": "resource_l93_real_fifo_swap_after_source_stat_defers_and_repair_collects_once"
         }
       ],
-      "note": "固定main#533 2b24a8b新增source；当前仅scanner前置真实执行，未执行的整链保持partial。Linux10新增及Qoder12相关/strict绿，Windows/macOS未实跑。",
       "cases": [
+        {
+          "source": {
+            "id": "L29:C3",
+            "title": "collects a small current Turn after more than 32 MiB of valid history",
+            "suites": [
+              "%s bounded native reader"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent写入>33MiB有效历史加1个小当前Turn，实际Source首轮恰1response/1turn，bytesRead严格<2MiB；随后无事件且0读，无全历史正文重建。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "resource_l29_more_than_33_mib_history_reads_less_than_two_mib_for_current_turn"
+              }
+            ]
+          }
+        },
         {
           "source": {
             "id": "L47:C3",
@@ -1193,8 +1232,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent实际Source处理65000个x后400组中文🙂，跨64KiB读取边界；完整output.messages逐原文包含，随后不重发。",
           "platforms": [
             "linux",
             "macos",
@@ -1204,8 +1243,56 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::multibyte_points_crossing_64k_reads_are_not_decoded_until_the_complete_record"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "resource_l47_unicode_crosses_64k_chunk_boundaries_without_text_loss"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C1",
+            "title": "recovers after notification capacity is reached without needing another Hook",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Root Native publisher同source 128个PreToolUse metadata发布全成功，追加后Stop第129条明确拒绝；无需另一个Hook，真实Source仍采到完整1response，persisted ACK后warm无事件且0读。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "resource_l58_real_metadata_publisher_capacity_still_collects_without_another_hook"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C1",
+            "title": "bounds dense object counts, marks the affected turn incomplete and drains the next turn",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "CN原参数：1user后8192个真实progress对象导致仅1事件且全部incomplete=true，1quarantine/turn-record-limit警告；不重发；追加健康下一turn后恰1response，随后无重发。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "resource_l75_dense_8192_records_mark_incomplete_then_following_turn_is_whole"
               }
             ]
           }
@@ -1219,8 +1306,8 @@
               "it.skipIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "Unix原平台范围：私有fault seam只在真实Source完成stat后、下一实际open前将原文件替换FIFO；实际O_NONBLOCK/fstat拒绝、5s有界不挂起，空records/空state且not-regular-file诊断；修复为新inode文件并发布真实观察后恰1response且随后无重复，未伪造成功结果/offset。",
           "platforms": [
             "linux",
             "macos"
@@ -1229,38 +1316,148 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::fifo_source_is_rejected_without_waiting_for_a_writer"
+                "file": "src/inputs/qoder-trace/transcript_source_tail_resource_history.rs",
+                "test": "resource_l93_real_fifo_swap_after_source_stat_defers_and_repair_collects_once"
               }
             ]
           }
         }
-      ]
+      ],
+      "note": "固定最新main#533 2b24a8b，本文件全部5声明逐原assert真实Source已执行。两Agent参数按原describe.each保留；outside cases依原CN参数，FIFO原skipIf Windows保留相同平台范围。Linux实际通过/strict绿，Windows/macOS未运行待CI；并非raw scanner-only承接。"
     },
     {
       "legacy": "tests/unit/inputs/qoder-recovery-review.test.mjs",
       "source_hash": "ded903142cc880b3cd0b66219308cc4fe820c040202a0acbba88235d7de01966",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::malformed_complete_line_is_quarantined_but_partial_json_never_becomes_a_committed_record"
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l40_bootstrap_over_limit_row_drains_when_lf_and_real_next_turn_arrive"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::oversized_record_spans_bounded_cycles_then_quarantines_exactly_one_complete_line"
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l52_damaged_records_preserve_physical_file_drain_two_turns_and_restart_without_replay"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::stable_final_json_and_legacy_count_final_have_distinct_complete_line_rules"
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l68_pending_over_limit_physical_progress_survives_restart_without_ack_or_full_reread"
         },
         {
-          "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-          "test": "tests::unchanged_three_mib_partial_tail_has_zero_body_reads_and_serializable_witness_only"
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l85_damaged_legacy_rows_count_as_physical_lines"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l95_eperm_existence_still_checks_real_pid_birth_and_reports_reused_lock"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l106_live_eperm_owner_does_not_starve_two_reused_pid_sources"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l128_late_initial_prompt_uses_metadata_request_identity"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l136_proven_initial_range_crosses_damaged_record_and_restart_without_replaying_live_turn"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l163_damaged_line_cannot_steal_a_different_inventory_prompt"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l179_migrates_consumed_legacy_no_lf_terminal_or_over_limit_tail_before_live_suffix"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l201_ordinary_partial_native_row_remains_uncommitted_until_complete"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l215_equal_prompt_text_does_not_claim_history_before_owned_next_user_is_written"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l226_ambiguous_initial_range_retains_unresolved_prompt_at_zero_committed_offset"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l233_live_turn_progresses_during_owner_outage_then_only_prefix_backfills_after_restart"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l253_owned_request_beyond_1000_prompts_uses_bounded_metadata_pages_and_restart"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l271_real_later_prompt_seals_recovery_without_waiting_for_unrelated_live_tail"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+          "test": "recovery_l286_unavailable_source_cannot_monopolize_shared_ownership_budget"
         }
       ],
-      "note": "固定main#533 2b24a8b新增source；当前仅scanner前置真实执行，未执行的整链保持partial。Linux10新增及Qoder12相关/strict绿，Windows/macOS未实跑。",
+      "note": "全部17精确AST声明/40参数场景真实Source单元链；native文件/reader/Root publisher/有界scan/checkpoint/restart/build均生产实现。仅metadata-only resolver与EPERM OS结果按原测试提供受控trait输入，真实SQLite resolver另由ownership专项验证。Linux实跑，Windows/macOS待平台CI；无预算放宽或skip。",
       "cases": [
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "does not permanently park bootstrap inside an over-limit row",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent原64KiB scan/128KiB record，512KiB未闭坏行4cycles后补LF+真实turn1，16cycles恰1LLM答复answer1、idle无重放。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l40_bootstrap_over_limit_row_drains_when_lf_and_real_next_turn_arrive"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "drains valid turns after a damaged record and restarts without replay",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])",
+              "it.each(['{broken}', JSON.stringify({ padding: 'x'.repeat(256 * 1024) })])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent×broken JSON/256KiB完整超限JSON，真实native文件追加两健康turn，24cycle精确2response/answer1+2、持久quarantine非空；新Source+JSON state恢复无重放，原坏行字节仍在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l52_damaged_records_preserve_physical_file_drain_two_turns_and_restart_without_replay"
+              }
+            ]
+          }
+        },
         {
           "source": {
             "id": "L68:C3",
@@ -1272,8 +1469,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent512KiB未闭行6cycle后pendingLine.position>128KiB；新Source恢复首次真实bytesRead<128KiB，补LF和新turn后12cycle只1response/answer1。",
           "platforms": [
             "linux",
             "macos",
@@ -1283,12 +1480,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::oversized_record_spans_bounded_cycles_then_quarantines_exactly_one_complete_line"
-              },
-              {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::unchanged_three_mib_partial_tail_has_zero_body_reads_and_serializable_witness_only"
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l68_pending_over_limit_physical_progress_survives_restart_without_ack_or_full_reread"
               }
             ]
           }
@@ -1304,8 +1497,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent旧行游标target2遇首物理bad JSON与last-prompt，损坏行照算物理行；真实Source首cycle包含answer1。",
           "platforms": [
             "linux",
             "macos",
@@ -1315,8 +1508,149 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::stable_final_json_and_legacy_count_final_have_distinct_complete_line_rules"
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l85_damaged_legacy_rows_count_as_physical_lines"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C3",
+            "title": "checks stale PID ownership even when the existence probe returns EPERM",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent仅cfg(test)在OS零信号probe结果注入EPERM Err(1)，经过正式process_alive_from_kill相同归一化和真实当前PID birth metadata检查；旧获取时间比birth早120s，真实Source采answer0并有legacy-lock-pid-reused诊断；不mock归属结果/事件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l95_eperm_existence_still_checks_real_pid_birth_and_reports_reused_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "protects a live EPERM owner without starving reused-PID recovery for other sources",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent3个真实Source/旧锁，EPERM由同正式归一化桥传入；live实际当前PID获取时间受保护，另2个获取时间早于真实birth120s；6cycle共享一次birth检查预算，恰2response/answer1+2，无answer0，不靠global枚举。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l106_live_eperm_owner_does_not_starve_two_reused_pid_sources"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C3",
+            "title": "recovers a late initial prompt using its database request identity",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent实际native rows+真实publisher request_set_id，原metadata-only resolver trait返回精确request0 timestamp/inventory，Source恢复answer0且下轮空；不以原文匹配。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l128_late_initial_prompt_uses_metadata_request_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L136:C3",
+            "title": "recovers the proven initial range through a complete bad record without replaying live Turns",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])",
+              "it.each(['{broken}', JSON.stringify({ padding: 'x'.repeat(256 * 1024) })])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent×2bad变体，metadata证明首user范围；16cycle每次真实读<128KiB，cycle1后重启，首范围恰1answer0/all incomplete、清initialOwnership、坏字节保留；再8cycle活turn1恰1answer1/no incomplete、所有event IDs唯一，二次重启不重放。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l136_proven_initial_range_crosses_damaged_record_and_restart_without_replaying_live_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C3",
+            "title": "does not claim a different prompt when a damaged line may hide an inventory user",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent坏行可能隐藏metadata库存首user，另真实user时间晚1ms；8cycle全部空，initialOwnership保留/backfill不存在/committed0，ACK后sources仍在，不偷认近邻或同文prompt。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l163_damaged_line_cannot_steal_a_different_inventory_prompt"
               }
             ]
           }
@@ -1333,8 +1667,8 @@
               "it.each(['last-prompt', 'oversized'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent×完整last-prompt或256KiB超限旧EOF无LF，原legacy游标target3；8cycle均空且bytesRead<128KiB、migration/pendingLine移除、committed=物理EOF；补LF+新turn后8cycle精确只1answer1不含answer0。",
           "platforms": [
             "linux",
             "macos",
@@ -1344,8 +1678,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::stable_final_json_and_legacy_count_final_have_distinct_complete_line_rules"
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l179_migrates_consumed_legacy_no_lf_terminal_or_over_limit_tail_before_live_suffix"
               }
             ]
           }
@@ -1361,8 +1695,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "partial",
-          "behavior": "原生实际文件读取子合同已承接（见精确target断言）；仍待共享collector与真实Input中的轮次输出/持久化ACK/恢复完整链，当前不将scanner-only冒称source完成。",
+          "coverage": "complete",
+          "behavior": "两Agent无legacy游标首prompt后追加半条assistant，4cycle均无事件且committed0；补完整JSON/LF/last-prompt后精确1response，idle空。",
           "platforms": [
             "linux",
             "macos",
@@ -1372,8 +1706,176 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/inputs/qoder-trace/transcript_scanner.rs",
-                "test": "tests::malformed_complete_line_is_quarantined_but_partial_json_never_becomes_a_committed_record"
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l201_ordinary_partial_native_row_remains_uncommitted_until_complete"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C3",
+            "title": "does not replay an identical historical prompt while the owned next user is not persisted",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agentmetadata库存两个不同request、原文完全相同；owned下一user未落盘前无事件/committed0；实际落盘next+Stop后只answer1不含answer0，idle空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l215_equal_prompt_text_does_not_claim_history_before_owned_next_user_is_written"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C3",
+            "title": "retains an ambiguous initial range instead of marking it consumed",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agentmetadata不可用且已存在初始历史全turn，真实UserPromptSubmit无精确request，Source不消费模糊范围：空事件/committed0/unresolvedPrompt存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l226_ambiguous_initial_range_retains_unresolved_prompt_at_zero_committed_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L233:C3",
+            "title": "keeps live turns moving while ownership is unavailable, then backfills only the unresolved prefix after restart",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agentmetadata不可用时首次历史前缀不输出；真实追加live1先交付answer1、不含0；metadata恢复+重启只回补answer0、不含1，两批event IDs全唯一，idle空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l233_live_turn_progresses_during_owner_outage_then_only_prefix_backfills_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L253:C3",
+            "title": "locates an owned request beyond 1000 historical prompts with bounded metadata pages",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent1025真实历史prompt，metadata-only trait按原256库存页/cursor返回；24cycle第3后重启，精确1response只answer1024不含1023；保持64KiB source scan/128KiB turn配置，不以全量正文匹配。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l253_owned_request_beyond_1000_prompts_uses_bounded_metadata_pages_and_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L271:C3",
+            "title": "seals a recovered range from a real later prompt without waiting for unrelated live writes to settle",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent原stable60000/settle5000，unresolved首范围有真实Stop但无last-prompt；metadata随后恢复并只落盘下一真实user，第二cycle已封住旧范围输出1answer0，不等无关live尾部稳定，下一轮空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l271_real_later_prompt_seals_recovery_without_waiting_for_unrelated_live_tail"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L286:C3",
+            "title": "does not let an unavailable source monopolize the shared ownership budget",
+            "suites": [
+              "%s review recovery"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent真实两个Source由publisher发现，第一个session归属不可用；共享metadata查询预算4cycle仍交付第二个已证明范围，恰1answer1不含0；用实际文件发现替代JS强制sources数组，保留公平性行为。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_recovery_history.rs",
+                "test": "recovery_l286_unavailable_source_cannot_monopolize_shared_ownership_budget"
               }
             ]
           }
@@ -1596,7 +2098,7 @@
     {
       "legacy": "tests/unit/inputs/qoder-transcript-collector.test.mjs",
       "source_hash": "d1d64411f85041a8b78be0f841c495d9c2d51e9ebf4118888afb65c77fab2fff",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [
         {
           "file": "src/inputs/qoder-trace/transcript_source_history.rs",
@@ -1649,6 +2151,54 @@
         {
           "file": "src/inputs/qoder-trace/transcript_source_history.rs",
           "test": "source_l93_streams_across_late_progress_without_splitting_tools"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l210_migrates_exact_legacy_line_cursor_without_replaying_accepted_turn"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l221_out_of_order_retry_notices_use_earliest_physical_anchor"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l228_missing_native_source_preserves_checkpoint_and_recovers_suffix"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l249_real_stop_notice_closes_turn_without_any_native_terminal_markers"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l254_same_inode_rewrite_has_new_user_and_distinct_turn_identity"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l330_live_legacy_writer_grace_defers_and_release_resumes_current_turn"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l357_small_budget_bootstrap_selects_last_of_400_turns_without_checkpoint_bodies"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l413_bad_notice_json_preserves_unread_source_then_repairs_without_body_cache"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l370_real_publisher_1030_sources_have_no_admission_starvation_or_duplicates"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l383_oversize_quarantine_keeps_healthy_source_and_later_turn_without_replay"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l264_atomic_generation_change_during_actual_open_does_not_publish_mixed_turn"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "collector_l301_real_same_watermark_publication_after_old_read_survives_ack_and_collects_new_generation"
         }
       ],
       "cases": [
@@ -1990,6 +2540,90 @@
         },
         {
           "source": {
+            "id": "L210:C3",
+            "title": "migrates the previous line cursor without replaying already committed turns",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent真实旧session SHA游标文件精确迁移previous物理行数；追加含tool的下一turn后只出prompt1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l210_migrates_exact_legacy_line_cursor_without_replaying_accepted_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C3",
+            "title": "uses the earliest legacy retry anchor when concurrent notifications arrive out of order",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent按规范化metadata legacyTriggerLine同时保存晚/早通知，真实Source选择最早物理锚点，精确输出prompt0/1。原Hook snake_case字段由publisher规范化，此fixture从Source边界写camelCase。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l221_out_of_order_retry_notices_use_earliest_physical_anchor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L228:C3",
+            "title": "retains checkpoint state when the native source temporarily disappears",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent完成turn0后源暂时rename消失，实际read输出空且序列化state逐字保持；恢复源追加turn1仅输出prompt1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l228_missing_native_source_preserves_checkpoint_and_recovers_suffix"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L239:C3",
             "title": "recovers a valid final JSON record without a newline",
             "suites": [
@@ -2012,6 +2646,90 @@
               {
                 "file": "src/inputs/qoder-trace/transcript_source_history.rs",
                 "test": "source_l239_complete_final_json_without_lf_is_recovered_once_after_stability"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L249:C3",
+            "title": "uses the real Hook Stop fact when native terminal markers are absent",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent移除真实Stop progress与assistant.stop_reason，仅实际Hook Stop事实闭合，精确输出prompt0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l249_real_stop_notice_closes_turn_without_any_native_terminal_markers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L254:C3",
+            "title": "detects same-inode rewrites and does not reuse the previous Turn ID",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent真实truncate/overwrite保持同handle inode，输出新prompt1且turnID与旧turn不同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l254_same_inode_rewrite_has_new_user_and_distinct_turn_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L264:C3",
+            "title": "does not publish a mixed generation when a transcript is replaced during a scan",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent在真实scanner第二次open前atomic rename新代；首次实际Source输出空/state{}，后新通知只输出prompt1；cfg(test)只注入真实文件替换，不伪造成功。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l264_atomic_generation_change_during_actual_open_does_not_publish_mixed_turn"
               }
             ]
           }
@@ -2074,6 +2792,62 @@
         },
         {
           "source": {
+            "id": "L301:C3",
+            "title": "preserves a new same-watermark observation published while an old one is acknowledged",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent真实publisher同observedSize/context文件名；实际metadata read后atomic替换源并再次发布，新observationId保留同路径；旧durable receipt清理不删新通知，随后只出prompt1、idle空。Native read自动ACK，故首轮单read代替JS settle+独立ack以保持相同边界。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l301_real_same_watermark_publication_after_old_read_survives_ack_and_collects_new_generation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L330:C3",
+            "title": "defers while a legacy worker is alive and migrates its final cursor afterward",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent真实当前PID旧writer锁在1s获取宽限内被认活，read空/state{}；不删活锁，fixture主动unlink释放后采prompt0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l330_live_legacy_writer_grace_defers_and_release_resumes_current_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
             "id": "L343:C3",
             "title": "coalesces concurrent cycles and stops further reads until restarted",
             "suites": [
@@ -2103,9 +2877,105 @@
               }
             ]
           }
+        },
+        {
+          "source": {
+            "id": "L357:C1",
+            "title": "bounds scan work across cycles and does not retain all historical bodies",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原CN场景400历史turn/64KiB scan，最多8cycle精确只出prompt399；checkpoint序列化小于4096，不保历史body。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l357_small_budget_bootstrap_selects_last_of_400_turns_without_checkpoint_bodies"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L370:C1",
+            "title": "discovers more than 1024 historical sources without permanent admission starvation",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原CN真实Root publisher生成1030历史source，40个正常Source cycle，去重user数=输出user数=1030，实际metadata cache<=4MiB。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l370_real_publisher_1030_sources_have_no_admission_starvation_or_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L383:C1",
+            "title": "quarantines an oversized record and continues without replaying healthy turns",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原CN64KiB turn限额：70KiB坏行保留物理文件；健康源并行输出，坏turn只other/incomplete无伪LLM，byte-limit诊断/1quarantine/EOF/cache预算精确；后turn2正常且stop/restart不重放。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l383_oversize_quarantine_keeps_healthy_source_and_later_turn_without_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L413:C1",
+            "title": "retains unread context on a metadata failure and resumes after it is repaired",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原CN实际notice坏JSON，read无事件/state{}；原字节修复后立即采prompt0，完成后实际body cache为空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "collector_l413_bad_notice_json_preserves_unread_source_then_repairs_without_body_cache"
+              }
+            ]
+          }
         }
       ],
-      "note": "固定main#533 2b24a8b。collector28仅累计16声明完整承接，剩12未列仍pending；其余四源34声明未整组关闭，五源总62。Source3逐原补齐L113/L239/L343，没有改标题/放宽断言。补充真实CLI status/cache/external gen_ai.turn.id/desktop/partial与empty identity/nonCLI负控；实际Input来源无legacy日志仍产1LLM response、IDE17/5tokens和durable EOF，Source3 strict全workspace/alltargets/allfeatures绿也补验factory。相关Qoder41实际通过，Linux执行；Windows/macOS尚待实际CI，Unix假CLI执行专项不冒称Windows。单PID出生metadata无全局proc枚举，Linux使用同一虚拟/proc视图的bounded stat/uptime，保留原born近期断言。"
+      "note": "累计28/28精确源声明，Source3原16+V12剩12；Linux实际运行，Windows/macOS仍待平台CI。无retired/跳过/预算放宽；Source.read自动durable ACK与JS显式ack边界差异在L301逐条说明。"
     },
     {
       "legacy": "tests/integration/qoder-recovery-ownership.test.ts",
@@ -2244,6 +3114,241 @@
               {
                 "file": "tests/qoder_533_durability_pipeline.rs",
                 "test": "source_l19_both_sources_pause_after_real_save_failure_then_resume_fresh_tail_once"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-transcript-migration-boundaries.test.mjs",
+      "source_hash": "553959caf638dec8f2f7925623bca3457f12c108960319ace0a2421ca7cb9696",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l40_next_prompt_at_saved_watermark_keeps_identity_through_ack_and_restart"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l66_prior_cursor_does_not_ack_same_inode_rewritten_stop"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l108_dangling_file_alias_keeps_identity_when_target_appears"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l122_incomplete_legacy_lock_grace_expires_without_deleting_owner_file"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l139_expired_reused_current_pid_does_not_block_native_collection"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+          "test": "migration_l155_genuine_live_owner_survives_old_ttl_and_release_resumes"
+        }
+      ],
+      "note": "全部7精确AST声明/16参数场景通过Linux实际Source+publisher；无生产语义改变。Windows/macOS未运行，L108原平台排除保留。Source.read自动durable ACK与原显式ack边界均透过真实ack方法验证。",
+      "cases": [
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "retains a next prompt at the saved watermark through ACK, collection and restart",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent实际publisher，3原始事件精确数量、saved ACK后同watermark新UserPrompt身份；空collect后重建Source，追加新turn三事件全部synthetic-next-owner、单turnID，ACK后idle空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l40_next_prompt_at_saved_watermark_keeps_identity_through_ack_and_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "does not ACK a rewritten-file Stop using the prior file cursor",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent原2048/1024padding历史与unresolved首prompt；追加turn1后恰3事件，ACK后同inode truncate为turn2再Stop，旧cursor ACK不得删新事实；恰3新事件/prompt2/无重放。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l66_prior_cursor_does_not_ack_same_inode_rewritten_stop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "uses one source when a missing file is behind a symlink (nested=%s)",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])",
+              "it.each([false, true])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent×nested false/true真实目录symlink/junction，文件尚不存在先publish，再创建源/Stop；实际Source恰3事件、单turnID、sources目录仅1项、idle空。Windows fixture有界5s真实New-Item Junction、环境变量传路径、完整错误输出，尚待实际Windows。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "keeps a dangling file symlink in the same source identity after its target appears",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])",
+              "it.skipIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "保持原Windows排除：两Agent Unix真实dangling文件symlink在target出现前后两次publish，Source恰3事件且同canonical source目录仅1项。",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l108_dangling_file_alias_keeps_identity_when_target_appears"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L122:C3",
+            "title": "waits briefly for an incomplete old lock, then takes over without deleting it",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent实际empty旧锁，第一次正常Source空；原clock推进5000ms后恰3事件，原锁仍存在且idle空；不删除他人锁。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l122_incomplete_legacy_lock_grace_expires_without_deleting_owner_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L139:C3",
+            "title": "does not confuse an expired lock with a live unrelated PID",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent以真实当前PID birth metadata减120000ms构造复用PID旧锁，实际Source恰3事件且idle空；不用TTL代替进程生存身份。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l139_expired_reused_current_pid_does_not_block_native_collection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C3",
+            "title": "keeps a genuine live old owner after the old TTL, then resumes when it releases",
+            "suites": [
+              "%s migration ordering"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两Agent当前真实PID与当前获取时间旧owner锁，clock推进120000ms仍保护live owner不输出；原锁主动释放后恰3事件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_migration_history.rs",
+                "test": "migration_l155_genuine_live_owner_survives_old_ttl_and_release_resumes"
               }
             ]
           }
