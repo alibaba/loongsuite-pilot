@@ -588,9 +588,15 @@ mod tests {
         .unwrap();
         file.flush().await.unwrap();
         drop(file);
-        tokio::fs::write(root.path().join("unrelated.jsonl"), "unrelated")
-            .await
-            .unwrap();
+        // The source uses a valid foreign record here, so accepting arbitrary
+        // filenames must fail even when their JSON and Codex fields are valid.
+        let unrelated = entry("foreign", "turn");
+        tokio::fs::write(
+            root.path().join("unrelated.jsonl"),
+            format!("{}\n", serde_json::to_string(&unrelated).unwrap()),
+        )
+        .await
+        .unwrap();
         assert_eq!(read(&journal, None).await, vec![vec![valid]]);
         assert!(read(&journal, Some("../unrelated")).await.is_empty());
     }
@@ -700,68 +706,72 @@ mod tests {
     #[tokio::test]
     async fn ack_cap_removes_residual_before_forgetting_proof_and_preserves_ack_on_cleanup_failure()
     {
-        let root = tempfile::tempdir().unwrap();
-        let crashed = entry("crashed", "old-turn");
-        let oldest = codex_turn_journal_group_key(&crashed);
-        for key in std::iter::once(oldest.clone())
-            .chain((0..MAX_ACKNOWLEDGED_TURNS - 1).map(|i| format!("{i:064x}")))
-        {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let root = tempfile::tempdir().unwrap();
+            let crashed = entry("crashed", "old-turn");
+            let oldest = codex_turn_journal_group_key(&crashed);
+            for key in std::iter::once(oldest.clone())
+                .chain((0..MAX_ACKNOWLEDGED_TURNS - 1).map(|i| format!("{i:064x}")))
+            {
+                tokio::fs::write(
+                    root.path().join(format!("codex-done-{key}.json")),
+                    serde_json::to_vec(&json!({"version":1,"key":key})).unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            let oldest_file = root.path().join(format!("codex-done-{oldest}.json"));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&oldest_file)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH)
+                .unwrap();
+            let journal = Arc::new(CodexTurnJournal::new(root.path()));
             tokio::fs::write(
-                root.path().join(format!("codex-done-{key}.json")),
-                serde_json::to_vec(&json!({"version":1,"key":key})).unwrap(),
+                journal.file(&oldest),
+                format!("{}\n", serde_json::to_string(&crashed).unwrap()),
             )
             .await
             .unwrap();
-        }
-        let oldest_file = root.path().join(format!("codex-done-{oldest}.json"));
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&oldest_file)
-            .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH)
-            .unwrap();
-        let journal = Arc::new(CodexTurnJournal::new(root.path()));
-        tokio::fs::write(
-            journal.file(&oldest),
-            format!("{}\n", serde_json::to_string(&crashed).unwrap()),
-        )
+            let latest = entry("latest", "latest-turn");
+            journal
+                .acknowledge(std::slice::from_ref(&latest))
+                .await
+                .unwrap();
+            assert!(!oldest_file.exists() && !journal.file(&oldest).exists());
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                MAX_ACKNOWLEDGED_TURNS
+            );
+            let blocked_key = format!("{0:064x}", 0);
+            let blocked_ack = journal.done_file(&blocked_key);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&blocked_ack)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH)
+                .unwrap();
+            tokio::fs::create_dir(journal.file(&blocked_key))
+                .await
+                .unwrap();
+            let restarted = Arc::new(CodexTurnJournal::new(root.path()));
+            assert!(restarted
+                .acknowledge(&[entry("next", "next-turn")])
+                .await
+                .is_err());
+            assert!(blocked_ack.exists());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(
+                    &tokio::fs::read(blocked_ack).await.unwrap()
+                )
+                .unwrap(),
+                json!({"version":1,"key":blocked_key})
+            );
+            assert!(restarted.is_acknowledged(&latest).await.unwrap());
+        })
         .await
-        .unwrap();
-        let latest = entry("latest", "latest-turn");
-        journal
-            .acknowledge(std::slice::from_ref(&latest))
-            .await
-            .unwrap();
-        assert!(!oldest_file.exists() && !journal.file(&oldest).exists());
-        assert_eq!(
-            std::fs::read_dir(root.path()).unwrap().count(),
-            MAX_ACKNOWLEDGED_TURNS
-        );
-        let blocked_key = format!("{0:064x}", 0);
-        let blocked_ack = journal.done_file(&blocked_key);
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&blocked_ack)
-            .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH)
-            .unwrap();
-        tokio::fs::create_dir(journal.file(&blocked_key))
-            .await
-            .unwrap();
-        let restarted = Arc::new(CodexTurnJournal::new(root.path()));
-        assert!(restarted
-            .acknowledge(&[entry("next", "next-turn")])
-            .await
-            .is_err());
-        assert!(blocked_ack.exists());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(
-                &tokio::fs::read(blocked_ack).await.unwrap()
-            )
-            .unwrap(),
-            json!({"version":1,"key":blocked_key})
-        );
-        assert!(restarted.is_acknowledged(&latest).await.unwrap());
+        .expect("source30s ACK retention budget");
     }
     #[tokio::test]
     async fn native_input_multi_flusher_holds_shared_checkpoint_until_prefix_is_on_disk() {
@@ -953,3 +963,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "codex_turn_journal_main_tests.rs"]
+mod main_tests;

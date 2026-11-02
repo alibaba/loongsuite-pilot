@@ -57,6 +57,8 @@ pub(super) const MAX_EMIT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE: usize = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
+const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
+const INCOMPLETE_TAIL_WITNESS_BYTES: usize = 64;
 const MAX_CACHED_TRANSCRIPT_META_BYTES: usize = 64 * 1024 * 1024;
 const CACHED_TRANSCRIPT_META_ABSENCE_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
 const SPAN_CONTEXT_TTL_MS: i64 = 48 * 60 * 60 * 1_000;
@@ -124,6 +126,123 @@ pub(super) fn has_copied_history_prefix(meta: Option<&CodexTranscriptMeta>) -> b
 }
 
 impl<'a> CodexTranscriptEngine<'a> {
+    fn remember_incomplete_tail(&self, path: &str, tail: scan::IncompleteJsonlTail) {
+        self.body.with_shared(|shared| {
+            shared.incomplete_tails.shift_remove(path);
+            shared.incomplete_tails.insert(path.to_owned(), tail);
+            while shared.incomplete_tails.len() > MAX_CACHED_INCOMPLETE_TAILS {
+                shared.incomplete_tails.shift_remove_index(0);
+            }
+        });
+    }
+    async fn incomplete_tail_ready(
+        &self,
+        rt: &InputRuntime,
+        path: &str,
+        start: i64,
+    ) -> anyhow::Result<bool> {
+        let Some(tail) = self
+            .body
+            .with_shared(|shared| shared.incomplete_tails.shift_remove(path))
+        else {
+            return Ok(true);
+        };
+        let current = scan::file_version_snapshot(path).await?;
+        if tail.start_offset != start
+            || current.inode != tail.version.inode
+            || current.device != tail.version.device
+            || current.size < tail.version.size
+            || (current.size == tail.version.size
+                && (current.modified != tail.version.modified
+                    || current.changed != tail.version.changed))
+        {
+            return Ok(true);
+        }
+        if current.size == tail.end_offset {
+            if current.modified != tail.version.modified || current.changed != tail.version.changed
+            {
+                return Ok(true);
+            }
+            self.remember_incomplete_tail(path, tail);
+            return Ok(false);
+        }
+        let mut file = tokio::fs::File::open(path).await?;
+        if scan::opened_file_version(&file).await? != current {
+            return Ok(true);
+        }
+        async fn read(
+            file: &mut tokio::fs::File,
+            position: i64,
+            length: usize,
+            rt: &InputRuntime,
+        ) -> std::io::Result<Vec<u8>> {
+            use tokio::io::{AsyncReadExt, AsyncSeekExt};
+            file.seek(std::io::SeekFrom::Start(position as u64)).await?;
+            let mut bytes = vec![0u8; length];
+            let started = crate::inputs::base::InputRuntimeAccumulator::now();
+            let n = file.read(&mut bytes).await?;
+            rt.with_accumulator(|a| {
+                a.observe_read(
+                    n as u64,
+                    length as u64,
+                    crate::inputs::base::InputRuntimeAccumulator::now() - started,
+                )
+            });
+            bytes.truncate(n);
+            Ok(bytes)
+        }
+        let anchor = read(
+            &mut file,
+            tail.end_offset - tail.anchor.len() as i64,
+            tail.anchor.len(),
+            rt,
+        )
+        .await?;
+        if anchor != tail.anchor {
+            return Ok(true);
+        }
+        let mut position = tail.end_offset;
+        let mut last = anchor;
+        let search_end = current
+            .size
+            .min(position.saturating_add(MAX_SCAN_BYTES_PER_FILE_CYCLE));
+        while position < search_end {
+            let bytes = read(
+                &mut file,
+                position,
+                ((search_end - position) as usize).min(scan::READ_CHUNK_SIZE),
+                rt,
+            )
+            .await?;
+            if bytes.is_empty() || bytes.contains(&b'\n') {
+                return Ok(true);
+            }
+            position += bytes.len() as i64;
+            if bytes.len() >= INCOMPLETE_TAIL_WITNESS_BYTES {
+                last = bytes[bytes.len() - INCOMPLETE_TAIL_WITNESS_BYTES..].to_vec();
+            } else {
+                last.extend_from_slice(&bytes);
+                if last.len() > INCOMPLETE_TAIL_WITNESS_BYTES {
+                    last.drain(..last.len() - INCOMPLETE_TAIL_WITNESS_BYTES);
+                }
+            }
+        }
+        if scan::opened_file_version(&file).await? == current
+            && scan::file_version_snapshot(path).await? == current
+        {
+            self.remember_incomplete_tail(
+                path,
+                scan::IncompleteJsonlTail {
+                    start_offset: tail.start_offset,
+                    end_offset: position,
+                    anchor: last,
+                    version: current,
+                },
+            );
+        }
+        Ok(false)
+    }
+
     pub fn discard_legacy_global_turn_registry(&self, rt: &InputRuntime) {
         let current = rt.state_store.get("codex-transcript");
         let Some(mut extra) = current.extra() else {
@@ -539,6 +658,12 @@ impl<'a> CodexTranscriptEngine<'a> {
             && processed_terminals < MAX_TERMINALS_PER_FILE_CYCLE
             && scanned_bytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
         {
+            if !self
+                .incomplete_tail_ready(rt, file_path, checkpoint.scan_offset)
+                .await?
+            {
+                break;
+            }
             let scan_start = checkpoint.scan_offset;
             let scan_end = stat
                 .size
@@ -568,6 +693,15 @@ impl<'a> CodexTranscriptEngine<'a> {
                     false
                 })
                 .await?;
+            }
+            if let Some(tail) = scan
+                .incomplete_tail
+                .take()
+                .filter(|tail| tail.end_offset == stat.size)
+            {
+                if scan::file_version_snapshot(file_path).await? == tail.version {
+                    self.remember_incomplete_tail(file_path, tail);
+                }
             }
             if scan.next_offset == scan_start {
                 break;

@@ -1459,6 +1459,7 @@ impl Orchestrator {
         let mut targets = Vec::new();
         for def in deployment.get_definitions() {
             if def.deploy_mode != mode
+                || (mode == DeployMode::PluginInject && def.plugin_inject.is_none())
                 || (mode == DeployMode::DirectoryPlugin && def.directory_plugin.is_none())
                 || (mode == DeployMode::DshYamlPatch && def.dsh_yaml_patch.is_none())
                 || (mode == DeployMode::CopilotPlugin && def.copilot_plugin.is_none())
@@ -1559,6 +1560,10 @@ impl Orchestrator {
                             } else {
                                 Err(if def.deploy_mode == DeployMode::DshYamlPatch {
                                     "failed to remove DSH YAML patch".into()
+                                } else if def.deploy_mode == DeployMode::PluginInject {
+                                    format!("failed to remove injected plugin for {}", def.id)
+                                } else if def.deploy_mode == DeployMode::CopilotPlugin {
+                                    format!("Copilot cleanup incomplete for {}", def.id)
                                 } else {
                                     format!("failed to remove {}", def.id)
                                 })
@@ -2733,6 +2738,11 @@ impl Orchestrator {
         let listener = live.id.as_str();
         let listener_owned = listener.to_string();
         let agent = listener_agent(listener).to_string();
+        let pi_deployment = if listener == "pi-coding-agent-log" {
+            self.deployment.lock().expect("deploy").clone()
+        } else {
+            None
+        };
         let manager = Arc::clone(&self.inputs);
         let id = live.id.clone();
         let stop_manager = Arc::clone(&self.inputs);
@@ -2746,13 +2756,11 @@ impl Orchestrator {
             threshold,
             enabled: enabled.unwrap_or_else(|| {
                 Arc::new(move || {
-                    listener_on(
-                        &config,
-                        &agents,
-                        &bits.lock().expect("bits"),
-                        &agent,
-                        &listener_owned,
-                    )
+                    let bits = bits.lock().expect("bits");
+                    if listener_owned == "pi-coding-agent-log" {
+                        return shared_pi_listener_on(&config, &bits, pi_deployment.as_deref());
+                    }
+                    listener_on(&config, &agents, &bits, &agent, &listener_owned)
                 })
             }),
             available: Arc::new(move || Box::pin(available())),
@@ -2942,6 +2950,46 @@ fn listener_agent(listener: &str) -> &str {
         "workbuddy" => "workbuddy",
         other => other,
     }
+}
+
+// One physical PI log input serves the built-in CLI and registered SDK Agents.
+// Per-entry agent gating remains in PiCodingAgentLogInput; keeping this shared
+// discovery entry alive must not bypass listener off or recorded deployment scope.
+fn shared_pi_listener_on(
+    config: &AnalyticsConfig,
+    bits: &GateBits,
+    deployment: Option<&DeploymentManager>,
+) -> bool {
+    const LISTENER: &str = "pi-coding-agent-log";
+    if !mode_enabled(
+        &bits.modes,
+        LISTENER,
+        config
+            .listeners
+            .get(LISTENER)
+            .map(|item| item.enabled)
+            .unwrap_or(true),
+    ) {
+        return false;
+    }
+    let definitions = deployment
+        .map(DeploymentManager::get_definitions)
+        .unwrap_or_default();
+    let mut candidates = definitions
+        .iter()
+        .filter(|def| {
+            def.id == "pi-coding-agent"
+                || def
+                    .pi_sdk
+                    .as_ref()
+                    .is_some_and(|sdk| sdk.schema_version == 1)
+        })
+        .peekable();
+    let allows = |agent: &str| scope_allows(bits, agent) && is_agent_gated_enabled(config, agent);
+    if candidates.peek().is_none() {
+        return allows("pi-coding-agent");
+    }
+    candidates.any(|def| allows(&def.id))
 }
 
 fn listener_on(

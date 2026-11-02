@@ -4,6 +4,7 @@
 //! concurrent callers onto one flush loop: each iteration snapshots the map,
 //! writes it, then repeats if `set` / `update` / `delete` ran during the write.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -314,12 +315,67 @@ struct StoreData {
     states: OrderedMap<InputState>,
     revision: u64,
     persisted_revision: u64,
+    input_revisions: HashMap<String, u64>,
+    extra_revisions: HashMap<String, HashMap<String, u64>>,
     flushing: bool,
     waiters: Vec<Waiter>,
     output_holds: usize,
     output_failure: Option<String>,
     active_collects: Vec<ActiveCollect>,
     collect_sequence: u64,
+}
+
+fn extra_field<'a>(state: &'a InputState, key: &str) -> Option<&'a JVal> {
+    match state.field(EXTRA) {
+        Some(JVal::Object(fields)) => fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+fn track_input_revision(data: &mut StoreData, id: &str, previous: &InputState, next: &InputState) {
+    data.revision += 1;
+    data.input_revisions.insert(id.to_owned(), data.revision);
+    // Native checkpoints are owned JSON values, so content equality preserves
+    // an unchanged durable field through unrelated shallow metadata patches.
+    let keys = [previous, next]
+        .into_iter()
+        .flat_map(|state| match state.field(EXTRA) {
+            Some(JVal::Object(fields)) => fields
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<std::collections::HashSet<_>>();
+    for key in keys {
+        if extra_field(previous, &key) != extra_field(next, &key) {
+            data.extra_revisions
+                .entry(id.to_owned())
+                .or_default()
+                .insert(key, data.revision);
+        }
+    }
+}
+fn prune_persisted_revision_keys(data: &mut StoreData) {
+    let StoreData {
+        states,
+        input_revisions,
+        extra_revisions,
+        persisted_revision,
+        ..
+    } = data;
+    input_revisions.retain(|id, revision| states.contains(id) || *revision > *persisted_revision);
+    extra_revisions.retain(|id, keys| {
+        keys.retain(|key, revision| {
+            *revision > *persisted_revision
+                || states
+                    .get(id)
+                    .is_some_and(|state| extra_field(state, key).is_some())
+        });
+        !keys.is_empty()
+    });
 }
 
 /// In-memory input checkpoints backed by one JSON file.
@@ -370,6 +426,8 @@ impl StateStore {
         data.states.clear();
         data.revision = 0;
         data.persisted_revision = 0;
+        data.input_revisions.clear();
+        data.extra_revisions.clear();
         let entries = match parsed {
             None => return,
             Some(JVal::Object(fields)) => fields,
@@ -393,6 +451,21 @@ impl StateStore {
 
     pub fn save_failed(&self) -> bool {
         self.mu.lock().unwrap().output_failure.is_some()
+    }
+
+    /// Reports whether the currently observed input (or one extra field) has
+    /// been written successfully. Other inputs/extra fields do not revoke a
+    /// durable receipt. Missing keys have no outstanding mutation.
+    pub fn is_persisted(&self, input_id: &str, extra_key: Option<&str>) -> bool {
+        let data = self.mu.lock().unwrap();
+        let revision = match extra_key {
+            Some(key) => data
+                .extra_revisions
+                .get(input_id)
+                .and_then(|keys| keys.get(key)),
+            None => data.input_revisions.get(input_id),
+        };
+        data.output_failure.is_none() && revision.copied().unwrap_or(0) <= data.persisted_revision
     }
 
     /// Register before mutating source progress. A dropped acceptance guard
@@ -511,27 +584,29 @@ impl StateStore {
         state.normalize();
         let mut data = self.mu.lock().unwrap();
         mark_collect_mutation(&mut data, Some(input_id));
+        let previous = data.states.get(input_id).cloned().unwrap_or_default();
+        track_input_revision(&mut data, input_id, &previous, &state);
         data.states.insert(input_id.to_owned(), state);
-        data.revision += 1;
     }
 
     pub fn update(&self, input_id: &str, patch: InputStatePatch) {
         let mut data = self.mu.lock().unwrap();
         let mut state = data.states.get(input_id).cloned().unwrap_or_default();
+        let previous = state.clone();
         apply_patch(&mut state, patch);
         mark_collect_mutation(&mut data, Some(input_id));
+        track_input_revision(&mut data, input_id, &previous, &state);
         data.states.insert(input_id.to_owned(), state);
-        data.revision += 1;
     }
 
     pub fn delete(&self, input_id: &str) -> bool {
         let mut data = self.mu.lock().unwrap();
-        let removed = data.states.remove(input_id).is_some();
-        if removed {
+        let removed = data.states.remove(input_id);
+        if let Some(previous) = &removed {
             mark_collect_mutation(&mut data, Some(input_id));
-            data.revision += 1;
+            track_input_revision(&mut data, input_id, previous, &InputState::new());
         }
-        removed
+        removed.is_some()
     }
 
     pub fn keys(&self) -> Vec<String> {
@@ -601,7 +676,11 @@ impl StateStore {
                     return;
                 }
                 Step::Write(revision, text) => match self.persist_text(&text).await {
-                    Ok(()) => self.mu.lock().unwrap().persisted_revision = revision,
+                    Ok(()) => {
+                        let mut data = self.mu.lock().unwrap();
+                        data.persisted_revision = revision;
+                        prune_persisted_revision_keys(&mut data);
+                    }
                     Err(error) => {
                         let mut data = self.mu.lock().unwrap();
                         data.flushing = false;
@@ -1304,3 +1383,7 @@ mod active_collect_scope_tests {
         assert!(other.mu.lock().unwrap().active_collects.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "state_store_qoder_533_tests.rs"]
+mod qoder_533_persistence_contract_tests;

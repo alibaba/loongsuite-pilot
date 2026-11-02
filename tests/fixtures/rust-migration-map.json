@@ -91421,6 +91421,549 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/core/orchestrator-plugin-inject-watchdog.test.ts",
+      "source_hash": "a2375376757683b644d00f69620f3b83888a03289967bafb011fa4957b901842",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All 20 frozen ef8953=f84 plugin watchdog declarations have actual native Orchestrator/deployment/metadata/registry/alarm assertions, no retirements. Actual Linux; Windows/macOS applicable pending execution. Detection/undeploy counters observe real manager entries only in cfg(test); native per-entry PI gates and resource budgets remain intact.",
+      "cases": [
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "only builds targets for plugin-inject agents",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual loader plus real DeploymentManager retains Hook/PluginInject definitions; Orchestrator targets are exactly plugin-inject:opencode and plugin-inject:qwen-code-cli, with unrelated Hook excluded.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l113_only_plugin_inject_definitions_become_exact_named_targets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L124:C3",
+            "title": "skips plugin-inject defs missing pluginInject config",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native loader retains incomplete plugin definition, but Orchestrator must produce zero repair targets. Original tree failed this assertion; one production guard now restores source behavior.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l124_missing_plugin_inject_configuration_never_builds_a_target"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C5",
+            "title": "returns false when the plugin file does not exist",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual missing PILOT_DATA-resolved local plugin asset returns false and real DeploymentManager detection-entry counter remains zero.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l133_missing_local_asset_short_circuits_real_manager_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C5",
+            "title": "returns false when the file exists but the agent is not detected",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual existing plugin asset with missing detected-agent directory returns false and consults real manager detection exactly once.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l144_existing_asset_cannot_replace_actual_agent_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C5",
+            "title": "returns true only when the file exists AND the agent is detected",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual resolved PILOT_DATA plugin file plus detected-agent directory returns true; moving that exact asset away makes same closure false without further detection calls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l153_both_resolved_pilot_data_asset_and_detected_agent_are_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C5",
+            "title": "accepts an existing OpenClaw directory plugin asset",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual directory (not regular file) at resolved OpenClaw data asset plus real supported host metadata/explicit bound entry passes actual target precondition; deleting directory rejects before further manager detection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l164_existing_openclaw_directory_passes_asset_and_real_host_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L187:C5",
+            "title": "skips the file gate for non-file specs (e.g. npm package)",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual npm spec succeeds with agent detected while no data/plugins directory exists before or after; exactly one real manager detection call.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l187_npm_spec_needs_no_local_asset_but_still_detects_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C5",
+            "title": "checks absolute extension paths used by Pi Coding Agent",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Pi absolute extension path absent returns false before detection, then real extension creation makes same target true and detection counter exactly one.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l204_pi_absolute_extension_path_is_checked_before_agent_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C5",
+            "title": "is healthy when needsRedeploy is false",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "check (healthy when spec present)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual configuration containing exact npm spec makes real manager needs_redeploy false and the constructed Orchestrator target healthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l226_existing_exact_spec_is_healthy_via_actual_needs_redeploy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L235:C5",
+            "title": "is unhealthy when needsRedeploy is true",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "check (healthy when spec present)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual configuration containing only foreign spec makes real manager needs_redeploy true and the constructed target unhealthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l235_missing_spec_is_unhealthy_via_actual_needs_redeploy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L245:C5",
+            "title": "does not count not-detected races as repairs and recovers within the same day",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual target closures + real OpenClaw metadata remove host package after precondition on four checks. Real deploy returns NotDetected and watchdog repaired=0 each time; fifth stable same-day cycle deploys successfully, repaired=1, real repair calls=5, ownership recorded.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l245_four_actual_disappearance_races_do_not_spend_daily_repair_budget"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L259:C5",
+            "title": "waits for strategy metadata despite the generic presence detector returning true",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual generic presence is true before supported host metadata exists, while strategy-aware target stays false. Writing temp explicit entry and valid package metadata makes the same target true on retry.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l259_generic_presence_waits_for_actual_openclaw_metadata_and_rechecks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L269:C5",
+            "title": "calls deploySingle on repair",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repair writes requested agent's spec into real settings and deployment state; preserves foreign spec/theme and becomes healthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l269_repair_really_deploys_injection_and_records_exact_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C5",
+            "title": "throws when deploySingle fails so the watchdog records the failure",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual missing config causes real manager deploy failure; Orchestrator propagates its exact no-config error, actual watchdog repaired remains zero, no deployment ownership record.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l278_actual_deployment_failure_propagates_to_target_and_watchdog"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L288:C5",
+            "title": "delegates to DeploymentManager.undeployAgent",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "cleanup (remove injection when disabled)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repair followed by target cleanup removes requested spec and ownership while preserving foreign spec and theme.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l288_cleanup_really_undeploys_only_its_injected_spec"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L298:C5",
+            "title": "throws when cleanup cannot remove the injected spec",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "cleanup (remove injection when disabled)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual invalid plugin configuration makes manager undeploy false; constructed target returns Err containing exact historical failed-to-remove-injected-plugin diagnostic, leaves invalid user bytes and ownership intact for retry.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l298_cleanup_failure_is_reported_and_ownership_remains_for_retry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C3",
+            "title": "keeps the shared PI input enabled when built-in PI is disabled but a registered SDK Agent is enabled",
+            "suites": [
+              "Orchestrator PI SDK shared input gating"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual registered acme-code SDK plus built-in PI disabled and SDK enabled are fed through register_all_inputs. Actual PI discovery entry remains enabled. Recorded scope without SDK rejects, adding SDK allows, explicit shared-listener Off rejects; individual PI input gate remains unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l309_registered_sdk_keeps_the_actual_shared_pi_discovery_entry_enabled"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "does not record a degraded startup alarm after successful recovery",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real SDK registration wrapper is deleted then actual Orchestrator restore repairs identical wrapper bytes; AlarmManager emits no degradation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l344_actual_missing_sdk_wrapper_is_restored_without_degraded_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L352:C3",
+            "title": "records a bounded-busy degradation without blocking startup",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real held native registry lock spans the existing 100ms+300ms retry delays; actual Orchestrator restore returns within 5s and records level2 DEGRADED_STARTUP_ALARM/input pi-coding-agent-log with exact bounded-busy diagnostic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l352_real_bounded_busy_restore_records_degradation_and_returns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L365:C3",
+            "title": "records a sanitized degradation for non-busy restore failures",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real registered SDK wrapper missing plus extension runtime missing triggers actual non-busy restore failure. Startup returns and real alarm retains type/level/input and doctor hint without disclosing private temp path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l365_actual_non_busy_restore_failure_has_only_sanitized_alarm_text"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

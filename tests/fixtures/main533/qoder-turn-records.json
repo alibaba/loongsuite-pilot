@@ -1,0 +1,154 @@
+[
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "other-0",
+    "event.name": "other",
+    "time_unix_nano": "1793607372643000000",
+    "gen_ai.input.messages_delta": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "type": "text",
+            "content": "Read the demo"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "llm.request-10",
+    "event.name": "llm.request",
+    "time_unix_nano": "1793607372653000000",
+    "gen_ai.step.id": "s1",
+    "gen_ai.response.id": "r1",
+    "gen_ai.request.model": "test-model"
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "llm.response-20",
+    "event.name": "llm.response",
+    "time_unix_nano": "1793607372663000000",
+    "gen_ai.step.id": "s1",
+    "gen_ai.response.id": "r1",
+    "gen_ai.request.model": "test-model",
+    "gen_ai.usage.input_tokens": 10,
+    "gen_ai.usage.output_tokens": 2,
+    "gen_ai.usage.cache_read.input_tokens": 4,
+    "gen_ai.output.messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "tool_call",
+            "id": "t1",
+            "name": "Read",
+            "arguments": {
+              "path": "demo.txt"
+            }
+          }
+        ]
+      }
+    ],
+    "gen_ai.response.finish_reasons": [
+      "tool_use"
+    ]
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "tool.call-21",
+    "event.name": "tool.call",
+    "time_unix_nano": "1793607372664000000",
+    "gen_ai.step.id": "s1",
+    "gen_ai.tool.call.id": "t1",
+    "gen_ai.tool.name": "Read",
+    "span_id": "aaaaaaaaaaaaaaaa",
+    "gen_ai.tool.call.arguments": {
+      "path": "demo.txt"
+    }
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "tool.result-30",
+    "event.name": "tool.result",
+    "time_unix_nano": "1793607372673000000",
+    "gen_ai.step.id": "s1",
+    "gen_ai.tool.call.id": "t1",
+    "gen_ai.tool.name": "Read",
+    "span_id": "aaaaaaaaaaaaaaaa",
+    "gen_ai.tool.call.result": "demo content"
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "llm.request-31",
+    "event.name": "llm.request",
+    "time_unix_nano": "1793607372674000000",
+    "gen_ai.step.id": "s2",
+    "gen_ai.response.id": "r2",
+    "gen_ai.request.model": "test-model",
+    "parent_span_id": "bbbbbbbbbbbbbbbb"
+  },
+  {
+    "trace_id": "1234567890abcdef1234567890abcdef",
+    "gen_ai.agent.type": "qoder",
+    "gen_ai.provider.name": "qoder",
+    "gen_ai.session.id": "root-test-session",
+    "gen_ai.turn.id": "root-test-turn",
+    "user.id": "test-user",
+    "event.id": "llm.response-40",
+    "event.name": "llm.response",
+    "time_unix_nano": "1793607372683000000",
+    "gen_ai.step.id": "s2",
+    "gen_ai.response.id": "r2",
+    "gen_ai.request.model": "test-model",
+    "gen_ai.usage.input_tokens": 20,
+    "gen_ai.usage.output_tokens": 3,
+    "gen_ai.usage.cache_read.input_tokens": 5,
+    "gen_ai.output.messages": [
+      {
+        "role": "assistant",
+        "parts": [
+          {
+            "type": "text",
+            "content": "demo read"
+          }
+        ]
+      }
+    ],
+    "gen_ai.response.finish_reasons": [
+      "stop"
+    ],
+    "gen_ai.turn.end": true
+  }
+]

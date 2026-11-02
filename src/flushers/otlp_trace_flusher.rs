@@ -1856,6 +1856,9 @@ fn prepare_records(
     if agent_type == "copilot" {
         passthrough.push("gen_ai.copilot.telemetry.source".into());
     }
+    if super::qoder_turn_converter::is_qoder_transcript_agent(agent_type) {
+        passthrough.push("agent.transcript_incomplete".into());
+    }
     if agent_type == "openclaw" {
         passthrough.extend(OPENCLAW_COMPAT_KEYS.iter().map(|key| (*key).to_string()));
     }
@@ -1910,6 +1913,8 @@ fn route_convert(
     };
     if agent_type == "codex" {
         super::convert_codex_turn(records, &options, converter)
+    } else if super::qoder_turn_converter::is_qoder_transcript_agent(agent_type) {
+        super::convert_qoder_turn(records, &options, converter)
     } else if agent_type == "doubao-work" {
         super::convert_doubao_work_turn(records, &options, converter)
     } else if agent_type == "qwen-code-cli" {
@@ -7662,3 +7667,11 @@ mod doubao_contract_tests {
         f.shutdown().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "codex_native_turn_main_tests.rs"]
+mod codex_native_turn_main_tests;
+
+#[cfg(test)]
+#[path = "qoder_turn_main_tests.rs"]
+mod qoder_turn_main_tests;

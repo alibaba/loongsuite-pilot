@@ -588,6 +588,112 @@ fn run_retry(ctx: &HookCtx<'_>, args: &[String], stdin: &[u8]) {
     }
 }
 
+/// Context already resolved by the collector; this adapter performs no file,
+/// configuration, history, retry, or process operations.
+pub struct CollectedTranscriptTurnContext<'a> {
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+    pub turn_id: &'a str,
+    pub runtime_user: &'a str,
+    pub cwd: Option<&'a str>,
+    pub user_name: Option<&'a str>,
+    pub user_email: Option<&'a str>,
+    pub agent_name: Option<&'a str>,
+    pub span_attributes: &'a serde_json::Map<String, Value>,
+    pub resource_attributes: &'a serde_json::Map<String, Value>,
+}
+
+pub fn build_collected_transcript_turn(
+    rows: &[Value],
+    context: CollectedTranscriptTurnContext<'_>,
+) -> Vec<Value> {
+    let name = context.user_name.map(|s| Value::String(s.to_owned()));
+    let email = context.user_email.map(|s| Value::String(s.to_owned()));
+    let identity = identity_from_fields(name.as_ref(), email.as_ref());
+    let stamp = Stamp {
+        span: context.span_attributes.clone(),
+        resources: context.resource_attributes.clone(),
+        agent_name: context
+            .agent_name
+            .map(str::to_owned)
+            .or_else(|| agent_name_patch(context.resource_attributes)),
+    };
+    let (_, content) = split_progress_content(rows);
+    let boundaries = build_llm_boundaries(&content);
+    build_events_from_boundaries(
+        &boundaries,
+        &content,
+        rows,
+        context.turn_id,
+        BoundaryContext {
+            session_id: context.session_id,
+            agent_id: context.agent_id,
+            runtime_user: context.runtime_user,
+            identity: identity.as_ref(),
+            cwd: context.cwd,
+            stamp: &stamp,
+        },
+    )
+    .into_iter()
+    .map(Value::Object)
+    .collect()
+}
+
+pub fn qoder_is_real_user_prompt(row: &Value) -> bool {
+    is_real_user_prompt(row) && !is_control_user_row(row)
+}
+
+pub fn qoder_is_control_user_row(row: &Value) -> bool {
+    is_control_user_row(row)
+}
+
+pub fn qoder_has_cn_terminal(rows: &[Value]) -> bool {
+    let progress: Vec<_> = rows
+        .iter()
+        .filter(|row| typ(row) == "progress")
+        .map(|row| Progress {
+            hook_event: hook_event(Some(row)).to_owned(),
+        })
+        .collect();
+    has_qoder_cn_terminal(&progress, rows)
+}
+
+pub fn qoder_legacy_retry_lock_path(data: &Path, transcript: &Path) -> PathBuf {
+    data.join("hooks").join(".retry-locks").join(format!(
+        "{}.lock",
+        sha1_hex(transcript.to_string_lossy().as_bytes())
+    ))
+}
+
+/// Collector-side CLI identity lookup: the thin Hook never runs a status child.
+pub async fn resolve_qoder_collector_cli_identity(data: &Path) -> Option<Value> {
+    resolve_qoder_collector_cli_identity_with_env(data, std::env::vars().collect()).await
+}
+
+/// Explicit environment for isolated callers. Reuses the existing bounded native
+/// status/cache implementation and moves its filesystem/child work off the input.
+pub async fn resolve_qoder_collector_cli_identity_with_env(
+    data: &Path,
+    mut env: std::collections::HashMap<String, String>,
+) -> Option<Value> {
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        data.to_string_lossy().into_owned(),
+    );
+    let identity = tokio::task::spawn_blocking(move || resolve_qoder_cli_user_identity(&env))
+        .await
+        .ok()
+        .flatten()?;
+    let mut value = Obj::new();
+    if let Some(name) = identity.name {
+        value.insert("name".into(), Value::String(name));
+    }
+    if let Some(email) = identity.email {
+        value.insert("email".into(), Value::String(email));
+    }
+    Some(Value::Object(value))
+}
+
 fn process_transcript(
     ctx: &HookCtx<'_>,
     transcript: &Path,

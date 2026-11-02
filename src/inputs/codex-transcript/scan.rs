@@ -13,6 +13,71 @@ use super::utils::string_value;
 pub const READ_CHUNK_SIZE: usize = 1024 * 1024;
 pub const MAX_JSONL_RECORD_BYTES: usize = 128 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileVersion {
+    pub inode: u64,
+    pub device: u64,
+    pub size: i64,
+    pub modified: Option<std::time::SystemTime>,
+    pub changed: (i64, i64),
+}
+#[derive(Clone, Debug)]
+pub struct IncompleteJsonlTail {
+    pub start_offset: i64,
+    pub end_offset: i64,
+    pub anchor: Vec<u8>,
+    pub version: FileVersion,
+}
+fn version_from_open(file: &std::fs::File) -> std::io::Result<FileVersion> {
+    let identity = crate::utils::file_identity::identity_from_open(file)?;
+    let metadata = file.metadata()?;
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    #[cfg(windows)]
+    let changed = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        };
+        let mut info = FILE_BASIC_INFO::default();
+        // SAFETY: File owns this live handle and the output buffer has the exact API layout.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                (&mut info as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        (info.ChangeTime, 0)
+    };
+    Ok(FileVersion {
+        inode: identity.ino,
+        device: identity.dev,
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        modified: metadata.modified().ok(),
+        changed,
+    })
+}
+pub async fn opened_file_version(file: &tokio::fs::File) -> std::io::Result<FileVersion> {
+    let file = file.try_clone().await?.into_std().await;
+    tokio::task::spawn_blocking(move || version_from_open(&file))
+        .await
+        .map_err(std::io::Error::other)?
+}
+pub async fn file_version_snapshot(path: &str) -> std::io::Result<FileVersion> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || version_from_open(&std::fs::File::open(path)?))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 #[derive(Clone, Debug)]
 pub struct JsonLine {
     pub start_offset: i64,
@@ -28,6 +93,7 @@ pub struct ScanStats {
     pub parse_failed_records: u64,
     pub max_record_bytes: u64,
     pub quarantined: bool,
+    pub incomplete_tail: Option<IncompleteJsonlTail>,
     #[cfg(test)]
     pub examined_bytes: u64,
     #[cfg(test)]
@@ -58,6 +124,26 @@ pub fn observe_batch(runtime: &InputRuntime, batch: CommittedInputBatch) {
     runtime.with_accumulator(|accumulator| accumulator.observe_committed_batch(batch));
 }
 
+#[cfg(test)]
+thread_local! { static ASSEMBLED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub fn reset_assembly_work() {
+    ASSEMBLED_BYTES.set(0);
+}
+#[cfg(test)]
+pub fn assembly_work() -> u64 {
+    ASSEMBLED_BYTES.get()
+}
+fn finished_scan(stats: ScanStats) -> ScanStats {
+    #[cfg(test)]
+    ASSEMBLED_BYTES.set(
+        ASSEMBLED_BYTES
+            .get()
+            .saturating_add(stats.retained_copy_bytes),
+    );
+    stats
+}
+
 /// `false` from `on_line` stops the scan at that line, matching the TypeScript scanner.
 pub async fn scan_json_lines(
     file_path: &str,
@@ -71,22 +157,31 @@ pub async fn scan_json_lines(
         ..Default::default()
     };
     if end_offset <= start_offset {
-        return Ok(stats);
+        return Ok(finished_scan(stats));
     }
     let mut file = tokio::fs::File::open(file_path).await?;
+    let original_version = opened_file_version(&file).await?;
+    let mut last_anchor = Vec::new();
     let mut position = start_offset;
-    let mut pending = Vec::<u8>::new();
+    let mut pending = Vec::<(std::sync::Arc<Vec<u8>>, usize, usize)>::new();
     let mut pending_start = start_offset;
     while position < end_offset {
         let length = ((end_offset - position) as usize).min(READ_CHUNK_SIZE);
-        let mut chunk = vec![0u8; length];
+        let mut chunk = std::sync::Arc::new(vec![0u8; length]);
         file.seek(SeekFrom::Start(position as u64)).await?;
         let started = InputRuntimeAccumulator::now();
-        let read = file.read(&mut chunk).await?;
+        let read = file
+            .read(
+                std::sync::Arc::get_mut(&mut chunk)
+                    .expect("new chunk")
+                    .as_mut_slice(),
+            )
+            .await?;
         observe_read(runtime, read as u64, length as u64, started);
         if read == 0 {
             break;
         }
+        last_anchor = chunk[read.saturating_sub(64)..read].to_vec();
         let chunk_start = position;
         position += read as i64;
         let mut cursor = 0;
@@ -104,29 +199,13 @@ pub async fn scan_json_lines(
             }
             let record_bytes = (chunk_start + part_end as i64 - pending_start) as u64;
             if record_bytes <= MAX_JSONL_RECORD_BYTES as u64 {
-                let part = &chunk[cursor..part_end];
-                let needed = pending.len() + part.len();
-                if pending.capacity() < needed {
-                    let capacity = pending
-                        .capacity()
-                        .saturating_mul(2)
-                        .max(READ_CHUNK_SIZE)
-                        .max(needed)
-                        .min(MAX_JSONL_RECORD_BYTES);
-                    #[cfg(test)]
-                    let previous = (pending.as_ptr(), pending.len());
-                    pending.reserve_exact(capacity - pending.len());
-                    #[cfg(test)]
-                    if previous.0 != pending.as_ptr() {
-                        stats.retained_copy_bytes += previous.1 as u64;
-                    }
-                }
-                pending.extend_from_slice(part);
+                // Retain references to new chunks, never copy the accumulated
+                // prefix. Only a completed multi-chunk record is assembled once.
+                pending.push((chunk.clone(), cursor, part_end));
                 #[cfg(test)]
                 {
-                    stats.retained_copy_bytes += part.len() as u64;
                     stats.peak_retained_record_bytes =
-                        stats.peak_retained_record_bytes.max(pending.len() as u64);
+                        stats.peak_retained_record_bytes.max(record_bytes);
                 }
             } else {
                 // Do not retain, decode or parse the over-limit body. Continue
@@ -152,9 +231,26 @@ pub async fn scan_json_lines(
                 );
                 // The skipped record may have been a terminal. Return to the
                 // engine before any next-turn start is allowed to replace it.
-                return Ok(stats);
+                return Ok(finished_scan(stats));
             }
-            let text = String::from_utf8_lossy(&pending);
+            let assembled = if pending.len() > 1 {
+                let mut bytes = Vec::with_capacity(record_bytes as usize);
+                for (chunk, start, end) in &pending {
+                    bytes.extend_from_slice(&chunk[*start..*end]);
+                }
+                #[cfg(test)]
+                {
+                    stats.retained_copy_bytes += record_bytes;
+                }
+                Some(bytes)
+            } else {
+                None
+            };
+            let bytes = assembled.as_deref().unwrap_or_else(|| {
+                let (chunk, start, end) = &pending[0];
+                &chunk[*start..*end]
+            });
+            let text = String::from_utf8_lossy(bytes);
             let text = text.trim();
             if !text.is_empty() {
                 stats.records += 1;
@@ -168,7 +264,7 @@ pub async fn scan_json_lines(
                             record,
                         }) {
                             stats.next_offset = line_end;
-                            return Ok(stats);
+                            return Ok(finished_scan(stats));
                         }
                     }
                     _ => stats.parse_failed_records += 1,
@@ -180,7 +276,18 @@ pub async fn scan_json_lines(
             cursor = newline + 1;
         }
     }
-    Ok(stats)
+    if position > pending_start {
+        let version = opened_file_version(&file).await?;
+        if version == original_version {
+            stats.incomplete_tail = Some(IncompleteJsonlTail {
+                start_offset: pending_start,
+                end_offset: position,
+                anchor: last_anchor,
+                version,
+            });
+        }
+    }
+    Ok(finished_scan(stats))
 }
 
 /// Explicit range readers own their entire requested range. Live scanning

@@ -567,6 +567,25 @@ async fn read_request(socket: &mut TcpStream) -> Result<HttpRequest, ReadError> 
         }
     }
     if content_length > MAX_HOOK_BODY_BYTES {
+        // Closing a Windows TCP socket with unread request bytes resets the
+        // connection and can discard the fail-open response. Drain only small
+        // overflows, without retaining or parsing their content. Both the byte
+        // budget and time budget bound an incomplete/untrusted upload.
+        if content_length <= MAX_HOOK_BODY_BYTES.saturating_add(64 * 1024) {
+            let mut remaining = content_length.saturating_sub(buf.len() - header_end - 4);
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                while remaining > 0 {
+                    let limit = remaining.min(tmp.len());
+                    let n = socket.read(&mut tmp[..limit]).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    remaining -= n;
+                }
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
+        }
         return Err(ReadError::TooLarge { path });
     }
     let mut body = buf[header_end + 4..].to_vec();
@@ -1003,6 +1022,28 @@ mod tests {
         assert_eq!(body["decision"], "block");
         assert_eq!(*emitted.lock().unwrap(), 0);
         qwen.close().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_advertised_body_does_not_wait_for_an_unsent_upload() {
+        let (server, port, _, _) = listen(Arc::new(Demo { throws: false })).await;
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let request = format!("POST /v1/hooks/evaluate HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n", MAX_HOOK_BODY_BYTES + 1);
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let body: Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1.trim()).unwrap();
+        assert_eq!(body["action"], "allow");
+        assert_eq!(body["failOpen"], true);
+        server.close().await;
     }
 
     #[tokio::test]

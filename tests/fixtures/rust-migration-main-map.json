@@ -23553,6 +23553,1595 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/core/orchestrator-plugin-inject-watchdog.test.ts",
+      "source_hash": "a2375376757683b644d00f69620f3b83888a03289967bafb011fa4957b901842",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All 20 frozen ef8953=f84 plugin watchdog declarations have actual native Orchestrator/deployment/metadata/registry/alarm assertions, no retirements. Actual Linux; Windows/macOS applicable pending execution. Detection/undeploy counters observe real manager entries only in cfg(test); native per-entry PI gates and resource budgets remain intact.",
+      "cases": [
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "only builds targets for plugin-inject agents",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual loader plus real DeploymentManager retains Hook/PluginInject definitions; Orchestrator targets are exactly plugin-inject:opencode and plugin-inject:qwen-code-cli, with unrelated Hook excluded.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l113_only_plugin_inject_definitions_become_exact_named_targets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L124:C3",
+            "title": "skips plugin-inject defs missing pluginInject config",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native loader retains incomplete plugin definition, but Orchestrator must produce zero repair targets. Original tree failed this assertion; one production guard now restores source behavior.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l124_missing_plugin_inject_configuration_never_builds_a_target"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C5",
+            "title": "returns false when the plugin file does not exist",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual missing PILOT_DATA-resolved local plugin asset returns false and real DeploymentManager detection-entry counter remains zero.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l133_missing_local_asset_short_circuits_real_manager_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C5",
+            "title": "returns false when the file exists but the agent is not detected",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual existing plugin asset with missing detected-agent directory returns false and consults real manager detection exactly once.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l144_existing_asset_cannot_replace_actual_agent_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C5",
+            "title": "returns true only when the file exists AND the agent is detected",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual resolved PILOT_DATA plugin file plus detected-agent directory returns true; moving that exact asset away makes same closure false without further detection calls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l153_both_resolved_pilot_data_asset_and_detected_agent_are_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C5",
+            "title": "accepts an existing OpenClaw directory plugin asset",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual directory (not regular file) at resolved OpenClaw data asset plus real supported host metadata/explicit bound entry passes actual target precondition; deleting directory rejects before further manager detection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l164_existing_openclaw_directory_passes_asset_and_real_host_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L187:C5",
+            "title": "skips the file gate for non-file specs (e.g. npm package)",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual npm spec succeeds with agent detected while no data/plugins directory exists before or after; exactly one real manager detection call.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l187_npm_spec_needs_no_local_asset_but_still_detects_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C5",
+            "title": "checks absolute extension paths used by Pi Coding Agent",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "precondition (double gate)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Pi absolute extension path absent returns false before detection, then real extension creation makes same target true and detection counter exactly one.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l204_pi_absolute_extension_path_is_checked_before_agent_detection"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C5",
+            "title": "is healthy when needsRedeploy is false",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "check (healthy when spec present)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual configuration containing exact npm spec makes real manager needs_redeploy false and the constructed Orchestrator target healthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l226_existing_exact_spec_is_healthy_via_actual_needs_redeploy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L235:C5",
+            "title": "is unhealthy when needsRedeploy is true",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "check (healthy when spec present)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual configuration containing only foreign spec makes real manager needs_redeploy true and the constructed target unhealthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l235_missing_spec_is_unhealthy_via_actual_needs_redeploy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L245:C5",
+            "title": "does not count not-detected races as repairs and recovers within the same day",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual target closures + real OpenClaw metadata remove host package after precondition on four checks. Real deploy returns NotDetected and watchdog repaired=0 each time; fifth stable same-day cycle deploys successfully, repaired=1, real repair calls=5, ownership recorded.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l245_four_actual_disappearance_races_do_not_spend_daily_repair_budget"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L259:C5",
+            "title": "waits for strategy metadata despite the generic presence detector returning true",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual generic presence is true before supported host metadata exists, while strategy-aware target stays false. Writing temp explicit entry and valid package metadata makes the same target true on retry.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l259_generic_presence_waits_for_actual_openclaw_metadata_and_rechecks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L269:C5",
+            "title": "calls deploySingle on repair",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repair writes requested agent's spec into real settings and deployment state; preserves foreign spec/theme and becomes healthy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l269_repair_really_deploys_injection_and_records_exact_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C5",
+            "title": "throws when deploySingle fails so the watchdog records the failure",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "repair (re-inject via deploySingle)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual missing config causes real manager deploy failure; Orchestrator propagates its exact no-config error, actual watchdog repaired remains zero, no deployment ownership record.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l278_actual_deployment_failure_propagates_to_target_and_watchdog"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L288:C5",
+            "title": "delegates to DeploymentManager.undeployAgent",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "cleanup (remove injection when disabled)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual repair followed by target cleanup removes requested spec and ownership while preserving foreign spec and theme.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l288_cleanup_really_undeploys_only_its_injected_spec"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L298:C5",
+            "title": "throws when cleanup cannot remove the injected spec",
+            "suites": [
+              "Orchestrator.buildPluginInjectInterceptTargets",
+              "cleanup (remove injection when disabled)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual invalid plugin configuration makes manager undeploy false; constructed target returns Err containing exact historical failed-to-remove-injected-plugin diagnostic, leaves invalid user bytes and ownership intact for retry.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l298_cleanup_failure_is_reported_and_ownership_remains_for_retry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C3",
+            "title": "keeps the shared PI input enabled when built-in PI is disabled but a registered SDK Agent is enabled",
+            "suites": [
+              "Orchestrator PI SDK shared input gating"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual registered acme-code SDK plus built-in PI disabled and SDK enabled are fed through register_all_inputs. Actual PI discovery entry remains enabled. Recorded scope without SDK rejects, adding SDK allows, explicit shared-listener Off rejects; individual PI input gate remains unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l309_registered_sdk_keeps_the_actual_shared_pi_discovery_entry_enabled"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "does not record a degraded startup alarm after successful recovery",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real SDK registration wrapper is deleted then actual Orchestrator restore repairs identical wrapper bytes; AlarmManager emits no degradation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l344_actual_missing_sdk_wrapper_is_restored_without_degraded_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L352:C3",
+            "title": "records a bounded-busy degradation without blocking startup",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real held native registry lock spans the existing 100ms+300ms retry delays; actual Orchestrator restore returns within 5s and records level2 DEGRADED_STARTUP_ALARM/input pi-coding-agent-log with exact bounded-busy diagnostic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l352_real_bounded_busy_restore_records_degradation_and_returns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L365:C3",
+            "title": "records a sanitized degradation for non-busy restore failures",
+            "suites": [
+              "Orchestrator PI SDK wrapper restore failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real registered SDK wrapper missing plus extension runtime missing triggers actual non-busy restore failure. Startup returns and real alarm retains type/level/input and doctor hint without disclosing private temp path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "source_l365_actual_non_busy_restore_failure_has_only_sanitized_alarm_text"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/core/orchestrator-copilot-watchdog.test.ts",
+      "source_hash": "9e0931418ea38bd6c9c238830bbc555672f2a79f3073335c8a77def73f3b836c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84 main-only one declaration; ef8953 file absent. Unix plugin support; native Windows adapter deliberately has no automatic Copilot target and a separate cfg(windows) proof. Linux actual here, macOS execution pending. Existing real lifecycle upgraded with exact cleanup-incomplete error and real undeploy counter proving no ownership=no manager call. Native immutable configuration uses actual AgentControl Off/On runtime transition to exercise enabled closure.",
+      "cases": [
+        {
+          "source": {
+            "id": "L6:C3",
+            "title": "checks and repairs enabled plugins and retries incomplete disabled cleanup",
+            "suites": [
+              "Copilot watchdog lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Orchestrator-built watchdog installs temp Copilot registration, checks healthy/unhealthy hooks, repairs exact bytes, rejects skipped deployment as repair, disables and cleans only owned files preserving foreign settings, no-ownership cleanup performs zero actual manager undeploy calls, incomplete cleanup retains ownership and retries successfully. Diagnostic contains historical cleanup incomplete prefix.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_watchdog_tests.rs",
+                "test": "copilot_plugin_watchdog_repairs_real_registration_and_cleans_disabled_owned_state"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/codex-turn-journal.test.ts",
+      "source_hash": "fb797a2c1ec0663bb09934b577d4c26592011e446b54f3b70b10c701aec5dbe1",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef无此文件，main8。f84与latest346 source逐字同hash。复用既有真实journal断言，只补原缺owned filename/pending权限/remove/absent及合法foreign fixture；原10,000 ACK/30s预算完整保留。同步中央3文件仅验证基点，未混入增量；journal生产逻辑无变更。",
+      "cases": [
+        {
+          "source": {
+            "id": "L26:C3",
+            "title": "restores separate users/sessions/turns and stable records after restart without duplicate event IDs",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原5记录跨4用户/session/turn分组、并发重复append、restart精确full-record相等；额外补回原所有文件名codex-turn+64hex.jsonl正则断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal_main_tests.rs",
+                "test": "main_l26_all_concurrently_written_group_filenames_are_owned_sha256_jsonl_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L37:C3",
+            "title": "reads the next pending group only after the previous group is consumed",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原70组先消费/ACK首group，yield后真实改写下一排序文件，第二group必须读取written-after-yield；ACK按key回放为空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "lazy_replay_reads_later_group_after_yield_and_ignores_acknowledged_groups"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "preserves complete records before a truncated tail and repairs that tail before appending",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原完整记录+截断尾重启不丢前缀，append修尾后再重启两完整记录相等；Native还覆盖20k跨扫描块截断，不降低原截断合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "incomplete_tail_is_excluded_and_repaired_before_append_even_across_scan_chunks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C3",
+            "title": "reads only owned files and valid matching Codex groups, excluding malformed and foreign records",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原owned filename+matching Codex user/session/turn、malformed/wrong-group/empty-id/other-agent都过滤；补把旧Native unrelated无效文本改成原合法foreign Codex JSON，证明归属过滤非仅JSON语法过滤。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "rejects_foreign_groups_and_malformed_lines_without_losing_complete_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "uses private permissions and removes only exported group files by records or group key",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原POSIX目录700/pending600，remove(entries)只去first保second，remove(key)及../unrelated安全，empty→重新appendfirst可读，absent journal空且不创建目录。Windows按原规则不测POSIX权限。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal_main_tests.rs",
+                "test": "main_private_pending_permissions_and_both_remove_forms_preserve_the_other_group_and_absent_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L102:C3",
+            "title": "persists private metadata-only acknowledgements and suppresses replay after restart",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原ack前false→ack metadata仅version1/key；目录700/ack600，restart true，append已ACK不重放、generic remove不能撤销ack，最终仅一个ack文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "private_acknowledgements_suppress_restart_and_cannot_be_undone_by_generic_removal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L127:C3",
+            "title": "ignores residual pending content if acknowledgement was written before a crash",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实pending+手写crash ACK后，重启ACK识别、全组/指定key回放空、已ACK再append不改原pending字节；结合privateACK与lazy-key原生断言补齐所有源断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "ack_before_crash_hides_residual_content_and_removal_without_ack_allows_replay"
+              },
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "private_acknowledgements_suppress_restart_and_cannot_be_undone_by_generic_removal"
+              },
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "lazy_replay_reads_later_group_after_yield_and_ignores_acknowledged_groups"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C3",
+            "title": "cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure",
+            "suites": [
+              "CodexTurnJournal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原完整10,000 ACK预算、真实oldest mtimeEpoch、清residual后再忘旧ack、计数仍10,000；真实pending目录unlink失败必须Err并保留proof。原30s测试预算显式恢复，未下调容量或时间。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_turn_journal.rs",
+                "test": "ack_cap_removes_residual_before_forgetting_proof_and_preserves_ack_on_cleanup_failure"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/codex-turn-converter.test.ts",
+      "source_hash": "8b5e5b3b493e76ed7b5a7bec62f9ba7e53dbf735a4e614ea8bfa22b6c9938a7c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef无此文件，main10声明/原3个it.each共13展开合同；f84与latest346逐字同hash。真实manager/journal/GenAi converter/Otlp final spans+受控exporter，非fake converter/函数存在断言；只复用已有fragment测试，补原未完整核对9组最终span合同。当前生产实现已满足，未改ACK/CP/转换逻辑。",
+      "cases": [
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "applies the current workspace exclusion during %s replay without an export ACK",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": [
+              "it.each(['startup', 'rehydrate'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原startup/rehydrate两模式真实InputManager当前workspace policy+实际journal replay；过滤后0span、不ACK、journal空。原POSIX固定路径适配临时绝对本地目录，Windows不把非绝对POSIX字串当产品缺陷。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l54_both_startup_and_rehydrate_apply_current_workspace_exclusion_without_ack"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "replays a retained prefix under %s while preserving identity and topology",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": [
+              "it.each(['legacy-content-opt-out', 'mask'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原legacy-content-opt-out/mask两模式都复验；旧prefix2条重放无partialspan，当前策略处理completion后恰好3span；legacyfalse仍保task/APIkey，mask去key且含[APIKEY_MASKED]；LLMd16、AGENT parent invocation I保持，最后ACKtrue。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l74_legacy_opt_out_and_mask_replay_preserve_original_content_identity_and_topology"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L103:C3",
+            "title": "recovers a pending native turn after a %s collector restart without partial AGENT export",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": [
+              "it.each(['graceful', 'crash'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原graceful/unclean两个实例重建模式；prefix+flush0span，新instance start0span，completion恰好3span/1AGENT/native LLMd16/allunique/journal空。保持old instance最后shutdown顺序；这是源同边界unclean instance recreation，不伪称OS kill试验。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l103_graceful_and_unclean_instance_restart_never_export_a_partial_agent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L126:C3",
+            "title": "retains a complete durable turn when export fails and acknowledges only successful replay",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原complete turn在真实exporter failure后持久1group；新成功exporter start恢复3span且journal清空，仅成功才ACK。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l126_failed_complete_turn_is_durable_until_successful_replay_ack"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C3",
+            "title": "does not export an acknowledged turn again when the source cursor replays after restart",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原complete turn首输出3，shutdown/start新实例后重放同source不再输出/journal空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l140_acknowledged_source_cursor_replay_after_restart_does_not_export_again"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "rehydrates an evicted pending prefix without exporting an unfinished turn",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原67 unfinished prefix跨64 cap，实际0span且pending64；补同一c0结尾再真实rehydrate输出3span/AGENT child:c0，未降容量。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l157_original_sixty_seven_pending_prefixes_evict_memory_then_rehydrate_only_the_completed_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L169:C3",
+            "title": "exports the parent before a late child and preserves each operation identity and token ownership",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原late child：parent先有1AGENT/child仍pending1，child完成后2AGENT、child root parentb16/invocationI/turn、parent不漏outgoinginvocation、2LLM tokeninput总22且child LLM parentf16、1ENTRY/2STEP/uniqueIDs、TOOLb16原1ms及invocationI全部检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l169_parent_finishes_before_late_child_with_exact_operation_ids_token_ownership_and_span_topology"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L199:C3",
+            "title": "deduplicates standard/short aliases and reserves restart-stable IDs",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原标准/短4种别名同时输入，两次全新flusher每次5span/LLM inputtoken11、排序spanIDs两次相同，原sourceModelRequest没被改写。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l199_standard_short_aliases_have_exact_five_spans_and_restart_stable_ids_without_audit_mutation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L223:C3",
+            "title": "keeps different response fragments even when their alias and timestamp match",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "复用真实prepare_trace_events：standard/short语义重复只留1、同timestamp不同fragment保留2且eventIDs正确；该共享函数无agent分支，native额外覆盖嵌套key顺序与observed timestamp不同的同义alias。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/trace_event_compat.rs",
+                "test": "aliases_deduplicate_semantic_copies_but_preserve_real_stream_fragments"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L230:C3",
+            "title": "keeps an independent ENTRY when upstream attachment is unknown and ignores audit-only delivery turns",
+            "suites": [
+              "Codex native turn conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原unknown upstream仍独立1ENTRY、AGENT parent invocationI保留；audit-only gen_ai.agent.result delivery turn+flush不增加span。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/codex_native_turn_main_tests.rs",
+                "test": "main_l230_unknown_upstream_keeps_independent_entry_and_audit_only_delivery_never_exports"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/export.test.ts",
+      "source_hash": "a62319320d8868ef8498e49a02a881a04a21df4c39f0114ec7dd99a467a43463",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84与346逐字同source hash；ef到f84仅import/mock append接点更新，原所有业务assert/时间容量未改，逐条复用既有真实Native与定向执行。新2b24不混此冻结分母。",
+      "cases": [
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "calls exporter.export via exportSpansForAgent test seam",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：实际export seam带原span1条调用exporter一次，保留test-span。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "shutdown_drains_a_pending_turn_and_direct_export_bypasses_the_converter"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L71:C3",
+            "title": "writes debug file when debug=true",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：debug=true/success真实tempdir/otlp-debug单文件单行，名称含test-pilot-claude-code且保留span。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "debug_and_failure_output_matrix_writes_only_the_requested_daily_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "does NOT write debug file when debug=false",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：debug=false/success实际otlp-debug目录不存在，无debug写入。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "debug_and_failure_output_matrix_writes_only_the_requested_daily_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "writes failed-log on export failure",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：debug=false/failure实际单个safe daily失败文件，_error.message精确401 unauthorized。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "debug_and_failure_output_matrix_writes_only_the_requested_daily_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C3",
+            "title": "exports small total size in a single call",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：原10条small span和10KB上限，真实batch长度严格[10]。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "small_large_and_default_batches_preserve_exact_original_batch_lengths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "splits spans into batches by estimated size",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：原5条4KB属性span和10KB上限，真实batch长度严格[2,2,1]。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "small_large_and_default_batches_preserve_exact_original_batch_lengths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C3",
+            "title": "uses default 10MB limit when maxExportBatchBytes not configured",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：未配置batch字节上限原100条small span，真实batch长度严格[100]。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "small_large_and_default_batches_preserve_exact_original_batch_lengths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L165:C3",
+            "title": "enables gzip compression by default on OTLPTraceExporter",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：实际created_exporters compression=gzip。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "normalizes_endpoint_urls_and_cms_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C3",
+            "title": "writes to BOTH debug and failed-log when debug=true and export fails",
+            "suites": [
+              "OtlpTraceFlusher - export"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：debug=true/failure实际debug与failed两个目录各1文件1行，同时保留span。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "debug_and_failure_output_matrix_writes_only_the_requested_daily_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L220:C3",
+            "title": "exports the same spans to every backend once",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：同服务两个backend均只收到1批1条，保留相同spanID/name。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "every_backend_exports_once_across_service_groups_and_one_failure_is_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "fans out to backends split across two serviceNames (once each)",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：第二backend配置独立managed-svc服务，两backend仍各只收到1批。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "every_backend_exports_once_across_service_groups_and_one_failure_is_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "builds a distinct service.name resource per endpoint serviceName group",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：使用实际endpoint_service_name和resource_attributes分别构造test-pilot-claude-code及managed-svc-claude-code。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "every_backend_exports_once_across_service_groups_and_one_failure_is_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C3",
+            "title": "uses one exact service.name for different agent types when suffixing is disabled",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：appendAgentTypeToServiceName=false，原opencode/codex两种agent资源service.name均shared-service且agent.type正确。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "disabled_suffix_keeps_exact_resource_service_for_both_original_agent_types"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L293:C3",
+            "title": "isolates a failing backend and still exports to the healthy one",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：backend-b503不阻塞backend-a；实际只有__backend-b-日期文件，精确1个、无backend-a。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "every_backend_exports_once_across_service_groups_and_one_failure_is_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L318:C3",
+            "title": "sanitizes a malicious endpoint name in the failed-log path",
+            "suites": [
+              "OtlpTraceFlusher - multi-backend fan-out"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：真实恶意endpoint失败，目录内恰1文件，parent为failedDir、无斜杠、含.._.._.._.._tmp_pwn和日期.jsonl。 新测试尚未执行，platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "malicious_backend_name_stays_inside_the_safe_daily_failure_directory"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/long-session.test.ts",
+      "source_hash": "69bd6b94592f638555b335a3327497577a6b1206eff097ac6b94707c235530c0",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84与346逐字同source hash；ef到f84仅import/mock append接点更新，原所有业务assert/时间容量未改，逐条复用既有真实Native与定向执行。新2b24不混此冻结分母。",
+      "cases": [
+        {
+          "source": {
+            "id": "L80:C3",
+            "title": "exports OTLP trace for a single turn with ≥4 LLM calls",
+            "suites": [
+              "OtlpTraceFlusher - long-session regression"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：原4次LLM共8条逐send终止一次conversion，实际converter.calls总1且records8。 新草案未Cargo，待中央实际执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "four_call_turn_followed_by_short_turn_and_fifty_turn_session_keep_records_and_locks_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L91:C3",
+            "title": "does not pollute subsequent turns after a long turn (≥4 LLM calls)",
+            "suites": [
+              "OtlpTraceFlusher - long-session regression"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：原长4步/短1步逐send终止各自conversion，实际records长度[8,2]，每次所有turn.id仅属当前turn。 新草案未Cargo，待中央实际执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "four_call_turn_followed_by_short_turn_and_fifty_turn_session_keep_records_and_locks_isolated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "resets inMem even when convertEventLogToTrace throws, isolating spans across turns",
+            "suites": [
+              "OtlpTraceFlusher - long-session regression"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：第一4步conversion真实抛错、active归零且buffer清空/无导出；下一单步调用真实GenAiEventLogConverter，导出非空且只含recovery-turn，无failed-turn。Rust不持有TS SDK inMem，按错误后无旧span泄漏的行为承接。 新草案未Cargo，待中央实际执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "failed_long_conversion_drops_state_before_the_real_recovery_converter_exports"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L135:C3",
+            "title": "survives many sequential turns without unbounded convertLocks growth",
+            "suites": [
+              "OtlpTraceFlusher - long-session regression"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84仅appendLine到segmented writer mock接点改变，业务assert未改；现有Native真实受控export/磁盘证据对应：原50轮×4LLM逐条发送，conversion恰50次/每次8条，locks恰一个且全部try_lock立即可得；buffers空。 新草案未Cargo，待中央实际执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "four_call_turn_followed_by_short_turn_and_fifty_turn_session_keep_records_and_locks_isolated"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

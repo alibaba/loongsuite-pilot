@@ -169,7 +169,12 @@ fn convert_group(
         begin,
         end,
     );
-    root.parent_span_id = first.parent_span_id.clone().filter(|id| valid_id(id, 16));
+    root.parent_span_id =
+        if super::qoder_turn_converter::is_qoder_transcript_agent(&first.agent_type) {
+            super::qoder_turn_converter::entry_upstream_parent(records)
+        } else {
+            first.parent_span_id.clone().filter(|id| valid_id(id, 16))
+        };
     root.attributes.extend(context_attributes(records, options));
     root.attributes.insert(
         "gen_ai.operation.name".into(),

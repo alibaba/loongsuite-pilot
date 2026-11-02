@@ -91,6 +91,7 @@ pub(super) struct Shared {
     pub meta_cache: IndexMap<String, CachedMeta>,
     pub meta_cache_bytes: usize,
     pub idle: IndexMap<String, RolloutStat>,
+    pub incomplete_tails: IndexMap<String, super::scan::IncompleteJsonlTail>,
     pub last_historical_stat_at: i64,
     pub cached_default: Option<CachedDefault>,
 }
@@ -165,6 +166,7 @@ impl CodexTranscriptInput {
                 meta_cache: IndexMap::new(),
                 meta_cache_bytes: 0,
                 idle: IndexMap::new(),
+                incomplete_tails: IndexMap::new(),
                 last_historical_stat_at: 0,
                 cached_default: None,
             }),
@@ -414,6 +416,7 @@ impl InputBody for CodexTranscriptBody {
         }
         self.with_shared(|shared| {
             shared.meta_cache.clear();
+            shared.incomplete_tails.clear();
             shared.meta_cache_bytes = 0;
         });
         Ok(())

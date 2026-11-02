@@ -581,7 +581,23 @@ async fn acquire_owner_file(path: &str, deadline: Instant) -> Option<String> {
     None
 }
 
-async fn exclusive_token(path: &str, token: &str) -> Result<(), String> {
+// If an awaiting async caller is cancelled, a successfully created worker
+// result must relinquish its token rather than strand the reclamation gate.
+struct PendingOwnerFile {
+    path: String,
+    token: String,
+    claimed: bool,
+}
+impl Drop for PendingOwnerFile {
+    fn drop(&mut self) {
+        if !self.claimed && std::fs::read_to_string(&self.path).ok().as_deref() == Some(&self.token)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn create_owner_file(path: String, token: String) -> Result<PendingOwnerFile, String> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -589,16 +605,33 @@ async fn exclusive_token(path: &str, token: &str) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    match options.open(path) {
+    match options.open(&path) {
         Ok(mut file) => {
             use std::io::Write;
             file.write_all(token.as_bytes())
                 .map_err(|err| err.to_string())?;
-            file.sync_all().map_err(|err| err.to_string())
+            file.sync_all().map_err(|err| err.to_string())?;
+            Ok(PendingOwnerFile {
+                path,
+                token,
+                claimed: false,
+            })
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Err("exists".into()),
         Err(err) => Err(err.to_string()),
     }
+}
+
+async fn exclusive_token(path: &str, token: &str) -> Result<(), String> {
+    let path = path.to_owned();
+    let token = token.to_owned();
+    // fsync on an ARM/Windows volume may stall. Keep it off the async thread
+    // that must concurrently release a competing patch lock.
+    let mut pending = tokio::task::spawn_blocking(move || create_owner_file(path, token))
+        .await
+        .map_err(|err| err.to_string())??;
+    pending.claimed = true;
+    Ok(())
 }
 
 async fn release_patch_lock(target: &str, token: &str) {
@@ -881,6 +914,19 @@ mod tests {
         drop(blocker);
         remove_enabled_marker(cfg).await.unwrap();
         assert!(!Path::new(&marker).exists());
+    }
+
+    #[test]
+    fn discarded_blocking_owner_results_release_only_their_own_token() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate").to_string_lossy().into_owned();
+        let pending = create_owner_file(path.clone(), "owner-a".into()).unwrap();
+        drop(pending);
+        assert!(!Path::new(&path).exists());
+        let pending = create_owner_file(path.clone(), "owner-b".into()).unwrap();
+        std::fs::write(&path, "foreign-owner").unwrap();
+        drop(pending);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "foreign-owner");
     }
 
     #[tokio::test]

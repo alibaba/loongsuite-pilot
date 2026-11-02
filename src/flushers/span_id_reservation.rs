@@ -14,7 +14,7 @@ const ZERO_SPAN_ID: &str = "0000000000000000";
 const TOOL_EVENT_NAMES: &[&str] = &["tool.call", "tool.result"];
 const LLM_EVENT_NAMES: &[&str] = &["llm.request", "llm.response"];
 
-fn valid_span_id(value: &str) -> bool {
+pub(super) fn valid_span_id(value: &str) -> bool {
     value.len() == VALID_SPAN_ID_LEN
         && value
             .chars()
@@ -22,17 +22,41 @@ fn valid_span_id(value: &str) -> bool {
         && value != ZERO_SPAN_ID
 }
 
+pub(super) fn valid_trace_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+        && value.bytes().any(|ch| ch != b'0')
+}
+
 pub struct ReservedSpanIdGenerator {
     reserved: Option<String>,
+    reserved_trace: Option<String>,
 }
 
 impl ReservedSpanIdGenerator {
     pub fn new() -> Self {
-        Self { reserved: None }
+        Self {
+            reserved: None,
+            reserved_trace: None,
+        }
     }
 
-    pub fn generate_trace_id(&self) -> String {
-        random_hex(32)
+    pub fn generate_trace_id(&mut self) -> String {
+        self.reserved_trace.take().unwrap_or_else(|| random_hex(32))
+    }
+
+    pub fn reserve_trace_id(&mut self, trace_id: &str) -> Result<(), String> {
+        if !valid_trace_id(trace_id) {
+            return Err("Invalid reserved trace id".into());
+        }
+        self.reserved_trace = Some(trace_id.into());
+        Ok(())
+    }
+
+    pub fn clear_trace_id(&mut self) {
+        self.reserved_trace = None;
     }
 
     pub fn generate_span_id(&mut self) -> String {
@@ -276,5 +300,48 @@ mod tests {
         assert_eq!(seen, "d0d0d0d0d0d0d0d0");
         let next = gate.start(Some("missing"), |generator| generator.generate_span_id());
         assert_ne!(next, "d0d0d0d0d0d0d0d0");
+    }
+}
+
+#[cfg(test)]
+mod main533_trace_reservation_tests {
+    use super::*;
+    const TRACE: &str = "1234567890abcdef1234567890abcdef";
+    #[test]
+    fn trace_reservation_is_one_shot_and_independent_of_a_reserved_span() {
+        let mut generator = ReservedSpanIdGenerator::new();
+        assert!(generator.reserve("aaaaaaaaaaaaaaaa"));
+        generator.reserve_trace_id(TRACE).unwrap();
+        assert_eq!(generator.generate_trace_id(), TRACE);
+        assert_eq!(generator.generate_span_id(), "aaaaaaaaaaaaaaaa");
+        let next = generator.generate_trace_id();
+        assert!(valid_trace_id(&next));
+        assert_ne!(next, TRACE);
+    }
+    #[test]
+    fn invalid_trace_reservations_fail_without_replacing_a_valid_pending_one() {
+        for invalid in [
+            "0".repeat(32),
+            "a".repeat(31),
+            "A".repeat(32),
+            "z".repeat(32),
+        ] {
+            let mut generator = ReservedSpanIdGenerator::new();
+            generator.reserve_trace_id(TRACE).unwrap();
+            assert_eq!(
+                generator.reserve_trace_id(&invalid).unwrap_err(),
+                "Invalid reserved trace id"
+            );
+            assert_eq!(generator.generate_trace_id(), TRACE);
+        }
+    }
+    #[test]
+    fn clearing_a_trace_reservation_cannot_change_or_leak_a_span_reservation() {
+        let mut generator = ReservedSpanIdGenerator::new();
+        assert!(generator.reserve("aaaaaaaaaaaaaaaa"));
+        generator.reserve_trace_id(TRACE).unwrap();
+        generator.clear_trace_id();
+        assert_ne!(generator.generate_trace_id(), TRACE);
+        assert_eq!(generator.generate_span_id(), "aaaaaaaaaaaaaaaa");
     }
 }

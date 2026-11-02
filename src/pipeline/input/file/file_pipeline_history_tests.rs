@@ -95,11 +95,12 @@ fn source_l66_l70_l74_l78_actual_exported_checkpoint_parser() {
 async fn source_l84_marker_write_failure_keeps_public_rows_deliverable() {
     let f = Fixture::new();
     let marker = f.root.path().join("marker-blocker");
+    let private = f.root.path().join("private-project");
     std::fs::write(&marker, "not a directory").unwrap();
     std::fs::write(
         f.logs.join("mixed.log"),
         [
-            json!({"session_id":"private","cwd":"/private-project","content":"secret"}).to_string(),
+            json!({"session_id":"private","cwd":private,"content":"secret"}).to_string(),
             json!({"session_id":"public","cwd":"/public-project","content":"retained-public"})
                 .to_string(),
         ]
@@ -110,7 +111,7 @@ async fn source_l84_marker_write_failure_keeps_public_rows_deliverable() {
     let mut opts = f.options();
     opts.workspace_policy = Some(Arc::new(std::sync::Mutex::new(
         WorkspacePolicy::new(
-            &["/private-project".into()],
+            &[private.to_string_lossy().into_owned()],
             Some(marker.to_string_lossy().into_owned()),
         )
         .unwrap(),
@@ -127,11 +128,12 @@ async fn source_l84_marker_write_failure_keeps_public_rows_deliverable() {
 async fn source_l99_filters_before_independent_delivery_and_advances_full_offset() {
     let f = Fixture::new();
     let file = f.logs.join("privacy.log");
+    let private = f.root.path().join("private-project");
     std::fs::write(
         &file,
         [
             json!({"session_id":"blocked","content":"early secret"}).to_string(),
-            json!({"session_id":"blocked","cwd":"/private-project","content":"secret"}).to_string(),
+            json!({"session_id":"blocked","cwd":private,"content":"secret"}).to_string(),
             json!({"session_id":"unknown","content":"allowed"}).to_string(),
             "plain unknown workspace".into(),
         ]
@@ -141,7 +143,7 @@ async fn source_l99_filters_before_independent_delivery_and_advances_full_offset
     .unwrap();
     let mut opts = f.options();
     opts.workspace_policy = Some(Arc::new(std::sync::Mutex::new(
-        WorkspacePolicy::new(&["/private-project".into()], None).unwrap(),
+        WorkspacePolicy::new(&[private.to_string_lossy().into_owned()], None).unwrap(),
     )));
     let pipeline = FilePipelineHandle::new(opts).unwrap();
     pipeline.start().await;

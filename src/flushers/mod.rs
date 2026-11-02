@@ -73,3 +73,6 @@ pub use span_enricher::{
     run_span_enricher_worker, SpanEnricher, SpanEnricherContext, SpanEnricherRunner, SpanView,
 };
 pub use span_id_reservation::{ReservedSpanIdGenerator, SpanIdGate, SpanIdReservations};
+
+mod qoder_turn_converter;
+pub use qoder_turn_converter::{convert_qoder_turn, QODER_TRANSCRIPT_AGENT_TYPES};

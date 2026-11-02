@@ -13,10 +13,20 @@ mod cursor;
 mod grok_build;
 mod kiro_cli;
 mod qoder;
+mod qoder_wakeup;
 mod qoder_work;
 mod qwen_code_cli;
 mod qwen_work_cn;
 mod workbuddy;
+
+pub use qoder::{
+    build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
+    qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, CollectedTranscriptTurnContext,
+};
+pub use qoder::{
+    resolve_qoder_collector_cli_identity, resolve_qoder_collector_cli_identity_with_env,
+};
+pub use qoder_wakeup::with_qoder_wakeup_lock;
 
 use common::{write_empty, Env, HookRequest};
 use std::io::{IsTerminal, Read, Write};

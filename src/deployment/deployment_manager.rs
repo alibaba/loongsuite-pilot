@@ -60,6 +60,10 @@ pub struct DeploymentManager {
     definitions: Mutex<Vec<AgentDefinition>>,
     installed_by: Option<InstalledBy>,
     gate: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    detection_calls: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    undeploy_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl DeploymentManager {
@@ -118,6 +122,10 @@ impl DeploymentManager {
             definitions: Mutex::new(Vec::new()),
             installed_by: opts.installed_by,
             gate: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            detection_calls: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            undeploy_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -288,7 +296,16 @@ impl DeploymentManager {
         self.finish_deploy(result).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_undeploy_calls(&self) -> usize {
+        self.undeploy_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn undeploy_agent(&self, def: &AgentDefinition) -> bool {
+        #[cfg(test)]
+        self.undeploy_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.gate.lock().await;
         if let Err(err) = self.load_state().await {
             logger().error(&err, None);
@@ -442,7 +459,16 @@ impl DeploymentManager {
         self.definitions.lock().unwrap().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_detection_calls(&self) -> usize {
+        self.detection_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn is_agent_detected(&self, def: &AgentDefinition) -> bool {
+        #[cfg(test)]
+        self.detection_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.gate.lock().await;
         if let Err(err) = self.load_state().await {
             logger().error(&err, None);

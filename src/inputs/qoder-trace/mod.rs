@@ -1,5 +1,6 @@
 //! Qoder / qoder-cli trace merge input and its token readers.
 
+pub mod transcript_scanner;
 mod intercept_token_reader;
 pub mod multimodal;
 mod qoder_trace_input;
@@ -28,3 +29,7 @@ pub use token_enricher::{
     collect_cli_expected_request_ids, enrich_cli_from_segments, enrich_cli_primary,
     enrich_cli_turn, enrich_ide_turn, inject_trace_id, needs_cli_segment_fallback,
 };
+
+pub mod prompt_ownership;
+
+pub mod legacy_hook_reader;

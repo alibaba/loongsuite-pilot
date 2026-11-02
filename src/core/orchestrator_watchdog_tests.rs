@@ -548,6 +548,8 @@ async fn copilot_contract(root: &Path) {
     let target = &targets[0];
     assert_eq!(target.id, "copilot-plugin:copilot");
     assert!((target.enabled)());
+    let disabled = fixture.orchestrator("copilot", Some(false));
+    assert!(!(disabled.copilot_intercepts(&fixture.manager)[0].enabled)());
     assert!((target.precondition)().await);
     assert!((target.check)().await);
 
@@ -600,7 +602,9 @@ async fn copilot_contract(root: &Path) {
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(plugin.join("foreign.txt"), "not owned by pilot\n").unwrap();
     let saved_settings = std::fs::read(&settings).unwrap();
+    let undeploy_calls = fixture.manager.test_undeploy_calls();
     target.cleanup.as_ref().unwrap()().await.unwrap();
+    assert_eq!(fixture.manager.test_undeploy_calls(), undeploy_calls);
     assert_eq!(std::fs::read(&settings).unwrap(), saved_settings);
     assert_eq!(
         std::fs::read_to_string(plugin.join("foreign.txt")).unwrap(),
@@ -627,7 +631,10 @@ async fn copilot_contract(root: &Path) {
     assert!(fixture.manager.has_record("copilot"));
     let valid_settings = std::fs::read(&settings).unwrap();
     std::fs::write(&settings, "{\"enabledPlugins\":[]}").unwrap();
-    assert!(target.cleanup.as_ref().unwrap()().await.is_err());
+    assert!(target.cleanup.as_ref().unwrap()()
+        .await
+        .unwrap_err()
+        .contains("cleanup incomplete"));
     assert!(
         fixture.manager.has_record("copilot"),
         "failed cleanup must preserve ownership for retry"
@@ -659,3 +666,6 @@ async fn copilot_plugin_watchdog_is_absent_on_windows() {
     assert!(!fixture.manager.has_record("copilot"));
     assert!(!detected.join("plugins").exists());
 }
+
+#[path = "orchestrator_plugin_inject_history_tests.rs"]
+mod plugin_inject_history_contract_tests;
