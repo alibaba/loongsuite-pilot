@@ -231,7 +231,7 @@ pub async fn deploy_loaded_config(
     if let Err(error) = crate::pi_sdk::ensure_registered_pi_sdk_wrappers(&data_dir).await {
         logger().warn(
             "无法恢复已注册的 PI SDK wrapper",
-            serde_json::json!({"error": error}).as_object(),
+            serde_json::json!({"error": error.to_string()}).as_object(),
         );
     }
     let manager = DeploymentManager::new(DeploymentManagerOptions {

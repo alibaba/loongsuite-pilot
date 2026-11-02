@@ -256,7 +256,7 @@ impl HookWatchdog {
             if let (Some(path), Some(needs)) =
                 (&target.change_watch_path, &target.needs_repair_on_change)
             {
-                let signature = change_signature(path);
+                let signature = change_signature(path)?;
                 let key = format!("{}\0{path}", target.agent_id);
                 let known = self
                     .last_change_signature
@@ -473,10 +473,20 @@ impl HookWatchdog {
             else {
                 continue;
             };
-            self.last_change_signature.lock().expect("sig").insert(
-                format!("{}\0{path}", target.agent_id),
-                change_signature(path),
-            );
+            match change_signature(path) {
+                Ok(signature) => {
+                    self.last_change_signature
+                        .lock()
+                        .expect("sig")
+                        .insert(format!("{}\0{path}", target.agent_id), signature);
+                }
+                Err(error) => logger("HookWatchdog").warn(
+                    "hook-watchdog baseline capture failed",
+                    Some(&fields(serde_json::json!({
+                        "agent": target.agent_id, "path": path, "error": error
+                    }))),
+                ),
+            }
         }
     }
 
@@ -821,19 +831,96 @@ fn entry_contains_marker(entry: &serde_json::Value, markers: &[String]) -> bool 
         })
 }
 
-fn change_signature(path: &str) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            format!("{}:{}:{mtime}", meta.len(), path)
+fn change_signature(path: &str) -> Result<String, String> {
+    match change_signature_io(path) {
+        Ok(signature) => Ok(signature),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".into()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn timestamp_nanos(time: SystemTime) -> i128 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    }
+}
+
+fn change_signature_io(path: &str) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "watched config is not a regular file",
+            ));
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "missing".into(),
-        Err(_) => "unreadable".into(),
+        Ok(format!(
+            "{}:{}:{}:{}:{}:{}",
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            timestamp_nanos(meta.modified()?),
+            meta.ctime(),
+            meta.ctime_nsec()
+        ))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_READ_ATTRIBUTES,
+        };
+        // This interval is a metadata probe. It needs no permission to read
+        // TOML content, and all identity/status fields use the same live handle.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "watched config is not a regular file",
+            ));
+        }
+        let identity = crate::utils::file_identity::identity_from_open(&file)?;
+        let mut info = std::mem::MaybeUninit::<FILE_BASIC_INFO>::zeroed();
+        // SAFETY: File owns a valid handle and the output has the exact layout
+        // and size that GetFileInformationByHandleEx(FileBasicInfo) requires.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: success initialized the complete FILE_BASIC_INFO value.
+        let info = unsafe { info.assume_init() };
+        Ok(format!(
+            "{}:{}:{}:{}:{}:{}",
+            identity.dev,
+            identity.ino,
+            meta.len(),
+            timestamp_nanos(meta.modified()?),
+            info.ChangeTime,
+            info.CreationTime
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported filesystem identity platform",
+        ))
     }
 }
 
@@ -940,3 +1027,7 @@ mod intercept_history_tests;
 #[cfg(test)]
 #[path = "hook_watchdog_shell_history_tests.rs"]
 mod shell_history_tests;
+
+#[cfg(test)]
+#[path = "hook_watchdog_signature_history_tests.rs"]
+mod signature_history_tests;

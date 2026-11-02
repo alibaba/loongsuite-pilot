@@ -55,8 +55,10 @@ impl std::fmt::Display for PiSdkRegistryBusyError {
 
 impl std::error::Error for PiSdkRegistryBusyError {}
 
-pub fn is_pi_sdk_registry_busy_error(message: &str) -> bool {
-    message.contains("PI SDK Agent registry is busy")
+pub fn is_pi_sdk_registry_busy_error(message: impl std::fmt::Display) -> bool {
+    message
+        .to_string()
+        .contains("PI SDK Agent registry is busy")
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +164,7 @@ pub async fn register_pi_sdk_agent(
         register_locked(data_dir.clone(), request.clone())
     })
     .await
+    .map_err(|error| error.to_string())
 }
 
 async fn register_locked(
@@ -265,6 +268,7 @@ pub async fn unregister_pi_sdk_agent(
         unregister_locked(data_dir.clone(), id.clone())
     })
     .await
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,13 +279,28 @@ pub struct UnregisterResult {
 }
 
 async fn unregister_locked(data_dir: String, id_value: String) -> Result<UnregisterResult, String> {
+    unregister_locked_with_cleanup(data_dir, id_value, |data_dir, definition| async move {
+        remove_extension(&data_dir, &definition).await
+    })
+    .await
+}
+
+async fn unregister_locked_with_cleanup<F, Fut>(
+    data_dir: String,
+    id_value: String,
+    cleanup: F,
+) -> Result<UnregisterResult, String>
+where
+    F: FnOnce(String, AgentDefinition) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
     let id = validate_pi_sdk_agent_id(&id_value)?;
     let definition_path = definition_path(&data_dir, &id);
     let definition = read_json_file::<AgentDefinition>(&definition_path).await;
     let Some(definition) = definition.filter(is_pi_sdk_agent_definition) else {
         return Err(format!("registered PI SDK Agent not found: {id}"));
     };
-    if !remove_extension(&data_dir, &definition).await {
+    if !cleanup(data_dir.clone(), definition.clone()).await {
         let paths = definition
             .plugin_inject
             .as_ref()
@@ -335,13 +354,14 @@ pub async fn list_registered_pi_sdk_agents(data_dir: &str) -> Vec<AgentDefinitio
     definitions
 }
 
-pub async fn ensure_registered_pi_sdk_wrappers(data_dir: &str) -> Result<u32, String> {
-    let data_dir = resolve_absolute_path(data_dir, "Pilot data directory", false)?;
+pub async fn ensure_registered_pi_sdk_wrappers(data_dir: &str) -> anyhow::Result<u32> {
+    let data_dir = resolve_absolute_path(data_dir, "Pilot data directory", false)
+        .map_err(anyhow::Error::msg)?;
     let mut attempt = 0;
     loop {
         match with_lock(&data_dir, || ensure_wrappers_locked(data_dir.clone())).await {
             Ok(count) => return Ok(count),
-            Err(err) if is_pi_sdk_registry_busy_error(&err) => {
+            Err(err) if err.downcast_ref::<PiSdkRegistryBusyError>().is_some() => {
                 if let Some(delay) = WRAPPER_RETRY_DELAYS_MS.get(attempt) {
                     attempt += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(*delay)).await;
@@ -805,7 +825,16 @@ async fn restore_wrapper(path: &str, previous: Option<&str>) {
     }
 }
 
-async fn with_lock<T, F, Fut>(data_dir: &str, operation: F) -> Result<T, String>
+// Release the exact owner on success, failure, panic, and future cancellation.
+// Registry cancellation must not strand the same-process owner map or lock file.
+struct RegistryLock(crate::utils::SingleInstanceLock);
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+async fn with_lock<T, F, Fut>(data_dir: &str, operation: F) -> anyhow::Result<T>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
@@ -817,14 +846,12 @@ where
         .into_owned();
     let acquired = acquire_single_instance_lock(&lock_path, Some(&patterns));
     let Some(lock) = acquired.lock else {
-        return Err(PiSdkRegistryBusyError {
+        return Err(anyhow::Error::new(PiSdkRegistryBusyError {
             holder_pid: acquired.holder_pid,
-        }
-        .to_string());
+        }));
     };
-    let result = operation().await;
-    lock.release();
-    result
+    let _guard = RegistryLock(lock);
+    operation().await.map_err(anyhow::Error::msg)
 }
 
 #[allow(dead_code)]
@@ -892,6 +919,15 @@ mod tests {
         assert_eq!(definition["id"], "acme-code");
         assert_eq!(definition["deployMode"], "plugin-inject");
         assert_eq!(definition["piSdk"]["schemaVersion"], 1);
+        assert_eq!(
+            definition["piSdk"]["agentDir"],
+            agent.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            definition["detection"]["paths"],
+            json!([detected.to_string_lossy().as_ref()])
+        );
+        assert_eq!(settings["extensions"], json!([&result.wrapper_path]));
         assert_eq!(definition["pluginInject"]["configKey"], "extensions");
         assert_eq!(
             definition["pluginInject"]["pluginId"],
@@ -983,3 +1019,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "pi_sdk_agent_registry_history.rs"]
+mod historical_contracts;

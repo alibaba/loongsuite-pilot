@@ -269,7 +269,9 @@ async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> Option<Ve
     let mut bytes = vec![0; usize::try_from(file.size - start).ok()?];
     let mut filled = 0;
     while filled < bytes.len() {
-        let read = file.opened.read(&mut bytes[filled..]).await.ok()?;
+        let read = read_chunk(&mut file.opened, &mut bytes[filled..])
+            .await
+            .ok()?;
         if read == 0 {
             break;
         }
@@ -296,6 +298,18 @@ async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> Option<Ve
         }
     }
     Some(events)
+}
+
+async fn read_chunk(file: &mut tokio::fs::File, bytes: &mut [u8]) -> std::io::Result<usize> {
+    #[cfg(test)]
+    let bytes = {
+        let limit = test_io::read_limit(bytes.len());
+        &mut bytes[..limit]
+    };
+    let read = file.read(bytes).await?;
+    #[cfg(test)]
+    test_io::read_completed(read);
+    Ok(read)
 }
 
 fn to_event(record: &Value) -> Option<SegmentEvent> {
@@ -379,7 +393,7 @@ fn build_data(files: &HashMap<String, FileState>) -> Vec<SegmentTokenData> {
                 event
                     .loop_id
                     .as_ref()
-                    .and_then(|id| attempt_failures.get(id).copied())
+                    .and_then(|id| attempt_failures.remove(id))
             })
             .or_else(|| {
                 event
@@ -487,3 +501,14 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "segment_identity_tests.rs"]
 mod segment_identity_tests;
+
+#[cfg(test)]
+#[path = "segment_start_migration_contract_tests.rs"]
+mod segment_start_migration_contract_tests;
+
+#[cfg(test)]
+#[path = "segment_incremental_migration_contract_tests.rs"]
+mod segment_incremental_migration_contract_tests;
+#[cfg(test)]
+#[path = "segment_io_test_support.rs"]
+mod test_io;

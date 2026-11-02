@@ -713,6 +713,24 @@ impl Updater {
     }
 
     fn ensure_install_id_locked(&self) -> anyhow::Result<()> {
+        let (_, disk) =
+            crate::deployment::installer_helper::read_config(Path::new(&self.config_path))?;
+        let mut config = self.config.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some(id) = disk
+            .get("installId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            config.install_id = Some(id.to_owned());
+            return Ok(());
+        }
+        // Keep a configured identity when the persisted file has no ID. The
+        // original ensureInstallId returns without writing in this case.
+        if config.install_id.as_ref().is_some_and(|id| !id.is_empty()) {
+            return Ok(());
+        }
+        drop(config);
+
         let file = crate::deployment::installer_helper::update_config_locked(
             Path::new(&self.config_path),
             |old| {

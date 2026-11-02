@@ -1900,3 +1900,7 @@ async fn hook_prunes_only_missing_daily_offsets_and_keeps_live_and_unrelated_sta
     assert!(extra[OFFSET_MAP_EXTRA_KEY].get(&old_name).is_none());
     assert_eq!(extra["unrelated"], "keep");
 }
+
+mod shared_history_contracts {
+    include!("shared_history_contracts.rs");
+}

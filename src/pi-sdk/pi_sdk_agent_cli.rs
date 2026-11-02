@@ -438,10 +438,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            definition["detection"]["paths"].as_array().unwrap().len(),
-            2
+            definition["detection"],
+            json!({"paths":[path_a.to_string_lossy().as_ref(),path_b.to_string_lossy().as_ref()],"commands":["acme-code"]})
         );
-        assert_eq!(definition["detection"]["commands"][0], "acme-code");
         let mut unregister = PiSdkCliIo::default();
         assert!(
             handle_pi_sdk_agent_cli_with(
@@ -505,3 +504,7 @@ mod tests {
         assert_eq!(parsed["name"], "JSON Code");
     }
 }
+
+#[cfg(test)]
+#[path = "pi_sdk_agent_cli_history.rs"]
+mod historical_contracts;

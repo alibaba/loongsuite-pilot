@@ -206,6 +206,10 @@ mod tests {
         assert!(!file.enabled);
         assert_eq!(file.check_interval_ms, 120_000);
         assert_eq!(
+            file.package_url.as_deref(),
+            Some("https://example.com/pkg.tar.gz")
+        );
+        assert_eq!(
             file.manifest_url.as_deref(),
             Some("https://example.com/manifest.json")
         );

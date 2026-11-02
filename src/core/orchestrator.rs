@@ -966,7 +966,7 @@ impl Orchestrator {
                 logger("Orchestrator").error(
                     "failed to restore generated PI SDK Agent wrappers",
                     Some(&fields(
-                        serde_json::json!({ "error": err, "registryBusy": busy }),
+                        serde_json::json!({ "error": err.to_string(), "registryBusy": busy }),
                     )),
                 );
                 alarm.record(
