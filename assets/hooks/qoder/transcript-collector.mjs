@@ -788,9 +788,11 @@ export class QoderTranscriptCollector {
       ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
       && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
-      ?? { cwd: source.cwd, desktop: source.desktop };
+      ?? { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
-      userIdentity: context.userIdentity, resourceAttributes: context.resourceAttributes ?? {}, spanAttributes: context.spanAttributes ?? {} };
+      userIdentity: context.userIdentity ?? source.userIdentity,
+      resourceAttributes: context.resourceAttributes ?? {},
+      spanAttributes: context.spanAttributes ?? {} };
     // The CLI persists local slash commands as user rows, including /exit
     // after the final response. Reuse the legacy parser's control-row contract
     // for both boundaries and messages so these cannot create an empty Turn
