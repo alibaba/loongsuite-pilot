@@ -4,10 +4,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::task::JoinHandle;
+
+#[path = "hook_watchdog_retirement.rs"]
+mod retirement;
 
 use crate::types::HookWatchdogConfig;
 use crate::utils::{file_exists, read_json_document, JsonDocumentRead, JsonSyntax};
@@ -19,6 +23,9 @@ const MAX_INTERCEPT_REPAIRS_PER_DAY: u32 = 3;
 const MARKER_BEGIN_PREFIX: &str = "loongsuite-pilot BEGIN ";
 
 pub type BoxFut<T> = Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+/// False is an observed unsuccessful/healthy decision; Err is a failed operation.
+/// Callers can retry a failed inspection without accepting its file signature.
+pub type PluginAction = Arc<dyn Fn() -> BoxFut<Result<bool, String>> + Send + Sync>;
 pub type InterceptAction = Arc<dyn Fn() -> BoxFut<Result<(), String>> + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,9 +67,9 @@ pub struct PluginCheckTarget {
     pub markers: Vec<String>,
     pub bin_path: Option<String>,
     pub install_args: Vec<String>,
-    pub repair_fn: Option<Arc<dyn Fn() -> BoxFut<bool> + Send + Sync>>,
+    pub repair_fn: Option<PluginAction>,
     pub change_watch_path: Option<String>,
-    pub needs_repair_on_change: Option<Arc<dyn Fn() -> BoxFut<bool> + Send + Sync>>,
+    pub needs_repair_on_change: Option<PluginAction>,
     pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -85,6 +92,7 @@ pub struct HookWatchdog {
     daily_repair_count: Mutex<HashMap<String, u32>>,
     daily_repair_reset_date: Mutex<String>,
     now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
+    lifecycle_generation: AtomicU64,
     startup: Mutex<Option<JoinHandle<()>>>,
     interval: Mutex<Option<JoinHandle<()>>>,
 }
@@ -105,6 +113,7 @@ impl HookWatchdog {
             daily_repair_count: Mutex::new(HashMap::new()),
             daily_repair_reset_date: Mutex::new(String::new()),
             now_ms: Arc::new(now_ms),
+            lifecycle_generation: AtomicU64::new(0),
             startup: Mutex::new(None),
             interval: Mutex::new(None),
         };
@@ -121,17 +130,33 @@ impl HookWatchdog {
             logger("HookWatchdog").info("hook-watchdog disabled", None);
             return;
         }
+        let generation = self
+            .lifecycle_generation
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
         let this = Arc::clone(self);
         *self.startup.lock().expect("startup") = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(STARTUP_DELAY_MS)).await;
+            if this.lifecycle_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             this.run_check().await;
+            // A running poll can finish after abort() was requested. Publish
+            // under the same lock stop() uses and recheck cancellation here.
+            let mut interval = this.interval.lock().expect("interval");
+            if this.lifecycle_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             let service = Arc::clone(&this);
-            *this.interval.lock().expect("interval") = Some(tokio::spawn(async move {
+            *interval = Some(tokio::spawn(async move {
                 let mut ticker =
                     tokio::time::interval(Duration::from_millis(service.config.interval_ms.max(1)));
                 ticker.tick().await;
                 loop {
                     ticker.tick().await;
+                    if service.lifecycle_generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
                     service.run_check().await;
                 }
             }));
@@ -139,6 +164,7 @@ impl HookWatchdog {
     }
 
     pub fn stop(&self) {
+        self.lifecycle_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(task) = self.startup.lock().expect("startup").take() {
             task.abort();
         }
@@ -245,7 +271,7 @@ impl HookWatchdog {
                         .expect("sig")
                         .insert(key, signature);
                 } else if known.as_deref() != Some(signature.as_str()) {
-                    if needs().await {
+                    if needs().await? {
                         missing.push("codex-trust".into());
                         pending = Some((key, signature));
                     } else {
@@ -318,6 +344,13 @@ impl HookWatchdog {
                 .lock()
                 .expect("invalid")
                 .insert(key, error.to_string());
+        } else {
+            logger("HookWatchdog").debug(
+                "hook-watchdog.invalid-config-suppressed",
+                Some(&fields(serde_json::json!({
+                    "agent": target.agent_id, "settingsPath": target.settings_path
+                }))),
+            );
         }
         TargetResult {
             agent_id: target.agent_id.clone(),
@@ -328,7 +361,18 @@ impl HookWatchdog {
 
     async fn repair_target(&self, target: &PluginCheckTarget) -> bool {
         if let Some(repair) = &target.repair_fn {
-            return repair().await;
+            return match repair().await {
+                Ok(repaired) => repaired,
+                Err(error) => {
+                    logger("HookWatchdog").error(
+                        "hook-watchdog.repair-failed",
+                        Some(&fields(serde_json::json!({
+                            "agent": target.agent_id, "error": error
+                        }))),
+                    );
+                    false
+                }
+            };
         }
         let Some(bin) = &target.bin_path else {
             return false;
@@ -441,13 +485,25 @@ impl HookWatchdog {
         data_dir: &str,
         is_agent_enabled: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) -> Vec<InterceptCheckTarget> {
+        Self::default_intercept_targets_in(
+            data_dir,
+            is_agent_enabled,
+            retirement::Context::native(),
+        )
+    }
+
+    fn default_intercept_targets_in(
+        data_dir: &str,
+        is_agent_enabled: impl Fn(&str) -> bool + Send + Sync + 'static,
+        context: retirement::Context,
+    ) -> Vec<InterceptCheckTarget> {
         let enabled = Arc::new(is_agent_enabled);
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = &context.home;
         let rc_paths = vec![
             Path::new(&home).join(".zshrc"),
             Path::new(&home).join(".bashrc"),
         ];
-        let mut targets = Vec::new();
+        let mut targets = retirement::targets(data_dir, &context);
         for block in intercept_rc_blocks() {
             let script = Path::new(data_dir).join("hooks").join(block.script_name);
             let script_text = script.to_string_lossy().to_string();
@@ -521,6 +577,17 @@ struct RcBlock {
 fn intercept_rc_blocks() -> Vec<RcBlock> {
     vec![
         RcBlock {
+            id: "claude-code-rc",
+            agent_id: "claude-code",
+            marker: "loongsuite-pilot BEGIN claude-code-intercept",
+            end_marker: "loongsuite-pilot END claude-code-intercept",
+            signature: "if ! alias claude >/dev/null 2>&1",
+            script_name: "claude-code-fetch-intercept.mjs",
+            render: |path| {
+                format!("\n# loongsuite-pilot BEGIN claude-code-intercept\nif ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then\n  eval 'claude() {{ BUN_OPTIONS=\"--preload={path} ${{BUN_OPTIONS}}\" command claude \"$@\"; }}'\nfi\n# loongsuite-pilot END claude-code-intercept")
+            },
+        },
+        RcBlock {
             id: "qodercli-rc",
             agent_id: "qoder",
             marker: "loongsuite-pilot BEGIN qodercli-intercept",
@@ -540,17 +607,6 @@ fn intercept_rc_blocks() -> Vec<RcBlock> {
             script_name: "qodercli-runtime-wrapper.sh",
             render: |path| {
                 format!("\n# loongsuite-pilot BEGIN qoderclicn-intercept\nif ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then\n  eval 'qoderclicn() {{ LOONGSUITE_QODERCLI_FLAVOR=qoderclicn \"{path}\" \"$@\"; }}'\nfi\n# loongsuite-pilot END qoderclicn-intercept")
-            },
-        },
-        RcBlock {
-            id: "claude-code-rc",
-            agent_id: "claude-code",
-            marker: "loongsuite-pilot BEGIN claude-code-intercept",
-            end_marker: "loongsuite-pilot END claude-code-intercept",
-            signature: "if ! alias claude >/dev/null 2>&1",
-            script_name: "claude-code-fetch-intercept.mjs",
-            render: |path| {
-                format!("\n# loongsuite-pilot BEGIN claude-code-intercept\nif ! alias claude >/dev/null 2>&1 && ! typeset -f claude >/dev/null 2>&1; then\n  eval 'claude() {{ BUN_OPTIONS=\"--preload={path} ${{BUN_OPTIONS}}\" command claude \"$@\"; }}'\nfi\n# loongsuite-pilot END claude-code-intercept")
             },
         },
     ]
@@ -833,7 +889,7 @@ mod tests {
                 install_args: Vec::new(),
                 repair_fn: Some(Arc::new(move || {
                     seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Box::pin(async { true })
+                    Box::pin(async { Ok(true) })
                 })),
                 change_watch_path: None,
                 needs_repair_on_change: None,
@@ -852,3 +908,19 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "hook_watchdog_retirement_tests.rs"]
+mod retirement_history_tests;
+
+#[cfg(test)]
+#[path = "hook_watchdog_normal_history_tests.rs"]
+mod normal_history_tests;
+
+#[cfg(test)]
+#[path = "hook_watchdog_failure_history_tests.rs"]
+mod failure_history_tests;
+
+#[cfg(test)]
+#[path = "hook_watchdog_intercept_history_tests.rs"]
+mod intercept_history_tests;

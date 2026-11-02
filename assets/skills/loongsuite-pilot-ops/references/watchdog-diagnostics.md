@@ -37,6 +37,8 @@ targets 来源：
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
+Rust 版退役清理只移除精确等于本安装 wrapper 路径的环境覆盖；Windows 比较忽略大小写，不按路径子串或脚本同名匹配。两个 macOS plist 还须符合旧安装器实际生成的完整 `Label`、`ProgramArguments` 与 `RunAtLoad` 结构，且 wrapper 路径属于本安装或当前 HOME 的标准旧数据目录，才会卸载和删除；同名第三方、符号链接或内容异常的文件会保留，复核时发现身份或内容发生变化也会保留并记录告警。合法旧 plist 不依赖应用、wrapper 文件或当前 Agent 选择存在。
+
 shell 目标的前置条件（precondition）要求对应 hook 脚本存在（`qodercli-rc` 对应
 `~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。不满足时静默 skip，不算修复失败。
 

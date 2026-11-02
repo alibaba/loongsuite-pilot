@@ -212,8 +212,10 @@ async fn codex_contract(root: &Path) {
     assert!(codex.needs_repair_on_change.is_some());
     assert!(claude.change_watch_path.is_none());
     assert!(claude.needs_repair_on_change.is_none());
-    assert!(codex.needs_repair_on_change.as_ref().unwrap()().await);
-    assert!(codex.repair_fn.as_ref().unwrap()().await);
+    assert!(codex.needs_repair_on_change.as_ref().unwrap()()
+        .await
+        .unwrap());
+    assert!(codex.repair_fn.as_ref().unwrap()().await.unwrap());
     let settings: Value =
         serde_json::from_slice(&std::fs::read(root.join(".codex/hooks.json")).unwrap()).unwrap();
     assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -236,7 +238,9 @@ async fn codex_contract(root: &Path) {
         Path::new(&hook.trust_toml.unwrap().config_path),
         root.join(".codex/config.toml")
     );
-    assert!(!codex.needs_repair_on_change.as_ref().unwrap()().await);
+    assert!(!codex.needs_repair_on_change.as_ref().unwrap()()
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

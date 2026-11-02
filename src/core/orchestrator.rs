@@ -1279,7 +1279,7 @@ impl Orchestrator {
                 repair_fn: Some(Arc::new(move || {
                     let deployment = Arc::clone(&deployment_repair);
                     let def = def_for_repair.clone();
-                    Box::pin(async move { deployment.deploy_single(&def).await.success })
+                    Box::pin(async move { Ok(deployment.deploy_single(&def).await.success) })
                 })),
                 change_watch_path: None,
                 needs_repair_on_change: None,
@@ -1302,7 +1302,7 @@ impl Orchestrator {
                     target.needs_repair_on_change = Some(Arc::new(move || {
                         let deployment = Arc::clone(&deployment_change);
                         let def = def_change.clone();
-                        Box::pin(async move { deployment.needs_redeploy(&def, None).await })
+                        Box::pin(async move { Ok(deployment.needs_redeploy(&def, None).await) })
                     }));
                 }
             }
@@ -4726,7 +4726,9 @@ mod tests {
                 find("qwen-work-cn-trace").watch_paths(),
                 [
                     history.clone(),
-                    home.join(".qwenworkcn/logs/sessions")
+                    home.join(".qwenworkcn")
+                        .join("logs")
+                        .join("sessions")
                         .to_string_lossy()
                         .into_owned(),
                 ]
