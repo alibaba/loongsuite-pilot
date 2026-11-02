@@ -445,3 +445,7 @@ mod tests {
         assert!(io.log[0].contains("menubar <start|stop>"));
     }
 }
+
+#[cfg(test)]
+#[path = "menubar_history.rs"]
+mod historical_contracts;

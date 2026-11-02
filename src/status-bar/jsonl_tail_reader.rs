@@ -190,6 +190,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].get("id"), Some(&Value::from(2)));
         assert_eq!(
             resumed[0].get("text").and_then(Value::as_str),

@@ -66585,6 +66585,1623 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/status-bar/jsonl-tail-reader.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "1a92fc9baa86299e223d3f4da97281b1ecee6391c469802e24464e078190ddb5",
+      "note": "Every immutable declaration and parameter row audited against actual native assertions; ef8953 and frozen f84 source are byte identical. CLI uses real temporary config/runtime files and an explicit app-process boundary, matching the original mock isolation; it does not certify a live macOS UI or service. Unix permission assertions execute only on Unix. Native Windows execution is separate from source provenance.",
+      "cases": [
+        {
+          "source": {
+            "id": "L8:C3",
+            "title": "reads only complete records and resumes from the committed newline",
+            "suites": [
+              "scanJsonlTail"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact two JSON objects with UTF8, 7/5-byte chunks, complete-line offsets and total initial bytes; append and resume without loss or partial emit.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/jsonl_tail_reader.rs",
+                "test": "reads_complete_records_and_resumes_at_the_newline"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L43:C3",
+            "title": "does not open or read a file when the range is empty",
+            "suites": [
+              "scanJsonlTail"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Nonexistent path and empty byte interval returns requested offset/zero reads/zero callback records.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/jsonl_tail_reader.rs",
+                "test": "does_not_open_an_empty_range"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/cli/token-usage.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "533c8678f9e183ee8b4dd0c5d3ad183849a37669241c97baaf2f726a615648cc",
+      "note": "Every immutable declaration and parameter row audited against actual native assertions; ef8953 and frozen f84 source are byte identical. CLI uses real temporary config/runtime files and an explicit app-process boundary, matching the original mock isolation; it does not certify a live macOS UI or service. Unix permission assertions execute only on Unix. Native Windows execution is separate from source provenance.",
+      "cases": [
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "parses range, data dir, and output mode options",
+            "suites": [
+              "token-usage CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact --once/--range 30d/data directory/no-color option parse and no error.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/token_usage.rs",
+                "test": "parses_range_data_dir_and_color"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "prints once by default and only colors tty output",
+            "suites": [
+              "token-usage CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Default output once; color only TTY and NO_COLOR empty disables.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/token_usage.rs",
+                "test": "parses_range_data_dir_and_color"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C3",
+            "title": "renders token usage from metrics summary and runtime data",
+            "suites": [
+              "token-usage CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real renderer exact runtime pid, compact totals, cache ratio, provider/agent and seven-day trend.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/token_usage.rs",
+                "test": "renders_token_usage_and_keeps_columns_aligned"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L114:C3",
+            "title": "keeps table columns aligned when color is enabled",
+            "suites": [
+              "token-usage CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Colored real renderer strips ANSI before checking every original provider/model/agent/repository/KPI column index.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/token_usage.rs",
+                "test": "renders_token_usage_and_keeps_columns_aligned"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "renders a useful empty state when metrics are missing",
+            "suites": [
+              "token-usage CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing summary renders helpful empty state without leaking internal summary path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/token_usage.rs",
+                "test": "renders_an_empty_state_without_the_summary_path"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/cli/menubar.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "bfa78bb5c21a52ca58dd35a516d9710bcaf4b8d8146a587cba9e597d5b52b3a4",
+      "note": "Every immutable declaration and parameter row audited against actual native assertions; ef8953 and frozen f84 source are byte identical. CLI uses real temporary config/runtime files and an explicit app-process boundary, matching the original mock isolation; it does not certify a live macOS UI or service. Unix permission assertions execute only on Unix. Native Windows execution is separate from source provenance.",
+      "cases": [
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "shows help without changing anything: %j",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each([[], ['--help'], ['start', '--help'], ['stop', '--help']])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All4 source help forms preserve real config/runtime bytes and do not touch application or liveness boundaries.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_help_four_forms_preserve_files_and_call_nothing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "rejects unsupported arguments: %j",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each([['restart'], ['start', 'unexpected'], ['stop', 'unexpected']])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All3 unsupported argv forms fail, preserving config and zero process/probe callbacks.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_unsupported_three_forms_call_nothing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "starts only the menu bar and preserves collector runtime state",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual configured command checks collector pid6789, starts UI12345 once, preserves runtime bytes and reports enablement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_start_keeps_collector_runtime_and_records_only_ui_action"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C3",
+            "title": "reports an already running app",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Configured application boundary returns already-running and actual command reports it as success.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_reports_already_running_ui"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L78:C3",
+            "title": "rejects %s on non-macOS platforms",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each(['start', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both nonmacOS commands reject before config or process effects.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_nonmac_start_and_stop_do_not_touch_configuration_or_processes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "persists enablement and starts when config.json was disabled",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual atomic JSON update keeps other keys and invokes start once.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_start_enables_disabled_configuration_without_losing_other_keys"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "does not override a disabling environment value: %s",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each(['false', '0'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both false/0 disable values reject without config update or process effects.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_disabling_environment_values_preserve_config_and_do_not_launch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L109:C3",
+            "title": "rejects unavailable collector runtime: %s",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each(['missing', 'invalid', 'stopped', 'dead', 'bad-pid'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All5 missing/invalid/stopped/dead/bad-pid real runtime forms fail with startup guidance and zero UI calls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_five_unavailable_collector_forms_never_launch_ui"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L122:C3",
+            "title": "keeps persisted enablement when the collector is unavailable",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing runtime failure preserves new persisted enablement and never launches.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_unavailable_collector_preserves_new_persisted_enablement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "returns failure if no app could be started",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "None at application boundary produces failure and no success output.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_no_available_app_is_a_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "returns launch errors without reporting success",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "EACCES at application boundary is visible as failure, never success.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_launch_error_is_reported_without_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C3",
+            "title": "stops only the menu bar and leaves collector runtime unchanged",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop only UI with cli-request reason, no liveness probe, keeps collector runtime bytes and other keys; Unix0640 preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_stop_preserves_runtime_config_keys_and_unix_mode"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C3",
+            "title": "can stop a leftover app when disabled and no collector runtime exists",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Disabled configuration and absent runtime still permit leftover UI stop.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_stop_handles_leftover_ui_without_collector"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L172:C3",
+            "title": "succeeds when the menu bar is already stopped",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Idempotent already-stopped response is reported successfully.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_stop_reports_already_stopped"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C3",
+            "title": "creates a private config file when config.json is missing",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing config creates exact enableStatusBarApp false object with Unix0600.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_missing_config_creates_private_json_object"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L186:C3",
+            "title": "refuses to overwrite unsupported config.json content: %s",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": [
+              "it.each([\n    ['{invalid', 'invalid JSON config'],\n    ['[]', 'non-object JSON config'],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both malformed/non-object JSON remain byte-identical and fail before process calls with exact refusal reason.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_invalid_and_nonobject_config_are_never_overwritten"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L199:C3",
+            "title": "warns when an enabling environment value overrides persisted disablement",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop persists disablement while true environment override emits original warning.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_enabling_environment_warns_after_persisted_disablement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L207:C3",
+            "title": "does not report success when stopping fails",
+            "suites": [
+              "menubar CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Stop error reports failure, emits no success and preserves newly persisted disablement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/menubar_history.rs",
+                "test": "history_stop_error_never_reports_success_and_keeps_disablement"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/compare-versions.test.ts",
+      "source_hash": "f982f3f2f2daa6b487b35f19f5a37a70f7abd0a989db8ab610a6ba4442995d1e",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84与ef测试逐字相同；映射现有真实Rust断言，不重复实现。执行证据单列Linux glibc2.34/Rust1.99.1，平台适用范围不等于Native执行证据。",
+      "cases": [
+        {
+          "source": {
+            "id": "L6:C5",
+            "title": "returns 1 when a > b (patch)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L10:C5",
+            "title": "returns -1 when a < b (patch)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L14:C5",
+            "title": "returns 0 when equal",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L18:C5",
+            "title": "returns 1 when a > b (minor)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L22:C5",
+            "title": "returns -1 when a < b (minor)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L26:C5",
+            "title": "returns 1 when a > b (major)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L30:C5",
+            "title": "returns -1 when a < b (major)",
+            "suites": [
+              "compareVersions",
+              "standard semver"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "标准major/minor/patch逐对精确返回-1/0/1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "compares_standard_semver"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C5",
+            "title": "treats missing segments as 0: 1.0 == 1.0.0",
+            "suites": [
+              "compareVersions",
+              "unequal segment counts"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失段补零及单/四段逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "pads_missing_segments_with_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C5",
+            "title": "1.0.1 > 1.0",
+            "suites": [
+              "compareVersions",
+              "unequal segment counts"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失段补零及单/四段逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "pads_missing_segments_with_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C5",
+            "title": "single segment: 2 > 1",
+            "suites": [
+              "compareVersions",
+              "unequal segment counts"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失段补零及单/四段逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "pads_missing_segments_with_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C5",
+            "title": "four segments: 1.0.0.1 > 1.0.0.0",
+            "suites": [
+              "compareVersions",
+              "unequal segment counts"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失段补零及单/四段逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "pads_missing_segments_with_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L54:C5",
+            "title": "falls back to string comparison for non-numeric versions",
+            "suites": [
+              "compareVersions",
+              "non-standard formats (string fallback)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "非数值原字符串回退，abc/def双向、相同beta、beta后缀均精确比较。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "falls_back_to_string_comparison"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C5",
+            "title": "returns 0 for identical non-numeric strings",
+            "suites": [
+              "compareVersions",
+              "non-standard formats (string fallback)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "非数值原字符串回退，abc/def双向、相同beta、beta后缀均精确比较。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "falls_back_to_string_comparison"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L63:C5",
+            "title": "falls back when any segment is NaN: 1.0.0-beta vs 1.0.0",
+            "suites": [
+              "compareVersions",
+              "non-standard formats (string fallback)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "非数值原字符串回退，abc/def双向、相同beta、beta后缀均精确比较。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "falls_back_to_string_comparison"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C5",
+            "title": "empty strings are equal",
+            "suites": [
+              "compareVersions",
+              "edge cases"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空字符串、全零、大整数版本逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "handles_empty_zero_and_large_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L76:C5",
+            "title": "zero versions: 0.0.0 == 0.0.0",
+            "suites": [
+              "compareVersions",
+              "edge cases"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空字符串、全零、大整数版本逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "handles_empty_zero_and_large_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C5",
+            "title": "large version numbers",
+            "suites": [
+              "compareVersions",
+              "edge cases"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空字符串、全零、大整数版本逐对精确返回。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "handles_empty_zero_and_large_versions"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/deterministic-bucket.test.ts",
+      "source_hash": "e2a137b8e12b774c15439bc0daf04d8119b749ed89d02f47fc5313f0053451eb",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84与ef测试逐字相同；映射现有真实Rust断言，不重复实现。执行证据单列Linux glibc2.34/Rust1.99.1，平台适用范围不等于Native执行证据。",
+      "cases": [
+        {
+          "source": {
+            "id": "L5:C3",
+            "title": "returns a number in [0, 99]",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原UUID输入与范围<100精确验证；u32返回类型确保非负。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_stays_in_range_and_is_stable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L11:C3",
+            "title": "returns the same value for the same installId + version",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "相同install-id/version重复调用结果相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_stays_in_range_and_is_stable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L19:C3",
+            "title": "returns different values for the same installId with different versions",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原50版本循环，集合大小>1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_changes_with_version_and_install_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L28:C3",
+            "title": "returns an integer",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "生产返回u32，类型保证整数；真实调用range/stability测试运行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_stays_in_range_and_is_stable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "returns different values for different installIds",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原50install-id循环，集合大小>1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_changes_with_version_and_install_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "handles empty installId without throwing",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空install-id真实调用范围<100，u32非负。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_stays_in_range_and_is_stable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "produces reasonable distribution across 100 buckets",
+            "suites": [
+              "deterministicBucket"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "10000个独立uuid-index-salt真实SHA256输入，非空bucket>80；用确定性salt替代Math.random避免概率不稳定，样本规模与阈值保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/version_utils.rs",
+                "test": "bucket_spreads_across_most_slots"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/startup-crash-classifier.test.ts",
+      "source_hash": "f8175c4e1a40c34c01a697f1a7ce6ad106df9f68c32daa4b51cde2f452855dc8",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84与ef测试逐字相同；映射现有真实Rust断言，不重复实现。执行证据单列Linux glibc2.34/Rust1.99.1，平台适用范围不等于Native执行证据。",
+      "cases": [
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "maps sqlite3 / native addon failures to native_module_missing",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原7条native addon消息逐条分类保留，包括sqlite3、DLOPEN、self-register、.node、builtin、ABI、install scripts。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_native_addon_failures"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "maps a plain missing module to module_not_found",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "普通lodash缺模块分类精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L35:C3",
+            "title": "maps startup-phase JSON-parse errors to config_error",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "startup两种JSON错误分类精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "does not treat JSON errors as config_error outside startup phase",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "module_load JSON错误保持unknown。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C3",
+            "title": "does not label a bare \"config\" mention (no JSON signature) as config_error",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "裸config提及保持unknown。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L49:C3",
+            "title": "does not mislabel config_error from a stack path containing config-loader.ts",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "stack含config-loader路径保持unknown。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "maps permission / disk errors",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "EACCES与ENOSPC逐条permission_or_disk。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "prefers permission_or_disk over config_error when both could match",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "startup含config.json的EACCES优先permission_or_disk。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "maps_plain_missing_module_json_and_disk"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "falls back to unknown and carries a sanitized raw message head",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "unknown与第一行detail精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "sanitizes_the_detail_head"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "sanitizes quotes/whitespace in the detail head",
+            "suites": [
+              "classifyStartupCrash"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "引号剔除、重复空白折叠精确得到boom quoted spaced。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/startup_crash_classifier.rs",
+                "test": "sanitizes_the_detail_head"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }
