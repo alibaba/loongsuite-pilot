@@ -72,16 +72,19 @@ it('recovers after notification capacity is reached without needing another Hook
   expect(warm.records).toEqual([]); expect(warm.metrics.bytesRead).toBe(0);
 });
 
-it('bounds dense object counts independently of byte size and resumes after repair', async () => {
+it('bounds dense object counts, marks the affected turn incomplete and drains the next turn', async () => {
   const warnings = [];
   const { file, wake } = setup('qoder-cn', { warn: (...args) => warnings.push(args) });
   const rows = turn();
   rows.splice(1, 0, ...Array.from({ length: 8192 }, () => ({ type: 'progress', data: { hookEvent: 'PreToolUse' } })));
   fs.writeFileSync(file, jsonl(rows)); wake();
   const failed = await collector.collect();
-  expect(failed.records).toEqual([]); expect(failed.state).toEqual({});
+  expect(failed.records).toHaveLength(1);
+  expect(failed.records.every(record => record['agent.transcript_incomplete'] === true)).toBe(true);
+  expect(Object.values(failed.state)[0].quarantines).toHaveLength(1);
+  expect((await collector.collect(failed.state)).records).toEqual([]);
   expect(warnings.some(([, fields]) => fields.reason === 'turn-record-limit')).toBe(true);
-  fs.writeFileSync(file, jsonl(turn())); wake();
+  fs.appendFileSync(file, jsonl(turn(1))); wake();
   const repaired = await collector.collect(failed.state);
   expect(repaired.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
   expect((await collector.collect(repaired.state)).records).toEqual([]);

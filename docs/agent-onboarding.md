@@ -363,6 +363,12 @@ existing Input StateStore; covered notices are reclaimed on the following cycle
 after its save. Source descriptors and scalar cursors grow with known sessions;
 there is no lifetime session admission cap or age-based deletion of unread data.
 
+Qoder native recovery keeps corrupt/over-limit bytes in the original transcript and stores at most 32 quarantine ranges. Complete bad lines advance the physical cursor; partial over-limit lines persist only their scan position and a small witness while seeking LF. Legacy migration counts physical newlines without parsing JSON. Valid later Turns continue. Retained valid events in a damaged or over-budget Turn carry `agent.transcript_incomplete=true` through JSONL and OTLP; this is not arbitrary-size lossless capture or a fabricated completion.
+
+Initial delayed prompt ownership uses the real Hook `request_set_id` and the same session's ordered SQLite user-request inventory, read in 256-row metadata-only keyset pages. Transcript UUIDs use a different namespace. Source clocks validate the ordered pairing; timestamps or repeated prompt text never select a nearest candidate. Missing, tied or contradictory evidence leaves an explicit unresolved range. The live cursor proceeds independently, and later positive evidence backfills only that range without replaying delivered Turns. Ownership lookups rotate fairly under one shared lookup budget per cycle.
+
+The Qoder/CN Hook wrappers require an unflagged SQLite-capable runtime (Node 22.13+, 23.4+, or newer; see [Node documentation](https://nodejs.org/download/release/v24.20.0/docs/api/sqlite.html)). An obsolete pin is rejected before selecting a managed runtime. The runtime/diagnostic paths must preserve the Hook protocol. An `EPERM` PID probe is not ownership proof: old retry locks still undergo the bounded birth-time check; an unverified genuinely live owner remains protected and diagnosed rather than stolen by age.
+
 Qoder acknowledges only the revision of `extra.qoderTranscripts` that actually
 reached disk. An ordinary write failure retains notices and pauses optimistic
 native progress while the existing cycle retries the save. A settled save promise
@@ -391,9 +397,10 @@ Each Input serializes collection. A normal cycle scans up to 4 MiB, visits 64
 sources and completes 32 Turns. Completing a line or restoring an evicted active
 Turn can exceed this soft scan budget. One Turn is limited to 16 MiB / 8,192
 records, the body cache to 32 MiB of source bytes, and the metadata cache to 4 MiB.
-These are read/cache budgets, not process RSS limits. Oversized records/Turns,
-corrupt metadata and I/O failures defer that source with its cursor intact and a
-rate-limited diagnostic; other sources continue.
+These are read/cache budgets, not process RSS limits. Damaged/over-limit native
+ranges follow the quarantine protocol above and retain their original bytes.
+Corrupt metadata and I/O failures retain the prior cursor and a rate-limited
+diagnostic; other sources continue.
 
 Test state transitions in the actual Input order: saved checkpoint → next prompt
 before its user row → ACK → collect, and in-place truncation → new Stop → ACK.
@@ -407,8 +414,8 @@ nonblocking open also prevents a path replaced with a FIFO between `stat` and
 `open` from stranding collection. Rejected handles are closed and leave the
 previous cursor intact, allowing recovery when the file is repaired.
 
-A first UserPromptSubmit starts from the observed complete-line watermark and
-waits for the new user row. A first Stop searches backward for the current real
+A first UserPromptSubmit anchors an open native user row or leaves a closed
+prefix unresolved until request ownership is proved. A first Stop searches backward for the current real
 user message instead of replaying the full history. Later reads use byte offsets,
 preserving partial lines, active Turns and restart recovery. Late third-party
 Hook progress does not define a new Turn. A last-prompt, SessionEnd or next real

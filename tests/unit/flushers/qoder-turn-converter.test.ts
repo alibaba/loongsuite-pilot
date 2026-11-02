@@ -88,6 +88,15 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
     expect(entry.spanContext().traceId).toBe(TRACE);
   });
 
+  it('exports an explicit incomplete marker without changing tool or token values', async () => {
+    const input = records(agentType).map(record => ({ ...record, 'agent.transcript_incomplete': true }));
+    const spans = await flush(input);
+    expect(spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY')!.attributes['agent.transcript_incomplete']).toBe(true);
+    expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')
+      .map(span => span.attributes['gen_ai.usage.input_tokens']).sort()).toEqual([10, 20]);
+    expect(spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL')!.attributes['gen_ai.tool.call.result']).toBe('demo content');
+  });
+
   it('keeps an upstream marker whose trace id arrives on a later record', async () => {
     const input = records(agentType, UPSTREAM);
     delete input[0].trace_id;

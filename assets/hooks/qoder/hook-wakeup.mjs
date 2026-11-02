@@ -135,7 +135,8 @@ export function withQoderWakeupLock(directory, action, waitMs = 25) {
     return { acquired: true, value: action() };
   } catch (error) {
     if (acquired) throw error;
-    return { acquired: false };
+    return { acquired: false, ...(error.code === 'ERR_UNKNOWN_BUILTIN_MODULE'
+      ? { reason: 'runtime-sqlite-unavailable' } : {}) };
   } finally {
     if (acquired) { try { database.exec('ROLLBACK'); } catch {} }
     try { database?.close(); } catch {}
@@ -166,6 +167,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   const record = {
     schema: 1, key, agentId, sessionId, transcriptPath, event,
     observationId: crypto.randomUUID(),
+    ...(field(payload.request_set_id, 512) ? { requestSetId: payload.request_set_id } : {}),
     ...(transcriptPath !== suppliedPath ? { suppliedPath } : {}),
     observedSize: stat?.size ?? 0, observedAt: Date.now(),
     ...(stat ? { inode: stat.ino } : {}),
@@ -189,7 +191,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   // coalesce; different lifecycle facts/identities retain their own record.
   const context = crypto.createHash('sha256').update(JSON.stringify([
     record.userIdentity, record.desktop, record.cwd, record.spanAttributes, record.resourceAttributes,
-    record.legacyTriggerLine,
+    record.legacyTriggerLine, record.requestSetId,
   ])).digest('hex').slice(0, 24);
   const destination = path.join(events, `${record.observedSize}-${event}-${context}.json`);
   const published = withQoderWakeupLock(directory, () => {
@@ -203,7 +205,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   if (!published.acquired) {
     // The descriptor remains durable: polling can still drain native data.
     // Metadata contention/capacity is observable and never acts as a cursor ACK.
-    warnCapacity(root, 'context-lock');
+    warnCapacity(root, published.reason ?? 'context-lock');
     return false;
   }
   if (!published.value) return false;

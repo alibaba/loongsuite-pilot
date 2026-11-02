@@ -95,7 +95,8 @@ function validSource(value, agentId, key) {
 export class QoderTranscriptCollector {
   constructor({ dataDir, agentId, scanBytes = QODER_SCAN_BYTES,
     maxTurnBytes = QODER_MAX_TURN_BYTES, cacheBytes = QODER_CACHE_BYTES,
-    stableMs = 250, settleMs = 5000, now = Date.now, warn = () => {}, runtime = () => null } = {}) {
+    stableMs = 250, settleMs = 5000, now = Date.now, warn = () => {}, runtime = () => null,
+    resolveInitialPrompt } = {}) {
     this.dataDir = dataDir;
     this.agentId = agentId;
     this.root = qoderWakeupRoot(dataDir, agentId);
@@ -107,6 +108,7 @@ export class QoderTranscriptCollector {
     this.now = now;
     this.warn = warn;
     this.runtime = runtime;
+    this.resolveInitialPrompt = resolveInitialPrompt;
     this.cache = new Map();
     this.cacheSize = 0;
     this.warned = new Map();
@@ -117,6 +119,11 @@ export class QoderTranscriptCollector {
     this.tailScans = new Map();
     this.deferredSources = new Map();
     this.legacyOwners = new Map();
+    this.legacyPending = new Set();
+    this.legacyInspections = new Map();
+    this.legacyInspectionSequence = 0;
+    this.promptInspections = new Map();
+    this.promptInspectionSequence = 0;
     this.discovery = null;
     this.pendingSources = [];
     this.cleanupRotation = 0;
@@ -131,6 +138,8 @@ export class QoderTranscriptCollector {
     this.metadata.clear(); this.metadataBytes = 0;
     this.tailScans.clear(); this.deferredSources.clear();
     this.legacyOwners.clear();
+    this.legacyPending.clear(); this.legacyInspections.clear();
+    this.promptInspections.clear();
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
@@ -198,6 +207,7 @@ export class QoderTranscriptCollector {
     this.metrics = { bytesRead: 0, recordsParsed: 0, sourceFilesOpened: 0, peakCachedBytes: this.cacheSize };
     this.remainingBytes = this.scanBytes;
     this.ownerInspectionBudget = 1;
+    this.promptInspectionBudget = 1;
     if (this.stopped) return { records, state: next, metrics: this.metrics, changed };
     try {
       const capacity = await smallJson(path.join(this.root, '..', 'capacity.json'));
@@ -205,6 +215,17 @@ export class QoderTranscriptCollector {
     } catch {}
     const entries = await this.sources();
     if (!entries.length) return { records, state: next, metrics: this.metrics, changed };
+    // One unavailable owner must not consume every cycle's shared DB budget.
+    // Choose fairly from this bounded discovery batch, even if that source's
+    // native file or legacy writer prevents its lookup from running today.
+    this.promptChosenKey = entries.filter(entry => next[entry.name]?.initialOwnership)
+      .reduce((chosen, entry) => !chosen || (this.promptInspections.get(entry.name) ?? 0)
+        < (this.promptInspections.get(chosen) ?? 0) ? entry.name : chosen, null);
+    if (this.promptChosenKey) this.rememberPromptInspection(this.promptChosenKey);
+    this.legacyChosenKey = entries.filter(entry => this.legacyPending.has(entry.name))
+      .reduce((chosen, entry) => !chosen || (this.legacyInspections.get(entry.name) ?? 0)
+        < (this.legacyInspections.get(chosen) ?? 0) ? entry.name : chosen, null);
+    if (this.legacyChosenKey) this.rememberLegacyInspection(this.legacyChosenKey);
     let visited = 0;
     for (const entry of entries) {
       if (this.stopped || this.remainingBytes <= 0 || records.length >= 4096) break;
@@ -229,8 +250,8 @@ export class QoderTranscriptCollector {
           continue;
         }
         this.deferredSources.delete(key);
-        if (await this.legacyWorkerAlive(source.transcriptPath)) continue;
-        if (source.suppliedPath && source.suppliedPath !== source.transcriptPath && await this.legacyWorkerAlive(source.suppliedPath)) continue;
+        if (await this.legacyWorkerAlive(source.transcriptPath, key)) continue;
+        if (source.suppliedPath && source.suppliedPath !== source.transcriptPath && await this.legacyWorkerAlive(source.suppliedPath, key)) continue;
         const contexts = observedContexts.filter(context => context.inode === undefined || context.inode === stat.ino);
         if (!contexts.length) continue; // Replacement has not been observed by a Hook yet.
         const rewritten = checkpoint?.fingerprint && (checkpoint.fileMtime !== stat.mtimeMs || checkpoint.fileCtime !== stat.ctimeMs)
@@ -240,6 +261,11 @@ export class QoderTranscriptCollector {
           if (old) checkpoint.recoveryReason = 'truncated';
           this.dropCache(key);
           this.tailScans.delete(source.transcriptPath);
+        }
+        if (checkpoint.unresolvedPrompt && !checkpoint.unresolvedPrompt.reason && !checkpoint.initialOwnership
+          && !checkpoint.backfill && checkpoint.committedOffset === 0 && checkpoint.activeStart === null
+          && contexts.some(context => context.event === 'UserPromptSubmit' && context.requestSetId)) {
+          checkpoint.bootstrapEnd = checkpoint.unresolvedPrompt.through;
         }
         const batch = await this.scanSource(source, contexts, checkpoint, stat);
         if (this.stopped) break;
@@ -255,11 +281,13 @@ export class QoderTranscriptCollector {
         // that same watermark (or after an in-place rewrite). Persist the exact
         // versions observed while a completed range was accepted instead.
         const advanced = checkpoint.committedOffset !== old?.committedOffset
-          || checkpoint.inode !== old?.inode || rewritten;
+          || checkpoint.inode !== old?.inode || rewritten
+          || ((old?.initialOwnership || old?.backfill) && !checkpoint.initialOwnership && !checkpoint.backfill);
         const saved = new Set((checkpoint.receipts ?? []).map(receipt => `${receipt.name}:${receipt.version}`));
         checkpoint.receipts = contexts.filter(context => context.receipt && (
           saved.has(`${context.receipt.name}:${context.receipt.version}`)
-          || (advanced && context.observedSize <= checkpoint.committedOffset
+          || (advanced && !(checkpoint.unresolvedPrompt && context.observedSize <= checkpoint.unresolvedPrompt.through)
+            && context.observedSize <= checkpoint.committedOffset
             && (!['UserPromptSubmit', 'SessionStart'].includes(context.event)
               || context.observedSize < checkpoint.committedOffset))
         )).map(context => context.receipt);
@@ -311,29 +339,52 @@ export class QoderTranscriptCollector {
     }
   }
 
-  async legacyWorkerAlive(transcriptPath) {
+  rememberLegacyInspection(key) {
+    this.legacyInspections.delete(key);
+    if (this.legacyInspections.size >= MAX_TAIL_SCANS) this.legacyInspections.delete(this.legacyInspections.keys().next().value);
+    this.legacyInspections.set(key, ++this.legacyInspectionSequence);
+  }
+
+  async legacyWorkerAlive(transcriptPath, sourceKey = transcriptPath) {
     const lock = path.join(this.dataDir, 'hooks/.retry-locks', crypto.createHash('sha1').update(transcriptPath).digest('hex') + '.lock');
     let value, stat;
     try { ({ value, stat } = await jsonSnapshot(lock)); }
     catch (error) {
-      if (error.code === 'ENOENT') return false;
-      try { stat = await fs.stat(lock); } catch { return false; }
+      if (error.code === 'ENOENT') { this.legacyPending.delete(sourceKey); return false; }
+      try { stat = await fs.stat(lock); } catch { this.legacyPending.delete(sourceKey); return false; }
       // The old writer creates an empty file before writing its JSON. Give
       // that publication a bounded grace, without deleting another writer's
       // lock or treating a crash/corrupt file as a permanently live worker.
+      this.legacyPending.delete(sourceKey);
       return this.now() - stat.mtimeMs < LEGACY_LOCK_GRACE_MS;
     }
     if (!Number.isInteger(value?.pid) || value.pid <= 0 || !Number.isFinite(value.startedAt)) {
+      this.legacyPending.delete(sourceKey);
       return this.now() - stat.mtimeMs < LEGACY_LOCK_GRACE_MS;
     }
+    let permissionDenied = false;
     try { process.kill(value.pid, 0); }
-    catch (error) { return error.code === 'EPERM'; }
-    if (this.now() - value.startedAt <= LEGACY_LOCK_AGE_MS) return true;
+    catch (error) {
+      if (error.code !== 'EPERM') { this.legacyPending.delete(sourceKey); return false; }
+      permissionDenied = true;
+    }
+    if (this.now() - value.startedAt <= LEGACY_LOCK_AGE_MS) {
+      this.legacyPending.delete(sourceKey);
+      if (permissionDenied) this.report(lock, 'legacy-owner-permission-denied');
+      return true;
+    }
     const version = fileVersion(stat);
     const known = this.legacyOwners.get(lock);
-    if (known?.version === version && (!known.alive || this.now() - known.checkedAt < 5000)) return known.alive;
-    if (this.ownerInspectionBudget === 0) return true;
+    if (known?.version === version && (!known.alive || this.now() - known.checkedAt < 5000)) {
+      this.legacyPending.delete(sourceKey);
+      return known.alive;
+    }
+    if (!this.legacyPending.has(sourceKey) && this.legacyPending.size >= MAX_TAIL_SCANS) this.legacyPending.delete(this.legacyPending.values().next().value);
+    this.legacyPending.add(sourceKey);
+    if (this.stopped || this.ownerInspectionBudget === 0 || (this.legacyChosenKey && this.legacyChosenKey !== sourceKey)) return true;
     this.ownerInspectionBudget = 0;
+    this.legacyPending.delete(sourceKey);
+    this.rememberLegacyInspection(sourceKey);
     // PID existence alone is not ownership: a recycled PID starts after this
     // lock's acquisition. Read only the process birth time, never argv/auth.
     const command = process.platform === 'win32' ? 'powershell.exe' : 'ps';
@@ -344,6 +395,7 @@ export class QoderTranscriptCollector {
       encoding: 'utf8', timeout: 1500, maxBuffer: 1024, windowsHide: true,
       env: { ...process.env, LC_ALL: 'C' },
     }, (error, stdout) => resolve(error ? NaN : Date.parse(stdout.trim()))));
+    if (this.stopped) return true;
     const alive = !Number.isFinite(born) || born <= value.startedAt + 1000;
     if (this.legacyOwners.size >= MAX_TAIL_SCANS) this.legacyOwners.delete(this.legacyOwners.keys().next().value);
     this.legacyOwners.set(lock, { version, alive, checkedAt: this.now() });
@@ -433,104 +485,163 @@ export class QoderTranscriptCollector {
     return bytesRead;
   }
 
-  async *lines(file, start, end, { allowFinal = false, rebuild = false } = {}) {
+  async *lines(file, start, end, { allowFinal = false, rebuild = false, countOnly = false,
+    checkpoint, skipRanges = [] } = {}) {
     const handle = await this.open(file);
-    let position = start;
-    let lineStart = start;
-    let pending = [];
-    let pendingBytes = 0;
-    let replay = false;
-    let lastBuffer;
+    const tailKey = rebuild ? file + '#rebuild' : file;
+    let position = start, lineStart = start, pending = [], pendingBytes = 0, replay = false, lastBuffer, oversized = false;
     try {
       const stat = await handle.stat();
-      let tail = !rebuild && this.tailScans.get(file);
+      let tail = checkpoint?.pendingLine ?? this.tailScans.get(tailKey);
       if (tail && tail.start === start && tail.ino === stat.ino && tail.dev === stat.dev
         && end >= tail.position && stat.size >= tail.size) {
+        const witness = Buffer.from(tail.witness, 'base64');
         let valid = tail.version === fileVersion(stat);
         if (!valid && stat.size > tail.size) {
-          const witness = Buffer.alloc(tail.witness.length);
-          const read = await this.read(handle, witness, tail.position - witness.length);
-          valid = read === witness.length && witness.equals(tail.witness);
+          const actual = Buffer.alloc(witness.length);
+          valid = await this.read(handle, actual, tail.position - witness.length) === witness.length && actual.equals(witness);
         }
         if (valid) {
-          position = tail.position;
-          pendingBytes = position - start;
-          replay = pendingBytes > 0;
-          lastBuffer = tail.witness;
-          if (position === end && (!allowFinal || (tail.version === fileVersion(stat) && tail.finalTried))) return;
+          position = tail.position; pendingBytes = position - start; replay = pendingBytes > 0;
+          oversized = tail.oversized === true || pendingBytes > this.maxTurnBytes;
+          lastBuffer = witness;
+          if (position === end && (!allowFinal || tail.finalTried || oversized)) return;
         } else tail = null;
       } else tail = null;
-      if (!tail && !rebuild) this.tailScans.delete(file);
+      if (!tail) { this.tailScans.delete(tailKey); if (checkpoint) delete checkpoint.pendingLine; }
       const fullLine = async (from, to) => {
         const bytes = to - from;
-        if (bytes > this.maxTurnBytes) throw new Error('record-byte-limit');
         const body = Buffer.alloc(bytes);
-        let offset = 0;
-        while (offset < bytes) {
+        for (let offset = 0; offset < bytes;) {
           const read = await this.read(handle, body.subarray(offset, Math.min(bytes, offset + CHUNK_BYTES)), from + offset);
           if (!read) throw new Error('source-changed-during-read');
           offset += read;
         }
         return body;
       };
-      while (position < end && (this.remainingBytes > 0 || rebuild)) {
-        const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, end - position,
-          rebuild ? CHUNK_BYTES : Math.max(1, this.remainingBytes)));
+      const parse = body => {
+        if (countOnly) return {};
+        const text = body.toString('utf8').trim();
+        if (!text) return {};
+        try {
+          const row = JSON.parse(text);
+          if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error();
+          this.metrics.recordsParsed++;
+          return { row };
+        } catch { return { quarantine: 'invalid-json-line' }; }
+      };
+      while (position < end && this.remainingBytes > 0) {
+        // Rehydrate known quarantines by seeking, rather than rereading a huge
+        // bad record. Older evicted ranges still scan under the cycle budget.
+        const skipped = !pendingBytes && skipRanges.find(range => range.start === position
+          && Number.isSafeInteger(range.end) && range.end > position && range.end <= end);
+        if (skipped) {
+          const from = position; position = skipped.end; lineStart = position;
+          yield { row: null, start: from, end: position, bytes: position - from, quarantine: skipped.reason };
+          continue;
+        }
+        const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, end - position, this.remainingBytes));
         const read = await this.read(handle, buffer, position);
         if (!read) break;
-        position += read;
-        lastBuffer = buffer.subarray(0, read);
+        position += read; lastBuffer = buffer.subarray(0, read);
         let cursor = 0;
         while (cursor < read) {
           const newline = buffer.indexOf(0x0a, cursor);
           const stop = newline >= 0 && newline < read ? newline : read;
           const fragment = buffer.subarray(cursor, stop);
-          if (!replay) pending.push(fragment);
           pendingBytes += fragment.length;
-          if (pendingBytes > this.maxTurnBytes) throw new Error('record-byte-limit');
+          if (!countOnly && pendingBytes <= this.maxTurnBytes && !replay) pending.push(fragment);
+          if (pendingBytes > this.maxTurnBytes) oversized = true;
+          if (oversized) pending = [];
           if (stop === read) break;
           const lineEnd = position - read + stop + 1;
-          const body = replay ? await fullLine(lineStart, lineEnd - 1) : Buffer.concat(pending, pendingBytes);
-          const text = body.toString('utf8').trim();
-          let row = null;
-          if (text) {
-            try { row = JSON.parse(text); } catch { throw new Error('invalid-json-line'); }
-            if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('invalid-json-line');
-            this.metrics.recordsParsed++;
-          }
-          if (!rebuild) this.tailScans.delete(file);
-          yield { row, start: lineStart, end: lineEnd, bytes: lineEnd - lineStart };
-          lineStart = lineEnd;
-          pending = [];
-          pendingBytes = 0;
-          replay = false;
-          cursor = stop + 1;
+          let parsed;
+          if (countOnly) parsed = {};
+          else if (oversized) parsed = { quarantine: 'record-byte-limit' };
+          else parsed = parse(replay ? await fullLine(lineStart, lineEnd - 1) : Buffer.concat(pending, pendingBytes));
+          this.tailScans.delete(tailKey); if (checkpoint) delete checkpoint.pendingLine;
+          yield { row: null, ...parsed, start: lineStart, end: lineEnd, bytes: lineEnd - lineStart };
+          lineStart = lineEnd; pending = []; pendingBytes = 0; replay = false; oversized = false; cursor = stop + 1;
         }
       }
-      if (pendingBytes && !rebuild) {
+      if (pendingBytes) {
         if (this.tailScans.size >= MAX_TAIL_SCANS) this.tailScans.delete(this.tailScans.keys().next().value);
         tail = { start: lineStart, position, size: stat.size, ino: stat.ino, dev: stat.dev,
-          version: fileVersion(stat), witness: Buffer.from(lastBuffer.subarray(-64)), finalTried: false };
-        this.tailScans.set(file, tail);
+          version: fileVersion(stat), witness: Buffer.from(lastBuffer.subarray(-64)).toString('base64'), oversized, finalTried: false };
+        this.tailScans.set(tailKey, tail);
+        if (checkpoint) checkpoint.pendingLine = tail;
       }
-      if (allowFinal && position === end && pendingBytes) {
+      if (allowFinal && position === end && pendingBytes && !oversized && !countOnly
+        && lastBuffer.toString('utf8').trimEnd().endsWith('}')) {
         if (tail) tail.finalTried = true;
-        let row;
-        const body = replay ? await fullLine(lineStart, end) : Buffer.concat(pending, pendingBytes);
-        try { row = JSON.parse(body.toString('utf8').trim()); }
-        catch { return; } // Incomplete native write: preserve its starting byte.
-        if (!row || typeof row !== 'object' || Array.isArray(row)) return;
-        this.metrics.recordsParsed++;
-        if (!rebuild) this.tailScans.delete(file);
-        yield { row, start: lineStart, end, bytes: end - lineStart };
+        const parsed = parse(replay ? await fullLine(lineStart, end) : Buffer.concat(pending, pendingBytes));
+        if (!parsed.row) return; // A non-newline malformed tail is still a partial native write.
+        this.tailScans.delete(tailKey); if (checkpoint) delete checkpoint.pendingLine;
+        yield { ...parsed, start: lineStart, end, bytes: end - lineStart };
       }
     } finally { await handle.close(); }
   }
 
-  async findBootstrap(file, checkpoint) {
+  async findOwnedPrompt(source, contexts, checkpoint, stat) {
+    const pending = checkpoint.initialOwnership;
+    if (this.promptInspectionBudget <= 0 || (this.promptChosenKey && this.promptChosenKey !== source.key)) return false;
+    this.promptInspectionBudget--;
+    this.rememberPromptInspection(source.key);
+    const proof = await this.resolveInitialPrompt?.(source, pending.requestSetId, pending.dbCursor);
+    if (!proof || !Array.isArray(proof.rows) || proof.rows.length > 256) {
+      this.report(source.key, 'initial-prompt-owner-unavailable'); return false;
+    }
+    if (proof.reset) {
+      Object.assign(pending, { offset: 0, seen: 0, candidate: null });
+      delete pending.dbCursor; delete pending.pendingLine;
+      return false;
+    }
+    let index = 0;
+    for await (const line of this.lines(source.transcriptPath, pending.offset, stat.size, { checkpoint: pending })) {
+      if (line.quarantine) { this.report(source.key, 'initial-prompt-owner-damaged'); return false; }
+      if (isRealUserPrompt(line.row)) {
+        const row = proof.rows[index];
+        const at = Date.parse(line.row.timestamp);
+        // Request IDs select the ordinal in a complete ordered inventory.
+        // Clocks validate the pairing; they never select a nearest prompt.
+        if (!row || !Number.isFinite(row.at) || typeof row.requestId !== 'string' || row.requestId.length > 512
+          || !Number.isFinite(at) || Math.abs(at - row.at) > 5000
+          || row.at <= (pending.dbCursor?.at ?? 0)) {
+          this.report(source.key, 'initial-prompt-owner-pending'); return false;
+        }
+        if (row.requestId === pending.requestSetId) pending.candidate = line.start;
+        pending.lastUserOffset = line.start;
+        pending.dbCursor = { ...row, inventoryId: proof.inventoryId };
+        pending.seen++; index++;
+      }
+      pending.offset = line.end;
+    }
+    if (pending.offset < stat.size || index < proof.rows.length || !proof.complete || pending.candidate === null) {
+      this.report(source.key, 'initial-prompt-owner-pending'); return false;
+    }
+    if (pending.candidate < pending.anchorEnd) {
+      checkpoint.backfill = { inode: stat.ino, offset: pending.candidate, committedOffset: pending.candidate,
+        activeStart: null, hasUser: false, bootstrapEnd: null, recoveryReason: 'initial-prompt-recovery',
+        activeRequestSetId: pending.requestSetId, end: pending.anchorEnd,
+        sealedBoundary: pending.lastUserOffset >= pending.anchorEnd };
+    }
+    delete checkpoint.initialOwnership;
+    if (!checkpoint.backfill) delete checkpoint.unresolvedPrompt;
+    this.tailScans.delete(source.transcriptPath);
+    return true;
+  }
+
+  rememberPromptInspection(key) {
+    this.promptInspections.delete(key);
+    if (this.promptInspections.size >= MAX_TAIL_SCANS) this.promptInspections.delete(this.promptInspections.keys().next().value);
+    this.promptInspections.set(key, ++this.promptInspectionSequence);
+  }
+
+  async findBootstrap(source, contexts, checkpoint, stat) {
+    const file = source.transcriptPath;
     const end = checkpoint.bootstrapEnd;
     if (end === 0) { checkpoint.offset = 0; checkpoint.bootstrapEnd = null; return true; }
-    const window = checkpoint.bootstrapWindow ?? 1024 * 1024;
+    const window = Math.min(checkpoint.bootstrapWindow ?? Math.min(1024 * 1024, this.scanBytes), this.maxTurnBytes);
     const start = Math.max(0, end - window);
     const handle = await this.open(file);
     let buffer;
@@ -550,10 +661,20 @@ export class QoderTranscriptCollector {
           // A prompt Hook can run either side of the native user write. If the
           // latest range is already closed, wait at the complete-line watermark;
           // otherwise the real user row below anchors the in-progress Turn.
+          const prompt = contexts.find(context => context.event === 'UserPromptSubmit' && context.requestSetId);
+          if (prompt) {
+            checkpoint.initialOwnership = { requestSetId: prompt.requestSetId, anchorEnd: completeEnd,
+              offset: 0, seen: 0, candidate: null };
+          }
+          // Until ownership is proven, this closed prefix might be either
+          // history or a late current prompt (older producers may lack IDs).
+          // Keep the unresolved range and its notices, while allowing future
+          // appended prompts to proceed. Never label that range consumed.
+          checkpoint.unresolvedPrompt = { through: completeEnd };
           checkpoint.offset = completeEnd;
-          checkpoint.committedOffset = completeEnd;
           checkpoint.bootstrapEnd = null;
           checkpoint.bootstrapWindow = null;
+          this.report(source.key, 'initial-prompt-owner-unavailable');
           return true;
         }
         if (isRealUserPrompt(row)) {
@@ -575,7 +696,25 @@ export class QoderTranscriptCollector {
     const firstNewline = buffer.indexOf(0x0a);
     const nextEnd = firstNewline < 0 ? end : start + firstNewline + 1;
     if (nextEnd === end) {
-      if (window >= this.maxTurnBytes) throw new Error('bootstrap-record-byte-limit');
+      if (window >= this.maxTurnBytes) {
+        // A backwards anchor search must not park forever at one huge row.
+        // The cut prefix is not a JSON record or a consumed prompt. Retain its
+        // uncertainty and seek its LF forwards under the ordinary scan budget.
+        checkpoint.unresolvedPrompt = { through: end, reason: 'bootstrap-record-byte-limit' };
+        checkpoint.bootstrapEnd = null;
+        checkpoint.bootstrapWindow = null;
+        if (firstNewline >= 0) {
+          checkpoint.offset = completeEnd;
+          this.quarantine(source, checkpoint, { start, end: completeEnd }, 'bootstrap-record-byte-limit');
+        } else {
+          checkpoint.offset = start;
+          checkpoint.pendingLine = { start, position: end, size: stat.size, ino: stat.ino, dev: stat.dev,
+            version: fileVersion(stat), witness: buffer.subarray(-64).toString('base64'), oversized: true, finalTried: true };
+          this.tailScans.delete(file);
+          this.report(source.key, 'bootstrap-record-byte-limit');
+        }
+        return true;
+      }
       checkpoint.bootstrapWindow = Math.min(this.maxTurnBytes, window * 2);
     } else {
       checkpoint.bootstrapEnd = nextEnd;
@@ -610,15 +749,17 @@ export class QoderTranscriptCollector {
     if (value.end < checkpoint.offset) {
       // Rehydration is one bounded active-turn range, even if it exceeds the
       // normal cycle budget. Idle evicted turns never enter this path.
-      if (checkpoint.offset - value.end > this.maxTurnBytes) throw new Error('turn-byte-limit');
-      for await (const line of this.lines(source.transcriptPath, value.end, checkpoint.offset, { rebuild: true, allowFinal: true })) {
+      const end = checkpoint.retainedEnd ?? checkpoint.offset;
+      for await (const line of this.lines(source.transcriptPath, value.end, end, {
+        rebuild: true, allowFinal: true, checkpoint: value, skipRanges: checkpoint.quarantines,
+      })) {
         if (line.row) value.rows.push(line.row);
-        value.bytes += line.bytes;
+        if (line.row) value.bytes += line.bytes;
         value.end = line.end;
         if (value.bytes > this.maxTurnBytes) throw new Error('turn-byte-limit');
       }
       this.remember(source.key, value);
-      if (value.end < checkpoint.offset) return null;
+      if (value.end < end) return null;
     }
     return value;
   }
@@ -626,7 +767,9 @@ export class QoderTranscriptCollector {
   async build(source, contexts, checkpoint, value, endOffset, terminalSource) {
     if (this.stopped) throw new Error('stopped');
     if (!checkpoint.hasUser || !value.rows.length) return [];
-    const context = [...contexts].reverse().find(item => item.observedSize <= endOffset
+    const context = [...contexts].reverse().find(item => checkpoint.activeRequestSetId
+      && item.requestSetId === checkpoint.activeRequestSetId)
+      ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
       && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
       ?? { cwd: source.cwd, desktop: source.desktop };
@@ -653,6 +796,16 @@ export class QoderTranscriptCollector {
       record['agent.transcript.cursor_reason'] = checkpoint.recoveryReason ?? 'incremental';
       record['agent.transcript.cursor_batch_id'] = turnId;
       record['agent.transcript.terminal_source'] = terminalSource;
+      if (checkpoint.incomplete) {
+        record['agent.transcript_incomplete'] = true;
+        // A damaged record may have been a terminal or a tool result. Do not
+        // turn the parser's last-step inference into a fabricated completion.
+        if (record['event.name'] === 'llm.response' && !record['agent.stop_reason']
+          && record['gen_ai.response.finish_reasons']?.[0] === 'end_turn') {
+          delete record['gen_ai.response.finish_reasons'];
+          for (const message of record['gen_ai.output.messages'] ?? []) delete message.finish_reason;
+        }
+      }
     }
     checkpoint.recoveryReason = 'incremental';
     return records;
@@ -667,6 +820,20 @@ export class QoderTranscriptCollector {
     checkpoint.stableSize = null;
     checkpoint.stableMtime = null;
     checkpoint.stableAt = null;
+    delete checkpoint.incomplete;
+    delete checkpoint.retainedEnd;
+    delete checkpoint.turnTruncated;
+    delete checkpoint.activeRequestSetId;
+  }
+
+  quarantine(source, checkpoint, line, reason) {
+    const ranges = checkpoint.quarantines ??= [];
+    if (!ranges.some(range => range.start === line.start && range.end === line.end && range.reason === reason)) {
+      ranges.push({ start: line.start, end: line.end, reason });
+      if (ranges.length > 32) ranges.shift();
+    }
+    if (checkpoint.hasUser) checkpoint.incomplete = true;
+    this.report(source.key, reason);
   }
 
   async scanSource(source, contexts, checkpoint, stat) {
@@ -675,7 +842,7 @@ export class QoderTranscriptCollector {
       if (!checkpoint[property]) continue;
       const migration = checkpoint[property];
       if (migration.target > migration.seen) {
-        for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size)) {
+        for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, { countOnly: true, checkpoint })) {
           checkpoint.offset = line.end;
           migration.seen++;
           if (migration.seen >= migration.target) break;
@@ -696,7 +863,22 @@ export class QoderTranscriptCollector {
       delete checkpoint[property];
       if (this.remainingBytes <= 0) return records;
     }
-    if (checkpoint.bootstrapEnd !== null && !await this.findBootstrap(source.transcriptPath, checkpoint)) return records;
+    if (checkpoint.bootstrapEnd !== null && !await this.findBootstrap(source, contexts, checkpoint, stat)) return records;
+    if (checkpoint.initialOwnership) await this.findOwnedPrompt(source, contexts, checkpoint, stat);
+    if (checkpoint.backfill) {
+      const backfill = checkpoint.backfill;
+      // Ownership lookup may wait for the DB. Keep its bounded historical
+      // range separate from the live cursor so new Turns are never parked or
+      // replayed when delayed evidence eventually arrives.
+      const recoverySource = { ...source, key: source.key + ':backfill' };
+      records.push(...await this.scanSource(recoverySource, contexts, backfill, { ...stat, size: backfill.end }));
+      if (backfill.offset >= backfill.end && backfill.activeStart === null) {
+        checkpoint.committedOffset = Math.max(checkpoint.committedOffset, backfill.end);
+        delete checkpoint.backfill;
+        delete checkpoint.unresolvedPrompt;
+        this.dropCache(recoverySource.key);
+      }
+    }
     if (checkpoint.stableSize !== stat.size || checkpoint.stableMtime !== stat.mtimeMs) {
       checkpoint.stableSize = stat.size;
       checkpoint.stableMtime = stat.mtimeMs;
@@ -705,12 +887,13 @@ export class QoderTranscriptCollector {
     const stable = this.now() - checkpoint.stableAt >= this.stableMs;
     const ready = stable && checkpoint.terminal
       && this.now() - (checkpoint.terminalAt ?? checkpoint.stableAt) >= this.settleMs;
-    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready) return records;
+    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready && !checkpoint.sealedBoundary) return records;
     let value = await this.rowsFor(source, checkpoint);
     if (!value) return records;
     let turns = 0;
-    for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, { allowFinal: stable })) {
+    for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, { allowFinal: stable, checkpoint })) {
       const row = line.row;
+      if (line.quarantine) this.quarantine(source, checkpoint, line, line.quarantine);
       const prompt = row && isRealUserPrompt(row);
       const contextFloor = Math.max(checkpoint.committedOffset, checkpoint.nativeStopOffset ?? 0);
       if (eventOf(row) === 'Stop') checkpoint.nativeStopOffset = line.end;
@@ -729,10 +912,15 @@ export class QoderTranscriptCollector {
         value.start = line.start;
       }
       if (checkpoint.activeStart !== null) {
-        if (row) value.rows.push(row);
-        if (value.rows.length > MAX_TURN_RECORDS) throw new Error('turn-record-limit');
-        value.bytes += line.bytes;
-        if (value.bytes > this.maxTurnBytes) throw new Error('turn-byte-limit');
+        if (row && !checkpoint.turnTruncated) {
+          const reason = value.rows.length >= MAX_TURN_RECORDS ? 'turn-record-limit'
+            : value.bytes + line.bytes > this.maxTurnBytes ? 'turn-byte-limit' : null;
+          if (reason) {
+            checkpoint.turnTruncated = true;
+            checkpoint.retainedEnd = line.start;
+            this.quarantine(source, checkpoint, line, reason);
+          } else { value.rows.push(row); value.bytes += line.bytes; }
+        }
         if (prompt) checkpoint.hasUser = true;
         if (eventOf(row) === 'Stop' || (row && hasQoderCnTerminalMarker([], [row]))) {
           if (!checkpoint.terminal) checkpoint.terminalAt = this.now();
@@ -753,11 +941,21 @@ export class QoderTranscriptCollector {
     // Some native versions write neither last-prompt nor an assistant terminal
     // flag. The real Stop observation supplies that fact, while the collector
     // still waits for a stable native tail before it closes the turn.
+    if (checkpoint.pendingLine && checkpoint.pendingLine.position - checkpoint.pendingLine.start > this.maxTurnBytes) {
+      if (checkpoint.hasUser) checkpoint.incomplete = true;
+      this.report(source.key, 'record-byte-limit');
+    }
     if (checkpoint.hasUser && !checkpoint.terminal && !checkpoint.nativeStopOffset
       && value.rows.some(row => row.type === 'assistant') && contexts.some(context => context.event === 'Stop'
       && context.observedSize > checkpoint.activeStart && context.observedSize <= checkpoint.offset)) {
       checkpoint.terminal = true;
       checkpoint.terminalAt = this.now();
+    }
+    if (checkpoint.activeStart !== null && checkpoint.sealedBoundary && checkpoint.offset === stat.size) {
+      records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'next-prompt-backfill'));
+      checkpoint.committedOffset = checkpoint.offset;
+      this.clearActive(checkpoint);
+      value = { start: null, end: checkpoint.offset, rows: [], bytes: 0 };
     }
     if (checkpoint.activeStart !== null && checkpoint.terminal && checkpoint.offset === stat.size) {
       if (checkpoint.stableSize !== stat.size || checkpoint.stableMtime !== stat.mtimeMs) {

@@ -4,6 +4,7 @@ import {
   type QoderTranscriptBatch,
 } from '../../../assets/hooks/qoder/transcript-collector.mjs';
 import type { InputRuntimeAccumulator } from '../base/input-runtime-metrics.js';
+import { readQoderPromptOwnership } from './prompt-ownership.js';
 
 /** Shared native source; Qoder and CN keep their own token enrichment/outputs. */
 export class QoderTranscriptSource {
@@ -18,6 +19,7 @@ export class QoderTranscriptSource {
   ) {
     this.collector = new QoderTranscriptCollector({
       dataDir, agentId, runtime, warn,
+      resolveInitialPrompt: (source, requestId, cursor) => readQoderPromptOwnership(agentId, source.sessionId, requestId, cursor),
     });
   }
 

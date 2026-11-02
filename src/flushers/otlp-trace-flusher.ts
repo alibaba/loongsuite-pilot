@@ -1238,7 +1238,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
             )];
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
-          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source'] : [];
+          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,

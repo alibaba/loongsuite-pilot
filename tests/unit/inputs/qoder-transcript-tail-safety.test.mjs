@@ -86,18 +86,19 @@ describe.each(['qoder', 'qoder-cn'])('%s physical tail progress', agentId => {
     expect(restarted.metrics.bytesRead).toBe(0);
   });
 
-  it('obeys the scan budget inside a long record and defers an unchanged oversized source', async () => {
+  it('obeys the scan budget and quarantines an oversized record without blocking later turns', async () => {
     const probe = await setup({ scanBytes: 64 * 1024, maxTurnBytes: 128 * 1024 });
     const before = Object.values(probe.state())[0].offset;
     fs.appendFileSync(probe.file, '{"type":"assistant","message":{"content":"' + 'x'.repeat(256 * 1024) + '"}}\n');
-    for (let index = 0; index < 4; index++) {
+    for (let index = 0; index < 6; index++) {
       const batch = await probe.poll();
       expect(batch.metrics.bytesRead).toBeLessThanOrEqual(64 * 1024 + 256);
       expect(batch.records).toEqual([]);
     }
     expect(probe.warnings.some(w => w.reason === 'record-byte-limit')).toBe(true);
     for (let index = 0; index < 3; index++) expect((await probe.poll()).metrics.bytesRead).toBe(0);
-    expect(Object.values(probe.state())[0].offset).toBe(before);
+    expect(Object.values(probe.state())[0].offset).toBeGreaterThan(before);
+    expect(Object.values(probe.state())[0].quarantines).toHaveLength(1);
     fs.writeFileSync(probe.file, jsonl([probe.user,
       { type: 'assistant', message: { id: 'repaired', role: 'assistant', model: 'synthetic-model',
         content: [{ type: 'text', text: 'repaired' }], stop_reason: 'end_turn' } }, { type: 'last-prompt' }]));
@@ -106,7 +107,7 @@ describe.each(['qoder', 'qoder-cn'])('%s physical tail progress', agentId => {
     expect((await probe.poll()).records).toEqual([]);
   });
 
-  it('retries malformed complete records only after the source version changes', async () => {
+  it('retains malformed bytes in the source and advances past only the complete bad line', async () => {
     const probe = await setup();
     fs.appendFileSync(probe.file, '{broken}\n');
     expect((await probe.poll()).records).toEqual([]);
