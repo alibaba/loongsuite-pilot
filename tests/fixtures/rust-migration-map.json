@@ -64828,9 +64828,9 @@
     {
       "legacy": "tests/unit/core/hook-watchdog-intercept-shell.test.ts",
       "source_hash": "6823ffd370aafc59a3330ed2e92d0def5878ccebc30a288e069dbf68e6cbcf07",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "修正E01无条件Windows bash忽略：7个bash声明在Windows也默认执行，通过独立Git Bash定位器选择已安装Git/usr/bin/bash.exe及同目录MSYS runtime，绝不解析System32 WSL stub；HOME/启动文件与PATH隔离。固定Linux真实bash7pass/zsh2ignored；Windows必须Native CI实跑，不能把Linux通过当Windows通过。原source AST/skipIf参数原样保留。",
+      "note": "完整20声明代码迁移（shell9+installer11）及参数/AST保留；执行证据分层：Linux bash7pass、zsh2明确ignored，installer真实Native入口+隔离Darwin backend验证11声明21行；Native Windows/macOS、zsh运行待相应CI。不可把平台适用或source verifier当实际平台通过。移除旧installer危险匹配而保留业务退役合同，不广泛retire。",
       "cases": [
         {
           "source": {
@@ -65089,6 +65089,318 @@
               {
                 "file": "src/core/hook_watchdog_shell_history_tests.rs",
                 "test": "shell_l143_migrated_rc_sources_cleanly_and_the_old_bare_block_is_gone"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "retires both custom-dataDir overrides regardless of selection %s",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)",
+              "it.each(['qoder-work', 'qoder-work-cn', 'qwen-work-cn', 'qoder-work,qoder-work-cn,qwen-work-cn', '', undefined])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "6个原selection行逐一真实fixture，App/配置/wrapper存在仍无gate，env两值清除、两个实际历史XML plist卸载删除、wrapper字节保留；selection配置不会影响共享组件",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l238_all_six_selection_rows_retire_real_owned_files_without_touching_wrapper"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L248:C3",
+            "title": "recognizes legacy Pilot paths for %s overrides",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)",
+              "it.each(['both', 'qoder', 'qwen'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原both/qoder/qwen三个旧标准路径组合实际执行，只认当前dataDir或当前HOME已知旧标准wrapper精确路径；按对应路径真实历史XML验证，旧wrapper不存在也能清",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l248_all_three_legacy_path_rows_use_only_the_known_old_home_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L256:C3",
+            "title": "cleans both overrides and plists without apps, config, dataDir or wrapper",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "实际无App/config/dataDir/wrapper，仍清两env与两个已验证旧plist，dataDir不会被创建",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l256_no_apps_config_data_directory_or_wrapper_is_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L262:C3",
+            "title": "cleans both overrides even if the LaunchAgents directory is missing",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "实际删除LaunchAgents目录后仍清两env，不unload/不重建Library目录，已有wrapper保留",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l262_missing_launchagents_directory_does_not_block_env_cleanup_or_get_created"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L273:C3",
+            "title": "preserves third-party overrides and plists while removing both Pilot plists",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实两种第三方env和第三方plist内容保留，两个实际历史producer格式且归属本安装的plist被删除；不继承源dummy plist/盲删文件名，安全适配明确记录",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l273_foreign_env_and_plist_survive_while_verified_pilot_plists_retire"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L288:C3",
+            "title": "retires only the Pilot-owned %s override in mixed ownership",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)",
+              "it.each(['qoder', 'qwen'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原qoder/qwen两种混合归属，只unset真正精确归属的一项，第三方值保留",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l288_each_mixed_ownership_row_retires_only_the_exact_owned_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L296:C3",
+            "title": "is idempotent and tolerates getenv returning nonzero for absent overrides",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "两次真实cleanup共getenv4/unset2/unload2，第三次absent getenv再不unset/unload；实际wrapper保留",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l296_repeated_retirement_tolerates_absent_getenv_and_is_idempotent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C3",
+            "title": "removes stale Pilot plists even when both overrides are already absent",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "env均不存在时仍卸载删除两已验证旧plist，没有unset，wrapper保留",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l309_owned_stale_plists_retire_when_both_overrides_are_already_absent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L316:C3",
+            "title": "is a Linux no-op",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Host Other/Linux真实无env/文件/命令副作用，保留文件字节和wrapper；不是以Ok结果掩盖修改",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l316_linux_host_is_a_true_env_file_and_command_noop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L325:C3",
+            "title": "has no active injector, app probes, selection gates or wrapper existence gates",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "实际缺dataDir/wrapper、坏config且无App仍cleanup；检查共享组件无config/selection/App探针，实际op无注入；两bootstrap不再有worker env/旧退役旁路，调用现有Native发布/卸载协议",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l325_no_active_injector_probe_selection_or_wrapper_file_gate_and_no_script_bypass"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L333:C3",
+            "title": "calls shared cleanup unconditionally from cmd_%s",
+            "suites": [
+              "installer runtime retirement (temporary HOME, mocked launchctl)"
+            ],
+            "parameters": [
+              "describe.skipIf(!HAS_BASH)",
+              "it.each(['install', 'upgrade', 'uninstall'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实Native controller stage/publish install→upgrade→check-only uninstall→uninstall相位：stage/check-only无副作用，发布current+命令提交后才清理，两env每入口仅一次；cache/runtime直到卸载helper返回仍保留。candidate握手用同Rust target编译的原生协议fixture，不冒称真实collector/service安装",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_installer_tests.rs",
+                "test": "installer_l333_actual_install_upgrade_uninstall_entries_retire_once_at_the_correct_phase"
               }
             ]
           }
@@ -65654,6 +65966,620 @@
               {
                 "file": "tests/hooks_native.rs",
                 "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/workspace-privacy.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "10006df3c552d445a52f1f055dd2aaa964069765a9d740d040d45a9fa7b099e9",
+      "note": "All immutable source declarations individually audited and actualNative assertions executed; baseline/f84 identical. Originalprivacy source explicitly manually configures a perinput policy: these2 contracts retain that scope and cannot prove Orchestrator wires privacy beforeMM. ProductionOrch/source-policy gap is separately under real red-test investigation, not hidden by thismapping. Bootstrap3 are purefiltercontracts; crossAgent/rawsystem/plugin classification requires independent callerchain proof.",
+      "cases": [
+        {
+          "source": {
+            "id": "L13:C3",
+            "title": "does not call the uploader for blocked workspaces or a subsequently switched session",
+            "suites": [
+              "workspace privacy before Codex attachments"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real native URI resolver refuses private cwd and sticky same-session cwd switch before realMultimodalProcessor; different session with no cwd positively reaches actualProcessor and controlledUploader exactlyonce with decodedhello/imagePNG. ActuallypassedLinux Rust1.99.1/glibc2.34; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/input/workspace_privacy_history.rs",
+                "test": "workspace_l13_blocked_and_switched_session_never_calls_uploader_but_unknown_workspace_other_session_does"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L31:C1",
+            "title": "keeps a blocked child attachment private after a text-only turn and cwd change without blocking its parent",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact checked-in child metadata threadID differsrootSession; real event-policy filtering seeds childtext exclusion, later publiccwd closure remainsprivate and policy stayssticky; separate parent sharingrootSession reaches nativeProcessor/Uploader once. This matches original privatecallback contract, not productionOrch authorization proof. ActuallypassedLinux Rust1.99.1/glibc2.34; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/input/workspace_privacy_history.rs",
+                "test": "workspace_l31_text_only_child_exclusion_survives_cwd_change_without_blocking_allowed_parent_attachment"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/bootstrap-turn-filter.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "fde16396f575f4528772d575f3e509943a41bcfbc91c4c812e59e199eef5def9",
+      "note": "All immutable source declarations individually audited and actualNative assertions executed; baseline/f84 identical. Originalprivacy source explicitly manually configures a perinput policy: these2 contracts retain that scope and cannot prove Orchestrator wires privacy beforeMM. ProductionOrch/source-policy gap is separately under real red-test investigation, not hidden by thismapping. Bootstrap3 are purefiltercontracts; crossAgent/rawsystem/plugin classification requires independent callerchain proof.",
+      "cases": [
+        {
+          "source": {
+            "id": "L22:C3",
+            "title": "keeps only the latest turn in each bootstrap batch",
+            "suites": [
+              "filterBootstrapHistoryTurns"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactsource4 records retain both latestrequest/latestresponse, originalorder and alloriginalfields. ActuallypassedLinux Rust1.99.1/glibc2.34; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/bootstrap_turn_filter.rs",
+                "test": "history_contracts::l22_latest_bootstrap_turn_preserves_every_event_in_that_turn_and_original_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "scopes recovery independently per transcript invocation batch",
+            "suites": [
+              "filterBootstrapHistoryTurns"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactsource5 records independently keepbatchA latest,batchB latest,normal incremental, inoriginalorder. ActuallypassedLinux Rust1.99.1/glibc2.34; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/bootstrap_turn_filter.rs",
+                "test": "history_contracts::l36_each_invocation_batch_recovers_independently_and_incremental_entries_survive"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "fails open when a mixed-version record has no batch id",
+            "suites": [
+              "filterBootstrapHistoryTurns"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactsource mixed-version bootstrap entries withoutbatchIDs returnunchanged, withfullequality not justcount. ActuallypassedLinux Rust1.99.1/glibc2.34; Windows/macOS unexecuted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/bootstrap_turn_filter.rs",
+                "test": "history_contracts::l52_mixed_version_missing_batch_id_returns_the_exact_entries_unmodified"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-work-sqlite-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "15f4ac304504825ca1b22dc553bdc51e064b030b563f4d7efa706ed4ed6b890f",
+      "note": "Exact ef8953 source assertions through actual native per-client constructor, HostedInput, temporary schema and StateStore. f84 identical. Node-only skipIf hasNodeSqlite replaced by bundled native SQLite; no cases retired. Linux16 actual; Windows/macOS actual pending CI. Initial baseline failure and physical source replacement remain separate reliability work, not implied by these source contracts.",
+      "cases": [
+        {
+          "source": {
+            "id": "L34:C3",
+            "title": "has correct identity and collection method",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual constructor id/agent/method are literal Work/sqlite values",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l34_real_work_identity_and_collection_method"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "baselines existing rows on first start and skips them",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual initial nonempty schema emits0 and persists MAX timestamp into fresh StateStore",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l41_initial_history_is_excluded_and_boundary_persists"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "emits llm.request entries for new user prompts",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual user row yields request/session/Work agent/subchat model/normalized user parts and exact seconds-to-nanoseconds",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l59_user_prompt_model_session_parts_and_nanosecond_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "falls back to UNKNOWN model when sub_chats.model_level is null",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual SQL NULL subchat model yields unknown",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l86_null_model_uses_unknown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "propagates model_level from sub_chats onto tool.result entries",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual joined subchat model propagates to tool.result",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l104_tool_result_inherits_subchat_model"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "emits tool.result entries for assistant tool-* parts (excluding tool-Thinking)",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual Thinking tool omitted while Read name/callID/object result retained",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l125_thinking_is_excluded_and_real_tool_payload_is_kept"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L156:C3",
+            "title": "advances cursor and avoids duplicate emission across collects",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual row advances cursor; reconstructed input and fresh StateStore emit0 duplicates",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l156_fresh_input_and_fresh_store_resume_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "does not re-emit existing tool.result parts when an assistant row is updated",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual assistant timestamp UPDATE does not repeat persisted tool result and advances timestamp",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l177_updated_assistant_does_not_repeat_persisted_tool_result"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L203:C3",
+            "title": "emits only newly appended tool.result parts when an assistant row grows",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual assistant parts UPDATE emits only newly appended call-new with new result",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l203_grown_assistant_emits_only_new_tool_part"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L241:C3",
+            "title": "emits both user prompt and tool result across multiple messages rows",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual two SQL rows produce exactly one request and one Bash result with original call/result",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l241_multiple_message_rows_preserve_user_and_tool_events"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L280:C3",
+            "title": "skips invalid parts JSON gracefully and still advances cursor",
+            "suites": [
+              "QoderWorkSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual malformed parts produces0 entries yet advances timestamp cursor",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l280_malformed_parts_do_not_emit_but_advance_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L307:C5",
+            "title": "has CN id and agentType",
+            "suites": [
+              "QoderWorkSqliteInput",
+              "QoderWork CN variant (parameterized)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual CN parameter gives distinct qoder-work-cn-sqlite id/agent with SQLite method",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l307_real_cn_variant_has_distinct_identity_and_sqlite_method"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L319:C5",
+            "title": "emits entries with qoder-work-cn agent type",
+            "suites": [
+              "QoderWorkSqliteInput",
+              "QoderWork CN variant (parameterized)"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Live actual CN input excludes existing row, then manual hosted cycle emits exactly new CN request",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-sqlite/sqlite_migration_contract_tests.rs",
+                "test": "source_l319_live_cn_variant_baselines_then_collects_only_new_prompt"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qwen-work-cn-sqlite-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "4b5012b2fd3941a0f9a9f145370db1f54d56451d392fe88ee69a8f746a3fa851",
+      "note": "Exact ef8953 source assertions through actual native per-client constructor, HostedInput, temporary schema and StateStore. f84 identical. Node-only skipIf hasNodeSqlite replaced by bundled native SQLite; no cases retired. Linux16 actual; Windows/macOS actual pending CI. Initial baseline failure and physical source replacement remain separate reliability work, not implied by these source contracts.",
+      "cases": [
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "maps QwenWorkCN user and tool rows without QoderWork inputs",
+            "suites": [
+              "QwenWorkCNSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Real Qwen input alone reads user/tool SQL rows into exact event order, normalized parts, agent/source/tool result while Qoder namespace and large unknown integer remain untouched",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/sqlite_migration_contract_tests.rs",
+                "test": "source_l33_real_qwen_user_and_tool_mapping_is_independent_of_qoder_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "continues across a batch boundary when rows share updated_at",
+            "suites": [
+              "QwenWorkCNSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual1001 equal-timestamp rows: first hosted cycle1000 exactfirst/last identities, second1 finalID, third0; compound cursor survives fresh StateStore and foreign namespace persists",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/sqlite_migration_contract_tests.rs",
+                "test": "source_l54_actual_equal_timestamp_1001_rows_cross_the_page_without_loss_or_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "collects a row inserted later with the same updated_at",
+            "suites": [
+              "QwenWorkCNSqliteInput"
+            ],
+            "parameters": [
+              "describe.skipIf(!hasNodeSqlite())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual later INSERT at unchanged timestamp emits only m-2 in next hosted cycle, and no repeat thereafter",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/sqlite_migration_contract_tests.rs",
+                "test": "source_l67_real_later_row_at_same_timestamp_is_collected_once"
               }
             ]
           }

@@ -1184,30 +1184,6 @@ remove_qoderclicn_token_intercept() {
 }
 
 
-# Restore app defaults without requiring the old wrapper, app, or agent selection to exist.
-retire_qoderwork_runtime_overrides() {
-    if [ "$(uname)" != "Darwin" ]; then return 0; fi
-
-    local plist_path
-    for plist_path in \
-        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist" \
-        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist"; do
-        if [ -f "$plist_path" ]; then
-            launchctl unload "$plist_path" 2>/dev/null || true
-            rm -f "$plist_path"
-        fi
-    done
-
-    local env_name current_runtime
-    for env_name in QW_QODER_WORKER_RUNTIME_PATH QODER_WORKER_RUNTIME_PATH; do
-        current_runtime=$(launchctl getenv "$env_name" 2>/dev/null || true)
-        if [ "$current_runtime" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ] || printf '%s' "$current_runtime" | grep -q 'loongsuite-pilot'; then
-            launchctl unsetenv "$env_name"
-            msg "    已清理 $env_name" "    Cleaned up $env_name"
-        fi
-    done
-}
-
 # ============================================================
 # Claude Code fetch intercept: inject/remove shell function
 #
@@ -1634,7 +1610,6 @@ cmd_install() {
         exit 1
     fi
     install_loongsuite_pilot_command
-    retire_qoderwork_runtime_overrides
     inject_qodercli_token_intercept
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
@@ -1733,7 +1708,6 @@ cmd_upgrade() {
         exit 1
     fi
     install_loongsuite_pilot_command
-    retire_qoderwork_runtime_overrides
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
@@ -2601,7 +2575,6 @@ cmd_uninstall() {
     cleanup_native_agents
     remove_qodercli_token_intercept
     remove_qoderclicn_token_intercept
-    retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
     echo ""
 

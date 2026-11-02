@@ -187,6 +187,13 @@ async fn expand_uninstall_targets(
 }
 
 pub(super) async fn run(value: Value) -> Result<String> {
+    run_with_retirement(value, super::runtime_retirement::Context::native()).await
+}
+
+pub(super) async fn run_with_retirement(
+    value: Value,
+    retirement: super::runtime_retirement::Context,
+) -> Result<String> {
     let options: Options = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("Invalid native uninstall options"))?;
     ensure!(
@@ -267,6 +274,18 @@ pub(super) async fn run(value: Value) -> Result<String> {
                 manager.undeploy_agent(target).await,
                 "Native cleanup failed for Agent {}; runtime assets were preserved",
                 target.id
+            );
+        }
+        if let Err(error) =
+            super::runtime_retirement::cleanup_all(&data_dir.to_string_lossy(), &retirement).await
+        {
+            crate::utils::create_logger("NativeUninstall").error(
+                "legacy runtime cleanup failed; installation files preserved for retry",
+                json!({"phase":"before-runtime-removal","error":&error}).as_object(),
+            );
+            eprintln!("[runtime-retirement] uninstall cleanup failed; installation files preserved for retry: {error}");
+            anyhow::bail!(
+                "Runtime environment cleanup failed; installation files were preserved for retry"
             );
         }
         super::legacy_uninstall::run(&home, &data_dir, options.purge).await?;

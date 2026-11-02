@@ -10,8 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::task::JoinHandle;
 
-#[path = "hook_watchdog_retirement.rs"]
-mod retirement;
+use crate::deployment::runtime_retirement as retirement;
 
 use crate::types::HookWatchdogConfig;
 use crate::utils::{file_exists, read_json_document, JsonDocumentRead, JsonSyntax};
@@ -503,7 +502,7 @@ impl HookWatchdog {
             Path::new(&home).join(".zshrc"),
             Path::new(&home).join(".bashrc"),
         ];
-        let mut targets = retirement::targets(data_dir, &context);
+        let mut targets = retired_runtime_targets(data_dir, &context);
         for block in intercept_rc_blocks() {
             let script = Path::new(data_dir).join("hooks").join(block.script_name);
             let script_text = script.to_string_lossy().to_string();
@@ -562,6 +561,34 @@ impl HookWatchdog {
         }
         targets
     }
+}
+
+fn retired_runtime_targets(
+    data_dir: &str,
+    context: &retirement::Context,
+) -> Vec<InterceptCheckTarget> {
+    retirement::definitions(context.host)
+        .iter()
+        .map(|def| {
+            let def = *def;
+            let context = context.clone();
+            let data = data_dir.to_owned();
+            InterceptCheckTarget {
+                id: def.id.into(),
+                enabled: Arc::new(|| false),
+                precondition: Arc::new(|| Box::pin(async { false })),
+                check: Arc::new(|| Box::pin(async { true })),
+                repair: Arc::new(|| Box::pin(async { Ok(()) })),
+                cleanup: Some(Arc::new(move || {
+                    let context = context.clone();
+                    let data = data.clone();
+                    Box::pin(
+                        async move { retirement::cleanup_definition(&data, &context, def).await },
+                    )
+                })),
+            }
+        })
+        .collect()
 }
 
 struct RcBlock {
@@ -741,22 +768,7 @@ pub fn extract_marker_block(content: &str, begin: &str, end: &str) -> Option<Mar
 }
 
 pub fn parse_windows_user_env(output: &str, env_name: &str) -> String {
-    let pattern = regex::Regex::new(r"^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$").expect("reg");
-    for line in output.split(['\n', '\r']) {
-        if let Some(caps) = pattern.captures(line) {
-            if caps
-                .get(1)
-                .map(|item| item.as_str().eq_ignore_ascii_case(env_name))
-                .unwrap_or(false)
-            {
-                return caps
-                    .get(2)
-                    .map(|item| item.as_str().trim().to_string())
-                    .unwrap_or_default();
-            }
-        }
-    }
-    String::new()
+    retirement::parse_windows_user_env(output, env_name)
 }
 
 fn invalid_key(target: &PluginCheckTarget) -> String {

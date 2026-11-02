@@ -29,6 +29,19 @@ struct InstallPaths {
 }
 
 pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
+    run_with_retirement(
+        operation,
+        input,
+        super::runtime_retirement::Context::native(),
+    )
+    .await
+}
+
+pub(super) async fn run_with_retirement(
+    operation: &str,
+    input: Value,
+    retirement: super::runtime_retirement::Context,
+) -> Result<String> {
     // 反序列化诊断不能回显输入值。
     let paths: InstallPaths =
         serde_json::from_value(input).map_err(|_| anyhow::anyhow!("原生安装路径参数无效"))?;
@@ -189,6 +202,17 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
                                     transaction.write(&key, &bytes, mode)?;
                                 }
                                 transaction.commit()?;
+                                if publish {
+                                    if let Err(error) = super::runtime_retirement::cleanup_all(
+                                        &paths.data_dir.to_string_lossy(), &retirement,
+                                    ).await {
+                                        crate::utils::create_logger("NativeInstall").warn(
+                                            "legacy runtime cleanup failed after commit; native publication remains committed",
+                                            json!({"phase":"post-commit","publicationCommitted":true,"error":&error}).as_object(),
+                                        );
+                                        eprintln!("[runtime-retirement] post-commit cleanup failed; native publication remains committed; retry next watchdog/installer attempt: {error}");
+                                    }
+                                }
                                 if let Err(error) = cleanup_legacy_windows_cli(
                                     &destination, &paths.cache_dir, &paths.data_dir,
                                 ) {

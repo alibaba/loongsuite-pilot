@@ -1,13 +1,13 @@
 //! Cleanup-only migration of the two retired worker runtime overrides.
-//! Env ownership follows frozen main exactly. Plists additionally have to match
+//! Env ownership is an exact current-data or known old HOME path. Plists also match
 //! the actual historical producer; a filename alone is not ownership evidence.
-use super::{BoxFut, InterceptCheckTarget};
+type BoxFut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Host {
+pub(crate) enum Host {
     Mac,
     Windows,
     Other,
@@ -24,12 +24,12 @@ impl Host {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Definition {
+pub(crate) struct Definition {
     pub id: &'static str,
     pub env_name: &'static str,
     pub plist_label: Option<&'static str>,
 }
-pub(super) const MAC_DEFS: [Definition; 2] = [
+pub(crate) const MAC_DEFS: [Definition; 2] = [
     Definition {
         id: "qoderwork-env",
         env_name: "QODER_WORKER_RUNTIME_PATH",
@@ -41,7 +41,7 @@ pub(super) const MAC_DEFS: [Definition; 2] = [
         plist_label: Some("com.loongsuite-pilot.qwenworkcn-env"),
     },
 ];
-pub(super) const WIN_DEFS: [Definition; 2] = [
+pub(crate) const WIN_DEFS: [Definition; 2] = [
     Definition {
         id: "qoderwork-win-env",
         env_name: "QODER_WORKER_RUNTIME_PATH",
@@ -54,7 +54,7 @@ pub(super) const WIN_DEFS: [Definition; 2] = [
     },
 ];
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Command {
+pub(crate) struct Command {
     pub program: &'static str,
     pub args: Vec<String>,
     pub timeout_ms: Option<u64>,
@@ -81,13 +81,16 @@ impl Command {
         }
     }
 }
-pub(super) trait Backend: Send + Sync {
+pub(crate) trait Backend: Send + Sync {
     fn permits_cleanup(&self) -> bool {
         true
     }
     fn run(&self, command: Command) -> BoxFut<Result<String, String>>;
     fn warn(&self, message: &str, fields: serde_json::Value) {
-        super::logger("HookWatchdog").warn(message, fields.as_object());
+        crate::utils::create_logger("RuntimeRetirement").warn(message, fields.as_object());
+        // Installer stdout can be intentionally discarded; stderr keeps the
+        // ownership/broadcast diagnostic visible to the invoking user.
+        eprintln!("[runtime-retirement] {message}: {fields}");
     }
 }
 struct Native;
@@ -168,7 +171,7 @@ impl Backend for Native {
     }
 }
 #[derive(Clone)]
-pub(super) struct Context {
+pub(crate) struct Context {
     pub host: Host,
     pub home: PathBuf,
     pub backend: Arc<dyn Backend>,
@@ -189,31 +192,48 @@ fn wrapper(data_dir: &str) -> String {
         .to_string_lossy()
         .into_owned()
 }
-pub(super) fn targets(data_dir: &str, context: &Context) -> Vec<InterceptCheckTarget> {
-    let defs = match context.host {
+fn owned_paths(context: &Context, current: &str) -> [String; 2] {
+    [
+        current.to_owned(),
+        wrapper(&context.home.join(".loongsuite-pilot").to_string_lossy()),
+    ]
+}
+fn owned_environment(context: &Context, current: &str, expected: &str) -> bool {
+    owned_paths(context, expected)
+        .iter()
+        .any(|owned| match context.host {
+            Host::Windows => current.to_lowercase() == owned.to_lowercase(),
+            Host::Mac => current == owned,
+            Host::Other => false,
+        })
+}
+
+pub(crate) fn definitions(host: Host) -> &'static [Definition] {
+    match host {
         Host::Mac => &MAC_DEFS,
         Host::Windows => &WIN_DEFS,
-        Host::Other => return Vec::new(),
-    };
-    defs.iter()
-        .map(|definition| {
-            let def = *definition;
-            let context = context.clone();
-            let path = wrapper(data_dir);
-            InterceptCheckTarget {
-                id: def.id.into(),
-                enabled: Arc::new(|| false),
-                precondition: Arc::new(|| Box::pin(async { false })),
-                check: Arc::new(|| Box::pin(async { true })),
-                repair: Arc::new(|| Box::pin(async { Ok(()) })),
-                cleanup: Some(Arc::new(move || {
-                    let context = context.clone();
-                    let path = path.clone();
-                    Box::pin(async move { cleanup(&context, def, &path).await })
-                })),
-            }
-        })
-        .collect()
+        Host::Other => &[],
+    }
+}
+pub(crate) async fn cleanup_definition(
+    data_dir: &str,
+    context: &Context,
+    def: Definition,
+) -> Result<(), String> {
+    cleanup(context, def, &wrapper(data_dir)).await
+}
+pub(crate) async fn cleanup_all(data_dir: &str, context: &Context) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for def in definitions(context.host) {
+        if let Err(error) = cleanup_definition(data_dir, context, *def).await {
+            failures.push(format!("{}: {error}", def.id));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<(), String> {
     if !context.backend.permits_cleanup() {
@@ -229,8 +249,8 @@ async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<()
                 ))
                 .await
                 .unwrap_or_default();
-            let current = super::parse_windows_user_env(&current, def.env_name);
-            if current.is_empty() || current.to_lowercase() != wrapper.to_lowercase() {
+            let current = parse_windows_user_env(&current, def.env_name);
+            if current.is_empty() || !owned_environment(context, &current, wrapper) {
                 return Ok(());
             }
             context
@@ -260,7 +280,7 @@ async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<()
                 .run(Command::mac(&["getenv", def.env_name]))
                 .await
             {
-                if current.trim() == wrapper {
+                if owned_environment(context, current.trim(), wrapper) {
                     if let Err(error) = context
                         .backend
                         .run(Command::mac(&["unsetenv", def.env_name]))
@@ -355,13 +375,9 @@ async fn cleanup_plist(
             return Ok(());
         }
     };
-    let legacy = context
-        .home
-        .join(".loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs")
-        .to_string_lossy()
-        .into_owned();
-    if !owned_xml(&first.bytes, label, def.env_name, wrapper)
-        && !owned_xml(&first.bytes, label, def.env_name, &legacy)
+    if !owned_paths(context, wrapper)
+        .iter()
+        .any(|owned| owned_xml(&first.bytes, label, def.env_name, owned))
     {
         context.backend.warn(
             "retired runtime plist preserved; ownership not verified",
@@ -401,3 +417,26 @@ async fn cleanup_plist(
         .await
         .map_err(|e| e.to_string())
 }
+
+pub(crate) fn parse_windows_user_env(output: &str, env_name: &str) -> String {
+    let pattern = regex::Regex::new(r"^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$").expect("reg");
+    for line in output.split(['\n', '\r']) {
+        if let Some(caps) = pattern.captures(line) {
+            if caps
+                .get(1)
+                .map(|item| item.as_str().eq_ignore_ascii_case(env_name))
+                .unwrap_or(false)
+            {
+                return caps
+                    .get(2)
+                    .map(|item| item.as_str().trim().to_string())
+                    .unwrap_or_default();
+            }
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+#[path = "runtime_retirement_installer_tests.rs"]
+mod installer_history_tests;

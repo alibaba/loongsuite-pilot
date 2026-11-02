@@ -770,7 +770,9 @@ async fn ownership_verifies_real_historical_default_data_path_after_custom_data_
     let legacy = f
         .root
         .path()
-        .join(".loongsuite-pilot/hooks/qoderwork-runtime-wrapper.mjs")
+        .join(".loongsuite-pilot")
+        .join("hooks")
+        .join("qoderwork-runtime-wrapper.mjs")
         .to_string_lossy()
         .into_owned();
     for def in MAC_DEFS {

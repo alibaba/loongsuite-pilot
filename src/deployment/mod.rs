@@ -113,3 +113,5 @@ pub use plugin_probe_strategy::{PluginProbeDeployOptions, PluginProbeStrategy};
 pub use worker_manifest_supervisor::{
     WorkerManifest, WorkerManifestOptions, WorkerManifestSupervisor,
 };
+
+pub(crate) mod runtime_retirement;

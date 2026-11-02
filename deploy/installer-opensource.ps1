@@ -1194,65 +1194,6 @@ function Write-Config {
 }
 
 # reg.exe removes overrides under CLM; the guarded .NET call notifies Explorer.
-function Get-PilotRuntimeOverride {
-    param([string]$Name)
-    $prevEAP = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
-        $regExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
-    if ($regExitCode -ne 0) { return "" }
-    foreach ($line in $regOut) {
-        if (($line -match '^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$') -and $Matches[1] -ieq $Name) {
-            return $Matches[2].Trim()
-        }
-    }
-    return ""
-}
-
-function Remove-PilotRuntimeOverride {
-    param([string]$Name)
-    reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }
-    try {
-        [Environment]::SetEnvironmentVariable($Name, $null, 'User')
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Retire-PilotRuntimeOverride {
-    param([string]$Name, [string]$WrapperPath)
-    $current = Get-PilotRuntimeOverride -Name $Name
-    if (-not $current) { return }
-    # Pilot-owned only: a third-party override must survive untouched.
-    if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {
-        $broadcasted = Remove-PilotRuntimeOverride -Name $Name
-        if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-        Msg "    ✅ 已退役 $Name" "    ✅ Retired $Name"
-    }
-}
-
-function Retire-QoderworkRuntimeOverrides {
-    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
-    Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
-
-    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    环境变量已清理，但无法通知 Explorer；请注销并重新登录 Windows" `
-            "    Environment overrides removed but Explorer could not be notified; sign out and back in"
-    } else {
-        Msg "    请完全退出并重新打开对应应用以生效" `
-            "    Fully quit and restart the corresponding apps for changes to take effect"
-    }
-    Write-Host ""
-}
-
 # ============================================================
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
@@ -2323,7 +2264,6 @@ function Cmd-Install {
             exit 1
         }
         Install-Command
-        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
@@ -2395,7 +2335,6 @@ function Cmd-Upgrade {
 
         Deploy-Package $script:STAGED_DIR
         Install-Command
-        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."
@@ -3040,34 +2979,6 @@ function Cmd-Uninstall {
     Msg "==> 原生清理 Agent 与历史插件配置..." "==> Cleaning Agent and legacy plugin configuration..."
     Invoke-NativeUninstall
     Write-Host ""
-
-    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
-    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    $runtimeEnvCleanupFailed = $false
-    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
-        try {
-            $currentRuntime = Get-PilotRuntimeOverride -Name $envName
-            if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
-                $broadcasted = Remove-PilotRuntimeOverride -Name $envName
-                if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-                Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
-            }
-        } catch {
-            $runtimeEnvCleanupFailed = $true
-            Msg "    ⚠️  清理 $envName 失败，已保留安装文件以便重试: $($_.Exception.Message)" `
-                "    ⚠️  Failed to clean $envName; installation files will be preserved for retry: $($_.Exception.Message)"
-        }
-    }
-    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    ⚠️  请注销并重新登录 Windows 以刷新 Explorer 环境" `
-            "    ⚠️  Sign out and back in to refresh the Explorer environment"
-    }
-    Write-Host ""
-
-    if ($runtimeEnvCleanupFailed) {
-        throw "Runtime environment cleanup failed; installation files were preserved for retry"
-    }
 
     # Keep the native runtime and deployed helper assets available until
     # every external config and runtime override has been cleaned. In
