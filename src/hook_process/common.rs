@@ -697,3 +697,7 @@ pub fn sanitize_record(record: Obj) -> Obj {
         _ => record,
     }
 }
+
+#[cfg(test)]
+#[path = "upstream_context_history_tests.rs"]
+mod upstream_context_history_tests;

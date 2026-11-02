@@ -6318,6 +6318,60 @@ mod legacy_runtime_contracts {
     }
 
     #[tokio::test]
+    async fn public_send_observes_removal_before_conversion_and_preserves_backpressure() {
+        let (_root, flusher, capture) = setup();
+        let flusher = Arc::new(flusher);
+        flusher
+            .send(record("first", "claude-code", "session"), Some(12.0))
+            .await
+            .unwrap();
+        let service = flusher.endpoint_service_name(0, "claude-code");
+        let key = convert_state_key("claude-code", &service, &Map::new());
+        // The same real converter gate used by the historical promise fixture.
+        // Exercise the public send API; do not remove a buffer in the test.
+        let gate = flusher.inner.convert_lock(&key).lock_owned().await;
+        let worker = flusher.clone();
+        let sending = tokio::spawn(async move {
+            worker
+                .send(record("next", "claude-code", "session"), Some(34.0))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while flusher.trace_runtime_snapshot()[0].removed_buffers_total == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!sending.is_finished());
+        assert!(capture.calls().is_empty());
+        let blocked = &flusher.trace_runtime_snapshot()[0];
+        assert_eq!(blocked.removed_buffers_total, 1);
+        assert_eq!(blocked.removed_logical_bytes_total, 12.0);
+        assert_eq!(blocked.pending_buffers, 0);
+        assert_eq!(blocked.pending_records, 0);
+        // Rust awaits conversion instead of the JS fire-and-forget call timing.
+        // The successor is admitted after that real conversion settles.
+        drop(gate);
+        sending.await.unwrap().unwrap();
+        let pending = &flusher.trace_runtime_snapshot()[0];
+        assert_eq!(pending.pending_buffers, 1);
+        assert_eq!(pending.pending_records, 1);
+        assert_eq!(pending.pending_logical_bytes, 34.0);
+        assert_eq!(pending.removed_logical_bytes_total, 12.0);
+        assert_eq!(capture.calls().iter().map(Vec::len).sum::<usize>(), 1);
+        flusher.flush().await.unwrap();
+        let complete = flusher.trace_runtime_snapshot();
+        assert_eq!(complete[0].pending_buffers, 0);
+        assert_eq!(complete[0].removed_buffers_total, 2);
+        assert_eq!(complete[0].removed_logical_bytes_total, 46.0);
+        assert_eq!(capture.calls().iter().map(Vec::len).sum::<usize>(), 2);
+        flusher.flush().await.unwrap();
+        assert_eq!(flusher.trace_runtime_snapshot(), complete);
+        flusher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cumulative_counters_keep_every_record_after_the_intentional_hard_64_eviction_fix() {
         let (_root, flusher, capture) = setup();
         for index in 0..70 {

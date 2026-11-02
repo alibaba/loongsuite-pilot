@@ -570,3 +570,117 @@ mod privacy_path_edge_regressions {
         ));
     }
 }
+
+#[cfg(test)]
+mod marker_stderr_history_contract {
+    use super::*;
+    #[tokio::test]
+    async fn real_marker_failure_warns_once_without_paths_and_recovers_while_public_events_survive()
+    {
+        const FLAG: &str = "PILOT_WORKSPACE_STDERR_HISTORY_ROOT";
+        if let Some(directory) = std::env::var_os(FLAG) {
+            let directory = std::path::PathBuf::from(directory);
+            let private = directory.join("private");
+            let state = directory.join("blocked-state");
+            std::fs::write(&state, b"a real file prevents directory creation").unwrap();
+            let mut policy = WorkspacePolicy::new(
+                &[private.to_string_lossy().into_owned()],
+                Some(state.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+            let event = |session: &str, cwd: Option<&std::path::Path>| {
+                let mut row =
+                    serde_json::json!({"gen_ai.agent.type":"codex","gen_ai.session.id":session})
+                        .as_object()
+                        .unwrap()
+                        .clone();
+                if let Some(cwd) = cwd {
+                    row.insert("agent.codex.cwd".into(), serde_json::json!(cwd));
+                }
+                row
+            };
+            let public = event("public", Some(&directory.join("public")));
+            assert_eq!(
+                policy.filter(&[event("private", Some(&private)), public.clone()], ""),
+                vec![public.clone()]
+            );
+            assert!(!policy.allows(&event("private", None), ""));
+            assert_eq!(policy.pending_markers.len(), 1);
+            assert_eq!(
+                policy.filter(std::slice::from_ref(&public), ""),
+                vec![public.clone()]
+            );
+            std::fs::remove_file(&state).unwrap();
+            // Same deterministic deadline seam as the original fake-clock test.
+            policy.next_retry_at = 0;
+            assert_eq!(
+                policy.filter(std::slice::from_ref(&public), ""),
+                vec![public]
+            );
+            assert!(policy.pending_markers.is_empty());
+            let mut restored = WorkspacePolicy::new(
+                &[private.to_string_lossy().into_owned()],
+                Some(state.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+            assert!(!restored.allows(&event("private", None), ""));
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let name = std::thread::current().name().unwrap().to_owned();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &name, "--nocapture"])
+            .env_clear()
+            .env(FLAG, directory.path())
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join("appdata"))
+            .env("LOCALAPPDATA", home.join("localappdata"))
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("XDG_CACHE_HOME", home.join("cache"))
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("CODEX_HOME", home.join("codex"))
+            .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+            .env("PATH", home.join("no-runtimes"))
+            .current_dir(&home)
+            .kill_on_drop(true);
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+            "ComSpec",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramW6432",
+            "PATHEXT",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let warnings = stderr
+            .lines()
+            .filter(|line| line.contains("[workspace-privacy]"))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 1, "{stderr}");
+        assert!(warnings[0].contains("Cannot persist session exclusions"));
+        assert!(
+            !stderr.contains(&*directory.path().to_string_lossy()),
+            "{stderr}"
+        );
+    }
+}

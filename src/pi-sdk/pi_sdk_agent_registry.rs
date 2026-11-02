@@ -493,11 +493,16 @@ fn wrapper_path(data_dir: &str, id: &str) -> String {
 }
 
 fn resolved_spec(data_dir: &str, definition: &AgentDefinition) -> String {
-    definition
-        .plugin_inject
-        .as_ref()
-        .map(|inject| inject.plugin_spec.replace("$PILOT_DATA", data_dir))
-        .unwrap_or_default()
+    // Every caller validates the managed SDK definition. Use the same native
+    // path returned to callers; placeholder substitution mixed separators on
+    // Windows and made settings disagree with the published wrapper path.
+    wrapper_path(data_dir, &definition.id)
+}
+
+fn equivalent_spec(value: &Value, spec: &str) -> bool {
+    value
+        .as_str()
+        .is_some_and(|value| comparable_path(value) == comparable_path(spec))
 }
 
 async fn inject_extension(data_dir: &str, definition: &AgentDefinition) -> Result<(), String> {
@@ -524,11 +529,28 @@ async fn inject_extension(data_dir: &str, definition: &AgentDefinition) -> Resul
         *list = json!([]);
     }
     let array = list.as_array_mut().unwrap();
-    if !array
-        .iter()
-        .any(|entry| entry.as_str() == Some(spec.as_str()))
-    {
+    let mut found = false;
+    let mut changed = false;
+    array.retain_mut(|entry| {
+        if !equivalent_spec(entry, &spec) {
+            return true;
+        }
+        if found {
+            changed = true;
+            return false;
+        }
+        found = true;
+        if entry.as_str() != Some(spec.as_str()) {
+            *entry = Value::String(spec.clone());
+            changed = true;
+        }
+        true
+    });
+    if !found {
         array.push(Value::String(spec));
+        changed = true;
+    }
+    if changed {
         let text = format!(
             "{}\n",
             serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".into())
@@ -559,7 +581,7 @@ async fn remove_extension(data_dir: &str, definition: &AgentDefinition) -> bool 
         return true;
     };
     let before = array.len();
-    array.retain(|entry| entry.as_str() != Some(spec.as_str()));
+    array.retain(|entry| !equivalent_spec(entry, &spec));
     if array.len() < before {
         let text = format!(
             "{}\n",
@@ -586,11 +608,7 @@ async fn needs_extension(data_dir: &str, definition: &AgentDefinition) -> bool {
     let key = config.config_key.as_deref().unwrap_or("extensions");
     json.get(key)
         .and_then(Value::as_array)
-        .map(|array| {
-            !array
-                .iter()
-                .any(|entry| entry.as_str() == Some(spec.as_str()))
-        })
+        .map(|array| !array.iter().any(|entry| equivalent_spec(entry, &spec)))
         .unwrap_or(true)
 }
 

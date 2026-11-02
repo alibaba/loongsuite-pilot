@@ -41,6 +41,53 @@ fn finite_count_u64(value: u64) -> u64 {
     value
 }
 
+/// Scalar observations for native collectors.
+///
+/// Byte and record counts come from integer read lengths, unlike the former
+/// JavaScript Number API. Invalid floating counts are rejected by the compiler;
+/// elapsed durations remain floating point and are normalized at runtime.
+///
+/// ```compile_fail,E0308
+/// use loongsuite_pilot::inputs::base::InputRuntimeAccumulator;
+/// let mut observations = InputRuntimeAccumulator::new();
+/// observations.observe_read(f64::NAN, f64::INFINITY, -1.0);
+/// ```
+///
+/// ```compile_fail,E0308,E0600
+/// use loongsuite_pilot::inputs::base::{InputRuntimeAccumulator, CommittedInputBatch};
+/// let mut observations = InputRuntimeAccumulator::new();
+/// observations.observe_committed_batch(CommittedInputBatch {
+///     bytes: -1,
+///     records: f64::NAN,
+///     parse_success_records: -2,
+///     parse_failed_records: f64::INFINITY,
+///     max_record_bytes: -3,
+/// });
+/// ```
+///
+/// ```compile_fail,E0308
+/// use loongsuite_pilot::inputs::base::InputRuntimeAccumulator;
+/// let mut observations = InputRuntimeAccumulator::new();
+/// observations.observe_backlog(f64::NAN);
+/// ```
+///
+/// ```
+/// use loongsuite_pilot::inputs::base::{InputRuntimeAccumulator, CommittedInputBatch, InputRuntimeDelta};
+/// let mut observations = InputRuntimeAccumulator::new();
+/// observations.observe_read(0, 0, -1.0);
+/// observations.observe_committed_batch(CommittedInputBatch {
+///     bytes: 0, records: 0, parse_success_records: 0,
+///     parse_failed_records: 0, max_record_bytes: 0,
+/// });
+/// observations.observe_backlog(0);
+/// assert_eq!(observations.finish(-1.0), InputRuntimeDelta {
+///     source_kind: "primary", raw_read_calls: 1, raw_read_bytes: 0,
+///     raw_in_records: 0, raw_in_bytes: 0, raw_in_max_batch_bytes: 0,
+///     raw_in_max_record_bytes: 0, raw_backlog_bytes_max: 0,
+///     parse_success_records: 0, parse_failed_records: 0,
+///     read_duration_ms: 0.0, process_duration_ms: 0.0,
+/// });
+/// ```
 #[derive(Debug)]
 pub struct InputRuntimeAccumulator {
     raw_read_calls: u64,

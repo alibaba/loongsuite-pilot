@@ -559,16 +559,14 @@ impl QoderWorkLogBody {
             let Some(event) = parse_sdk_log_line(line) else {
                 continue;
             };
-            if let Some(entry) = self.apply_event(event) {
-                out.push(entry);
-            }
+            out.extend(self.apply_event(event));
         }
         Ok(out)
     }
 }
 
 impl QoderWorkLogBody {
-    fn apply_event(&self, event: SdkEvent) -> Option<AgentActivityEntry> {
+    fn apply_event(&self, event: SdkEvent) -> Vec<AgentActivityEntry> {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         match event {
             SdkEvent::SystemInit {
@@ -588,7 +586,7 @@ impl QoderWorkLogBody {
                         tools,
                     },
                 );
-                None
+                Vec::new()
             }
             SdkEvent::SetModelPolicy {
                 chat_model,
@@ -599,7 +597,7 @@ impl QoderWorkLogBody {
                 state.policy.chat = chat_model;
                 state.policy.compact = compact_model;
                 state.policy.scene = scene_model;
-                None
+                Vec::new()
             }
             SdkEvent::MessageStart {
                 ts,
@@ -626,7 +624,7 @@ impl QoderWorkLogBody {
                         start_ts: ts,
                     },
                 );
-                None
+                Vec::new()
             }
             SdkEvent::BlockStart {
                 session_id,
@@ -639,7 +637,7 @@ impl QoderWorkLogBody {
                     turn.tools
                         .push((tool_id.unwrap_or_default(), tool_name.unwrap_or_default()));
                 }
-                None
+                Vec::new()
             }
             SdkEvent::MessageDelta {
                 session_id,
@@ -653,10 +651,12 @@ impl QoderWorkLogBody {
                     turn.input_tokens = input_tokens;
                     turn.output_tokens = output_tokens;
                 }
-                None
+                Vec::new()
             }
             SdkEvent::MessageStop { ts, session_id } => {
-                let turn = state.turns.remove(&session_id)?;
+                let Some(turn) = state.turns.remove(&session_id) else {
+                    return Vec::new();
+                };
                 let session = state.sessions.get(&session_id);
                 let mut opts = serde_json::Map::new();
                 opts.insert("timestamp".into(), json!(ts));
@@ -681,6 +681,12 @@ impl QoderWorkLogBody {
                         json!(turn.output_tokens),
                     );
                 }
+                if turn.input_tokens > 0 || turn.output_tokens > 0 {
+                    opts.insert(
+                        "gen_ai.usage.total_tokens".into(),
+                        json!(turn.input_tokens.saturating_add(turn.output_tokens)),
+                    );
+                }
                 let mut attributes = serde_json::Map::new();
                 if let Some(session) = session {
                     if !session.tier.is_empty() {
@@ -697,9 +703,28 @@ impl QoderWorkLogBody {
                     }
                 }
                 attributes.insert("message_id".into(), json!(turn.message_id));
+                let shared = attributes.clone();
+                attributes.insert("source".into(), json!("qoder-work-sdk-log"));
+                attributes.insert("event_kind".into(), json!("response"));
+                attributes.insert("tool_use_count".into(), json!(turn.tools.len()));
                 opts.insert("attributes".into(), Value::Object(attributes));
+                let mut entries = vec![build_agent_activity_entry(&Value::Object(opts))];
+                for (index, (call_id, tool_name)) in turn.tools.iter().enumerate() {
+                    let mut attributes = shared.clone();
+                    attributes.insert("source".into(), json!("qoder-work-sdk-log"));
+                    attributes.insert("event_kind".into(), json!("tool_use"));
+                    attributes.insert("tool_index".into(), json!(index));
+                    entries.push(build_agent_activity_entry(&json!({
+                        "timestamp":ts,"event.name":"tool.call",
+                        "gen_ai.session.id":session_id,"gen_ai.agent.type":self.agent_type.as_str(),
+                        "gen_ai.request.model":turn.model,"gen_ai.response.model":turn.model,
+                        "gen_ai.response.id":turn.message_id,"gen_ai.tool.name":tool_name,
+                        "gen_ai.tool.call.id":call_id,"gen_ai.tool.call.exec.id":call_id,
+                        "attributes":attributes,
+                    })));
+                }
                 let _ = turn.start_ts;
-                Some(build_agent_activity_entry(&Value::Object(opts)))
+                entries
             }
             SdkEvent::Result {
                 ts,
@@ -707,17 +732,46 @@ impl QoderWorkLogBody {
                 result_id,
                 subtype,
                 duration_ms,
+                duration_api_ms,
                 num_turns,
-                ..
-            } => Some(build_agent_activity_entry(&json!({
-                "timestamp": ts,
-                "event.name": "other",
-                "event.id": result_id,
-                "gen_ai.session.id": session_id,
-                "gen_ai.agent.type": self.agent_type.as_str(),
-                "attributes": { "source": "qoder-work-sdk-log", "subtype": subtype, "duration_ms": duration_ms, "num_turns": num_turns }
-            }))),
-            _ => None,
+                context_usage_ratio,
+            } => {
+                let session = state.sessions.get(&session_id);
+                let model = model_for_tier(
+                    &state.policy,
+                    session.map(|s| s.tier.as_str()).unwrap_or(""),
+                );
+                let mut attributes = serde_json::Map::from_iter([
+                    ("source".into(), json!("qoder-work-sdk-log")),
+                    ("event_kind".into(), json!("result")),
+                    ("subtype".into(), json!(subtype)),
+                    ("result_subtype".into(), json!(subtype)),
+                    ("duration_ms".into(), json!(duration_ms)),
+                    ("duration_api_ms".into(), json!(duration_api_ms)),
+                    ("num_turns".into(), json!(num_turns)),
+                    ("context_usage_ratio".into(), json!(context_usage_ratio)),
+                ]);
+                if let Some(session) = session {
+                    if !session.tier.is_empty() {
+                        attributes.insert("subscription_tier".into(), json!(session.tier));
+                    }
+                    if !session.cwd.is_empty() {
+                        attributes.insert("cwd".into(), json!(session.cwd));
+                    }
+                    if !session.agents.is_empty() {
+                        attributes.insert("agents".into(), json!(session.agents));
+                    }
+                    if !session.tools.is_empty() {
+                        attributes.insert("tools".into(), json!(session.tools));
+                    }
+                }
+                vec![build_agent_activity_entry(&json!({
+                    "timestamp":ts,"event.name":"other","event.id":result_id,
+                    "gen_ai.session.id":session_id,"gen_ai.agent.type":self.agent_type.as_str(),
+                    "gen_ai.request.model":model,"gen_ai.response.model":model,"attributes":attributes,
+                }))]
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -825,3 +879,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "log_identity_tests.rs"]
 mod log_identity_tests;
+
+#[cfg(test)]
+#[path = "sdk_history_migration_contract_tests.rs"]
+mod work_sdk_history_migration_contract_tests;

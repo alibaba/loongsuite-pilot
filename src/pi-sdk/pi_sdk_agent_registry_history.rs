@@ -359,3 +359,43 @@ async fn history_concurrent_registrations_preserve_one_identity_and_one_extensio
         .join(PI_SDK_REGISTRY_LOCK_FILE)
         .exists());
 }
+
+#[tokio::test]
+async fn history_legacy_equivalent_wrapper_paths_repair_without_touching_foreign_extensions() {
+    let (_directory, request) = fixture().await;
+    let registered = register_pi_sdk_agent(request.clone()).await.unwrap();
+    // Both aliases point at the actual published file. The repeated separator
+    // also exercises normalization on Unix; old Windows substitution mixed
+    // native dataDir separators with the forward-slash SDK suffix.
+    let legacy = format!(
+        "{}/plugins//pi-coding-agent/agents/acme-code.mjs",
+        request.data_dir
+    );
+    let mixed = format!(
+        "{}/plugins/pi-coding-agent/agents/acme-code.mjs",
+        request.data_dir
+    );
+    assert!(Path::new(&legacy).is_file());
+    let foreign = json!("../foreign-extension.mjs");
+    let object = json!({"package":"keep-unknown-shape"});
+    let body = json!({"keepMe":true,"extensions":[foreign,legacy,object,mixed]});
+    std::fs::write(&registered.settings_path, body.to_string()).unwrap();
+    assert!(
+        doctor_pi_sdk_agent(&request.data_dir, "acme-code")
+            .await
+            .unwrap()
+            .healthy
+    );
+    register_pi_sdk_agent(request.clone()).await.unwrap();
+    assert_eq!(
+        settings(&request),
+        json!({"keepMe":true,"extensions":[foreign,registered.wrapper_path,object]})
+    );
+    unregister_pi_sdk_agent(&request.data_dir, "acme-code")
+        .await
+        .unwrap();
+    assert_eq!(
+        settings(&request),
+        json!({"keepMe":true,"extensions":[foreign,object]})
+    );
+}
