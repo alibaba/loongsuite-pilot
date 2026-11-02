@@ -380,20 +380,34 @@ it('discovers more than 1024 historical sources without permanent admission star
   expect(collector.metadataBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
 });
 
-it('defers an oversized turn without acknowledging it or starving another source', async () => {
+it('quarantines an oversized record and continues without replaying healthy turns', async () => {
   const warnings = [];
-  collector = new QoderTranscriptCollector({ dataDir, agentId, maxTurnBytes: 64 * 1024, warn: (...args) => warnings.push(args), now: () => clock });
-  const oversized = turn(0); oversized[1].message.content = 'x'.repeat(70 * 1024);
-  write(oversized); wake();
+  const options = { dataDir, agentId, maxTurnBytes: 64 * 1024, warn: (...args) => warnings.push(args), now: () => clock };
+  collector = new QoderTranscriptCollector(options);
+  const oversized = turn(0); oversized[2].message.content = 'x'.repeat(70 * 1024);
+  write(oversized.slice(0, 1)); wake('UserPromptSubmit'); await collect();
+  append([...oversized.slice(1), { type: 'last-prompt' }]); wake();
+  const original = fs.readFileSync(transcript);
   const healthy = path.join(dataDir, 'healthy.jsonl');
   fs.writeFileSync(healthy, [...turn(1), { type: 'last-prompt' }].map(JSON.stringify).join('\n') + '\n');
   publishQoderWakeup({ session_id: 'healthy', transcript_path: healthy, hook_event_name: 'Stop' }, { dataDir, agentId });
   const records = await settle();
-  expect(userTexts(records)).toEqual(['prompt 1']);
+  expect(userTexts(records).sort()).toEqual(['prompt 0', 'prompt 1']);
+  const incomplete = records.filter(record => record['agent.transcript_incomplete']);
+  expect(userTexts(incomplete)).toEqual(['prompt 0']);
+  expect(incomplete.some(record => record['event.name'] === 'llm.response')).toBe(false);
   expect(warnings.some(([, fields]) => fields.reason.includes('byte-limit'))).toBe(true);
   expect(collector.cacheSize).toBeLessThanOrEqual(collector.cacheLimit);
-  const badKey = crypto.createHash('sha256').update(JSON.stringify(['session', transcript])).digest('hex');
-  expect(state[badKey]).toBeUndefined();
+  const badKey = crypto.createHash('sha256').update(JSON.stringify(['session', fs.realpathSync(transcript)])).digest('hex');
+  expect(state[badKey].committedOffset).toBe(original.length);
+  expect(state[badKey].quarantines).toHaveLength(1);
+  expect(fs.readFileSync(transcript)).toEqual(original);
+  append([...turn(2), { type: 'last-prompt' }]); wake();
+  const later = await settle();
+  expect(userTexts(later)).toEqual(['prompt 2']);
+  expect(later.some(record => record['agent.transcript_incomplete'])).toBe(false);
+  collector.stop(); collector = new QoderTranscriptCollector(options);
+  expect((await settle())).toEqual([]);
 });
 
 it('retains unread context on a metadata failure and resumes after it is repaired', async () => {
