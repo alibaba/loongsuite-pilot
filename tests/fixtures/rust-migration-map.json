@@ -12743,38 +12743,462 @@
     },
     {
       "legacy": "tests/e2e-remote/jsonl-validate.test.mjs",
-      "coverage": "partial",
-      "rust": [
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "7f9eff8b2996b6a5ddc4e68e581753fc40fb1725414b57cd0e46a326f7fedfcc",
+      "note": "Remote E2E script generation is optional host JavaScript, retained through3 actual host tests in a separate test:host script; no Node/Python is required by the native validator. All14 baseline validation declarations execute the real xtask CLI with PATH containing no runtimes. f84 adds9 declarations and explicitly replaces the invalid standard-name negative; native Codex metadata/subagent/audit semantics are fixed with real red3/green evidence. Host collection is recorded by the standard migration reporter; published and protected working E2E builder hashes independently match. Existing user changes in e2e-scenarios are preserved.",
+      "cases": [
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_graph_coverage_and_inputs_are_preserved"
+          "source": {
+            "id": "L18:C3",
+            "title": "returns empty string when E2E_JSONL_VALIDATE=0",
+            "suites": [
+              "buildJsonlValidationSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original optional host script-builder contract is actually collected/executed; native collector validation is separate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/jsonl-validation-builder.test.mjs",
+            "names": [
+              "remote E2E JSONL script builder > returns empty string when E2E_JSONL_VALIDATE=0"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:jsonl-builder"
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_rejects_each_historical_graph_error_without_payload_leaks"
+          "source": {
+            "id": "L22:C3",
+            "title": "embeds base64 validator and references AgentActivityEntry schema",
+            "suites": [
+              "buildJsonlValidationSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original optional host script-builder contract is actually collected/executed; native collector validation is separate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/jsonl-validation-builder.test.mjs",
+            "names": [
+              "remote E2E JSONL script builder > embeds the existing validator and required remote controls"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:jsonl-builder"
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_accepts_incomplete_compatibility_and_agent_specific_turns"
+          "source": {
+            "id": "L30:C3",
+            "title": "validator source declares all REQUIRED AgentActivityEntry fields",
+            "suites": [
+              "buildJsonlValidationSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original optional host script-builder contract is actually collected/executed; native collector validation is separate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/jsonl-validation-builder.test.mjs",
+            "names": [
+              "remote E2E JSONL script builder > declares every original required activity field"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:jsonl-builder"
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_accepts_projected_workbuddy_without_unreliable_tool_names"
+          "source": {
+            "id": "L145:C3",
+            "title": "validates a complete multi-tool graph and reports per-event field coverage",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native CLI accepts original graph, exact tool coverage and all zero hard issues; files remain unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_graph_coverage_and_inputs_are_preserved"
+              }
+            ]
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_filters_environment_and_diagnostic_exit_codes_match"
+          "source": {
+            "id": "L155:C3",
+            "title": "accepts projected WorkBuddy builder output after tools with no reliable name are dropped",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual WorkBuddy builder/projection runs original fixture with missing names; no unreliable tools and native validator missing/tool-pair errors zero.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_accepts_projected_workbuddy_without_unreliable_tool_names"
+              }
+            ]
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_strict_never_accepts_empty_malformed_or_out_of_window_inputs"
+          "source": {
+            "id": "L180:C3",
+            "title": "detects missing required fields and exits 1 under STRICT",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual strict native CLI prints FAIL codex file and exact category/fields=[user.id]/missing1 for original duplicate-id fixture.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
         },
         {
-          "file": "xtask/tests/jsonl_validate.rs",
-          "test": "native_jsonl_checks_types_cross_file_graphs_limits_and_explicit_paths"
+          "source": {
+            "id": "L192:C3",
+            "title": "honors E2E_JSONL_AGENT_FILTER",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual env prefix filter includes good Claude file and excludes invalid Codex file under strict mode.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L205:C3",
+            "title": "reports bad event.name enum values",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "f84 explicitly replaces the former gen_ai.model.request negative with invalid.event.name; native validator accepts the standard alias and preserves diagnostic0/strict1/bad_event_name1 for the real invalid name.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C3",
+            "title": "accepts agent.input as a valid event name",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Standalone agent.input is accepted by actual native strict CLI with bad_event_name0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L222:C3",
+            "title": "strictly rejects $name",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": [
+              "it.each([\n    {\n      name: 'duplicate event IDs',\n      mutate: entries => { entries[7]['event.id'] = entries[0]['event.id']; },\n      category: 'duplicate_event_id=1',\n    },\n    {\n      name: 'native JSON types and positive millisecond duration',\n      mutate: entries => {\n        entries[2]['gen_ai.tool.call.arguments'] = '{\"path\":\"/workspace/example/a.txt\"}';\n        entries[4]['gen_ai.tool.call.duration'] = 0;\n      },\n      category: 'type_error=2',\n    },\n    {\n      name: 'request/response pairing',\n      mutate: entries => { entries.splice(1, 1); },\n      category: 'model_pair_error=1',\n    },\n    {\n      name: 'tool call/result pairing and name consistency',\n      mutate: entries => { entries[4]['gen_ai.tool.name'] = 'DifferentSyntheticTool'; },\n      category: 'tool_pair_error=1',\n    },\n    {\n      name: 'turn start/end uniqueness',\n      mutate: entries => { delete entries[7]['gen_ai.turn.end']; },\n      category: 'turn_boundary_error=1',\n    },\n    {\n      name: 'both turn boundaries missing',\n      mutate: entries => {\n        delete entries[0]['gen_ai.turn.start'];\n        delete entries[7]['gen_ai.turn.end'];\n      },\n      category: 'turn_boundary_error=1',\n    },\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All six exact original duplicate/type2/model/tool/missing-end/both-boundaries mutations fail with original category counts; actual CLI never prints contents.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_rejects_each_historical_graph_error_without_payload_leaks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L268:C3",
+            "title": "accepts an incomplete turn with exactly one start and no end",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual incomplete other turn with single start/no terminal end passes native strict validation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_accepts_incomplete_compatibility_and_agent_specific_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L283:C3",
+            "title": "accepts a compatibility input pair with the turn boundary only on other",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual other+agent.input pair has one unique turn start and no false duplicate boundary.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_accepts_incomplete_compatibility_and_agent_specific_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L303:C3",
+            "title": "never prints prompt, tool payload, result, or user path values in validation errors",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original secret/path string in malformed arguments produces type_error1 and no content disclosure in native diagnostic output.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L315:C3",
+            "title": "returns 0 with hint when log dir is empty (non-strict)",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual empty directory returns0 and original no .jsonl files hint.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L321:C3",
+            "title": "fails strict validation when the requested time window contains no rows",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual out-of-window record yields strict1, windowed0 and empty_window1; bounded native CLI also rejects empty/malformed inputs.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_strict_never_accepts_empty_malformed_or_out_of_window_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L341:C3",
+            "title": "default filter covers the L1 CLI coverage set and excludes IDE-only agents",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual strict default includes each exact six original L1 CLI filenames and excludes the qoder IDE file.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L360:C3",
+            "title": "E2E_JSONL_AGENT_FILTER=all disables filtering",
+            "suites": [
+              "JSONL_VALIDATOR_JS (integration)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual valid Cursor file succeeds with env filter all and is present in diagnostic output.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/jsonl_validate.rs",
+                "test": "native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction"
+              }
+            ]
+          }
         }
-      ],
-      "note": "原生 CLI 承接字段覆盖率、必填/类型/重复 ID、模型及工具配对、轮次边界、前缀过滤与严格/非严格退出码；复用实际 WorkBuddy builder/projection 验证不可靠工具名的处理。强化空输入/空窗口拒绝、跨文件图与脱敏诊断，受控 PATH 不依赖 Node/Python。远程 shell/Docker 编排及原 base64|node 包装尚未替代，因此保留 partial 和旧工具清理门禁。"
+      ]
     },
     {
       "legacy": "tests/integration/codex-subagent-converter.test.ts",
@@ -74803,6 +75227,1312 @@
               {
                 "file": "tests/upstream_link_store_history.rs",
                 "test": "retention_source_l49_absent_directory_returns_zero_counts"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/trace-linker.test.ts",
+      "source_hash": "3f7fdb20be76b5588200875f5795ef804af0dd4117a2d71abba9537b3cd15229",
+      "coverage": "complete",
+      "rust": [],
+      "note": "13 baseline声明逐断言真实方法/实际claims与JSONL验证；原40ms墙钟门槛、3x50ms重试预算完整保留。prune未来cutoff旧复用断言按f84已明确替换的disk claim合同更新。真实平台证据另列。",
+      "cases": [
+        {
+          "source": {
+            "id": "L63:C3",
+            "title": "stamps trace_id on all events and parent_span_id on the other event",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实do X context，other/LLM均上游trace，other parent上游SPAN；LLM原dddd父不变，turnID t1保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_stamp_preserves_intra_turn_parent_and_reuses_context_across_batches"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "cross-batch: llm arriving in a later batch reuses cached turn context",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同真实linker先other batch，再延迟LLM batch，实际命中cached trace且intra-turn parent仍dddd。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_stamp_preserves_intra_turn_parent_and_reuses_context_across_batches"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "turn-level record takes priority over session-level on the first turn",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "turn+session上下文共存时首turn取turnTP；后turn在同linker和fresh重启均不误取低优先级session。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_turn_priority_and_session_fallback_are_first_turn_only_even_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "falls back to session-level on first turn when no turn record matches",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "仅session上下文首turn取session trace和session parent，精确双字段。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_turn_priority_and_session_fallback_are_first_turn_only_even_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "session-level applies only to the first turn, not later turns",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同linker第二turn保持原LOCAL且parentNone，不复用首turn session。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_turn_priority_and_session_fallback_are_first_turn_only_even_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C3",
+            "title": "does not reapply session-level context after a collector restart",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "全新linker第二turn保持LOCAL、parentNone，持久session消费marker阻止restart复用。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_turn_priority_and_session_fallback_are_first_turn_only_even_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "overrides an existing (native) trace_id on hit",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原已带native trace的事件真实hit后被上游trace替换，非原ID。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_stamp_preserves_intra_turn_parent_and_reuses_context_across_batches"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L139:C3",
+            "title": "leaves records unchanged on miss",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实无correlation文件，记录clone前后全结构相等；原LOCAL和parentNone保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_missing_context_and_missing_session_or_turn_are_fail_open_and_unchanged"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "is fail-open: entries without session/turn are skipped",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实缺session/turn的Other默认记录在有/无correlation文件时都skip，无panic且结构不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_missing_context_and_missing_session_or_turn_are_fail_open_and_unchanged"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "does not burn the retry budget when the session has no correlation file",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实retries3、retryDelay50ms，无关联file实际wall elapsed<40ms且trace不变，未改成0重试。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_no_file_and_empty_other_preserve_the_real_forty_ms_retry_fast_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C3",
+            "title": "does not retry-sleep for an empty other event even when a file exists",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实retries3、retryDelay50ms，有关联file但空other实际wall elapsed<40ms且trace不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_no_file_and_empty_other_preserve_the_real_forty_ms_retry_fast_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L174:C3",
+            "title": "pruneIdle evicts cached state for sessions idle past the cutoff",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实已stamp后future cutoff使cache/first-turn map从1到0，disk claim仍不可被匿名newturn复用。ef末断言原期待TP已由f84 same-file L281 case明确替换为None；只更新该已被main修正的断言，不恢复claim重用缺陷。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_prune_evicts_only_idle_native_caches_and_never_reuses_a_main_disk_claim"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L187:C3",
+            "title": "pruneIdle keeps sessions accessed within the cutoff",
+            "suites": [
+              "TraceLinker"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "past cutoff保留cache/first-turn map各1，store记录仍消费、resolveNone。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_history_tests.rs",
+                "test": "baseline_prune_evicts_only_idle_native_caches_and_never_reuses_a_main_disk_claim"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/e2e-reparent.test.ts",
+      "source_hash": "32796f40716ea66fd5f8a49ea5515bae40ff636d41078334f7009b08f06939e6",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84逐字相同。Node OpenTelemetry provider/InMemory exporter/id-generator实现机制由生产GenAiEventLogConverter原生ReadableSpan结果承接，真实TraceLinker与真实converter，未mock span或修改converter；最终保留全部字段关系断言。",
+      "cases": [
+        {
+          "source": {
+            "id": "L109:C3",
+            "title": "all spans share upstream traceId and ENTRY hangs under the upstream span",
+            "suites": [
+              "upstream-link e2e: stamp -> real converter reparents to upstream span"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原SID/中文prompt/上游TP/本地trace/5事件（other+LLM request+TOOL call/result+LLM response）及reserved d4 span构造；真实关联stamp→native GenAi converter。warnings为空、spans非空、全部trace等于上游且非本地；明确ENTRY父为上游span，TOOL ID精确保留d4，不只查任意span碰巧命中。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_reparent_history.rs",
+                "test": "real_stamp_and_native_converter_reparent_entry_and_preserve_the_reserved_tool_span"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/load.test.ts",
+      "source_hash": "4609854675f463fe131c30c994f073944d530f662447cda85e2d40540f29a9f5",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84逐字相同。两项负载/性能合同原生迁移；第三项仅Node heapUsed/global.gc观测机制逐声明退役且实际4000turn工作负载仍执行。所有生产参数/5000ms守门不降低；Native跨平台实际证据另列，Linux执行不等于Windows/Mac已通过。",
+      "cases": [
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "interleaved, cross-batch, N sessions x M turns: every turn correctly + uniquely stamped",
+            "suites": [
+              "TraceLinker load / stress"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际60sessions×40turns×3events，原mulberry32(12345)按原跨session FIFO及batch选取算法，前10 raw draws与独立Node捕获值相等；逐事件/parent/LOCAL miss不变、每turn命中trace唯一、不双分配。真实2280stamped/120miss/1335batches，N/M不缩小。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_load_history_tests.rs",
+                "test": "original_interleaving_scaling_and_cache_workloads_preserve_all_sizes_and_guards"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L185:C3",
+            "title": "resolveTurn scaling: measures per-session linear-scan cost (flags quadratic growth)",
+            "suites": [
+              "TraceLinker load / stress"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实1500和3000 turn records，实际JSONL、真实durable claims和TraceLinker；计时仅stamp段；每次末事件trace精确等于M，保留原t2<5000ms和ratio诊断、不增加ratio门槛。实测1.235408708s/2.464428856s，ratio1.99，无假钟/改预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/trace_linker_load_history_tests.rs",
+                "test": "original_interleaving_scaling_and_cache_workloads_preserve_all_sizes_and_guards"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L227:C3",
+            "title": "cache growth: heap retained after many sessions (unbounded-cache indicator)",
+            "suites": [
+              "TraceLinker load / stress"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留原400sessions×10turns实际工作负载（8000events），额外逐事件trace/parent检查；native cache4000/first_turn400真实保留状态诊断。仅Node global.gc/process.memoryUsage.heapUsed这两个观测API及after>0断言机制退役；原没有heap上限，native也不声称heap字节或内存有界。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust无Node GC与V8 heapUsed观测API；f84仍含该Node机制，此处依据已授权整个项目Rust迁移而退役该运行时专属诊断，不谎称main已删它。原400×10业务负载完整原生执行并检查结果/实际cache增长，未退役工作负载、未宣称原不存在的内存上限保证。",
+            "replacement": [
+              {
+                "file": "src/core/upstream_link/trace_linker_load_history_tests.rs",
+                "test": "original_interleaving_scaling_and_cache_workloads_preserve_all_sizes_and_guards"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/claude-code/tool-context.test.mjs",
+      "source_hash": "4f4f4ad65c9d3c9c23fed8b2f3cfdd099b158daef6bb44fa81a87b2e93b2a3c1",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef/f84逐字相同，12声明逐assert承接真实私有生产API+实际文件+OS子进程；源Node临时writer/并发进程机制改为Rust子进程，不退役业务合同。10绿2红后，按main原publisher不可覆盖hardlink+有效record bounded retry修复，仅Claude context私有发布链。LinuxRust1.99.1/glibc2.34实跑；Windows/macOS仍待各自实际，不混验。",
+      "cases": [
+        {
+          "source": {
+            "id": "L72:C3",
+            "title": "reserves idempotently and preserves trace flags",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual filesystem reservations same tool id reuse exact span, 16hex, original traceId/unsampled00 flags/tracestate preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l72_idempotent_reservation_preserves_unsampled_flags_and_tracestate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "returns a full Bash input replacement without changing other fields",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual production Bash replacement preserves description/timeout/background flag, exact TRACEPARENT and quoted apostrophe TRACESTATE, no resource export; original pipeline suffix intact.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l94_full_bash_replacement_retains_other_fields_and_quotes_tracestate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "generates one local trace per prompt and distinct TOOL parent ids",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual distinct local tools same prompt share32hex trace, distinct parent spans,01 flags and exact durable source/local/traceId/flags seed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l118_local_prompt_trace_has_distinct_tool_parents_and_durable_seed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "keeps parallel reservations trace-consistent, distinct, and idempotent",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual eight isolated OS processes released together share one prompt trace and8distinct tools; six more real processes identicaltool share single trace andspan. Initial production regression observed3split traces; immutable publisher fix closes it.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l146_actual_eight_process_reservations_share_one_trace_and_six_duplicate_tools_share_one_span"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C3",
+            "title": "retries a partial record from an older writer without exposing a split trace",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual older OS process createsempty target then fillsafter30ms; native reservation must wait for original winner and reread same legacy trace, not generate/drop context. Initial regression None closed by original20x5ms bounded validation retry.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l163_actual_older_process_empty_then_complete_record_is_adopted_without_split_trace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C3",
+            "title": "does not generate a competing tool context for an ACP-managed session",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real ACP correlation JSONL prevents competing local tool context.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l211_acp_managed_session_does_not_generate_competing_context"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L232:C3",
+            "title": "uses a local trace on later prompts after the environment upstream is consumed",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "After real consumed marker, later prompt produces new localtrace, source/local and no consumed upstream tracestate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l232_later_prompt_uses_fresh_local_trace_without_consumed_upstream_tracestate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L259:C3",
+            "title": "injects resource attributes independently with shell-safe quoting",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual resource-only production command builder keeps whitespace/opaque apostrophe quoting andtimeout; no TRACEPARENT export.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l259_resource_only_propagation_preserves_opaque_value_and_shell_quoting"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L274:C3",
+            "title": "accepts terminal line endings in resource attributes but rejects embedded newlines",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual LF/CRLF trimming preserves terminal resource carrier and embeddednewline causes fail-openNone.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l274_terminal_crlf_is_trimmed_but_embedded_resource_newlines_fail_open"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L292:C3",
+            "title": "consumes the context once and rejects later turns after Stop",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real tool context file consumed once then gone; Stop marker observed, no later env-only reservation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l292_context_consumes_once_and_stop_rejects_later_env_only_context"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L312:C3",
+            "title": "refreshes the consumed marker mtime on later turns so active sessions survive TTL cleanup",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual marker file is aged48h viaFileTimes, subsequentStop refreshes real mtime; consumed state remains.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l312_later_stop_refreshes_the_real_marker_mtime_past_stale_retention_window"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L329:C3",
+            "title": "fails open for invalid traceparent and malformed input",
+            "suites": [
+              "claude-code per-tool context"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Invalid traceparent reservation and empty/malformed Bashresource input fail open without injected replacement.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/claude_tool_context_history.rs",
+                "test": "l329_invalid_trace_and_malformed_bash_input_fail_open"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pipeline/sleep-detector.test.ts",
+      "source_hash": "c40c45818be68e18cb0a42d5384e2ec36711297ba580d4c4fe4cc7cebb5d4b48",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84逐字相同；优先复用已充分native断言，补齐缺失阈值/字段/实际配置数量。sender constructor数据根已改TempDir避免共享/tmp测试数据，mock transport边界与源一致，额外真实failure metadata仍全隔离，不发送外部SLS。执行证据与source validity分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L23:C3",
+            "title": "emits wake event when time gap exceeds threshold",
+            "suites": [
+              "SleepDetector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原5s正常tick不发；模拟wallclock到70s后精确1次wake且sleep>=50000ms，生产tick方法/手动clock保留源vi假钟合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "emits_wake_when_gap_exceeds_threshold"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L42:C3",
+            "title": "does not emit wake during normal operation",
+            "suites": [
+              "SleepDetector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原10次5s tick实际运行，wake计数0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "does_not_emit_during_normal_ticks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "stop clears timer and listeners",
+            "suites": [
+              "SleepDetector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实stop后手动120s tick无wake且listeners0；真实background sampling额外验证timer取消与late subscription。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "stop_clears_listeners"
+              },
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "background_sampling_shares_late_subscriptions_and_stops"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "start is idempotent",
+            "suites": [
+              "SleepDetector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两次start_manual后stop无错误；实际background start两次只发1次wake，避免只验证手动入口。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "start_is_idempotent"
+              },
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "background_sampling_shares_late_subscriptions_and_stops"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pipeline/pipeline-manager.test.ts",
+      "source_hash": "7b99c8b97f339b12b406e4c4d381a775288331f8640852f6b9a45abc8cddfa7c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84逐字相同；优先复用已充分native断言，补齐缺失阈值/字段/实际配置数量。sender constructor数据根已改TempDir避免共享/tmp测试数据，mock transport边界与源一致，额外真实failure metadata仍全隔离，不发送外部SLS。执行证据与source validity分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "starts and stops with no configs",
+            "suites": [
+              "PipelineManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实隔离配置根为空，start后实际pipelines为空，stop完成。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "starts_stops_and_skips_invalid_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "loads existing configs on start",
+            "suites": [
+              "PipelineManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实app/nginx两配置，start后实际Map恰好2且两个名称存在，stop清空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "starts_stops_and_skips_invalid_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L91:C3",
+            "title": "skips invalid config files",
+            "suites": [
+              "PipelineManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实bad JSON/incomplete alongside two valid configs，仍恰好2有效pipeline。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "starts_stops_and_skips_invalid_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C3",
+            "title": "ignores non-json files",
+            "suites": [
+              "PipelineManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实readme.txt alongside valid configs，仍只有两有效pipeline；所有log glob在隔离根且无输入，不调用外部SLS。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "starts_stops_and_skips_invalid_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "stop is safe to call multiple times",
+            "suites": [
+              "PipelineManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start后stop两次安全，空配置实际处理，不只函数存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "starts_stops_and_skips_invalid_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C3",
+            "title": "SleepDetector can be started and stopped independently",
+            "suites": [
+              "SleepDetector integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原manager独立SleepDetector启停；另原生background_sampling真实start/stop覆盖component timer生命周期。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/pipeline_manager.rs",
+                "test": "sleep_detector_starts_and_stops"
+              },
+              {
+                "file": "src/pipeline/sleep_detector.rs",
+                "test": "background_sampling_shares_late_subscriptions_and_stops"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pipeline/file-sls-sender.test.ts",
+      "source_hash": "2d33df76be7ae282543df4e3c0549996d64393c6bca714f3aea0d811313ff0df",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84逐字相同；优先复用已充分native断言，补齐缺失阈值/字段/实际配置数量。sender constructor数据根已改TempDir避免共享/tmp测试数据，mock transport边界与源一致，额外真实failure metadata仍全隔离，不发送外部SLS。执行证据与source validity分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L38:C3",
+            "title": "enqueue adds lines to buffer and returns true",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实enqueue前0、原3lines返回true且buffer3，受控RecordingSink同源mock transport边界。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "enqueue_flush_and_backpressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "enqueue returns false when buffer is full",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原64000行完整enqueue成功，下一overflow返回false且仍64000；未缩容量。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender_history_tests.rs",
+                "test": "history_original_sixty_four_thousand_capacity_rejects_the_next_line"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "isBackpressured returns true at high watermark",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原32000行达到高水位，前false后true；未缩阈值。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender_history_tests.rs",
+                "test": "history_original_thirty_two_thousand_high_watermark_sets_backpressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "flush sends buffered lines via postWebtracking",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际flush一次，精确两content记录line1/line2及topic test-config；另enqueue_flush原生测试精确project/logstore/https endpoint。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "flush_posts_the_enqueued_lines"
+              },
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "enqueue_flush_and_backpressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C3",
+            "title": "flush does nothing when buffer is empty",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实空flush，RecordingSink posts为空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "empty_flush_and_failure_persist"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "flush persists failed logs on error",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原transport mock抛controlled error，persist ctx精确mode/project/logstore/kind/count1/bytes>0；实际failure writer额外落临时JSONL检查无__logs__/raw line，生产schema2使用batch_count/batch_bytes。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "empty_flush_and_failure_persist"
+              },
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender_history_tests.rs",
+                "test": "history_real_failure_metadata_never_persists_the_raw_log_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "shutdown flushes remaining buffer",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start+enqueue+shutdown，已post且最终buffer0，transport受控不发真实SLS。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "shutdown_flushes_remaining"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "bufferSize reflects current count",
+            "suites": [
+              "FileSlsSender"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原跨两file enqueue，buffer精确0→2→3。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/flusher/file/file_sls_sender.rs",
+                "test": "buffer_size_counts_across_files"
               }
             ]
           }
