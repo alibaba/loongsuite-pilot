@@ -1805,12 +1805,19 @@ impl Orchestrator {
         self.add_hosted(
             &mut entries,
             HostedInputSpec::new("qoder-cn-trace", "qoder-cn", "hook-jsonl", 1),
-            QoderCnTraceInput::new(QoderCnTraceOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(self.data_dir_join("logs/qoder-cn/history")),
-                poll_interval_ms: self.poll("qoder-cn-trace"),
-            }),
-            QoderCnTraceInput::get_watch_paths(),
+            QoderCnTraceInput::new_with_data_dir(
+                QoderCnTraceOptions {
+                    state_store: Arc::clone(state_store),
+                    log_dir: Some(self.data_dir_join("logs/qoder-cn/history")),
+                    poll_interval_ms: self.poll("qoder-cn-trace"),
+                },
+                std::path::PathBuf::from(&self.data_dir),
+            ),
+            {
+                let mut paths = QoderCnTraceInput::get_watch_paths();
+                paths.push(self.data_dir_join("state/qoder-transcripts/qoder-cn/sources"));
+                paths
+            },
             QoderCnTraceInput::check_availability,
         )
         .await;
@@ -2308,18 +2315,21 @@ impl Orchestrator {
         let qoder_agent = self.config.agents.get("qoder").cloned().unwrap_or_default();
         let qoder_multimodal = self.inputs_have_multimodal()
             && is_agent_multimodal_enabled(Some("qoder"), &qoder_agent);
-        let qoder = QoderTraceInput::new(QoderTraceOptions {
-            state_store: Arc::clone(state_store),
-            log_dir: Some(self.data_dir_join("logs/qoder/history")),
-            poll_interval_ms: self.poll("qoder-trace"),
-            multimodal_enabled: qoder_multimodal,
-            upload_mode: qoder_agent.multimodal.as_ref().map(|item| item.upload_mode),
-            allowed_root_paths: qoder_agent
-                .multimodal
-                .as_ref()
-                .and_then(|item| item.allowed_root_paths.clone())
-                .unwrap_or_default(),
-        });
+        let qoder = QoderTraceInput::new_with_data_dir(
+            QoderTraceOptions {
+                state_store: Arc::clone(state_store),
+                log_dir: Some(self.data_dir_join("logs/qoder/history")),
+                poll_interval_ms: self.poll("qoder-trace"),
+                multimodal_enabled: qoder_multimodal,
+                upload_mode: qoder_agent.multimodal.as_ref().map(|item| item.upload_mode),
+                allowed_root_paths: qoder_agent
+                    .multimodal
+                    .as_ref()
+                    .and_then(|item| item.allowed_root_paths.clone())
+                    .unwrap_or_default(),
+            },
+            std::path::PathBuf::from(&self.data_dir),
+        );
         if qoder_multimodal {
             if let Some(processor) = self.inputs.multimodal_processor() {
                 qoder.set_multimodal_processor(processor);
@@ -2329,7 +2339,11 @@ impl Orchestrator {
             entries,
             HostedInputSpec::new("qoder-trace", "qoder", "hook-jsonl", 1),
             qoder,
-            QoderTraceInput::get_watch_paths(),
+            {
+                let mut paths = QoderTraceInput::get_watch_paths();
+                paths.push(self.data_dir_join("state/qoder-transcripts/qoder/sources"));
+                paths
+            },
             QoderTraceInput::check_availability,
         )
         .await;

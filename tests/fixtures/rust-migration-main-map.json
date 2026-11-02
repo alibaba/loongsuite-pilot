@@ -25142,6 +25142,2017 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/failed-log.test.ts",
+      "source_hash": "a84d7a5e73a02b7f81a440100ba267d3269b2a0a4ee2a2e4928c944b1a1d1afd",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84main5=ef3+新增2参数声明，每新增声明均debug/failed2模式。f84/346/最新2b24逐字同hash。复用原3Native，仅新增原100MiB/3GiB+1最终真实文件合同；代码已有等价行为，不改生产writer或ACK。",
+      "cases": [
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "rotates %s evidence before appending past the normal segment size",
+            "suites": [
+              "OtlpTraceFlusher failed-log lifecycle"
+            ],
+            "parameters": [
+              "it.each(['debug', 'failed'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原debug/failed两参数，真实active大小原100MiB，append后恰好2文件、closed段仍100MiB，active合法JSON name=failed-span，failed error.message=failure；未降阈值或仅测helper。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_failed_log_main_tests.rs",
+                "test": "main_l46_original_debug_and_failed_evidence_rotate_after_one_hundred_mib_without_truncating_the_closed_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "removes an over-3-GiB legacy %s active file before appending",
+            "suites": [
+              "OtlpTraceFlusher failed-log lifecycle"
+            ],
+            "parameters": [
+              "it.each(['debug', 'failed'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原debug/failed两参数，真实active逻辑3GiB+1后append，恰好保留同名active且无archive，JSON name精确failed-span。Windows仅测试用FSCTL_SET_SPARSE沿已有fixture避免真实分配，不降3GiB阈值。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_failed_log_main_tests.rs",
+                "test": "main_l60_original_debug_and_failed_over_three_gib_active_file_is_reclaimed_without_archive"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "writes the existing full span and _error to a safe daily file",
+            "suites": [
+              "OtlpTraceFlusher failed-log lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际tempdir只1个safe daily文件，无目录跳跃，精确_error={code:2,message:connection refused}，完整failed-span及diagnostic payload保留，单行JSON。 下一批草案未Cargo，待中央运行；platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "complete_error_object_and_diagnostic_span_stay_in_one_safe_daily_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L102:C3",
+            "title": "does not append a recent legacy fixed file",
+            "suites": [
+              "OtlpTraceFlusher failed-log lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际写入fresh legacy固定名文件legacy换行，新writer完全不追加，仍legacy换行；目录恰2个文件，新增daily suffix文件。 下一批草案未Cargo，待中央运行；platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "a_fresh_legacy_fixed_file_remains_untouched_when_daily_evidence_is_written"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C3",
+            "title": "switches to a new file after the local calendar date changes",
+            "suites": [
+              "OtlpTraceFlusher failed-log lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "注入Local日历2026-08-20 23:59/2026-08-21 00:01，实际两daily文件分别含完整_error(code2/first day和second day)；不全局修改时钟。 下一批草案未Cargo，待中央运行；platforms仅适用范围。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "local_midnight_rollover_uses_two_daily_files_and_preserves_each_error"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/runtime-observability.test.ts",
+      "source_hash": "e38c7c54ba106fcc11884567ac9751d66b21f0bcb256f0dda331c3574f4696c0",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All exact source declarations now complete; original single temporary65/batch final64 capacity and ordinary preemption earlyreturn/ownedshutdown lifecycle aligned. No source business declaration retired, no unsupported correction claims, no Codex/Doub ACK/cancel guarantee weakened. Actual Linux fixedglibc2.34/Rust1.99.1; Windows/macOS listed applicability, Native pending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "reads largest/oldest buffers without serializing or copying event content",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际scalar snapshot原120bytes/3records/largest100bytes/100ms/oldest200ms且返回值不别名；Rust直接字段读取不调用进程memory/JSON。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "snapshots_keep_exact_largest_oldest_scalars_without_live_counter_aliasing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "accounts bytes before a same-batch successor can remove the previous buffer",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原Claude successor65条/123+64x10精确removed123→763和重复flush幂等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "main_claude_successor_accounts_original_bytes_while_the_original_codex_fixture_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C3",
+            "title": "marks unavailable byte measurements without blocking collection",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原mismatched length、NaN、negative、0；5pending、0bytes、4unmeasured，移除恰好4。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "unavailable_measurements_never_block_collection_and_are_removed_exactly_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "removal is recorded before conversion settles and never leaves a second turn state",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已对齐原实际可观察合同：冻结f84 TypeScript真实InputManager→Multi→OTLP oracle证明preempt旧export未完成时dispatch返回、next resident1且inFlight1、shutdown等待；Native同链真实0/1红→绿，公开send原12移除/next34在export gate未完成前已接纳，flush最终0且两记录完整。普通任务由外层flusher拥有JoinSet，Inner仅Weak scope；取消shutdown等待后两条仍最终export；最后owner Drop实际loopback HTTP EOF、含idle时Inner弱引用消失；普通失败真实failed-log/counters可见。Codex/Doub不进入普通scope，其terminal batch仍等待真实export后ACK，取消后freshjournal恢复。ef原SignalB Codex fixture由f84明确改Claude，原Codex并发不抢占负控保留，不用语言差异或未经授权更正代替原assert。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "public_send_accepts_successor_before_owned_preemption_export_and_flush_joins"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "collector_preemption_returns_with_owned_export_and_shutdown_joins_through_real_manager_and_multi"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "cancelling_shutdown_wait_keeps_previously_accepted_ordinary_worker_owned_until_retry"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_last_flusher_drop_closes_real_loopback_request_with_idle_enabled"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_failure_keeps_original_failed_log_and_endpoint_counters_visible"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_supports_concurrent_flush_and_shutdown_waiters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "keeps concurrent Codex native turns until their own terminal evidence",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两个Codex不同turn各自保留12/34，原pending2/46bytes/removed0；first terminal0后pending1/34。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l108_concurrent_codex_turns_keep_bytes_until_their_own_terminal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L120:C3",
+            "title": "keeps counters cumulative across idle reports and preserves existing buffer eviction",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原70条single后pending65/removed5，flush累计70/bytes70/原70业务记录完整，重复快照幂等，fresh7不重置；精确恢复原65而非Native旧hard64。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "cumulative_counters_preserve_original_single_send_soft65_then_flush_all_seventy_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "caps diagnostic dimensions without dropping business records",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原70agent诊断64/实际buffers65，flush后buffers0/诊断64/全70业务记录完整；原数值逐个实际断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "diagnostic_dimensions_cap_at_64_without_dropping_any_of_the_seventy_business_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L142:C3",
+            "title": "retains the Codex prefix when its %s continuation arrives at capacity",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": [
+              "it.each(['single', 'batch', 'batch-restored'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原single/batch/batch-restored三模式全实跑，pre快照65、no convert/noACK、原64/65新turn workload、exact prefix+terminal完整字段/18tokens、final<=64与ACK，全部原assert已对齐；另真实65resident时journal append IO失败、同实例及fresh journal/flusher重启恢复证明不丢prefix/不提前ACK。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l142_all_three_capacity_modes_recover_exact_prefix_tokens_and_ack_with_original_soft65"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "soft65_resident_prefix_survives_real_append_io_failure_and_fresh_restart_before_terminal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L180:C3",
+            "title": "keeps terminal flushing deferred until overlapping batches both finish appending",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原private persist preparation独立两gate，第二batch必须在第一未释放前进入；先释放first后0转换，释放second后2，next后3；两条真实红→绿之一。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l180_two_preparations_overlap_and_terminal_conversion_waits_for_both"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C3",
+            "title": "restores terminal flushing when batch preparation fails",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实temp journal父路径被文件占用引发IO Err，非模拟panic；恢复目录后原next terminal恰好1转换，batch_depth0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l215_real_preparation_io_error_releases_batch_depth_for_next_terminal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L224:C3",
+            "title": "waits for startup replay before durably accepting a live Codex batch",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "与原private journal.load gate同边界：startup gate held时live未返回且磁盘不含live；释放后真实replay+live journal可读且pending2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l224_startup_replay_finishes_before_live_batch_is_durably_accepted"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L256:C3",
+            "title": "journals an external single send while another Codex batch is appending",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原selective pre-journal append gate同私有preparation边界；batch held时真实single send返回，真实journal含single-prefix且不含未append的batch-prefix；释放后pending2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l256_external_single_is_persisted_while_another_batch_preparation_is_held"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L281:C3",
+            "title": "retains a resident Codex prefix when an idle tick overlaps journal append",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原idle1000ms未降，真实等待2s代替原Date1000→3000；terminal准备held期间真实idle tick仍pending1；释放后恰好1转换且原prefix+terminal完整字段/11input tokens与真实journal ACK。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l281_original_one_second_idle_tick_keeps_prefix_during_real_append_preparation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L315:C3",
+            "title": "flushes a terminal single send after an overlapping preparation completes",
+            "suites": [
+              "Trace runtime scalar snapshots"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原private preparation held时terminal single先返回但0转换；释放早先pending后恰好1转换且首rowturn=terminal；真实红→绿之一。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "main_l315_terminal_single_is_accepted_while_earlier_preparation_is_pending"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/copilot-hybrid.test.ts",
+      "source_hash": "783daed0c89c590c44e9f8677928e237ef32a73f557928dc0841b1e7fdb6305a",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef无该文件；f84新增真实合同，f84/346/最新2b24逐字同hash。本轮Linux/glibc2.34/Rust1.99.1实际执行；Win/macOS仅列适用，Native另验。无retire。",
+      "cases": [
+        {
+          "source": {
+            "id": "L8:C2",
+            "title": "reconstructs within-interaction LLM input from deltas while preserving roots, tool results and tokens",
+            "suites": [
+              "Copilot hybrid final spans"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原toolConversation经真实parse_interactions+Native GenAi+受控exporter最终span；同trace1、LLM2，roles user/user-assistant-tool，ENTRY/AGENT精确单user输入，AGENTinput200，TOOL1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/final_spans_main_tests.rs",
+                "test": "main_l8_real_parser_reconstructs_deltas_preserving_roots_tool_results_and_two_call_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L24:C2",
+            "title": "exports separate traces, exact LLM/AGENT usage and no summary trace",
+            "suites": [
+              "Copilot hybrid final spans"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原Node helper生成精确双interaction/summary样本，真实parser→finalspans：trace2/LLM2，LLM100/10和正duration，ENTRY/AGENT原native-otel passthrough及按trace匹配Read/Second输入，AGENT2各input100。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/final_spans_main_tests.rs",
+                "test": "main_l24_two_interactions_export_separate_traces_exact_usage_and_no_summary_trace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C2",
+            "title": "preserves ordered current-interaction prompts under the current always-collect contract",
+            "suites": [
+              "Copilot hybrid final spans"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原follow-up插入时间1.500未改；真实parser→ENTRY/AGENT各精确[Read the sample.,Also explain it.]且STEP1。原Native真实输出[Also,Read,Also]红→修复，仅hybrid-v2 Copilot显式Other user输入累加，LLM rolling context/其它Agent未改。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/final_spans_main_tests.rs",
+                "test": "main_l40_current_interaction_prompts_keep_original_order_and_one_step"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/dedup.test.ts",
+      "source_hash": "7aefcfa15b7faa3f9d47cb1bdc7ca4997512d964d7e3ae402a9e13ca9194b79f",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef无该文件；f84新增真实合同，f84/346/最新2b24逐字同hash。本轮Linux/glibc2.34/Rust1.99.1实际执行；Win/macOS仅列适用，Native另验。无retire。",
+      "cases": [
+        {
+          "source": {
+            "id": "L43:C3",
+            "title": "keeps latest record when same event.id is sent twice (re-parse simulation)",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两poll同evt1，晚到permission.decision_source保留、records1、recordIndex[evt1]=0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l43_reparse_adds_permission_source_without_duplicate_record_or_index"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "retains non-Copilot updates with a repeated event ID",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原openclaw shared-id连续first/corrected，buffer原序两record保持；不得把Copilot dedup泛化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l66_non_copilot_repeated_id_preserves_both_model_updates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L76:C3",
+            "title": "does not dedup records with different event.id (distinct events)",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原evt1/2/3，各3records/3index。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l76_three_distinct_ids_retain_three_records_and_index_entries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C3",
+            "title": "simulates 3 re-parses of same session → buffer keeps 1× records, not 3×",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3poll×2records不缩减，最终2records/2index。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l87_original_three_polls_of_two_events_keep_two_records_not_six"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "appends records without event.id (no dedup) — preserves existing behavior",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原缺event.id两记录append，records2/index0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l100_two_missing_ids_append_without_creating_a_dedup_index"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "deep-merges fields across re-parses: preserves gen_ai.llm.reasoning.text from first poll when second poll omits it",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原reasoning thinking hard about the plan及resp1，第二poll缺reasoning后仍1record且两字段精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l115_later_missing_reasoning_preserves_original_reasoning_and_response_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "deep-merges: later non-empty value does NOT overwrite first non-empty value (first-write-wins)",
+            "suites": [
+              "OtlpTraceFlusher - event.id dedup across re-parses"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原alpha/beta非空冲突first-write-wins，resolved_model原gpt-5.6-luna不被后续空串清掉，records1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_dedup_main_tests.rs",
+                "test": "main_l138_first_nonempty_reasoning_and_resolved_model_win_over_later_values"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts",
+      "source_hash": "a4b3fca6b0f3f473e0f56e3d72054fb1b0f0b05feb1ffc210ed8f64dfc60f6f0",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef21→f84main22仅新增OpenCodeV2一声明、原21业务assert逐字不变。f84/346/2b24逐字同hash，已有真实Native覆盖足够，不重复实现/扩框架；本轮整个OTLP117执行含所有22目标。",
+      "cases": [
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "waits for V2 execution completion but preserves V1 stop behavior",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "f84新增V2执行完结合同已有真实Native：V1 request+stop恰好一次含2records，V2 request+stop+tool.call/result+retry request/error response始终0转换，other turn.end后恰好一次7records；原error/stop不提前关闭和V1立即关闭均保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "opencode_v2_flushes_only_execution_completion_and_v1_keeps_finish_reason_behavior"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "keeps incremental Hermes retries and overlapping same-session turns until their explicit ends",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "hermes_realtime_retry_overlapping_turns_wait_for_explicit_end"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "flushes a failed legacy OpenClaw turn without llm_output",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "legacy_openclaw_agent_end_flushes_failed_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C3",
+            "title": "flushes incomplete legacy cleanup without claiming a model failure",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "legacy_openclaw_cleanup_does_not_invent_model_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L124:C3",
+            "title": "Signal A: finish_reason=stop triggers immediate flush",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "stop_finishes_the_complete_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C3",
+            "title": "Signal A: finish_reason=cancelled triggers immediate flush",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "cancelled_finishes_the_complete_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L156:C3",
+            "title": "does not close a Codex turn on intermediate root or subagent stops",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "codex_root_and_subagent_stops_wait_for_explicit_parent_end"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L197:C3",
+            "title": "claude-code: a mid-turn error span does NOT end the turn; turn.end does",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "claude_retry_error_waits_for_turn_end"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L222:C3",
+            "title": "Signal A: finish_reason=tool_calls does NOT end turn",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "tool_calls_does_not_close_the_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L234:C3",
+            "title": "OpenClaw uses llm_output as its default boundary even after a per-call stop",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "openclaw_per_call_stop_waits_for_llm_output"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L261:C3",
+            "title": "Signal B: new groupKey triggers flush of old buffer",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "known_session_new_trace_preempts_the_old_buffer"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L283:C3",
+            "title": "Signal B: does NOT preempt when session identity is unavailable",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "unknown_session_traces_do_not_preempt_each_other"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L314:C3",
+            "title": "Signal C: shutdown drains all pending buffers",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "shutdown_drains_the_pending_buffer_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L328:C3",
+            "title": "backfills gen_ai.turn.id when using trace_id as group key",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "trace_group_key_backfills_turn_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L347:C5",
+            "title": "Codex-like step: tool_call response then tools in same batch does not early-flush",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "codex_step_with_tools_in_one_batch_keeps_six_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C5",
+            "title": "Hermes retry batch: error response does not drop the successful retry",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "hermes_retry_in_the_same_batch_keeps_four_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L421:C5",
+            "title": "OpenClaw error/recovery across batches waits for the llm_output marker",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "openclaw_error_and_recovery_batches_wait_for_the_output_marker"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L478:C5",
+            "title": "Claude-like batch: tools sorted before stop are all included in one flush",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "claude_sorted_tools_and_stop_batch_keeps_four_records"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L506:C5",
+            "title": "Cursor-like batch: records after stop in same batch are kept (differs from master send loop)",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "cursor_stop_and_child_records_in_the_same_batch_all_survive"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L544:C5",
+            "title": "multi-turn batch: each completed turn flushes once at batch end",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "two_codex_turns_in_a_batch_convert_once_each"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L576:C5",
+            "title": "cross-batch late entries after stop are still dropped (dual-root guard unchanged)",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection",
+              "sendBatch — regression vs master sequential send()"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "late_tool_from_the_next_batch_never_reopens_the_closed_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L605:C3",
+            "title": "drops late entries for already-flushed turns (prevents dual-root)",
+            "suites": [
+              "OtlpTraceFlusher - turn boundary detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ef→f84该声明assert/operation未改，仅此前新增V2声明使行号+21；保留既有源级冻结完整操作/断言回放，实际公开send/sendBatch/flush/shutdown+原TurnBoundaryProcessor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "late_single_events_and_shutdown_never_convert_again"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/checkpoints/state-store.test.ts",
+      "source_hash": "73fe97b2418e0b0e43b7b2db19fce9ede3eae7d236b8f2f10f19e2d46106c994",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Frozen historical source exact assertions rechecked against native tests; latest current-main fragment is separate. No source-hash substitution. Linux actual only; JS Error object reference is native stable failure-value contract, not Node runtime requirement.",
+      "cases": [
+        {
+          "source": {
+            "id": "L36:C5",
+            "title": "should start with empty state",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native load missing initial file yields exact empty InputState for unknown id.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::starts_with_empty_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C5",
+            "title": "should persist state across save/load",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual atomic save writes exact100 offset/5 rowid and independent new store load returns identical fields.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::persists_state_across_save_load"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L51:C5",
+            "title": "should handle missing file gracefully",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual nonexistent pathname load is graceful and unknown state empty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::handles_missing_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C5",
+            "title": "should handle corrupt JSON gracefully",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual not-json bytes load gracefully to empty state.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::handles_corrupt_json"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C5",
+            "title": "should get empty state for unknown id",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual loaded store unknown nonexistent id returns empty state.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_returns_empty_state_for_unknown_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C5",
+            "title": "should set and retrieve state",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual set x offset42 then get lastOffset42.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_retrieves_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C5",
+            "title": "should update partial state without losing existing fields",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual initial offset10,rowid20, patch offset30 preserves rowid20.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::updates_partial_state_without_losing_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C5",
+            "title": "should set state immutably (no reference leaks)",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual independent owned state copy: original offset10+foo/bar stored, original changed999 cannot change store10; extra remainsfoo/bar.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::set_stores_an_independent_copy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C5",
+            "title": "should return 0 for unknown input",
+            "suites": [
+              "StateStore",
+              "getOffset/setOffset"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual unknown input getOffset returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_offset_returns_zero_for_unknown_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C5",
+            "title": "should set and get offset",
+            "suites": [
+              "StateStore",
+              "getOffset/setOffset"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual input-a setOffset256/getOffset256.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_gets_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C5",
+            "title": "should return 0 for unknown input",
+            "suites": [
+              "StateStore",
+              "getRowId/setRowId"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual unknown input getRowId returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_row_id_returns_zero_for_unknown_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C5",
+            "title": "should set and get rowId",
+            "suites": [
+              "StateStore",
+              "getRowId/setRowId"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual input-b setRowId42/getRowId42.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_gets_row_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L126:C5",
+            "title": "should not write without a new revision",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual load then no-op save leaves file nonexistent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::does_not_write_without_a_new_revision"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L135:C5",
+            "title": "should write when the revision changes",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual mutation revision offset1 then save creates file.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::writes_when_the_revision_changes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C5",
+            "title": "should not rewrite an already persisted revision",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual atomic-write observer sees exactly1 call through save and repeated unchanged save.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::does_not_rewrite_an_already_persisted_revision"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L154:C5",
+            "title": "blocks shared checkpoint saves until every output hold is accepted",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Public async holds: first/late oneshot holds, codex10→30 and other20 updates; actual write count0 until BOTH holds accept, exact disk fields30/20 then repeat save leaves exactly1 write.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l192_every_async_hold_must_accept_before_exactly_one_shared_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C5",
+            "title": "latches a rejected hold so subsequent shared saves keep the last durable cursor",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual codex1 first saved, rejected public async hold then optimistic codex2/other3; both subsequent saves return same stable first native failure value, disk exactlycodex1, exact write count1. JS Error-reference identity adapted to native Result failure-value identity; business latching remains strict.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l216_rejected_async_hold_keeps_exact_first_failure_and_last_durable_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L191:C5",
+            "title": "releases settled holds during sustained output failure without unfreezing saves",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All100 distinct async rejected holds settle: every save preserves first journal failure, active output holds return0, later accepted hold cannot unfreeze, exact writecount1/diskcodex1, fresh store+acceptedhold updates durablecodex2. Native stable first error value preserves original JS reference-equality intent without JS object instances.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l229_hundred_settled_failures_release_holds_without_replacing_first_error_or_writing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C5",
+            "title": "rejects a no-op save after a settled failed hold even without a new revision",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual async rejection settles without any state revision; no-op save returns original native error value, atomic-write count0 and file absent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l253_settled_failure_rejects_noop_save_without_any_revision_or_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L223:C5",
+            "title": "honors a new hold before the next revision of an active write",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first atomic write is gated; new async output hold registered while write active and codex2 staged. First write physically completes codex1, no second write or completed save before accept; release completes exactly2writes/durablecodex2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l261_new_hold_blocks_second_revision_after_first_actual_write_finishes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L251:C5",
+            "title": "serializes saves and persists mutations made during an active write",
+            "suites": [
+              "StateStore",
+              "concurrent saves"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual write hook+real atomic file writes: save1 blocked, input-a patched2/input-b rowid3 then concurrent save joins; exact2 writes, max active1, exact captured snapshots1 then2/3 and disk2/3.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::serializes_saves_and_persists_mutations_during_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L301:C5",
+            "title": "retains an unpersisted revision after a failed write",
+            "suites": [
+              "StateStore",
+              "concurrent saves"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first write failure returns exact reason; retry atomic save succeeds with input-a10, exact attempted writecount2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::retains_unpersisted_revision_after_failed_write"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

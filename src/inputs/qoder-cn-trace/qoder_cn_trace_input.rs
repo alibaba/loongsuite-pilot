@@ -9,6 +9,11 @@ use crate::inputs::base::{
     build_canonical_hook_entry, create_hook_history_startup_checkpoint,
     filter_bootstrap_history_turns, CanonicalHookRecordOptions, InputBody, InputRuntime,
 };
+use crate::inputs::qoder_trace::legacy_hook_reader::QoderLegacyHookReader;
+use crate::inputs::qoder_trace::prompt_ownership::{
+    NativeQoderPromptOwnershipResolver, QoderPromptOwnershipResolver,
+};
+use crate::inputs::qoder_trace::transcript_source::QoderTranscriptSource;
 use crate::inputs::qoder_trace::{
     collect_cli_expected_request_ids, enrich_cli_from_segments, enrich_cli_primary,
     enrich_ide_turn, inject_trace_id, read_intercept_data, read_segment_tokens_for_session,
@@ -20,13 +25,39 @@ use crate::utils::{
     directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
 };
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
 static STEP_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":s(\d+)$").expect("step"));
+
+/// Native reader seams match main's protected CN reader methods. Production
+/// defaults keep exact CN databases/intercept/segment namespace.
+#[async_trait]
+pub trait QoderCnTraceReaders: Send + Sync {
+    async fn read_cli_intercept(&self) -> crate::inputs::qoder_trace::InterceptData {
+        read_intercept_data(None, Some("qoderclicn-intercept.jsonl")).await
+    }
+    async fn read_cli_segments(
+        &self,
+        session: &str,
+        expected: &[String],
+    ) -> Vec<crate::inputs::qoder_trace::SegmentTokenData> {
+        read_segment_tokens_for_session(session, expected, QODER_CN_SEGMENTS_ROOT).await
+    }
+    async fn read_ide_tokens(
+        &self,
+        session: &str,
+    ) -> crate::inputs::qoder_trace::SqliteTokenResult {
+        read_sqlite_tokens(session, &resolve_qoder_cn_db_paths()).await
+    }
+}
+struct NativeQoderCnTraceReaders;
+#[async_trait]
+impl QoderCnTraceReaders for NativeQoderCnTraceReaders {}
 
 pub struct QoderCnTraceOptions {
     pub state_store: Arc<crate::checkpoints::StateStore>,
@@ -46,6 +77,9 @@ struct Anchor {
 struct QoderCnTraceBody {
     log_dir: String,
     anchors: Mutex<HashMap<String, Anchor>>,
+    legacy_hook_reader: tokio::sync::Mutex<QoderLegacyHookReader>,
+    transcript_source: Arc<QoderTranscriptSource>,
+    readers: Arc<dyn QoderCnTraceReaders>,
 }
 
 impl QoderCnTraceInput {
@@ -76,6 +110,38 @@ impl QoderCnTraceInput {
     }
 
     pub fn new(opts: QoderCnTraceOptions) -> Self {
+        let parent = opts
+            .state_store
+            .file_path()
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let data_dir = if parent.file_name().is_some_and(|name| name == "logs") {
+            parent.parent().unwrap_or(parent)
+        } else {
+            parent
+        }
+        .to_path_buf();
+        Self::new_with_data_dir(opts, data_dir)
+    }
+    pub fn new_with_data_dir(opts: QoderCnTraceOptions, data_dir: PathBuf) -> Self {
+        Self::new_with_sources(
+            opts,
+            data_dir,
+            Arc::new(NativeQoderCnTraceReaders),
+            Arc::new(NativeQoderPromptOwnershipResolver::default()),
+        )
+    }
+    pub fn new_with_sources(
+        opts: QoderCnTraceOptions,
+        data_dir: PathBuf,
+        readers: Arc<dyn QoderCnTraceReaders>,
+        resolver: Arc<dyn QoderPromptOwnershipResolver>,
+    ) -> Self {
+        let transcript_source = Arc::new(QoderTranscriptSource::new(
+            data_dir,
+            "qoder-cn".into(),
+            resolver,
+        ));
         Self {
             inner: crate::inputs::base::HostedInput::new(
                 QoderCnTraceBody {
@@ -83,6 +149,9 @@ impl QoderCnTraceInput {
                         resolve_home("~/.loongsuite-pilot/logs/qoder-cn/history")
                     }),
                     anchors: Mutex::new(HashMap::new()),
+                    legacy_hook_reader: tokio::sync::Mutex::new(QoderLegacyHookReader::default()),
+                    transcript_source,
+                    readers,
                 },
                 "QoderCnTraceInput",
                 opts.state_store,
@@ -94,7 +163,10 @@ impl QoderCnTraceInput {
         self.inner.start().await
     }
     pub async fn stop(&self) -> Result<(), String> {
-        self.inner.stop().await
+        self.inner.body.transcript_source.stop();
+        let result = self.inner.stop().await;
+        self.inner.body.legacy_hook_reader.lock().await.reset();
+        result
     }
     pub async fn check_availability() -> bool {
         directory_exists(&resolve_home("~/.qoder-cn")).await
@@ -121,6 +193,8 @@ impl InputBody for QoderCnTraceBody {
     }
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        self.transcript_source.start();
+        self.legacy_hook_reader.lock().await.reset();
         ensure_dir(&self.log_dir).await;
         let state = rt.state();
         if let Some(checkpoint) =
@@ -148,8 +222,51 @@ impl InputBody for QoderCnTraceBody {
     }
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        let mut raw = read_today(&self.log_dir, rt).await?;
+        let persisted = rt
+            .state_store
+            .is_persisted(self.id(), Some("qoderTranscripts"));
+        let mut raw = read_today(&self.log_dir, rt, &self.legacy_hook_reader).await?;
+        let extra = rt.state().extra();
+        let native = self
+            .transcript_source
+            .read(
+                extra.as_ref().and_then(|v| v.get("qoderTranscripts")),
+                persisted,
+            )
+            .await?;
+        for observation in &native.metrics.reads {
+            rt.with_accumulator(|acc| {
+                acc.observe_read(
+                    observation.bytes,
+                    observation.requested,
+                    observation.duration_ms,
+                )
+            });
+        }
+        for record in &native.records {
+            let Some(record) = record.as_object() else {
+                continue;
+            };
+            if let Some(mut entry) = build_canonical_hook_entry(
+                record,
+                ClientType::QoderCn.as_str(),
+                None,
+                CanonicalHookRecordOptions {
+                    preserve_safe_custom_top_level_fields: true,
+                },
+            ) {
+                let _ = enrich_canonical_entry_with_git(&mut entry, record, "qoder-cn").await;
+                raw.push(entry);
+            }
+        }
         if raw.is_empty() {
+            if native.changed {
+                rt.set_state_fields(
+                    None,
+                    None,
+                    Some(serde_json::json!({"qoderTranscripts":native.state})),
+                );
+            }
             return Ok(Vec::new());
         }
         merge_orphans(&mut raw, &self.anchors);
@@ -187,12 +304,9 @@ impl InputBody for QoderCnTraceBody {
                 let expected = collect_cli_expected_request_ids(&slice);
                 #[cfg(test)]
                 cn_history_migration_contract_tests::observe_expected(&expected);
-                let segments =
-                    read_segment_tokens_for_session(session, &expected, QODER_CN_SEGMENTS_ROOT)
-                        .await;
+                let segments = self.readers.read_cli_segments(session, &expected).await;
                 if intercept.is_none() {
-                    intercept =
-                        Some(read_intercept_data(None, Some("qoderclicn-intercept.jsonl")).await);
+                    intercept = Some(self.readers.read_cli_intercept().await);
                 }
                 let data = intercept.as_ref().unwrap();
                 enrich_cli_primary(
@@ -206,7 +320,7 @@ impl InputBody for QoderCnTraceBody {
                     enrich_cli_from_segments(&mut slice, &segments);
                 }
             } else {
-                let result = read_sqlite_tokens(session, &resolve_qoder_cn_db_paths()).await;
+                let result = self.readers.read_ide_tokens(session).await;
                 enrich_ide_turn(&mut slice, &result.rows);
             }
             expand_container_times(&mut slice);
@@ -227,6 +341,13 @@ impl InputBody for QoderCnTraceBody {
             ordered.extend(slice);
         }
         let _ = no_session;
+        if native.changed {
+            rt.set_state_fields(
+                None,
+                None,
+                Some(serde_json::json!({"qoderTranscripts":native.state})),
+            );
+        }
         Ok(ordered)
     }
 }
@@ -475,8 +596,8 @@ fn has_client_request_id(entries: &[AgentActivityEntry]) -> bool {
     })
 }
 
-fn group(entries: &[AgentActivityEntry]) -> HashMap<String, Vec<usize>> {
-    let mut groups = HashMap::new();
+fn group(entries: &[AgentActivityEntry]) -> IndexMap<String, Vec<usize>> {
+    let mut groups = IndexMap::new();
     for (index, entry) in entries.iter().enumerate() {
         let turn = entry
             .turn_id
@@ -509,7 +630,11 @@ fn parse_nanos(value: &str) -> Option<i128> {
     value.parse().ok()
 }
 
-async fn read_today(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
+async fn read_today(
+    log_dir: &str,
+    rt: &InputRuntime,
+    reader: &tokio::sync::Mutex<QoderLegacyHookReader>,
+) -> anyhow::Result<Vec<AgentActivityEntry>> {
     let name = format!("qoder-cn-{}.jsonl", get_today_date_string());
     let path = Path::new(log_dir).join(&name);
     let Ok(meta) = tokio::fs::metadata(&path).await else {
@@ -527,28 +652,75 @@ async fn read_today(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<Agen
     if (meta.len() as f64) <= offset {
         return Ok(Vec::new());
     }
-    let Some(slice) =
-        crate::inputs::base::read_file_slice(path.to_string_lossy().as_ref(), offset as u64)
-            .await?
-    else {
-        return Ok(Vec::new());
-    };
-    let Some(newline) = slice.bytes.iter().rposition(|b| *b == b'\n') else {
-        return Ok(Vec::new());
-    };
-    rt.set_state_fields(Some(name), Some(offset + newline as f64 + 1.0), None);
-    let text = String::from_utf8_lossy(&slice.bytes[..=newline]);
+    rt.with_accumulator(|acc| acc.observe_backlog(meta.len().saturating_sub(offset as u64)));
+    let batch = reader
+        .lock()
+        .await
+        .read_observed(&path, offset as u64, |bytes, requested, duration| {
+            rt.with_accumulator(|acc| acc.observe_read(bytes, requested, duration));
+        })
+        .await?;
+    let skipped = batch
+        .quarantine
+        .iter()
+        .filter(|range| range.to.is_some())
+        .collect::<Vec<_>>();
+    let mut records = skipped.len() as u64;
+    let mut failed = records;
+    let mut success = 0;
+    let mut max_record = skipped.iter().map(|range| range.bytes).max().unwrap_or(0);
+    if !batch.quarantine.is_empty() {
+        let mut previous = state
+            .extra()
+            .and_then(|value| {
+                value
+                    .get("qoderLegacyQuarantine")
+                    .and_then(Value::as_array)
+                    .cloned()
+            })
+            .unwrap_or_default();
+        for range in &batch.quarantine {
+            let mut record = serde_json::to_value(range)?.as_object().cloned().unwrap();
+            record.insert("file".into(), Value::String(name.clone()));
+            previous.push(Value::Object(record.clone()));
+            record.insert(
+                "file".into(),
+                Value::String(path.to_string_lossy().into_owned()),
+            );
+            rt.warn(
+                "oversized legacy Hook record quarantined; source retained",
+                Some(&record),
+            );
+        }
+        let keep = previous.len().saturating_sub(32);
+        previous.drain(..keep);
+        rt.set_state_fields(
+            None,
+            None,
+            Some(serde_json::json!({"qoderLegacyQuarantine":previous})),
+        );
+    }
+    let complete_length = batch.next_offset.saturating_sub(offset as u64);
+    if complete_length > 0 {
+        rt.set_state_fields(Some(name), Some(batch.next_offset as f64), None);
+    }
     let mut entries = Vec::new();
-    for line in text.split('\n') {
+    for bytes in batch.buffer.split_inclusive(|b| *b == b'\n') {
+        let line = String::from_utf8_lossy(bytes);
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        records += 1;
+        max_record = max_record.max(bytes.len() as u64);
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            failed += 1;
             continue;
         };
         let Some(record) = value.as_object() else {
+            failed += 1;
             continue;
         };
+        success += 1;
         if let Some(mut entry) = build_canonical_hook_entry(
             record,
             ClientType::QoderCn.as_str(),
@@ -561,9 +733,28 @@ async fn read_today(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<Agen
             entries.push(entry);
         }
     }
+    if complete_length > 0 {
+        rt.with_accumulator(|acc| {
+            acc.observe_committed_batch(crate::inputs::base::CommittedInputBatch {
+                records,
+                bytes: complete_length,
+                parse_success_records: success,
+                parse_failed_records: failed,
+                max_record_bytes: max_record,
+            })
+        });
+    }
     Ok(filter_bootstrap_history_turns(entries))
 }
 
 #[cfg(test)]
 #[path = "cn_history_migration_contract_tests.rs"]
 mod cn_history_migration_contract_tests;
+
+#[cfg(test)]
+#[path = "cn_legacy_533_tests.rs"]
+mod legacy_533_contract_tests;
+
+#[cfg(test)]
+#[path = "cn_source_533_tests.rs"]
+mod source_533_contract_tests;

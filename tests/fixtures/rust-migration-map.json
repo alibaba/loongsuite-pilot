@@ -11812,79 +11812,10 @@
     },
     {
       "legacy": "tests/unit/checkpoints/state-store.test.ts",
-      "coverage": "complete",
-      "rust": [
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "starts_with_empty_state"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "persists_state_across_save_load"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "handles_missing_file"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "handles_corrupt_json"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "get_returns_empty_state_for_unknown_id"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "sets_and_retrieves_state"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "updates_partial_state_without_losing_fields"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "set_stores_an_independent_copy"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "get_offset_returns_zero_for_unknown_input"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "sets_and_gets_offset"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "get_row_id_returns_zero_for_unknown_input"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "sets_and_gets_row_id"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "does_not_write_without_a_new_revision"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "writes_when_the_revision_changes"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "does_not_rewrite_an_already_persisted_revision"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "serializes_saves_and_persists_mutations_during_write"
-        },
-        {
-          "file": "src/checkpoints/state_store.rs",
-          "test": "retains_unpersisted_revision_after_failed_write"
-        }
-      ],
-      "note": "17 个历史用例逐项核对并复用现有 Rust 断言；加强持久化字节、写次数和并发写入验证。平台实跑结果另行记录。",
       "source_hash": "fe32d321dae52b9ad280bc982ae632fba76ff40d9cbd8dc3c2e6683ea2365005",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Frozen historical source exact assertions rechecked against native tests; latest current-main fragment is separate. No source-hash substitution. Linux actual only; JS Error object reference is native stable failure-value contract, not Node runtime requirement.",
       "cases": [
         {
           "source": {
@@ -11897,7 +11828,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "load 后未知输入返回空状态",
+          "behavior": "Actual native load missing initial file yields exact empty InputState for unknown id.",
           "platforms": [
             "linux",
             "macos",
@@ -11908,7 +11839,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "starts_with_empty_state"
+                "test": "tests::starts_with_empty_state"
               }
             ]
           }
@@ -11924,7 +11855,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "保存 offset=100、rowId=5 后重建实例得到相同状态，并校验文件字节",
+          "behavior": "Actual atomic save writes exact100 offset/5 rowid and independent new store load returns identical fields.",
           "platforms": [
             "linux",
             "macos",
@@ -11935,7 +11866,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "persists_state_across_save_load"
+                "test": "tests::persists_state_across_save_load"
               }
             ]
           }
@@ -11951,7 +11882,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "不存在的文件加载为空状态",
+          "behavior": "Actual nonexistent pathname load is graceful and unknown state empty.",
           "platforms": [
             "linux",
             "macos",
@@ -11962,7 +11893,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "handles_missing_file"
+                "test": "tests::handles_missing_file"
               }
             ]
           }
@@ -11978,7 +11909,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "损坏 JSON 加载为空状态",
+          "behavior": "Actual not-json bytes load gracefully to empty state.",
           "platforms": [
             "linux",
             "macos",
@@ -11989,7 +11920,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "handles_corrupt_json"
+                "test": "tests::handles_corrupt_json"
               }
             ]
           }
@@ -12005,7 +11936,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "未知 ID 的 get 返回空状态",
+          "behavior": "Actual loaded store unknown nonexistent id returns empty state.",
           "platforms": [
             "linux",
             "macos",
@@ -12016,7 +11947,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "get_returns_empty_state_for_unknown_id"
+                "test": "tests::get_returns_empty_state_for_unknown_id"
               }
             ]
           }
@@ -12032,7 +11963,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "set 后 get 返回 offset=42",
+          "behavior": "Actual set x offset42 then get lastOffset42.",
           "platforms": [
             "linux",
             "macos",
@@ -12043,7 +11974,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "sets_and_retrieves_state"
+                "test": "tests::sets_and_retrieves_state"
               }
             ]
           }
@@ -12059,7 +11990,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "更新 offset=30 时保留原 rowId=20",
+          "behavior": "Actual initial offset10,rowid20, patch offset30 preserves rowid20.",
           "platforms": [
             "linux",
             "macos",
@@ -12070,7 +12001,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "updates_partial_state_without_losing_fields"
+                "test": "tests::updates_partial_state_without_losing_fields"
               }
             ]
           }
@@ -12086,7 +12017,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "修改调用方副本的 offset 不影响存储的 offset=10 和 extra",
+          "behavior": "Actual independent owned state copy: original offset10+foo/bar stored, original changed999 cannot change store10; extra remainsfoo/bar.",
           "platforms": [
             "linux",
             "macos",
@@ -12097,7 +12028,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "set_stores_an_independent_copy"
+                "test": "tests::set_stores_an_independent_copy"
               }
             ]
           }
@@ -12113,7 +12044,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "未知输入 offset 默认 0",
+          "behavior": "Actual unknown input getOffset returns0.",
           "platforms": [
             "linux",
             "macos",
@@ -12124,7 +12055,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "get_offset_returns_zero_for_unknown_input"
+                "test": "tests::get_offset_returns_zero_for_unknown_input"
               }
             ]
           }
@@ -12140,7 +12071,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "set_offset 后读得 256",
+          "behavior": "Actual input-a setOffset256/getOffset256.",
           "platforms": [
             "linux",
             "macos",
@@ -12151,7 +12082,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "sets_and_gets_offset"
+                "test": "tests::sets_and_gets_offset"
               }
             ]
           }
@@ -12167,7 +12098,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "未知输入 rowId 默认 0",
+          "behavior": "Actual unknown input getRowId returns0.",
           "platforms": [
             "linux",
             "macos",
@@ -12178,7 +12109,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "get_row_id_returns_zero_for_unknown_input"
+                "test": "tests::get_row_id_returns_zero_for_unknown_input"
               }
             ]
           }
@@ -12194,7 +12125,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "set_row_id 后读得 42",
+          "behavior": "Actual input-b setRowId42/getRowId42.",
           "platforms": [
             "linux",
             "macos",
@@ -12205,7 +12136,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "sets_and_gets_row_id"
+                "test": "tests::sets_and_gets_row_id"
               }
             ]
           }
@@ -12221,7 +12152,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "没有 revision 变化时 save 不创建文件",
+          "behavior": "Actual load then no-op save leaves file nonexistent.",
           "platforms": [
             "linux",
             "macos",
@@ -12232,7 +12163,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "does_not_write_without_a_new_revision"
+                "test": "tests::does_not_write_without_a_new_revision"
               }
             ]
           }
@@ -12248,7 +12179,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "revision 变化后 save 创建文件",
+          "behavior": "Actual mutation revision offset1 then save creates file.",
           "platforms": [
             "linux",
             "macos",
@@ -12259,7 +12190,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "writes_when_the_revision_changes"
+                "test": "tests::writes_when_the_revision_changes"
               }
             ]
           }
@@ -12275,7 +12206,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "连续两次 save 的实际写次数为 1",
+          "behavior": "Actual atomic-write observer sees exactly1 call through save and repeated unchanged save.",
           "platforms": [
             "linux",
             "macos",
@@ -12286,7 +12217,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "does_not_rewrite_an_already_persisted_revision"
+                "test": "tests::does_not_rewrite_an_already_persisted_revision"
               }
             ]
           }
@@ -12302,7 +12233,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "活动写入时新增输入并更新 offset；两个 save 最终持久化全部变化，写次数=2、最大并发=1",
+          "behavior": "Actual write hook+real atomic file writes: save1 blocked, input-a patched2/input-b rowid3 then concurrent save joins; exact2 writes, max active1, exact captured snapshots1 then2/3 and disk2/3.",
           "platforms": [
             "linux",
             "macos",
@@ -12313,7 +12244,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "serializes_saves_and_persists_mutations_during_write"
+                "test": "tests::serializes_saves_and_persists_mutations_during_write"
               }
             ]
           }
@@ -12329,7 +12260,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "第一次写失败返回原因；第二次重试仍写入 offset=10，总调用次数=2",
+          "behavior": "Actual first write failure returns exact reason; retry atomic save succeeds with input-a10, exact attempted writecount2.",
           "platforms": [
             "linux",
             "macos",
@@ -12340,7 +12271,7 @@
             "tests": [
               {
                 "file": "src/checkpoints/state_store.rs",
-                "test": "retains_unpersisted_revision_after_failed_write"
+                "test": "tests::retains_unpersisted_revision_after_failed_write"
               }
             ]
           }
@@ -38346,7 +38277,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "实际70个不同未完成session：显式flush前buffer恰64、最旧6个已逐个1条被转换，flush后共70；保留旧>=6断言并加强避免无界实现也因最终flush误通过。 下一批草案未Cargo，待中央运行；platforms仅适用范围。",
+          "behavior": "原70个abandoned single输入及原flush后>=6断言全部保留。源代码该>=6是在显式flush之后，并未要求预flush6；Native额外加强对齐实际source soft65/预flush最旧5，最终完整70>=6。不是把原6改5；旧Native预flush64/6额外断言已移除以免违背原runtime65合同。",
           "platforms": [
             "linux",
             "macos",
@@ -38357,7 +38288,7 @@
             "tests": [
               {
                 "file": "src/flushers/otlp_trace_flusher.rs",
-                "test": "legacy_concurrent_subagent_contracts::seventy_unfinished_sessions_force_out_the_six_oldest_before_explicit_flush"
+                "test": "seventy_unfinished_sessions_keep_soft65_and_force_five_oldest_before_final_flush"
               }
             ]
           }
@@ -39025,7 +38956,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "真实旧12byte buffer在public send触发的同session successor到达时移除，真实converter锁仍阻塞时removed1/12可见、converter0、public send未完成且next未接纳；解锁await返回后next34为唯一pending，flush后removed2/46、两条真实业务记录全保留且重复flush不重复计费。f84将该SignalB fixture从Codex明确改成Claude，Codex不抢占负控仍保留。JS fire-and-forget可在send返回前后观察next这一API观测点由Rust显式await背压替代，不宣称返回时点相同；保留原先private lifecycle回归并新增公共API证明。",
+          "behavior": "已对齐原实际可观察合同：冻结f84 TypeScript真实InputManager→Multi→OTLP oracle证明preempt旧export未完成时dispatch返回、next resident1且inFlight1、shutdown等待；Native同链真实0/1红→绿，公开send原12移除/next34在export gate未完成前已接纳，flush最终0且两记录完整。普通任务由外层flusher拥有JoinSet，Inner仅Weak scope；取消shutdown等待后两条仍最终export；最后owner Drop实际loopback HTTP EOF、含idle时Inner弱引用消失；普通失败真实failed-log/counters可见。Codex/Doub不进入普通scope，其terminal batch仍等待真实export后ACK，取消后freshjournal恢复。ef原SignalB Codex fixture由f84明确改Claude，原Codex并发不抢占负控保留，不用语言差异或未经授权更正代替原assert。",
           "platforms": [
             "linux",
             "macos",
@@ -39036,11 +38967,27 @@
             "tests": [
               {
                 "file": "src/flushers/otlp_trace_flusher.rs",
-                "test": "legacy_runtime_contracts::removal_accounting_is_visible_before_the_blocked_conversion_settles"
+                "test": "public_send_accepts_successor_before_owned_preemption_export_and_flush_joins"
               },
               {
-                "file": "src/flushers/otlp_trace_flusher.rs",
-                "test": "legacy_runtime_contracts::public_send_observes_removal_before_conversion_and_preserves_backpressure"
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "collector_preemption_returns_with_owned_export_and_shutdown_joins_through_real_manager_and_multi"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "cancelling_shutdown_wait_keeps_previously_accepted_ordinary_worker_owned_until_retry"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_last_flusher_drop_closes_real_loopback_request_with_idle_enabled"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_failure_keeps_original_failed_log_and_endpoint_counters_visible"
+              },
+              {
+                "file": "src/flushers/otlp_runtime_main_tests.rs",
+                "test": "ordinary_owned_export_supports_concurrent_flush_and_shutdown_waiters"
               }
             ]
           }
@@ -39055,7 +39002,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "原70个Codex不同session各1byte，保留当前有意修复hard64：pending64/removed6，并断言真实buffers64；baseline和f84 main仍写旧65/5，逐子断言明确更正off-by-one，不退役case。flush实际Capture converter收到合计70原business records，累计removed70/bytes70，多次空flush完全不变，fresh7仍removed70/pending7。",
+          "behavior": "真实恢复ef/f84原single先裁剪后append合同：70条后65pending/5removed，flush后70removed/70bytes且真实70records完整，fresh7仍累计70；原所有精确数字保留。",
           "platforms": [
             "linux",
             "macos",
@@ -39066,7 +39013,7 @@
             "tests": [
               {
                 "file": "src/flushers/otlp_trace_flusher.rs",
-                "test": "legacy_runtime_contracts::cumulative_counters_keep_every_record_after_the_intentional_hard_64_eviction_fix"
+                "test": "cumulative_counters_preserve_original_single_send_soft65_then_flush_all_seventy_records"
               }
             ]
           }
@@ -39081,7 +39028,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "原70个不同agent维度各1byte，诊断snapshot限制64，真实buffer硬限64（原baseline与main旧65需按已授权off-by-one修正）；flush真实buffer0、诊断仍64，实际Capture converter接收全部70条business records，诊断限维不删除业务记录。",
+          "behavior": "原70维度输入后snapshot64而实际buffers65，flush后buffers0/diagnostics64，真实70businessrecords全部被转换；已对齐原65，不再声称hard64经用户批准。",
           "platforms": [
             "linux",
             "macos",
@@ -39099,7 +39046,7 @@
         }
       ],
       "rust": [],
-      "note": "All six immutable declarations audited at the native public API/lifecycle boundary. Historical memoryUsage spy is replaced by the actual scoped allocation regression; hard64/6 retains the previously authorized eviction correction and all70 business rows. f84 explicitly replaces Codex SignalB fixtures with Claude; original Codex nonpreemption remains a negative control. Rust async send awaits real converter backpressure: the JS fire-and-forget next-buffer observation point is explicitly replaced, not reported as identical call timing. Actual public-send blocked-converter proof confirms removal12 before settling, then successor34 and final46 without a second state or lost record. Linux focused10 passed, earlier whole-workspace3199/0/5 includes existing six plus allocation regression; new public proof executes separately before final batch validation."
+      "note": "All exact source declarations now complete; original single temporary65/batch final64 capacity and ordinary preemption earlyreturn/ownedshutdown lifecycle aligned. No source business declaration retired, no unsupported correction claims, no Codex/Doub ACK/cancel guarantee weakened. Actual Linux fixedglibc2.34/Rust1.99.1; Windows/macOS listed applicability, Native pending."
     },
     {
       "legacy": "tests/unit/flushers/otlp-trace-flusher/runtime-stage-outcome.test.ts",

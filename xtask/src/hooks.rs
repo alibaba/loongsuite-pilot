@@ -124,6 +124,9 @@ fn powershell(hook: &Hook) -> String {
     let mut script = format!("$ErrorActionPreference = 'Stop'\n$EmptyResult = '{empty}'\n");
     script.push_str("# Resolve signed built-in modules by their exact PSHOME manifests. Short-name\n# autoload can stall in isolated Windows PowerShell 5.1 environments.\ntry {\n    Import-Module -Name ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop\n    Import-Module -Name ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop\n} catch {\n    try { Microsoft.PowerShell.Utility\\Write-Error '[loongsuite-pilot] built-in PowerShell modules unavailable' -ErrorAction Continue } catch {}\n    if ($EmptyResult) { $EmptyResult }\n    exit 0\n}\n");
     script.push_str(&format!("$NativeArgs = @('hook-process', '{agent}')\n"));
+    if matches!(agent, "qoder" | "qoder-cn") {
+        script.push_str("$NativeArgs += '--wakeup-only'\n");
+    }
     match hook.mode {
         Mode::Payload => {}
         Mode::Event(allowed) => {
@@ -171,6 +174,9 @@ fn shell(hook: &Hook) -> String {
         ""
     };
     let mut script = format!("#!/usr/bin/env bash\n{bootstrap}set -u\nEMPTY_RESULT='{empty}'\nNATIVE_ARGS=('hook-process' '{agent}')\n");
+    if matches!(agent, "qoder" | "qoder-cn") {
+        script.push_str("NATIVE_ARGS+=('--wakeup-only')\n");
+    }
     match hook.mode {
         Mode::Payload => {}
         Mode::Event(allowed) => {

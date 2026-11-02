@@ -103,6 +103,7 @@ pub(crate) fn command() -> Command {
                 .arg(Arg::new("payload-path").requires("event"))
                 .arg(value("agent-id"))
                 .arg(value("log-prefix"))
+                .arg(flag("wakeup-only"))
                 .arg(flag("retry"))
                 .arg(value("transcript"))
                 .arg(value("session"))

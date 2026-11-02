@@ -189,8 +189,71 @@ struct OtlpState {
     created_exporters: Vec<ExporterOpts>,
 }
 
+// The owning scope lives outside Inner: worker→Inner→Weak(scope) has no
+// strong cycle. Dropping the last flusher drops JoinSet and aborts its requests.
+#[derive(Default)]
+struct OrdinaryFlushScope {
+    tasks: Mutex<tokio::task::JoinSet<Result<(), FlushError>>>,
+    // JoinSet has one join waker. Concurrent flush/shutdown callers must not
+    // overwrite each other's waiter; cancellation releases this owned guard.
+    draining: tokio::sync::Mutex<()>,
+}
+impl OrdinaryFlushScope {
+    fn report(result: Result<Result<(), FlushError>, tokio::task::JoinError>) {
+        let error = match result {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => error.to_string(),
+            Err(error) => format!("ordinary trace worker failed: {error}"),
+        };
+        create_logger("otlp-trace-flusher").error(&error, None);
+    }
+    fn spawn(
+        &self,
+        job: impl std::future::Future<Output = Result<(), FlushError>> + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+        while let Some(result) = tasks.try_join_next() {
+            Self::report(result);
+        }
+        let (finished, waiting) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let result = job.await;
+            let _ = finished.send(());
+            result
+        });
+        waiting
+    }
+    async fn drain(&self) {
+        let _draining = self.draining.lock().await;
+        while let Some(result) = std::future::poll_fn(|cx| {
+            self.tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .poll_join_next(cx)
+        })
+        .await
+        {
+            Self::report(result);
+        }
+    }
+}
+
 pub struct OtlpTraceFlusher {
     inner: Arc<OtlpInner>,
+    ordinary_flushes: Arc<OrdinaryFlushScope>,
+}
+impl Drop for OtlpTraceFlusher {
+    fn drop(&mut self) {
+        if let Some(idle) = self
+            .inner
+            .idle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            idle.abort();
+        }
+    }
 }
 
 impl std::fmt::Debug for OtlpTraceFlusher {
@@ -242,7 +305,22 @@ impl Drop for OtlpBatch {
 #[cfg(test)]
 type TestConversionClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+#[cfg(test)]
+type TestCodexPreparation = Arc<
+    dyn Fn(
+            Vec<AgentActivityEntry>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), FlushError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 struct OtlpInner {
+    ordinary_flushes: std::sync::Weak<OrdinaryFlushScope>,
+    #[cfg(test)]
+    test_codex_preparation: Mutex<Option<TestCodexPreparation>>,
+    #[cfg(test)]
+    test_codex_startup_replay: Mutex<Option<TestCodexPreparation>>,
     codex_journal: Mutex<Option<CodexJournalContext>>,
     doubao_journal: Mutex<Option<DoubaoJournalContext>>,
     doubao_restore: tokio::sync::OnceCell<()>,
@@ -358,12 +436,18 @@ impl OtlpTraceFlusher {
             );
         }
         let data_dir = cfg.data_dir.clone().unwrap_or_else(default_data_dir);
+        let ordinary_flushes = Arc::new(OrdinaryFlushScope::default());
         let inner = Arc::new(OtlpInner {
+            ordinary_flushes: Arc::downgrade(&ordinary_flushes),
             codex_journal: Mutex::new(None),
             doubao_journal: Mutex::new(None),
             doubao_restore: tokio::sync::OnceCell::new(),
             journal_restore: tokio::sync::OnceCell::new(),
             acceptance: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            test_codex_preparation: Mutex::new(None),
+            #[cfg(test)]
+            test_codex_startup_replay: Mutex::new(None),
             enrichers: {
                 let runner =
                     SpanEnricherRunner::new(cfg.span_enricher_paths.as_deref().unwrap_or(&[]))?;
@@ -442,7 +526,10 @@ impl OtlpTraceFlusher {
             .join(", ");
         create_logger("otlp-trace-flusher")
             .info(&format!("OTLP trace flusher initialized → {names}"), None);
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            ordinary_flushes,
+        })
     }
 
     pub fn with_codex_journal(
@@ -481,6 +568,57 @@ impl OtlpTraceFlusher {
             prepare: Arc::new(prepare),
         });
         self
+    }
+
+    async fn accept_entries(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        logical_bytes: Option<Vec<f64>>,
+        single: bool,
+    ) -> Result<(), FlushError> {
+        self.inner.ensure_started().await?;
+        let mut batch = Some(OtlpBatch::new(&self.inner));
+        let sizes = logical_bytes.filter(|sizes| sizes.len() == entries.len());
+        {
+            // Keep Doubao's existing ownership gate. Codex preparation must
+            // overlap other batches/single sends, with durable append preceding
+            // the serialized admission step and batch_depth deferring terminals.
+            let has_doubao = entries
+                .iter()
+                .any(|entry| normalize_agent_type(&entry.agent_type) == "doubao-work");
+            let _doubao_acceptance = if has_doubao {
+                Some(self.inner.acceptance.lock().await)
+            } else {
+                None
+            };
+            self.inner.persist_codex_entries(&entries).await?;
+            self.inner.persist_doubao_entries(&entries).await?;
+            let _codex_acceptance = if !has_doubao
+                && entries
+                    .iter()
+                    .any(|entry| normalize_agent_type(&entry.agent_type) == "codex")
+            {
+                Some(self.inner.acceptance.lock().await)
+            } else {
+                None
+            };
+            // Main's public single call leaves preparation scope before
+            // append: trim existing buffers first, protecting this continuation.
+            if single {
+                drop(batch.take());
+            }
+            for (index, entry) in entries.into_iter().enumerate() {
+                self.inner
+                    .send_entry(entry, sizes.as_ref().map(|sizes| sizes[index]))
+                    .await?;
+            }
+        }
+        drop(batch);
+        if single {
+            self.inner.flush_completed().await
+        } else {
+            self.inner.finish_batch().await
+        }
     }
 
     pub fn endpoint_counters(&self) -> HashMap<String, OtlpEndpointCounter> {
@@ -547,7 +685,7 @@ impl BaseFlusher for OtlpTraceFlusher {
         entry: AgentActivityEntry,
         logical_bytes: Option<f64>,
     ) -> Result<(), FlushError> {
-        self.send_batch(vec![entry], logical_bytes.map(|bytes| vec![bytes]))
+        self.accept_entries(vec![entry], logical_bytes.map(|bytes| vec![bytes]), true)
             .await
     }
 
@@ -556,30 +694,7 @@ impl BaseFlusher for OtlpTraceFlusher {
         entries: Vec<AgentActivityEntry>,
         logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError> {
-        self.inner.ensure_started().await?;
-        let batch = OtlpBatch::new(&self.inner);
-        let sizes = logical_bytes.filter(|sizes| sizes.len() == entries.len());
-        {
-            let _acceptance = if entries.iter().any(|entry| {
-                matches!(
-                    normalize_agent_type(&entry.agent_type).as_str(),
-                    "codex" | "doubao-work"
-                )
-            }) {
-                Some(self.inner.acceptance.lock().await)
-            } else {
-                None
-            };
-            self.inner.persist_codex_entries(&entries).await?;
-            self.inner.persist_doubao_entries(&entries).await?;
-            for (index, entry) in entries.into_iter().enumerate() {
-                self.inner
-                    .send_entry(entry, sizes.as_ref().map(|sizes| sizes[index]))
-                    .await?;
-            }
-        }
-        drop(batch);
-        self.inner.finish_batch().await
+        self.accept_entries(entries, logical_bytes, false).await
     }
 
     async fn flush(&self) -> Result<(), FlushError> {
@@ -601,7 +716,9 @@ impl BaseFlusher for OtlpTraceFlusher {
                 buffer.completed = true;
             }
         }
-        self.inner.flush_completed().await
+        let completed = self.inner.flush_completed().await;
+        self.ordinary_flushes.drain().await;
+        completed
     }
 
     async fn shutdown(&self) -> Result<(), FlushError> {
@@ -672,6 +789,13 @@ impl OtlpInner {
         };
         self.journal_restore
             .get_or_try_init(|| async {
+                #[cfg(test)]
+                {
+                    let hook = self.test_codex_startup_replay.lock().unwrap().clone();
+                    if let Some(hook) = hook {
+                        hook(Vec::new()).await?;
+                    }
+                }
                 let replay = context
                     .journal
                     .load(None)
@@ -716,6 +840,15 @@ impl OtlpInner {
         self: &Arc<Self>,
         entries: &[AgentActivityEntry],
     ) -> Result<(), FlushError> {
+        // The historical tests gate the private preparation boundary before any
+        // journal lock; this seam is absent from production builds.
+        #[cfg(test)]
+        {
+            let hook = self.test_codex_preparation.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(entries.to_vec()).await?;
+            }
+        }
         let Some(context) = self.codex_context() else {
             return Ok(());
         };
@@ -902,10 +1035,13 @@ impl OtlpInner {
 
     async fn finish_batch(self: &Arc<Self>) -> Result<(), FlushError> {
         self.flush_completed().await?;
-        self.trim_turn_buffers().await
+        self.trim_turn_buffers(None).await
     }
 
-    async fn trim_turn_buffers(self: &Arc<Self>) -> Result<(), FlushError> {
+    async fn trim_turn_buffers(
+        self: &Arc<Self>,
+        incoming_key: Option<&str>,
+    ) -> Result<(), FlushError> {
         let journaled = self.codex_context().is_some();
         let evicted = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -916,7 +1052,7 @@ impl OtlpInner {
             let mut candidates: Vec<_> = state
                 .buffers
                 .iter()
-                .filter(|(_, buffer)| !buffer.completed)
+                .filter(|(key, buffer)| !buffer.completed && incoming_key != Some(key.as_str()))
                 .map(|(key, buffer)| (key.clone(), buffer.last_activity_ms))
                 .collect();
             candidates.sort_by_key(|(_, activity)| *activity);
@@ -933,7 +1069,7 @@ impl OtlpInner {
                 self.record_removal(&buffer);
             } else {
                 buffer.completed = true;
-                self.finish_buffer(buffer, false).await?;
+                self.trigger_ordinary_flush(buffer, false).await?;
             }
         }
         Ok(())
@@ -1003,8 +1139,9 @@ impl OtlpInner {
             buffers
         };
         for buffer in preempted {
-            self.finish_buffer(buffer, false).await?;
+            self.trigger_ordinary_flush(buffer, false).await?;
         }
+        self.trim_turn_buffers(Some(&key)).await?;
         let ready = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
             let now = now_ms();
@@ -1100,16 +1237,57 @@ impl OtlpInner {
             }
         };
         if let Some(buffer) = ready {
-            self.finish_buffer(buffer, true).await?;
+            self.trigger_ordinary_flush(buffer, true).await?;
         }
         Ok(())
     }
 
-    async fn finish_buffer(
+    async fn trigger_ordinary_flush(
         self: &Arc<Self>,
-        mut buffer: TurnBuffer,
+        buffer: TurnBuffer,
         mark_flushed: bool,
     ) -> Result<(), FlushError> {
+        if matches!(buffer.agent_type.as_str(), "codex" | "doubao-work") {
+            return self.finish_buffer(buffer, mark_flushed).await;
+        }
+        let Some(scope) = self.ordinary_flushes.upgrade() else {
+            return self.finish_buffer(buffer, mark_flushed).await;
+        };
+        let waiting = self
+            .start_ordinary_export(&scope, buffer, mark_flushed)
+            .await;
+        if waiting.is_some() {
+            // The pending task is already owned before this scheduling point.
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+
+    async fn start_ordinary_export(
+        self: &Arc<Self>,
+        scope: &OrdinaryFlushScope,
+        buffer: TurnBuffer,
+        mark_flushed: bool,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let buffer = self.prepare_buffer_export(buffer, mark_flushed);
+        let inner = Arc::clone(self);
+        let mut exporting = Box::pin(async move { inner.export_buffer(buffer).await });
+        // JS async functions execute up to their first suspension immediately.
+        // Drive that same initial phase before transferring the pending export
+        // into the flusher-owned scope; never detach a request from its owner.
+        use std::future::Future;
+        let first =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(exporting.as_mut().poll(cx))).await;
+        match first {
+            std::task::Poll::Ready(result) => {
+                OrdinaryFlushScope::report(Ok(result));
+                None
+            }
+            std::task::Poll::Pending => Some(scope.spawn(exporting)),
+        }
+    }
+
+    fn prepare_buffer_export(&self, mut buffer: TurnBuffer, mark_flushed: bool) -> TurnBuffer {
         let doubao = buffer.agent_type == "doubao-work";
         if mark_flushed && !doubao {
             self.state
@@ -1128,6 +1306,20 @@ impl OtlpInner {
                 }
             }
         }
+        buffer
+    }
+
+    async fn finish_buffer(
+        self: &Arc<Self>,
+        buffer: TurnBuffer,
+        mark_flushed: bool,
+    ) -> Result<(), FlushError> {
+        let buffer = self.prepare_buffer_export(buffer, mark_flushed);
+        self.export_buffer(buffer).await
+    }
+
+    async fn export_buffer(self: &Arc<Self>, buffer: TurnBuffer) -> Result<(), FlushError> {
+        let doubao = buffer.agent_type == "doubao-work";
         let exported = self
             .convert_and_export(&buffer.agent_type, &buffer.records)
             .await;
@@ -1208,11 +1400,33 @@ impl OtlpInner {
             completed
         };
         let mut failure = None;
+        let mut durable = Vec::new();
+        let mut waiting = Vec::new();
+        let scope = self.ordinary_flushes.upgrade();
+        // Transfer ordinary records before the first cancellable wait. These
+        // completion signals describe task lifetime only, never transport ACK.
         for buffer in completed {
+            if !matches!(buffer.agent_type.as_str(), "codex" | "doubao-work") {
+                if let Some(scope) = &scope {
+                    if let Some(done) = self.start_ordinary_export(scope, buffer, false).await {
+                        waiting.push(done);
+                    }
+                    continue;
+                }
+            }
+            durable.push(buffer);
+        }
+        for buffer in durable {
             if let Err(error) = self.finish_buffer(buffer, false).await {
                 if failure.is_none() {
                     failure = Some(error);
                 }
+            }
+        }
+        for done in waiting {
+            if done.await.is_err() {
+                create_logger("otlp-trace-flusher")
+                    .error("ordinary trace worker did not complete", None);
             }
         }
         if let Some(error) = failure {
@@ -1259,7 +1473,7 @@ impl OtlpInner {
                     continue;
                 }
                 buffer.completed = true;
-                if let Err(error) = self.finish_buffer(buffer, true).await {
+                if let Err(error) = self.trigger_ordinary_flush(buffer, true).await {
                     create_logger("otlp-trace-flusher").warn(&error.to_string(), None);
                 }
             }
@@ -5757,16 +5971,16 @@ mod legacy_concurrent_subagent_contracts {
     }
 
     #[tokio::test]
-    async fn seventy_unfinished_sessions_force_out_the_six_oldest_before_explicit_flush() {
+    async fn seventy_unfinished_sessions_keep_soft65_and_force_five_oldest_before_final_flush() {
         let (_root, flusher, capture) = setup();
         for index in 0..70 {
             let hex = format!("{index:08x}");
             let trace = format!("{hex}2f3577b34da6a3ce929d0e0e4736")[..32].to_string();
             send(&flusher,serde_json::json!({"event.name":"other","gen_ai.turn.id":format!("s{index}:t1"),"gen_ai.session.id":format!("s{index}"),"trace_id":trace})).await;
         }
-        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 64);
+        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 65);
         let calls = capture.calls();
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 5);
         for (index, records) in calls.iter().enumerate() {
             assert_eq!(records.len(), 1);
             assert_eq!(
@@ -6323,7 +6537,7 @@ mod legacy_runtime_contracts {
     }
 
     #[tokio::test]
-    async fn public_send_observes_removal_before_conversion_and_preserves_backpressure() {
+    async fn public_send_accepts_successor_before_owned_preemption_export_and_flush_joins() {
         let (_root, flusher, capture) = setup();
         let flusher = Arc::new(flusher);
         flusher
@@ -6332,52 +6546,41 @@ mod legacy_runtime_contracts {
             .unwrap();
         let service = flusher.endpoint_service_name(0, "claude-code");
         let key = convert_state_key("claude-code", &service, &Map::new());
-        // The same real converter gate used by the historical promise fixture.
-        // Exercise the public send API; do not remove a buffer in the test.
         let gate = flusher.inner.convert_lock(&key).lock_owned().await;
-        let worker = flusher.clone();
-        let sending = tokio::spawn(async move {
-            worker
-                .send(record("next", "claude-code", "session"), Some(34.0))
+        let out = flusher.clone();
+        let mut sending = tokio::spawn(async move {
+            out.send(record("next", "claude-code", "session"), Some(34.0))
                 .await
         });
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while flusher.trace_runtime_snapshot()[0].removed_buffers_total == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert!(!sending.is_finished());
+        let result = tokio::time::timeout(Duration::from_secs(5), &mut sending).await;
+        let early = result.is_ok();
+        if let Ok(result) = result {
+            result.unwrap().unwrap();
+        }
+        let snapshot = flusher.trace_runtime_snapshot();
+        let out = flusher.clone();
+        let draining = tokio::spawn(async move { out.flush().await });
+        tokio::task::yield_now().await;
+        let drained_early = draining.is_finished();
         assert!(capture.calls().is_empty());
-        let blocked = &flusher.trace_runtime_snapshot()[0];
-        assert_eq!(blocked.removed_buffers_total, 1);
-        assert_eq!(blocked.removed_logical_bytes_total, 12.0);
-        assert_eq!(blocked.pending_buffers, 0);
-        assert_eq!(blocked.pending_records, 0);
-        // Rust awaits conversion instead of the JS fire-and-forget call timing.
-        // The successor is admitted after that real conversion settles.
         drop(gate);
-        sending.await.unwrap().unwrap();
-        let pending = &flusher.trace_runtime_snapshot()[0];
-        assert_eq!(pending.pending_buffers, 1);
-        assert_eq!(pending.pending_records, 1);
-        assert_eq!(pending.pending_logical_bytes, 34.0);
-        assert_eq!(pending.removed_logical_bytes_total, 12.0);
-        assert_eq!(capture.calls().iter().map(Vec::len).sum::<usize>(), 1);
-        flusher.flush().await.unwrap();
-        let complete = flusher.trace_runtime_snapshot();
-        assert_eq!(complete[0].pending_buffers, 0);
-        assert_eq!(complete[0].removed_buffers_total, 2);
-        assert_eq!(complete[0].removed_logical_bytes_total, 46.0);
+        if !early {
+            sending.await.unwrap().unwrap();
+        }
+        draining.await.unwrap().unwrap();
+        assert!(early);
+        assert!(!drained_early);
+        assert_eq!(snapshot[0].pending_buffers, 1);
+        assert_eq!(snapshot[0].pending_logical_bytes, 34.0);
+        assert_eq!(snapshot[0].removed_logical_bytes_total, 12.0);
+        assert_eq!(flusher.trace_runtime_snapshot()[0].pending_buffers, 0);
         assert_eq!(capture.calls().iter().map(Vec::len).sum::<usize>(), 2);
-        flusher.flush().await.unwrap();
-        assert_eq!(flusher.trace_runtime_snapshot(), complete);
         flusher.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn cumulative_counters_keep_every_record_after_the_intentional_hard_64_eviction_fix() {
+    async fn cumulative_counters_preserve_original_single_send_soft65_then_flush_all_seventy_records(
+    ) {
         let (_root, flusher, capture) = setup();
         for index in 0..70 {
             flusher
@@ -6393,9 +6596,9 @@ mod legacy_runtime_contracts {
                 .unwrap();
         }
         let row = &flusher.trace_runtime_snapshot()[0];
-        assert_eq!(row.pending_buffers, 64);
-        assert_eq!(row.removed_buffers_total, 6);
-        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 64);
+        assert_eq!(row.pending_buffers, 65);
+        assert_eq!(row.removed_buffers_total, 5);
+        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 65);
         flusher.flush().await.unwrap();
         let snapshot = flusher.trace_runtime_snapshot();
         assert_eq!(snapshot[0].removed_buffers_total, 70);
@@ -6430,7 +6633,7 @@ mod legacy_runtime_contracts {
                 .unwrap();
         }
         assert_eq!(flusher.trace_runtime_snapshot().len(), 64);
-        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 64);
+        assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 65);
         flusher.flush().await.unwrap();
         assert_eq!(flusher.inner.state.lock().unwrap().buffers.len(), 0);
         assert_eq!(flusher.trace_runtime_snapshot().len(), 64);
@@ -7675,3 +7878,15 @@ mod codex_native_turn_main_tests;
 #[cfg(test)]
 #[path = "qoder_turn_main_tests.rs"]
 mod qoder_turn_main_tests;
+
+#[cfg(test)]
+#[path = "otlp_failed_log_main_tests.rs"]
+mod failed_log_main_tests;
+
+#[cfg(test)]
+#[path = "otlp_runtime_main_tests.rs"]
+mod runtime_main_tests;
+
+#[cfg(test)]
+#[path = "otlp_dedup_main_tests.rs"]
+mod dedup_main_tests;

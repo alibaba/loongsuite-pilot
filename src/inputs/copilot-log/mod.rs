@@ -768,3 +768,6 @@ mod tests {
         assert_eq!(policy["historyStartTimeMs"], 0);
     }
 }
+
+#[cfg(test)]
+mod final_spans_main_tests;

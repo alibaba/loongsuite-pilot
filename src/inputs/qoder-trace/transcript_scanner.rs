@@ -91,8 +91,15 @@ pub struct Line {
     pub row: Option<Value>,
     pub quarantine: Option<&'static str>,
 }
+#[derive(Clone, Debug)]
+pub struct ReadObservation {
+    pub bytes: u64,
+    pub requested: u64,
+    pub duration_ms: f64,
+}
 #[derive(Default, Clone, Debug)]
 pub struct ScanMetrics {
+    pub reads: Vec<ReadObservation>,
     pub bytes_read: u64,
     pub records_parsed: u64,
     pub source_files_opened: u64,
@@ -149,7 +156,13 @@ fn read(
         ));
     }
     f.seek(SeekFrom::Start(at))?;
+    let started = std::time::Instant::now();
     let n = f.read(body)?;
+    budget.metrics.reads.push(ReadObservation {
+        bytes: n as u64,
+        requested: body.len() as u64,
+        duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+    });
     budget.remaining -= n as i64;
     budget.metrics.bytes_read += n as u64;
     Ok(n)

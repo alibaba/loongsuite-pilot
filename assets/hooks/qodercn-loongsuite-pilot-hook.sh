@@ -6,6 +6,7 @@ set +o posix
 set -u
 EMPTY_RESULT=''
 NATIVE_ARGS=('hook-process' 'qoder-cn')
+NATIVE_ARGS+=('--wakeup-only')
 AGENT_ID="${1:-qoder-cn}"
 NATIVE_ARGS+=('--agent-id' "$AGENT_ID" '--log-prefix' "$AGENT_ID")
 HOOK_DIR="${BASH_SOURCE[0]%/*}"

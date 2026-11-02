@@ -123,7 +123,10 @@ impl QoderLegacyHookReader {
                 && before.size >= tail.position
         });
         if let Some(cached) = tail.as_ref() {
-            if !cached.snapshot.same_stamp(&before) {
+            // Size is an independent mutation signal. Windows can coalesce the
+            // metadata timestamps of rapid truncate/rewrite/grow operations.
+            // Reusing a partial then still requires the same bounded anchors.
+            if before.size != cached.snapshot.size || !cached.snapshot.same_stamp(&before) {
                 let mut append = before.size > cached.snapshot.size;
                 if append && !cached.witness.is_empty() {
                     let mut bytes = vec![0; cached.witness.len()];

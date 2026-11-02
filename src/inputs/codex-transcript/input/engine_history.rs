@@ -4828,6 +4828,27 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
 ) {
     use crate::inputs::base::WorkspacePolicy;
     use crate::inputs::codex_transcript::CodexMultimodalOptions;
+    // run_cycle may join a watcher cycle whose file snapshot predates a write.
+    // Observe real state, sharing the existing real-lifecycle fixture's five-
+    // second budget across every scan boundary in each original matrix case.
+    async fn observe_cycle_boundary(
+        f: &Fixture,
+        deadline: tokio::time::Instant,
+        label: &str,
+        ready: impl Fn() -> bool,
+    ) {
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                f.input.run_cycle().await;
+                if ready() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("native privacy fixture did not observe {label}"));
+    }
     let mut privacy_failures = Vec::new();
     for child_terminal in [true, false] {
         for (blocked_parent, blocked_child) in [(true, false), (false, false), (false, true)] {
@@ -4881,6 +4902,7 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
                 });
                 target.lock().expect("output").extend(filtered);
             });
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             f.input.start().await.expect("real startup before fixtures");
             let mut parent_lines = NATIVE_PARENT
                 .lines()
@@ -4890,7 +4912,10 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
             let pp =
                 write_native_fixture(&f, NATIVE_PARENT_NAME, &(parent_lines.join("\n") + "\n"))
                     .await;
-            f.input.run_cycle().await;
+            observe_cycle_boundary(&f, deadline, "parent spawn registration", || {
+                f.input.subagent_link_snapshot().detected_spawns >= 4
+            })
+            .await;
             assert_eq!(f.input.subagent_link_snapshot().detected_spawns, 4);
             let child = NATIVE_CHILDREN[0];
             let mut child_records = child
@@ -4922,7 +4947,15 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
                 .join("\n")
                 + "\n";
             let cp = write_native_fixture(&f, child.0, &text).await;
-            f.input.run_cycle().await;
+            let child_prefix_size = std::fs::metadata(&cp)
+                .expect("published child prefix")
+                .len() as i64;
+            observe_cycle_boundary(&f, deadline, "new child checkpoint", || {
+                f.engine()
+                    .read_checkpoint(f.rt(), &f.engine().state_key(&cp))
+                    .is_some_and(|state| state.scan_offset >= child_prefix_size)
+            })
+            .await;
             let before = f.checkpoint(&cp);
             if child_terminal {
                 assert!(before.active_turn.is_none() && before.scan_offset > 0);
@@ -4934,7 +4967,17 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
                 assert!(responses_for(&f.records(), child.2).is_empty());
             }
             f.append(&pp, &(parent_terminal + "\n")).await;
-            f.input.run_cycle().await;
+            let parent_end = std::fs::metadata(&pp)
+                .expect("published parent terminal")
+                .len() as i64;
+            observe_cycle_boundary(&f, deadline, "parent terminal checkpoint", || {
+                f.engine()
+                    .read_checkpoint(f.rt(), &f.engine().state_key(&pp))
+                    .is_some_and(|state| {
+                        state.scan_offset >= parent_end && state.active_turn.is_none()
+                    })
+            })
+            .await;
             assert!(f.checkpoint(&pp).active_turn.is_none());
             if !child_terminal {
                 assert!(
@@ -4942,7 +4985,17 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
                     "parent must not force child"
                 );
                 f.append(&cp, &(child_end + "\n")).await;
-                f.input.run_cycle().await;
+                let child_end = std::fs::metadata(&cp)
+                    .expect("published child terminal")
+                    .len() as i64;
+                observe_cycle_boundary(&f, deadline, "child terminal checkpoint", || {
+                    f.engine()
+                        .read_checkpoint(f.rt(), &f.engine().state_key(&cp))
+                        .is_some_and(|state| {
+                            state.scan_offset >= child_end && state.active_turn.is_none()
+                        })
+                })
+                .await;
             }
             assert!(f.checkpoint(&cp).active_turn.is_none());
             f.input.stop().await.expect("real bounded stop");

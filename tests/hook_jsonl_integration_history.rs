@@ -52,6 +52,100 @@ async fn collect_qoder(logs: &Path, store: Arc<StateStore>) -> Vec<AgentActivity
     let result = rows.lock().unwrap().clone();
     result
 }
+
+// #533 moves transcript processing into the real collector. Preserve the frozen
+// transcript bytes and validate ownership against an actual synthetic SQLite DB.
+#[cfg(unix)]
+async fn collect_native_qoder(
+    data: &Path,
+    transcript: &Path,
+    store: Arc<StateStore>,
+) -> Vec<AgentActivityEntry> {
+    use async_trait::async_trait;
+    use loongsuite_pilot::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver;
+    use loongsuite_pilot::inputs::qoder_trace::{
+        InterceptData, QoderTraceReaders, SegmentTokenData, SqliteTokenResult,
+    };
+    struct NoTokens;
+    #[async_trait]
+    impl QoderTraceReaders for NoTokens {
+        async fn read_cli_intercept(&self) -> InterceptData {
+            InterceptData::default()
+        }
+        async fn read_cli_segments(&self, _: &str, _: &[String]) -> Vec<SegmentTokenData> {
+            vec![]
+        }
+        async fn read_ide_tokens(&self, _: &str) -> SqliteTokenResult {
+            SqliteTokenResult {
+                rows: Vec::new(),
+                matched_db_path: None,
+            }
+        }
+    }
+    let db_path = data.join("fixture-ownership.db");
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS chat_message(session_id TEXT,request_id TEXT PRIMARY KEY,role TEXT,gmt_create INTEGER)").unwrap();
+    for (index, line) in std::fs::read_to_string(transcript)
+        .unwrap()
+        .lines()
+        .enumerate()
+    {
+        let row: Value = serde_json::from_str(line).unwrap();
+        if row["type"] != "user"
+            || row["message"]["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "tool_result"))
+        {
+            continue;
+        }
+        let at = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str().unwrap())
+            .unwrap()
+            .timestamp_millis();
+        db.execute(
+            "INSERT OR IGNORE INTO chat_message VALUES (?1,?2,'user',?3)",
+            rusqlite::params![
+                row["sessionId"].as_str().unwrap(),
+                format!("fixture-request-{index}"),
+                at
+            ],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let input = QoderTraceInput::new_with_sources(
+        QoderTraceOptions {
+            state_store: store,
+            log_dir: Some(
+                data.join("logs/qoder/history")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            poll_interval_ms: Some(60000),
+            multimodal_enabled: false,
+            upload_mode: None,
+            allowed_root_paths: vec![],
+        },
+        data.to_path_buf(),
+        Arc::new(NoTokens),
+        Arc::new(NativeQoderPromptOwnershipResolver::with_paths(vec![
+            db_path.to_string_lossy().into_owned(),
+        ])),
+    );
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&rows);
+    input.bind_collector(
+        move |entries| observed.lock().unwrap().extend_from_slice(entries),
+        |_| {},
+    );
+    input.start().await.unwrap();
+    for _ in 0..12 {
+        input.inner.run_cycle().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    input.stop().await.unwrap();
+    let collected = rows.lock().unwrap().clone();
+    collected
+}
 fn schema(entry: &AgentActivityEntry) {
     let v = serde_json::to_value(entry).unwrap();
     for k in ["time_unix_nano", "observed_time_unix_nano"] {
@@ -373,7 +467,11 @@ async fn l211_bound_qoder_shell_default_agent_native_processor_real_input_preser
     )
     .await;
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "{}");
-    let raw = disk_rows(&logs, "qoder");
+    let rows = collect_native_qoder(&data, &transcript, store).await;
+    let raw = rows
+        .iter()
+        .map(|row| serde_json::to_value(row).unwrap())
+        .collect::<Vec<_>>();
     assert!(!raw.is_empty());
     let first = &raw[0];
     for key in [
@@ -395,7 +493,6 @@ async fn l211_bound_qoder_shell_default_agent_native_processor_real_input_preser
     assert!(!serde_json::to_string(&raw)
         .unwrap()
         .contains("should-not-leak"));
-    let rows = collect_qoder(&logs, store).await;
     let user = rows
         .iter()
         .find(|e| serde_json::to_value(e).unwrap()["event.name"] == "other" && e.step_id.is_none())
@@ -419,7 +516,12 @@ async fn l344_bound_qoder_shell_retains_delayed_ide_tool_step_and_native_user_id
     let transcript = root.path().join("delayed.jsonl");
     append(&transcript, &original(344)[0]);
     invoke(root.path(),&hooks,"qoder",&data,&json!({"hook_event_name":"Stop","transcript_path":transcript,"session_id":"sess-delayed-ide","extra":{"email":"git-user@example.com","user":{"name":"qoder-user","email":"qoder-user@example.com","uid":"qoder-native-user-id"}}}).to_string(),false).await;
-    let rows = disk_rows(&data.join("logs/qoder/history"), "qoder");
+    let store = Arc::new(StateStore::new(data.join("state.json")));
+    let rows = collect_native_qoder(&data, &transcript, store)
+        .await
+        .into_iter()
+        .map(|row| serde_json::to_value(row).unwrap())
+        .collect::<Vec<_>>();
     assert!(rows
         .iter()
         .all(|r| r["user.name"] == "qoder-user" && r["user.email"] == "qoder-user@example.com"));
@@ -465,12 +567,16 @@ async fn l713_bound_qoder_shell_real_transcript_cursor_preserves_two_distinct_hu
     let hooks = binding(root.path());
     let data = root.path().join("data");
     let transcript = root.path().join("multi.jsonl");
+    let store = Arc::new(StateStore::new(data.join("state.json")));
+    let mut collected = Vec::new();
     for wave in original(713) {
         append(&transcript, &wave);
         invoke(root.path(),&hooks,"qoder",&data,&json!({"hook_event_name":"Stop","transcript_path":transcript,"session_id":"sess-multi"}).to_string(),false).await;
+        collected.extend(collect_native_qoder(&data, &transcript, Arc::clone(&store)).await);
     }
-    let mut rows = disk_rows(&data.join("logs/qoder/history"), "qoder")
+    let mut rows = collected
         .into_iter()
+        .map(|row| serde_json::to_value(row).unwrap())
         .filter(|r| r["event.name"] == "other")
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), 2);

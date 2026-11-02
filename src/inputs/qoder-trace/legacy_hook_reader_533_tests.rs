@@ -176,3 +176,43 @@ async fn native_callback_observes_read_before_physical_replacement_error_and_rec
     );
     assert_eq!(std::fs::read(&moved).unwrap(), b"{\"id\":\"old\"}\n");
 }
+
+#[tokio::test]
+async fn native_growing_rewrite_rechecks_partial_prefix_even_with_coalesced_metadata_stamp() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("history.jsonl");
+    let mut reader = QoderLegacyHookReader::new(64 * 1024, 256 * 1024);
+    let mut offset = 0;
+    std::fs::write(
+        &path,
+        format!("{{\"id\":\"old\",\"text\":\"{}", "x".repeat(96 * 1024)),
+    )
+    .unwrap();
+    assert_eq!(poll(&mut reader, &path, &mut offset).await.next_offset, 0);
+    let expected = json!({"id":"new","text":"x".repeat(96*1024)});
+    let source = format!("{expected}\n");
+    std::fs::write(&path, &source).unwrap();
+    let actual = snapshot(&open_regular(&path).await.unwrap()).await.unwrap();
+    let cached = &mut reader.tail.as_mut().unwrap().snapshot;
+    // Windows may coalesce the metadata timestamps for these rapid writes.
+    // Keep the real cached bytes/size/identity and actual rewritten body.
+    cached.modified = actual.modified;
+    cached.changed = actual.changed;
+    assert!(cached.same_stamp(&actual));
+    assert!(actual.size > cached.size);
+    let mut bytes = Vec::new();
+    for _ in 0..4 {
+        if offset >= source.len() as u64 {
+            break;
+        }
+        let batch = poll(&mut reader, &path, &mut offset).await;
+        assert!(batch.bytes_read <= 64 * 1024);
+        bytes.extend(batch.buffer);
+    }
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+        expected
+    );
+    assert_eq!(offset, source.len() as u64);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+}

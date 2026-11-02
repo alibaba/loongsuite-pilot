@@ -26,7 +26,7 @@ pub use qoder::{
 pub use qoder::{
     resolve_qoder_collector_cli_identity, resolve_qoder_collector_cli_identity_with_env,
 };
-pub use qoder_wakeup::with_qoder_wakeup_lock;
+pub use qoder_wakeup::{publish_qoder_wakeup, with_qoder_wakeup_lock};
 
 use common::{write_empty, Env, HookRequest};
 use std::io::{IsTerminal, Read, Write};
@@ -34,12 +34,32 @@ use std::io::{IsTerminal, Read, Write};
 pub fn run_hook_process(agent: &str) -> i32 {
     let started = std::time::Instant::now();
     crate::utils::redirect_root_logger_to_stderr();
+    let args: Vec<String> = std::env::args().skip(3).collect();
+    let bounded_qoder =
+        matches!(agent, "qoder" | "qoder-cn") && args.iter().any(|arg| arg == "--wakeup-only");
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
-        let _ = std::io::stdin().read_to_end(&mut raw);
+        if bounded_qoder {
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let mut payload = Vec::new();
+                let result = std::io::stdin()
+                    .take(1024 * 1024 + 1)
+                    .read_to_end(&mut payload);
+                let _ = send.send(if result.is_ok() && payload.len() <= 1024 * 1024 {
+                    payload
+                } else {
+                    Vec::new()
+                });
+            });
+            raw = receive
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap_or_default();
+        } else {
+            let _ = std::io::stdin().read_to_end(&mut raw);
+        }
     }
-    let args: Vec<String> = std::env::args().skip(3).collect();
     let env = std::env::vars().collect();
     let mut stdout = std::io::stdout();
     dispatch(agent, terminal, &raw, &args, &env, &mut stdout, started)

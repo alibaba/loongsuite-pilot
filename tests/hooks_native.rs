@@ -315,8 +315,8 @@ fn powershell_51_and_pwsh_preserve_native_stdin_in_both_language_modes() {
 }
 
 #[cfg(unix)]
-#[test]
-fn qodercn_bootstraps_bash_from_sh_or_posix_mode_without_losing_stdin_or_agent_id() {
+#[tokio::test]
+async fn qodercn_bootstraps_bash_from_sh_or_posix_mode_without_losing_stdin_or_agent_id() {
     for program in ["/bin/sh", "/bin/bash"] {
         let root = tempfile::tempdir().unwrap();
         let hooks = fixture(root.path());
@@ -368,17 +368,92 @@ fn qodercn_bootstraps_bash_from_sh_or_posix_mode_without_losing_stdin_or_agent_i
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(result.stdout, b"{}\n");
-        let history = hooks.parent().unwrap().join("logs/qoder-cn/history");
-        let records: Vec<Value> = fs::read_dir(history)
+
+        // The shell publishes metadata; the collector now owns transcript parsing.
+        // Keep the original BOM, Chinese, POSIX launch and identity assertions.
+        use async_trait::async_trait;
+        use loongsuite_pilot::inputs::qoder_cn_trace::{
+            QoderCnTraceInput, QoderCnTraceOptions, QoderCnTraceReaders,
+        };
+        use loongsuite_pilot::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver;
+        use loongsuite_pilot::inputs::qoder_trace::{
+            InterceptData, SegmentTokenData, SqliteTokenResult,
+        };
+        use std::sync::{Arc, Mutex};
+        struct NoTokens;
+        #[async_trait]
+        impl QoderCnTraceReaders for NoTokens {
+            async fn read_cli_intercept(&self) -> InterceptData {
+                InterceptData::default()
+            }
+            async fn read_cli_segments(&self, _: &str, _: &[String]) -> Vec<SegmentTokenData> {
+                vec![]
+            }
+            async fn read_ide_tokens(&self, _: &str) -> SqliteTokenResult {
+                SqliteTokenResult {
+                    rows: vec![],
+                    matched_db_path: None,
+                }
+            }
+        }
+        let data = fs::canonicalize(hooks.parent().unwrap()).unwrap();
+        assert!(!data.join("logs/qoder-cn/history").exists());
+        let db_path = data.join("fixture-ownership.db");
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("CREATE TABLE chat_message(session_id TEXT,request_id TEXT,role TEXT,gmt_create INTEGER)").unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-01T10:00:00Z")
             .unwrap()
-            .flat_map(|entry| {
-                fs::read_to_string(entry.unwrap().path())
-                    .unwrap()
-                    .lines()
-                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+            .timestamp_millis();
+        db.execute(
+            "INSERT INTO chat_message VALUES ('cn-through-sh','cn-request','user',?1)",
+            [at],
+        )
+        .unwrap();
+        drop(db);
+        let input = QoderCnTraceInput::new_with_sources(
+            QoderCnTraceOptions {
+                state_store: Arc::new(loongsuite_pilot::checkpoints::StateStore::new(
+                    data.join("state.json"),
+                )),
+                log_dir: Some(
+                    data.join("logs/qoder-cn/history")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                poll_interval_ms: Some(10),
+            },
+            data,
+            Arc::new(NoTokens),
+            Arc::new(NativeQoderPromptOwnershipResolver::with_paths(vec![
+                db_path.to_string_lossy().into_owned(),
+            ])),
+        );
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&collected);
+        input.bind_collector(
+            move |batch| output.lock().unwrap().extend_from_slice(batch),
+            |_| {},
+        );
+        input.start().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !collected.lock().unwrap().iter().any(
+                |row: &loongsuite_pilot::types::AgentActivityEntry| {
+                    row.event_name
+                        .is_some_and(|name| name.as_str() == "llm.response")
+                },
+            ) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("CN wakeup did not reach the actual collector");
+        input.stop().await.unwrap();
+        let records = collected
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| serde_json::to_value(row).unwrap())
+            .collect::<Vec<_>>();
         assert!(!records.is_empty());
         assert!(records
             .iter()

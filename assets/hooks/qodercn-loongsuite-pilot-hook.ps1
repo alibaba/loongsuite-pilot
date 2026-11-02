@@ -11,6 +11,7 @@ try {
     exit 0
 }
 $NativeArgs = @('hook-process', 'qoder-cn')
+$NativeArgs += '--wakeup-only'
 $AgentId = if ($args.Count -gt 0) { $args[0] } else { 'qoder-cn' }
 $NativeArgs += @('--agent-id', $AgentId, '--log-prefix', $AgentId)
 try {

@@ -166,6 +166,11 @@ struct CliIdentity {
 }
 
 pub fn run(request: &mut HookRequest<'_>) -> i32 {
+    if has_flag(request.args, "--wakeup-only") {
+        write_empty(request.stdout);
+        publish_hook_notice(request);
+        return 0;
+    }
     let (agent_id, log_prefix) = parse_agent_args(request.args);
     let runtime = load_runtime_config(request.env);
     let ctx = HookCtx {
@@ -182,6 +187,78 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
         run_normal(&ctx, request.stdin);
     }
     0
+}
+
+// The native command retains its legacy inline mode for existing installed
+// wrappers during binary-only upgrades. Newly generated wrappers select the
+// collector-owned metadata path explicitly.
+fn publish_hook_notice(request: &HookRequest<'_>) {
+    if request.stdin.len() > 1024 * 1024 {
+        return;
+    }
+    let (mut agent, _) = parse_agent_args(request.args);
+    if agent == "qoder-cli" {
+        agent = "qoder".into();
+    }
+    let mut value: Value =
+        serde_json::from_str(decode_payload(request.stdin).trim()).unwrap_or(Value::Null);
+    if has_flag(request.args, "--retry") {
+        value = json!({
+            "session_id":flag_value(request.args,"--session"),
+            "transcript_path":flag_value(request.args,"--transcript"),
+            "hook_event_name":"Stop",
+            "cwd":flag_value(request.args,"--cwd"),
+            "extra":{"user":value},
+        });
+        if let Some(line) =
+            flag_value(request.args, "--trigger-end-line").and_then(|v| v.parse::<u64>().ok())
+        {
+            value["legacy_trigger_line"] = json!(line);
+        }
+    }
+    if !value.is_object() {
+        return;
+    }
+    let extra = value.get("extra").and_then(Value::as_object);
+    let desktop = value
+        .pointer("/parent_business_info/product")
+        .and_then(Value::as_str)
+        == Some("app");
+    let identity = extra
+        .and_then(|extra| {
+            if agent == "qoder-cn" {
+                extract_qoder_cn_user_identity(extra)
+            } else {
+                extract_user_identity(extra)
+            }
+        })
+        .or_else(|| {
+            if desktop {
+                read_qoder_app_user_identity(request.env, &agent)
+            } else {
+                None
+            }
+        });
+    let identity = identity
+        .as_ref()
+        .and_then(|id| serde_json::from_str::<Value>(&identity_json(id)).ok());
+    let stamp = build_stamp(request.env);
+    if super::qoder_wakeup::publish_qoder_wakeup(
+        &value,
+        &data_dir(request.env),
+        &agent,
+        identity.as_ref(),
+        &stamp.resources,
+        &stamp.span,
+    ) {
+        if let Some(session) = value
+            .get("session_id")
+            .or_else(|| value.get("conversation_id"))
+            .and_then(Value::as_str)
+        {
+            record_upstream_context_once(request.env, &agent, session);
+        }
+    }
 }
 
 fn run_normal(ctx: &HookCtx<'_>, stdin: &[u8]) {
@@ -620,7 +697,7 @@ pub fn build_collected_transcript_turn(
     };
     let (_, content) = split_progress_content(rows);
     let boundaries = build_llm_boundaries(&content);
-    build_events_from_boundaries(
+    build_events_from_boundaries_with_tool_values(
         &boundaries,
         &content,
         rows,
@@ -633,6 +710,7 @@ pub fn build_collected_transcript_turn(
             cwd: context.cwd,
             stamp: &stamp,
         },
+        true,
     )
     .into_iter()
     .map(Value::Object)
@@ -1915,6 +1993,24 @@ fn build_events_from_boundaries(
     turn_id: &str,
     context: BoundaryContext<'_>,
 ) -> Vec<Obj> {
+    build_events_from_boundaries_with_tool_values(
+        boundaries,
+        content_events,
+        all_parsed,
+        turn_id,
+        context,
+        false,
+    )
+}
+
+fn build_events_from_boundaries_with_tool_values(
+    boundaries: &[Boundary],
+    content_events: &[Value],
+    all_parsed: &[Value],
+    turn_id: &str,
+    context: BoundaryContext<'_>,
+    preserve_tool_values: bool,
+) -> Vec<Obj> {
     let BoundaryContext {
         session_id,
         agent_id,
@@ -2275,11 +2371,13 @@ fn build_events_from_boundaries(
                 call_record.insert("gen_ai.tool.call.id".into(), Value::String(id.clone()));
                 call_record.insert("gen_ai.tool.call.exec.id".into(), Value::String(id.clone()));
             }
-            if let Some(arguments) = arguments_string(&call.input) {
-                call_record.insert(
-                    "gen_ai.tool.call.arguments".into(),
-                    Value::String(arguments),
-                );
+            let arguments = if preserve_tool_values {
+                call.input.clone()
+            } else {
+                arguments_string(&call.input).map(Value::String)
+            };
+            if let Some(arguments) = arguments {
+                call_record.insert("gen_ai.tool.call.arguments".into(), arguments);
             }
             call_record.insert("user.id".into(), Value::String(user_id.clone()));
             call_record.insert(
@@ -4914,3 +5012,7 @@ mod retry_boundary_history_tests;
 #[cfg(test)]
 #[path = "qoder_retry_window_history_tests.rs"]
 mod retry_window_history_tests;
+
+#[cfg(test)]
+#[path = "qoder_collected_typed_arguments_tests.rs"]
+mod collected_typed_arguments_tests;

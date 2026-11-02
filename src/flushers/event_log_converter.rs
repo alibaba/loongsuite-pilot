@@ -202,7 +202,26 @@ fn convert_group(
     } else {
         Vec::new()
     };
-    let top_input = if !pi_turn_input.is_empty() {
+    // Hybrid Copilot has one explicit Other event per human prompt. Those
+    // events are separate inputs, while LLM deltas below remain rolling context.
+    // Treating them as full snapshots loses the earlier prompt and then appends
+    // it again from the request delta.
+    let copilot_turn_input: Vec<_> = if first.agent_type == "copilot"
+        && records.iter().any(|record| {
+            record.get("gen_ai.copilot.source").and_then(Value::as_str) == Some("hybrid-v2")
+        }) {
+        records
+            .iter()
+            .filter(|record| record.event_name == Some(AgentEventName::Other))
+            .filter_map(|record| record.input_messages.as_ref().and_then(message_array))
+            .flatten()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let top_input = if !copilot_turn_input.is_empty() {
+        Some(Value::Array(copilot_turn_input))
+    } else if !pi_turn_input.is_empty() {
         // Pi emits one explicit turn-level user input independently of the
         // rolling full LLM context. Registered PI SDK identities use the same
         // protocol. Only this declaration defines ENTRY/AGENT input; LLM leaves

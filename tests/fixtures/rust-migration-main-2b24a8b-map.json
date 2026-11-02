@@ -5,10 +5,334 @@
     {
       "legacy": "tests/unit/checkpoints/state-store.test.ts",
       "source_hash": "b2006e25f2a23203415144b9419867de06c517d5cdf8b6c7357df2564f9f298d",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "Frozen main2b24a8b #533 delta only: these 2 declarations added to existing 22. Prior 22 must be remapped by exact descriptor/title to this 24-declaration source before whole file complete. No retirements. Native owned-JSON equality tracks unchanged durable content rather than JS object reference identity. Linux actual; Windows/macOS applicable not executed.",
+      "note": "Latest main2b24a8b source24 = ef17 + f84hold5 + #533persisted2. All original runtime assertions individually reviewed, exact five async hold/I/O counter cases added,0retired. JS Error object reference identity adapts to stable first native Result error value; hold settlement, frozen cursor, exact I/O counts remain tested. Native owned JSON compares durable content rather than JS object references. Linux actually verified; macOS/Windows applicable not executed here.",
       "cases": [
+        {
+          "source": {
+            "id": "L36:C5",
+            "title": "should start with empty state",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native load missing initial file yields exact empty InputState for unknown id.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::starts_with_empty_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C5",
+            "title": "should persist state across save/load",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual atomic save writes exact100 offset/5 rowid and independent new store load returns identical fields.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::persists_state_across_save_load"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L51:C5",
+            "title": "should handle missing file gracefully",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual nonexistent pathname load is graceful and unknown state empty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::handles_missing_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C5",
+            "title": "should handle corrupt JSON gracefully",
+            "suites": [
+              "StateStore",
+              "load/save lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual not-json bytes load gracefully to empty state.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::handles_corrupt_json"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C5",
+            "title": "should get empty state for unknown id",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual loaded store unknown nonexistent id returns empty state.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_returns_empty_state_for_unknown_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C5",
+            "title": "should set and retrieve state",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual set x offset42 then get lastOffset42.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_retrieves_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C5",
+            "title": "should update partial state without losing existing fields",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual initial offset10,rowid20, patch offset30 preserves rowid20.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::updates_partial_state_without_losing_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C5",
+            "title": "should set state immutably (no reference leaks)",
+            "suites": [
+              "StateStore",
+              "get/set/update"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual independent owned state copy: original offset10+foo/bar stored, original changed999 cannot change store10; extra remainsfoo/bar.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::set_stores_an_independent_copy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C5",
+            "title": "should return 0 for unknown input",
+            "suites": [
+              "StateStore",
+              "getOffset/setOffset"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual unknown input getOffset returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_offset_returns_zero_for_unknown_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C5",
+            "title": "should set and get offset",
+            "suites": [
+              "StateStore",
+              "getOffset/setOffset"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual input-a setOffset256/getOffset256.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_gets_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C5",
+            "title": "should return 0 for unknown input",
+            "suites": [
+              "StateStore",
+              "getRowId/setRowId"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual unknown input getRowId returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::get_row_id_returns_zero_for_unknown_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C5",
+            "title": "should set and get rowId",
+            "suites": [
+              "StateStore",
+              "getRowId/setRowId"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual input-b setRowId42/getRowId42.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::sets_and_gets_row_id"
+              }
+            ]
+          }
+        },
         {
           "source": {
             "id": "L125:C3",
@@ -19,7 +343,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Actual disk writes track each input independently; an unrelated input's pending mutation does not revoke qoder durability. Deterministic state-file directory causes ordinary save error, save_failed remains false, is_persisted false until repair/retry writes both and fresh load observes offsets3/2.",
+          "behavior": "Actual durable per-input receipt and unrelated input pending isolation; physical EISDIR save failure stays retryable and undurable until successful repair/save, fresh store observes offsets3/2.",
           "platforms": [
             "linux",
             "macos",
@@ -45,7 +369,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Actual qoderTranscripts offset10 save is durable through unrelated extra.other mutation while whole input is pending. Offset20 mutation revokes field receipt until real save, fresh load resets durable status; pending delete revokes key receipt until persisted delete.",
+          "behavior": "Actual extra qoderTranscripts offset10 remains durable through other metadata patch, offset20 becomes undurable until save; fresh load durable; pending delete undurable until real saved deletion.",
           "platforms": [
             "linux",
             "macos",
@@ -57,6 +381,276 @@
               {
                 "file": "src/checkpoints/state_store_qoder_533_tests.rs",
                 "test": "source_native_cursor_receipt_survives_other_metadata_and_tracks_pending_delete"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C5",
+            "title": "should not write without a new revision",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual load then no-op save leaves file nonexistent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::does_not_write_without_a_new_revision"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L173:C5",
+            "title": "should write when the revision changes",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual mutation revision offset1 then save creates file.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::writes_when_the_revision_changes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L182:C5",
+            "title": "should not rewrite an already persisted revision",
+            "suites": [
+              "StateStore",
+              "revision optimization"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual atomic-write observer sees exactly1 call through save and repeated unchanged save.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::does_not_rewrite_an_already_persisted_revision"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L192:C5",
+            "title": "blocks shared checkpoint saves until every output hold is accepted",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Public async holds: first/late oneshot holds, codex10→30 and other20 updates; actual write count0 until BOTH holds accept, exact disk fields30/20 then repeat save leaves exactly1 write.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l192_every_async_hold_must_accept_before_exactly_one_shared_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L216:C5",
+            "title": "latches a rejected hold so subsequent shared saves keep the last durable cursor",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual codex1 first saved, rejected public async hold then optimistic codex2/other3; both subsequent saves return same stable first native failure value, disk exactlycodex1, exact write count1. JS Error-reference identity adapted to native Result failure-value identity; business latching remains strict.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l216_rejected_async_hold_keeps_exact_first_failure_and_last_durable_cursor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L229:C5",
+            "title": "releases settled holds during sustained output failure without unfreezing saves",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All100 distinct async rejected holds settle: every save preserves first journal failure, active output holds return0, later accepted hold cannot unfreeze, exact writecount1/diskcodex1, fresh store+acceptedhold updates durablecodex2. Native stable first error value preserves original JS reference-equality intent without JS object instances.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l229_hundred_settled_failures_release_holds_without_replacing_first_error_or_writing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L253:C5",
+            "title": "rejects a no-op save after a settled failed hold even without a new revision",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual async rejection settles without any state revision; no-op save returns original native error value, atomic-write count0 and file absent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l253_settled_failure_rejects_noop_save_without_any_revision_or_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L261:C5",
+            "title": "honors a new hold before the next revision of an active write",
+            "suites": [
+              "StateStore",
+              "durable output holds"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first atomic write is gated; new async output hold registered while write active and codex2 staged. First write physically completes codex1, no second write or completed save before accept; release completes exactly2writes/durablecodex2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store_qoder_533_tests.rs",
+                "test": "main_l261_new_hold_blocks_second_revision_after_first_actual_write_finishes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L289:C5",
+            "title": "serializes saves and persists mutations made during an active write",
+            "suites": [
+              "StateStore",
+              "concurrent saves"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual write hook+real atomic file writes: save1 blocked, input-a patched2/input-b rowid3 then concurrent save joins; exact2 writes, max active1, exact captured snapshots1 then2/3 and disk2/3.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::serializes_saves_and_persists_mutations_during_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L339:C5",
+            "title": "retains an unpersisted revision after a failed write",
+            "suites": [
+              "StateStore",
+              "concurrent saves"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first write failure returns exact reason; retry atomic save succeeds with input-a10, exact attempted writecount2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/checkpoints/state_store.rs",
+                "test": "tests::retains_unpersisted_revision_after_failed_write"
               }
             ]
           }
@@ -993,6 +1587,663 @@
               {
                 "file": "src/flushers/span_id_reservation.rs",
                 "test": "clearing_a_trace_reservation_cannot_change_or_leak_a_span_reservation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-transcript-collector.test.mjs",
+      "source_hash": "d1d64411f85041a8b78be0f841c495d9c2d51e9ebf4118888afb65c77fab2fff",
+      "coverage": "partial",
+      "rust": [
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l113_l133_l152_cli_controls_do_not_create_turns_and_real_prompt_is_retained"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l175_partial_final_record_retains_offset_then_recovers_suffix"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l188_late_model_output_after_stop_keeps_both_responses_and_tool"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l202_discarded_stage_replays_the_same_event_ids"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l239_complete_final_json_without_lf_is_recovered_once_after_stability"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l278_unobserved_later_turn_does_not_inherit_invocation_identity"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l289_only_saved_completed_ranges_reclaim_notices_and_unsaved_state_does_not_read"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l343_concurrent_calls_share_one_actual_collection_and_io_observations"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l343_stop_prevents_reads_and_start_resumes_preserved_state"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l61_bootstrap_keeps_hook_anchored_and_all_later_queued_turns"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l75_l104_l162_late_progress_idle_and_restart"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l86_prompt_hook_before_new_row_does_not_replay_prior_turn"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+          "test": "source_l93_streams_across_late_progress_without_splitting_tools"
+        }
+      ],
+      "cases": [
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "bootstraps only the Hook-anchored turn and retains all later queued turns",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实两Agent从首Stop锚定turn1后保留排队turn2/3；userTexts恰1/2/3，eventIDs唯一、3turn、1call/1result，末轮idle无重复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l61_bootstrap_keeps_hook_anchored_and_all_later_queued_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "ignores late third-party UserPromptSubmit progress when bootstrapping a Stop",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实tool/result之间late第三方progress不分轮，user0/1toolcall/1toolresult/唯一turn。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l75_l104_l162_late_progress_idle_and_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "does not replay the previous turn when the first prompt Hook precedes the new user row",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "初次PromptHook在旧已闭前缀之后、下个real user尚未写入时无历史重发；追加后仅prompt1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l86_prompt_hook_before_new_row_does_not_replay_prior_turn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L93:C3",
+            "title": "keeps streamed content together across late prompt progress notifications",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "按原分段写入流式tool turn，未完成时零输出；late progress后最终user0/2responses/1result。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l93_streams_across_late_progress_without_splitting_tools"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "reads zero body bytes on unchanged polls and after duplicate notifications",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "已完成后重复同水位Stop notice，真实Source空records且body bytesRead=0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l75_l104_l162_late_progress_idle_and_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "does not create an empty Turn for the native CLI /exit envelope after a completed turn",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实两Agent退出envelope不制造Turn：初轮user0/单turn/1call/1result，控制正文不泄漏；尾部SessionEnd无事件、offset精确EOF、idle0reads，checkpoint重建Source无重发；同文显式promptId仍是后续真实用户提交。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l113_l133_l152_cli_controls_do_not_create_turns_and_real_prompt_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C3",
+            "title": "excludes local CLI controls from an active turn without dropping a later genuine command prompt",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "active本地control envelope不进入结果且2responses保留；同文但显式promptId的真正CLI提交仍恰user controlText/1response。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l113_l133_l152_cli_controls_do_not_create_turns_and_real_prompt_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C3",
+            "title": "does not bootstrap a new Turn from a CLI-only command transcript",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "仅CLI control+SessionEnd不制造Turn，后续真实prompt1正常输出。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l113_l133_l152_cli_controls_do_not_create_turns_and_real_prompt_is_retained"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L162:C3",
+            "title": "resumes complete offsets after restart without duplicating tools or Turns",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "checkpoint JSON序列化重建Source后追加tool Turn，仅prompt1/1call/1result；旧prompt0未重复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l75_l104_l162_late_progress_idle_and_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C3",
+            "title": "keeps a partial final record uncommitted and recovers its suffix",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实assistant JSON截断50bytes，Source无事件且offset<fileSize；补后缀与Stop后仅prompt0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l175_partial_final_record_retains_offset_then_recovers_suffix"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L188:C3",
+            "title": "waits for late model output after Stop and preserves tools",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实先Stop后晚到assistant，时钟+1s仍无事件，+6s后1toolcall/1result/2responses完整保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l188_late_model_output_after_stop_keeps_both_responses_and_tool"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L202:C3",
+            "title": "leaves staged source progress replayable when the Input did not commit it",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "未提交staged state，重新以空state采实际同源，非空事件且event IDs序列全等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l202_discarded_stage_replays_the_same_event_ids"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L239:C3",
+            "title": "recovers a valid final JSON record without a newline",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "逐原exact fixture：prefix仅progress+user，assistant带stop_reason但没有LF、也无native Stop。第一次无事件，+6s后稳定decode，再+6s稳定settle，恰user0/1response，committedOffset和offset都精确物理EOF，后续不重发。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l239_complete_final_json_without_lf_is_recovered_once_after_stability"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C3",
+            "title": "does not inherit invocation identity into a later unobserved turn",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "首轮旧span gen_ai.session.id真实存在，ACK后追加无Hook观察的下一turn，仅user1且全记录不含旧invocation。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l278_unobserved_later_turn_does_not_inherit_invocation_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L289:C3",
+            "title": "reclaims only observations covered by the saved completed-turn cursor",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "未完成范围notice保留1；实际完成并下一persisted ACK后events空/source.json保留/不重发；额外persisted=false零IO、state不变、notice不删正负验收。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l289_only_saved_completed_ranges_reclaim_notices_and_unsaved_state_does_not_read"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L343:C3",
+            "title": "coalesces concurrent cycles and stops further reads until restarted",
+            "suites": [
+              "native %s transcript collection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实两个并发Source.read共享实际collect（completed计数恰1），真实IO字节守恒、首轮user0；stop后以原未提交空state再读records空/bytes0；start后仍该空state重新产生user0。另已保存state停止/恢复续采下一turn正控保持。Rust用实际工作次数替代JS Promise对象身份。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l343_concurrent_calls_share_one_actual_collection_and_io_observations"
+              },
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_history.rs",
+                "test": "source_l343_stop_prevents_reads_and_start_resumes_preserved_state"
+              }
+            ]
+          }
+        }
+      ],
+      "note": "固定main#533 2b24a8b。collector28仅累计16声明完整承接，剩12未列仍pending；其余四源34声明未整组关闭，五源总62。Source3逐原补齐L113/L239/L343，没有改标题/放宽断言。补充真实CLI status/cache/external gen_ai.turn.id/desktop/partial与empty identity/nonCLI负控；实际Input来源无legacy日志仍产1LLM response、IDE17/5tokens和durable EOF，Source3 strict全workspace/alltargets/allfeatures绿也补验factory。相关Qoder41实际通过，Linux执行；Windows/macOS尚待实际CI，Unix假CLI执行专项不冒称Windows。单PID出生metadata无全局proc枚举，Linux使用同一虚拟/proc视图的bounded stat/uptime，保留原born近期断言。"
+    },
+    {
+      "legacy": "tests/integration/qoder-recovery-ownership.test.ts",
+      "source_hash": "881278c18e9f0a3fc208aa0c4e05d18eb142266cf6fc070e043813fbc7dd4b92",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Both #533 source declarations and both original qoder/qoder-cn parameters executed with actual native Source/SQLite/StateStore/fresh input factories. The second declaration traverses the real InputManager, mask, real JSONL and native OTLP converter with controlled capture exporter. No real network or Agent data. Native SQLite does not inherit Node experimental-engine skip. Linux execution only; Windows/macOS applicable but not executed here. No retirements; no new delivery ACK claim.",
+      "cases": [
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "persists the database rotation through StateStore and resumes the fifth database after source restart",
+            "suites": [
+              "%s recovery across production layers"
+            ],
+            "parameters": [
+              "describe.skipIf(!loadDatabaseSync()).each(['qoder', 'qoder-cn'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual five temporary SQLite databases, current source request ownership rotates only4 first call and persists dbSearch.nextIndex4 into real StateStore. Stop, fresh StateStore load, reversed discovery, freshSource recovers exact2 LLM responses from fifth DB in second read. Save recovered state then actual further read produces no repeated records; both original agents independently executed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_533_recovery_pipeline.rs",
+                "test": "source_l75_real_sqlite_search_rotation_survives_disk_and_source_restart_for_both_agents"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L93:C3",
+            "title": "preserves recovered tool types, per-call usage, masking and incomplete semantics through InputManager and the real genai flusher",
+            "suites": [
+              "%s recovery across production layers"
+            ],
+            "parameters": [
+              "describe.skipIf(!loadDatabaseSync()).each(['qoder', 'qoder-cn'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual five-DB prompt ownership search first pauses with zero events and durable nextIndex4; then each actual public input factory/manager lifecycle recovers typed nested tool arguments, unique IDs/one turn, exact2requests/2responses, actual SQL per-call input100/110 output10/11 and cache50. InputManager masks API key through typed Capture, real local JSONL and actual genai converter. Exact2 LLM+1TOOL+1ENTRY(parent absent/incomplete)+AGENT210/21; unique7span parent closure, raw damaged line retained, no secret. Actual public stop drains async native fanout, fresh Store+fresh InputManager/Input yields no new rows/spans. Private collector-only parser keeps raw Value kinds, old Hook string behavior remains verified.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_533_recovery_pipeline.rs",
+                "test": "source_l93_both_actual_inputs_manager_masking_and_real_genai_preserve_recovered_semantics"
+              },
+              {
+                "file": "src/hook_process/qoder_collected_typed_arguments_tests.rs",
+                "test": "collector_keeps_original_tool_value_kinds_and_legacy_hook_keeps_strings"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-legacy-history-boundaries.test.ts",
+      "source_hash": "4e77dbf4e1e4ae8e2445afa82a8c02aa2cf714116db6b7a4124bb86bd83b4ad3",
+      "coverage": "complete",
+      "rust": [],
+      "note": "New #533 declaration; both original qoder/qoder-cn parameters actually executed. Linux actual only; macOS/Windows apply but await central CI. Temporary synthetic files only. No retirements, no new output ACK protocol. Existing CN-only evidence is superseded by this full parameter verification.",
+      "cases": [
+        {
+          "source": {
+            "id": "L14:C3",
+            "title": "drains a legal line larger than one read batch, its successor and a restarted partial tail once",
+            "suites": [
+              "%s old Hook backlog"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both actual public QoderTraceInput/CN factories start and drain explicit0 legacy checkpoint through real bounded reader: legal16MiB record followed by small record stays exactIDs large/small, exacttokens11/11, committedEOF, no repeats. Append split inside UTF8 Chinese codepoint, checkpoint/capture unchanged until complete, actual stop/new input resumes once and preserves Chinese+emoji; no repeated completed tail. All raw original assertions retained; fixture poll10ms only, reader4MiB/record32MiB/stability/stop budgets unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_533_durability_pipeline.rs",
+                "test": "source_l14_actual_both_inputs_drain_legal_large_line_successor_and_restarted_utf8_once"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-checkpoint-durability.test.ts",
+      "source_hash": "e5873fcbd0807afb4fbee170eb43692344b2d641cb5df0b2c2461d2c271c0588",
+      "coverage": "complete",
+      "rust": [],
+      "note": "New #533 declaration; both original qoder/qoder-cn parameters actually executed. Linux actual only; macOS/Windows apply but await central CI. Temporary synthetic files only. No retirements, no new output ACK protocol. Existing CN-only evidence is superseded by this full parameter verification.",
+      "cases": [
+        {
+          "source": {
+            "id": "L19:C3",
+            "title": "retains receipts and pauses optimistic progress after ordinary disk failure, then recovers once",
+            "suites": [
+              "%s durable notification receipts"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qoder-cn'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both agents actual Source/temporary native transcript + Root SQLite wakeup gate + actual StateStore EISDIR save failure; first3 records preserved, ordinaryIO remains retryable save_failed=false/is_persisted=false, retainednotice1 then2, secondread emits[]/bytes0 and identicaloptimisticstate. Restore original statefile and save: exactly3 fresh-tail records contain prompt1 and every owner name; durable recovered cp then Source stop/freshSource no records/notices0, freshStore persisted receipt also no records. Mirrors original source directSource assertions and does not claim output ACK.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_533_durability_pipeline.rs",
+                "test": "source_l19_both_sources_pause_after_real_save_failure_then_resume_fresh_tail_once"
               }
             ]
           }
