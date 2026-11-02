@@ -287,3 +287,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_migration_history_contract_tests.rs"]
+mod plugin_migration_history_contract_tests;

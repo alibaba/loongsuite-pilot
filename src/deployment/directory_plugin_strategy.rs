@@ -177,6 +177,7 @@ impl DirectoryPluginStrategy {
             .map_err(|err| err.to_string())?;
         let staging_str = staging_path.to_string_lossy().into_owned();
         let mut transaction = DirectorySwap::new(PathBuf::from(&target_dir), staging_path.clone());
+        let mut pending_activation = None;
         let deploy_result = async {
             copy_directory_contents(&source_dir, &staging_str).await?;
             let staged_hash =
@@ -210,7 +211,18 @@ impl DirectoryPluginStrategy {
             transaction.install()?;
             if let Some(activation) = &config.activation {
                 if let Some(activation_hash) = hash_activation(Some(activation)) {
-                    let status = activate(activation).await?;
+                    let status = match activate(activation).await {
+                        Ok(status) => status,
+                        Err(error) => {
+                            // Keep invalid configuration rejection unchanged. An
+                            // actual retryable activation failure gets metadata
+                            // only, after the SDK transaction has rolled back.
+                            if timeout_ms(activation).is_ok() {
+                                pending_activation = Some(marker.clone());
+                            }
+                            return Err(error);
+                        }
+                    };
                     marker.activation_hash = Some(activation_hash);
                     marker.activation_status = Some(status);
                     write_marker(Path::new(&target_dir), &marker_file, &def.id, &marker).await?;
@@ -222,11 +234,92 @@ impl DirectoryPluginStrategy {
         .await;
         if let Err(err) = deploy_result {
             return match transaction.rollback() {
-                Ok(()) => Err(err),
+                Ok(()) => {
+                    if let Some(marker) = pending_activation.filter(|_| {
+                        matches!(target_state, TargetState::Missing | TargetState::Empty)
+                    }) {
+                        if let Err(pending) = self
+                            .publish_pending_marker(
+                                def,
+                                &marker_file,
+                                &target_dir,
+                                &target_state,
+                                marker,
+                            )
+                            .await
+                        {
+                            return Err(format!("{err}; pending marker failed: {pending}"));
+                        }
+                    }
+                    Err(err)
+                }
                 Err(rollback) => Err(format!("{err}; rollback failed: {rollback}")),
             };
         }
         Ok(())
+    }
+
+    async fn publish_pending_marker(
+        &self,
+        def: &AgentDefinition,
+        marker_file: &str,
+        target: &str,
+        original: &TargetState,
+        marker: Marker,
+    ) -> Result<(), String> {
+        if !matches!(original, TargetState::Missing | TargetState::Empty) {
+            return Err("pending marker requires an initial missing/empty target".into());
+        }
+        let target_path = PathBuf::from(target);
+        let parent = target_path.parent().ok_or("targetDir has no parent")?;
+        let name = target_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("targetDir has no name")?;
+        let staging = parent.join(format!(
+            ".{name}.loongsuite-pilot-pending-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let marker_file = marker_file.to_owned();
+        let stage_marker_file = marker_file.clone();
+        let body = encode_marker(&def.id, &marker);
+        #[cfg(test)]
+        let worker_pause = history_test_hooks::pending_pause("worker");
+        // Ownership stays with the worker result until the async caller claims
+        // it. Cancellation during slow filesystem IO cleans this private stage
+        // after the worker finishes; that worker never modifies the target.
+        let mut transaction = tokio::task::spawn_blocking(move || {
+            let transaction = DirectorySwap::new(target_path, staging);
+            std::fs::create_dir(&transaction.staging).map_err(|error| error.to_string())?;
+            std::fs::write(transaction.staging.join(stage_marker_file), body)
+                .map_err(|error| error.to_string())?;
+            #[cfg(test)]
+            if let Some(pause) = worker_pause {
+                pause.wait_blocking();
+            }
+            Ok::<_, String>(transaction)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        #[cfg(test)]
+        history_test_hooks::pause_pending("prepared").await;
+        if &self.inspect_at(target, &marker_file, &def.id).await? != original {
+            return Err("target directory changed before pending marker publication".into());
+        }
+        if !matches!(original, TargetState::Missing) {
+            transaction.capture_previous()?;
+            if &self
+                .inspect_at(&transaction.backup.to_string_lossy(), &marker_file, &def.id)
+                .await?
+                != original
+            {
+                return Err("target directory changed before pending marker publication".into());
+            }
+        }
+        transaction.install()?;
+        #[cfg(test)]
+        history_test_hooks::pause_pending("installed").await;
+        transaction.commit()
     }
 
     pub async fn remove_directory(&self, def: &AgentDefinition) -> bool {
@@ -376,6 +469,10 @@ async fn assert_directory(directory: &str, label: &str) -> Result<(), String> {
 }
 
 async fn copy_directory_contents(source: &str, target: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if history_test_hooks::copy_error() {
+        return Err("copy failed".into());
+    }
     let mut entries = tokio::fs::read_dir(source)
         .await
         .map_err(|err| err.to_string())?;
@@ -631,6 +728,10 @@ fn is_unsupported(err: &str) -> bool {
 }
 
 async fn run_command(command: &str, args: &[String], timeout_ms: u64) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(result) = history_test_hooks::command(command, args, timeout_ms) {
+        return result;
+    }
     let child = tokio::process::Command::new(command)
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
@@ -657,12 +758,7 @@ async fn run_command(command: &str, args: &[String], timeout_ms: u64) -> Result<
     }
 }
 
-async fn write_marker(
-    directory: &Path,
-    marker_file: &str,
-    agent_id: &str,
-    marker: &Marker,
-) -> Result<(), String> {
+fn encode_marker(agent_id: &str, marker: &Marker) -> String {
     let mut body = serde_json::Map::new();
     body.insert("schemaVersion".into(), json!(MARKER_SCHEMA_VERSION));
     body.insert("owner".into(), json!(MARKER_OWNER));
@@ -677,15 +773,20 @@ async fn write_marker(
     if let Some(activation_status) = &marker.activation_status {
         body.insert("activationStatus".into(), json!(activation_status));
     }
-    tokio::fs::write(
-        directory.join(marker_file),
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into())
-        ),
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into())
     )
-    .await
-    .map_err(|err| err.to_string())
+}
+async fn write_marker(
+    directory: &Path,
+    marker_file: &str,
+    agent_id: &str,
+    marker: &Marker,
+) -> Result<(), String> {
+    tokio::fs::write(directory.join(marker_file), encode_marker(agent_id, marker))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn read_owned_marker(path: &Path, agent_id: &str) -> Option<Marker> {
@@ -955,10 +1056,22 @@ mod tests {
                         "VERSION = 1\n"
                     );
                 }
-                None if initial == "empty" => {
-                    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0)
+                None => {
+                    // SDK payload is still rolled back. Initial failure now
+                    // keeps only the original source's retry/diagnostic marker.
+                    let entries = std::fs::read_dir(&target)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    assert_eq!(entries, vec![DEFAULT_MARKER_FILE]);
+                    let pending: Value = serde_json::from_slice(
+                        &std::fs::read(target.join(DEFAULT_MARKER_FILE)).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(pending["schemaVersion"], 1);
+                    assert!(pending.get("activationHash").is_none());
+                    assert!(!target.join("nested/plugin.py").exists());
                 }
-                None => assert!(!target.exists()),
             }
             assert!(std::fs::read_dir(target.parent().unwrap())
                 .unwrap()
@@ -1133,3 +1246,10 @@ mod tests {
         assert!(!target.exists());
     }
 }
+
+#[cfg(test)]
+#[path = "directory_plugin_history_contract_tests.rs"]
+mod history_contract_tests;
+#[cfg(test)]
+#[path = "directory_plugin_history_test_hooks.rs"]
+mod history_test_hooks;

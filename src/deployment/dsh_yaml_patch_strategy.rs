@@ -379,6 +379,10 @@ fn enabled_marker(cfg: &DshYamlPatchConfig) -> String {
 }
 
 async fn read_bytes(path: &str) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    if let Some(result) = dsh_yaml_history_test_hooks::read(path) {
+        return result;
+    }
     match tokio::fs::read(path).await {
         Ok(bytes) => Ok(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -971,3 +975,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "dsh_yaml_history_contract_tests.rs"]
+mod dsh_yaml_history_contract_tests;
+#[cfg(test)]
+#[path = "dsh_yaml_history_test_hooks.rs"]
+mod dsh_yaml_history_test_hooks;

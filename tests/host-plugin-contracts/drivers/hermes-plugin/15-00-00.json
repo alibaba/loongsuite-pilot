@@ -1,0 +1,157 @@
+{
+  "case": 15,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "on_session_start",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Load the loongsuite-pr-review skill.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Load the loongsuite-pr-review skill."
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "finish_reason": "tool_calls",
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "pre_tool_call",
+      "payload": {
+        "tool_name": "skill_view",
+        "args": {
+          "name": "loongsuite-pr-review"
+        },
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_skill_view_1"
+      }
+    },
+    {
+      "hook": "post_tool_call",
+      "payload": {
+        "tool_name": "skill_view",
+        "args": {
+          "name": "loongsuite-pr-review"
+        },
+        "result": "{\"success\":true,\"name\":\"loongsuite-pr-review\",\"description\":\"Review LoongSuite PR readiness.\",\"metadata\":{\"version\":\"1.2.3\"}}",
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_skill_view_1"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Load the loongsuite-pr-review skill.",
+        "assistant_response": "Skill loaded.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Load the loongsuite-pr-review skill."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_skill_view_1",
+                "type": "function",
+                "function": {
+                  "name": "skill_view",
+                  "arguments": "{\"name\":\"loongsuite-pr-review\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"success\":true,\"name\":\"loongsuite-pr-review\",\"description\":\"Review LoongSuite PR readiness.\",\"metadata\":{\"version\":\"1.2.3\"}}",
+            "tool_call_id": "call_skill_view_1"
+          },
+          {
+            "role": "assistant",
+            "content": "Skill loaded.",
+            "finish_reason": "stop"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": false,
+    "configUser": "pilot-config-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

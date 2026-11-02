@@ -980,3 +980,41 @@ fn native_trace_delegation_keeps_causal_start_and_each_executions_final_tool_rul
         "error"
     ));
 }
+#[test]
+fn qoder_finish_reason_shared_enum_is_accepted_and_unknown_output_message_reasons_are_rejected_by_real_cli(
+) {
+    let root = tempfile::tempdir().unwrap();
+    for reason in loongsuite_pilot::normalization::VALID_FINISH_REASONS {
+        let mut spans = graph();
+        for span in &mut spans {
+            if let Some(messages) = span["attributes"]["gen_ai.output.messages"].as_array_mut() {
+                for message in messages {
+                    message["finish_reason"] = json!(reason);
+                }
+            }
+        }
+        write(root.path(), &spans);
+        let report = validate(root.path(), 0);
+        assert!(!has(&report, "schema.output_messages", "error"), "{reason}");
+    }
+    for reason in [
+        json!("pause_turn"),
+        json!("some_future_reason"),
+        json!(""),
+        json!(42),
+    ] {
+        let mut spans = graph();
+        for span in &mut spans {
+            if let Some(messages) = span["attributes"]["gen_ai.output.messages"].as_array_mut() {
+                for message in messages {
+                    message["finish_reason"] = reason.clone();
+                }
+            }
+        }
+        write(root.path(), &spans);
+        assert!(
+            has(&validate(root.path(), 1), "schema.output_messages", "error"),
+            "{reason}"
+        );
+    }
+}

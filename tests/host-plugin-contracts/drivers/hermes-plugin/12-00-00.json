@@ -1,0 +1,107 @@
+{
+  "case": 12,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Report the available tool surface.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Report the available tool surface."
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "private-system-prompt-marker"
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "private-system-prompt-marker"
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Report the available tool surface.",
+        "assistant_response": "The tool surface is available.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Report the available tool surface."
+          },
+          {
+            "role": "assistant",
+            "content": "The tool surface is available.",
+            "finish_reason": "stop"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": false,
+    "configUser": "pilot-config-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

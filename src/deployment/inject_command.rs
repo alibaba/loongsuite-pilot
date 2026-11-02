@@ -187,6 +187,17 @@ pub async fn inject_claude_directory(
     data_dir: &str,
     hook: &AgentHookConfig,
 ) -> Result<Value, String> {
+    inject_claude_directory_with_lock_timeout(config_dir, data_dir, hook, 10_000).await
+}
+
+// Native overload for the historical optional lock timeout; the public command
+// keeps its exact 10s budget. No changes to canonicalization or locking order.
+async fn inject_claude_directory_with_lock_timeout(
+    config_dir: &str,
+    data_dir: &str,
+    hook: &AgentHookConfig,
+    timeout_ms: u64,
+) -> Result<Value, String> {
     if cfg!(windows) {
         return Err("Session hook injection currently supports Linux and macOS only".into());
     }
@@ -214,7 +225,7 @@ pub async fn inject_claude_directory(
     with_claude_settings_lock(
         &settings_path_text,
         || inject_locked(&settings_path_text, data_dir, hook),
-        10_000,
+        timeout_ms,
     )
     .await?
 }
@@ -361,3 +372,7 @@ mod tests {
         assert_eq!(parsed.config_dir.as_deref(), Some("/tmp/claude"));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "inject_command_history_contract_tests.rs"]
+mod history_contract_tests;

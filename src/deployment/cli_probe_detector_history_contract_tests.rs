@@ -234,7 +234,18 @@ async fn native_isolated_probe_contract_child() {
         .await
         .unwrap();
         assert!(!strict.detected);
-        assert!(strict.reason.contains(old.to_str().unwrap()));
+        // Diagnostics deliberately JSON-quote the full persisted entry, so
+        // Windows backslashes (including verbatim prefixes) are escaped.
+        // Match that complete field rather than a raw substring that only
+        // happens to work on Unix.
+        let old_json = serde_json::to_string(old.to_str().unwrap()).unwrap();
+        assert!(
+            strict
+                .reason
+                .contains(&format!("Persisted OpenClaw entry is missing : {old_json}")),
+            "missing binding must retain its exact JSON-quoted path: {}",
+            strict.reason
+        );
         let install = probe_agent_definition_with_detector(
             &definition,
             &CliProbeOptions {
@@ -247,7 +258,13 @@ async fn native_isolated_probe_contract_child() {
         .unwrap();
         assert!(install.detected);
         assert_eq!(PathBuf::from(install.openclaw_cli_path.unwrap()), entry);
-        assert!(install.reason.contains("replacing missing entry"));
+        assert!(
+            install
+                .reason
+                .contains(&format!("; replacing missing entry {old_json}")),
+            "installer recovery must retain the same missing binding: {}",
+            install.reason
+        );
         assert_eq!(std::fs::read_to_string(&config).unwrap(), bytes);
     } else {
         let result = probe_agent_definition_with_detector(

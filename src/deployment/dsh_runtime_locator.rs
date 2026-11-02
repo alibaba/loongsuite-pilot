@@ -367,37 +367,51 @@ mod tests {
 
     #[tokio::test]
     async fn prefers_persisted_then_configured_then_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let persisted = root.join("persisted").join("cordis.patch.yml");
+        let configured = root.join("configured").join("cordis.patch.yml");
+        let env_home = root.join("env").join("dsh");
+        assert!(persisted.is_absolute());
+        assert!(configured.is_absolute());
+        assert!(env_home.is_absolute());
+        let configured_def = def(Some(configured.to_str().unwrap()));
         let mut locator = DshRuntimeLocator::new();
-        locator.env.insert("DSH_HOME".into(), "/env/dsh".into());
+        locator.env = HashMap::from([("DSH_HOME".into(), env_home.to_string_lossy().into_owned())]);
         let mut record = DeployedAgentRecord {
             deploy_mode: DeployMode::DshYamlPatch,
             deployed_at: "t".into(),
             source_hash: None,
             last_remote_checked_at: None,
             target_dir: None,
-            dsh_patch_path: Some("/persisted/cordis.patch.yml".into()),
+            dsh_patch_path: Some(persisted.to_string_lossy().into_owned()),
             hook_settings_path: None,
             hook_settings_paths: None,
             installed_by: None,
             plugin_inject_config_path: None,
         };
         let target = locator
-            .locate(&def(Some("/configured/cordis.patch.yml")), Some(&record))
+            .locate(&configured_def, Some(&record))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(target.source, DshRuntimeTargetSource::Persisted);
-        assert!(target.patch_path.ends_with("/persisted/cordis.patch.yml"));
+        assert_eq!(std::path::Path::new(&target.patch_path), persisted);
         record.dsh_patch_path = None;
         let target = locator
-            .locate(&def(Some("/configured/cordis.patch.yml")), Some(&record))
+            .locate(&configured_def, Some(&record))
             .await
             .unwrap()
             .unwrap();
         assert_eq!(target.source, DshRuntimeTargetSource::ConfiguredPatch);
+        assert_eq!(std::path::Path::new(&target.patch_path), configured);
         let target = locator.locate(&def(None), None).await.unwrap().unwrap();
         assert_eq!(target.source, DshRuntimeTargetSource::PilotEnv);
-        assert!(target.home.ends_with("/env/dsh"));
+        assert_eq!(std::path::Path::new(&target.home), env_home);
+        assert_eq!(
+            std::path::Path::new(&target.patch_path),
+            env_home.join("cordis.patch.yml")
+        );
     }
 
     #[test]

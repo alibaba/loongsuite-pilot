@@ -198,6 +198,14 @@ impl WorkspacePolicy {
         !self.roots.is_empty()
     }
 
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub(crate) fn has_pending_markers(&self) -> bool {
+        !self.pending_markers.is_empty()
+    }
+
     pub fn excludes(&self, directory: &str) -> bool {
         let Some(candidate) = normalize_directory(directory) else {
             return false;

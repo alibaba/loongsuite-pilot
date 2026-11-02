@@ -3631,3 +3631,19 @@ mod tests {
         assert!(unmatched.llm_calls[0].declared_tools[0].result.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "qwen_provider_message_contract_tests.rs"]
+mod provider_message_contract_tests;
+
+#[cfg(test)]
+#[path = "qwen_build_capture_contract_tests.rs"]
+mod build_capture_contract_tests;
+
+#[cfg(test)]
+#[path = "qwen_parser_processor_contract_tests.rs"]
+mod parser_processor_contract_tests;
+
+#[cfg(test)]
+#[path = "qwen_self_check_contract_tests.rs"]
+mod self_check_contract_tests;

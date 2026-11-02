@@ -227,6 +227,15 @@ fn convert_group(
         // protocol. Only this declaration defines ENTRY/AGENT input; LLM leaves
         // below still materialize their complete original context.
         materialize_input(&pi_turn_input)
+    } else if first.agent_type == "openclaw" {
+        // OpenClaw's before_agent_run is the human prompt. LLM full contexts
+        // additionally contain host-injected messages and later tool history.
+        let human_records: Vec<_> = records
+            .iter()
+            .copied()
+            .filter(|r| r.event_name == Some(AgentEventName::Other))
+            .collect();
+        materialize_input(&human_records).or_else(|| materialize_input(&records[..first_request]))
     } else if is_dsh {
         let human_records: Vec<_> = records
             .iter()
@@ -261,6 +270,28 @@ fn convert_group(
     );
     agent.parent_span_id = Some(entry_id.clone());
     agent.attributes.extend(root.attributes.clone());
+    // The event-log SDK takes turn metadata from its first carrying record.
+    // It belongs to the agent invocation, while ENTRY keeps only human input.
+    for (key, value) in [
+        (
+            "gen_ai.system_instructions",
+            records
+                .iter()
+                .find_map(|r| r.system_instructions.as_ref().filter(|v| !v.is_null())),
+        ),
+        (
+            "gen_ai.tool.definitions",
+            records
+                .iter()
+                .find_map(|r| r.tool_definitions.as_ref().filter(|v| !v.is_null())),
+        ),
+    ] {
+        if let Some(value) = value {
+            agent
+                .attributes
+                .insert(key.into(), attribute(value.clone()));
+        }
+    }
     agent.attributes.insert(
         "gen_ai.operation.name".into(),
         Value::String("invoke_agent".into()),
@@ -444,6 +475,24 @@ fn convert_group(
     }
     aggregate_usage(&mut agent, &leaves);
     aggregate_usage(&mut root, &leaves);
+    // SDK common agent identity is turn-scoped. Preserve explicit per-span
+    // values, and resolve missing names within this group (never from a parent).
+    let default_name = root
+        .attributes
+        .get("gen_ai.agent.name")
+        .cloned()
+        .unwrap_or_else(|| Value::String(name.to_string()));
+    if default_name.as_str().is_some_and(|name| !name.is_empty()) {
+        for span in std::iter::once(&mut root)
+            .chain(std::iter::once(&mut agent))
+            .chain(steps.values_mut())
+            .chain(leaves.iter_mut())
+        {
+            span.attributes
+                .entry("gen_ai.agent.name")
+                .or_insert_with(|| default_name.clone());
+        }
+    }
     result.trace_ids.push(trace);
     result.spans.extend([root, agent]);
     result.spans.extend(steps.into_values());
@@ -568,6 +617,12 @@ fn merge_attributes(
     record: &AgentActivityEntry,
     options: &ConvertOptions,
 ) {
+    // The event-log SDK exposes the canonical event user dimension on spans.
+    if !record.user_id.is_empty() {
+        attributes
+            .entry("gen_ai.user.id")
+            .or_insert_with(|| Value::String(record.user_id.clone()));
+    }
     for (key, value) in entry_to_object(record) {
         if key.starts_with("gen_ai.")
             || key.starts_with("error.")
@@ -585,12 +640,18 @@ fn context_attributes(
 ) -> Map<String, Value> {
     let mut result = Map::new();
     for record in records {
+        if !record.user_id.is_empty() {
+            result
+                .entry("gen_ai.user.id")
+                .or_insert_with(|| Value::String(record.user_id.clone()));
+        }
         for (key, value) in entry_to_object(record) {
             if key.starts_with("gen_ai.agent.")
                 || key.starts_with("gen_ai.subagent.")
                 || key == "gen_ai.session.id"
                 || key == "gen_ai.turn.id"
                 || key == "gen_ai.provider.name"
+                || key == "gen_ai.user.id"
                 || options.passthrough_keys.contains(&key)
             {
                 result.insert(key, attribute(value));

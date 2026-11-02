@@ -1,0 +1,98 @@
+{
+  "case": 13,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "on_session_start",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "This request will fail before a provider response is returned.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "This request will fail before a provider response is returned."
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "api_request_id": "api-request-error-1",
+        "status_code": 429,
+        "retryable": false,
+        "retry_count": 3,
+        "reason": "provider_error",
+        "error": {
+          "type": "RateLimitError",
+          "message": "Too many requests"
+        }
+      }
+    },
+    {
+      "hook": "api_request_error",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "api_request_id": "api-request-error-1",
+        "status_code": 429,
+        "retryable": false,
+        "retry_count": 3,
+        "reason": "provider_error",
+        "error": {
+          "type": "RateLimitError",
+          "message": "Too many requests"
+        }
+      }
+    },
+    {
+      "hook": "on_session_end",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "completed": false,
+        "interrupted": false,
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "on_session_finalize",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": false,
+    "configUser": "pilot-config-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

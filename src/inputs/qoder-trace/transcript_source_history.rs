@@ -70,10 +70,24 @@ fn unique(rows: &[Value]) {
         .collect::<HashSet<_>>();
     assert_eq!(ids.len(), rows.len());
 }
+// Use the same canonical Windows namespace as real wakeup descriptors.
+fn fixture_native_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_str().expect("fixture UTF-8 path");
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(local) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(local);
+        }
+    }
+    path
+}
 impl Fixture {
     async fn new(agent: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = fixture_native_path(std::fs::canonicalize(dir.path()).unwrap());
         let file = root.join("native.jsonl");
         std::fs::write(&file, []).unwrap();
         let key = digest(&json!(["session", file.to_str().unwrap()]));
@@ -588,3 +602,34 @@ mod migration_contracts;
 
 #[path = "transcript_source_recovery_history.rs"]
 mod review_recovery_contracts;
+
+#[tokio::test]
+async fn real_publisher_and_fixture_share_the_exact_canonical_checkpoint_key() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        let empty = Map::new();
+        assert!(crate::hook_process::publish_qoder_wakeup(
+            &json!({"session_id":"session","transcript_path":f.file,"hook_event_name":"Stop"}),
+            &f.root,
+            agent,
+            None,
+            &empty,
+            &empty
+        ));
+        let descriptor = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("source.json");
+        let source: Value = serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(source["key"], f.key);
+        assert_eq!(source["transcriptPath"], f.file.to_str().unwrap());
+        assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+        assert!(f.state.get(&f.key).is_some());
+        f.restart().await;
+        assert!(f.collect().await.records.is_empty());
+    }
+}

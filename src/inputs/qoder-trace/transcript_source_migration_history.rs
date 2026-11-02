@@ -131,32 +131,48 @@ fn directory_alias(target: &Path, alias: &Path) {
 }
 #[cfg(windows)]
 fn directory_alias(target: &Path, alias: &Path) {
+    use std::io::{Read, Seek, SeekFrom};
     use std::process::{Command, Stdio};
-    let mut child=Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command","$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:PILOT_QODER_ALIAS -Target $env:PILOT_QODER_TARGET | Out-Null"]).env("PILOT_QODER_ALIAS",alias).env("PILOT_QODER_TARGET",target).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let shell = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut stdout = tempfile::tempfile().unwrap();
+    let mut stderr = tempfile::tempfile().unwrap();
+    let mut command = Command::new(shell);
+    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+        "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:PILOT_QODER_ALIAS -Target $env:PILOT_QODER_TARGET | Out-Null"])
+        .env("PILOT_QODER_ALIAS", fixture_native_path(alias.to_path_buf()))
+        .env("PILOT_QODER_TARGET", fixture_native_path(target.to_path_buf()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone().unwrap()))
+        .stderr(Stdio::from(stderr.try_clone().unwrap()));
+    let mut child = crate::utils::candidate_process::CandidateChild::spawn(&mut command).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if child.try_wait().unwrap().is_some() {
-            let out = child.wait_with_output().unwrap();
-            assert!(
-                out.status.success(),
-                "junction failed {:?}: {} {}",
-                out.status,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let out = child.wait_with_output().unwrap();
-            panic!(
-                "junction timeout: {} {}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
+            break None;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    };
+    drop(child);
+    stdout.seek(SeekFrom::Start(0)).unwrap();
+    stderr.seek(SeekFrom::Start(0)).unwrap();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    stdout.take(1024 * 1024).read_to_end(&mut out).unwrap();
+    stderr.take(1024 * 1024).read_to_end(&mut err).unwrap();
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "junction failed status={status:?}: {} {}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
+    assert_eq!(
+        std::fs::canonicalize(alias).unwrap(),
+        std::fs::canonicalize(target).unwrap()
+    );
 }
 #[tokio::test]
 async fn migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source() {

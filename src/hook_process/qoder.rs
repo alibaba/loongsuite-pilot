@@ -2558,11 +2558,9 @@ fn normalize_finish_reason(reason: &str) -> Option<&str> {
         "model_context_window_exceeded" => "length",
         other => other,
     };
-    match mapped {
-        "stop" | "length" | "content_filter" | "tool_call" | "tool_calls" | "error"
-        | "end_turn" | "max_tokens" | "cancelled" => Some(mapped),
-        _ => None,
-    }
+    crate::normalization::VALID_FINISH_REASONS
+        .contains(&mapped)
+        .then_some(mapped)
 }
 
 fn finalize_records(
@@ -5002,6 +5000,10 @@ mod tests {
 mod compat_contract_tests;
 
 #[cfg(test)]
+#[path = "qoder_finish_boundary_contract_tests.rs"]
+mod finish_boundary_contract_tests;
+
+#[cfg(test)]
 #[path = "qoder_identity_tests.rs"]
 mod identity_tests;
 
@@ -5024,3 +5026,7 @@ mod collected_typed_arguments_tests;
 #[cfg(test)]
 #[path = "../normalization/qoder_agent_event_history_tests.rs"]
 mod qoder_agent_event_history_tests;
+
+#[cfg(test)]
+#[path = "shared_privacy_history_tests.rs"]
+mod shared_privacy_history_tests;

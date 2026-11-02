@@ -865,6 +865,10 @@ fn compute_hash(prev: &str, messages: &[Value]) -> String {
     hash
 }
 
+fn should_log_full_messages(previous: &str, delta: &[Value], current: &str) -> bool {
+    compute_hash(previous, delta) != current
+}
+
 fn deterministic_hex(value: &str, length: usize) -> String {
     let hex = sha256_hex(value.as_bytes());
     let mut sliced: String = hex.chars().take(length).collect();
@@ -3851,7 +3855,7 @@ fn build_turn_records(
                 .skip(previous_len)
                 .cloned()
                 .collect::<Vec<_>>();
-            let log_full = compute_hash(&running_hash, &delta) != hash;
+            let log_full = should_log_full_messages(&running_hash, &delta, &hash);
             (hash, delta, log_full)
         };
         let mut request = start_record(
@@ -5447,3 +5451,7 @@ mod tests {
         assert_eq!(world.records(), after);
     }
 }
+
+#[cfg(test)]
+#[path = "grok_emitter_history_tests.rs"]
+mod grok_emitter_history_tests;

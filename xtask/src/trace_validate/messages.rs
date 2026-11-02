@@ -2,17 +2,7 @@
 use super::{Check, Span};
 use serde_json::Value;
 
-pub(super) const FINISH_REASONS: &[&str] = &[
-    "stop",
-    "length",
-    "content_filter",
-    "tool_call",
-    "tool_calls",
-    "error",
-    "end_turn",
-    "max_tokens",
-    "cancelled",
-];
+pub(super) use loongsuite_pilot::normalization::VALID_FINISH_REASONS as FINISH_REASONS;
 
 pub(super) fn parsed(value: &Value) -> Option<Value> {
     match value {

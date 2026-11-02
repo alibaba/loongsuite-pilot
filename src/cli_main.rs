@@ -365,8 +365,10 @@ async fn run_inject(args: &[String]) -> i32 {
     else {
         return failed("Claude Code hook definition not found".into());
     };
-    let env_config_dir =
-        std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_else(|_| "~/.claude".to_string());
+    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "~/.claude".to_string());
     let config_dir = resolve_home(
         opts.config_dir
             .as_deref()

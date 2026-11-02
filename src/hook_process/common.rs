@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type Obj = Map<String, Value>;
@@ -303,7 +303,7 @@ pub fn collect_resource_attributes(env: &Env, agent_id: &str) -> Obj {
         if value.is_empty() {
             continue;
         }
-        if value.len() > 512 {
+        if value.encode_utf16().count() > 512 {
             warn_skip(agent_id, env_name, "value too long");
             continue;
         }
@@ -313,8 +313,21 @@ pub fn collect_resource_attributes(env: &Env, agent_id: &str) -> Obj {
 }
 
 pub fn parse_span_attributes(env: &Env, agent_id: &str, allow_invocation_identity: bool) -> Obj {
+    parse_span_attributes_from_env(
+        env,
+        agent_id,
+        allow_invocation_identity,
+        "LOONGSUITE_PILOT_SPAN_ATTRIBUTES",
+    )
+}
+fn parse_span_attributes_from_env(
+    env: &Env,
+    agent_id: &str,
+    allow_invocation_identity: bool,
+    env_name: &str,
+) -> Obj {
     let mut out = Obj::new();
-    let Some(raw) = env.get("LOONGSUITE_PILOT_SPAN_ATTRIBUTES") else {
+    let Some(raw) = env.get(env_name) else {
         return out;
     };
     if raw.is_empty() {
@@ -332,7 +345,7 @@ pub fn parse_span_attributes(env: &Env, agent_id: &str, allow_invocation_identit
         }
         if allow_invocation_identity {
             if let Some(mapped) = invocation_field(key) {
-                if value.len() > 512 {
+                if value.encode_utf16().count() > 512 {
                     warn_skip(agent_id, key, "value too long");
                 } else {
                     out.insert(mapped.to_string(), Value::String(value.to_string()));
@@ -348,7 +361,7 @@ pub fn parse_span_attributes(env: &Env, agent_id: &str, allow_invocation_identit
             warn_skip(agent_id, key, "sensitive field name");
             continue;
         }
-        if value.len() > 512 {
+        if value.encode_utf16().count() > 512 {
             warn_skip(agent_id, key, "value too long");
             continue;
         }
@@ -480,6 +493,16 @@ pub fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+// Only failed durable exclusions need process-local retention. A normal
+// successful marker remains shared on disk; do not retain healthy scopes.
+struct PendingWorkspacePolicy {
+    fingerprint: String,
+    policy: WorkspacePolicy,
+}
+static PENDING_WORKSPACE_POLICIES: OnceLock<Mutex<HashMap<PathBuf, PendingWorkspacePolicy>>> =
+    OnceLock::new();
+const MAX_PENDING_PRIVACY_SCOPES: usize = 128;
+
 pub fn filter_workspace_records(
     env: &Env,
     records: &[Obj],
@@ -510,12 +533,33 @@ pub fn filter_workspace_records(
     let roots = validate_excluded_workspaces(excluded).map_err(|_| {
         "Workspace privacy configuration could not be loaded; collection will retry without advancing its cursor".to_string()
     })?;
+    let pending = PENDING_WORKSPACE_POLICIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pending = pending.lock().unwrap_or_else(|error| error.into_inner());
     if roots.is_empty() {
+        pending.remove(&root);
         return Ok(records.to_vec());
     }
     let state_dir = root.join("state").join("workspace-exclusions");
-    let mut policy = WorkspacePolicy::new(roots, Some(state_dir));
-    Ok(policy.filter_maps(records, agent_id))
+    let fresh = WorkspacePolicy::new(roots, Some(state_dir));
+    let fingerprint = fresh.fingerprint().to_owned();
+    let mut policy = match pending.remove(&root) {
+        Some(previous) if previous.fingerprint == fingerprint => previous.policy,
+        _ => fresh,
+    };
+    let filtered = policy.filter_maps(records, agent_id);
+    if policy.has_pending_markers() {
+        if pending.len() >= MAX_PENDING_PRIVACY_SCOPES {
+            return Err("Workspace privacy exclusions could not be retained; collection will retry without advancing its cursor".into());
+        }
+        pending.insert(
+            root,
+            PendingWorkspacePolicy {
+                fingerprint,
+                policy,
+            },
+        );
+    }
+    Ok(filtered)
 }
 
 pub fn write_jsonl_records(
@@ -693,3 +737,11 @@ pub fn sanitize_record(record: Obj) -> Obj {
 #[cfg(test)]
 #[path = "upstream_context_history_tests.rs"]
 mod upstream_context_history_tests;
+
+#[cfg(test)]
+#[path = "shared_resource_history_tests.rs"]
+mod shared_resource_history_tests;
+
+#[cfg(test)]
+#[path = "shared_emitter_history_tests.rs"]
+mod shared_emitter_history_tests;

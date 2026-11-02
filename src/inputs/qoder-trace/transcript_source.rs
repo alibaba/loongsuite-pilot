@@ -59,8 +59,59 @@ struct LineScan {
     end: u64,
     options: ScanOptions,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirectoryVersion {
+    modified: u128,
+    changed: (i64, i64),
+}
+fn directory_version(path: &Path) -> std::io::Result<DirectoryVersion> {
+    #[cfg(unix)]
+    let (metadata, changed) = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        let changed = (metadata.ctime(), metadata.ctime_nsec());
+        (metadata, changed)
+    };
+    #[cfg(windows)]
+    let (metadata, changed) = {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        };
+        // Directory handle, FILE_READ_ATTRIBUTES only; no transcript read.
+        let directory = std::fs::OpenOptions::new()
+            .access_mode(0x80)
+            .custom_flags(0x0200_0000)
+            .open(path)?;
+        let metadata = directory.metadata()?;
+        let mut info = FILE_BASIC_INFO::default();
+        // SAFETY: live owned directory handle and exact API output layout.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                FileBasicInfo,
+                (&mut info as *mut FILE_BASIC_INFO).cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Creation time is not ctime on Windows. Native ChangeTime records the
+        // directory generation when last-write timestamps happen to be equal.
+        (metadata, (info.ChangeTime, 0))
+    };
+    Ok(DirectoryVersion {
+        modified: metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        changed,
+    })
+}
 struct Metadata {
-    version: FileVersion,
+    version: DirectoryVersion,
     source: Value,
     contexts: Vec<Value>,
     bytes: usize,
@@ -406,16 +457,10 @@ impl Collector {
     }
     fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Value, Vec<Value>)> {
         let events = dir.join("events");
-        let stamp = std::fs::metadata(&events)?;
-        let modified = stamp
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        // Directory stamps are only hints. Every changed generation is bounded by
-        // metadata bytes and context count; notices remain untouched on any error.
+        let version = directory_version(&events)?;
+        // Preserve the upstream mtime + ctime cache generation contract.
         if let Some(m) = self.metadata.get(dir) {
-            if m.version.modified == modified {
+            if m.version == version {
                 return Ok((m.source.clone(), m.contexts.clone()));
             }
         }
@@ -458,13 +503,7 @@ impl Collector {
             self.metadata.insert(
                 dir.to_owned(),
                 Metadata {
-                    version: FileVersion {
-                        dev: 0,
-                        ino: 0,
-                        size: 0,
-                        modified,
-                        changed: (0, 0),
-                    },
+                    version,
                     source: source.clone(),
                     contexts: contexts.clone(),
                     bytes,

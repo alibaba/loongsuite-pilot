@@ -337,3 +337,52 @@ async fn collector_l301_real_same_watermark_publication_after_old_read_survives_
         assert!(f.collect().await.records.is_empty());
     }
 }
+
+#[tokio::test]
+async fn same_directory_mtime_new_generation_refreshes_notices_and_acknowledges_exact_receipts() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&closed_turn(0, false));
+        f.wake("Stop", json!({}));
+        assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+        f.collect().await; // Persisted acknowledgement, then cache the current inventory.
+        let events = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("events");
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        let modified = std::fs::metadata(&events).unwrap().modified().unwrap();
+        let replacement = f.file.with_extension("new");
+        std::fs::write(&replacement, jsonl(&closed_turn(1, false))).unwrap();
+        std::fs::rename(replacement, &f.file).unwrap();
+        f.wake("Stop", json!({}));
+        // Force exactly the stale-cache precondition, without sleep, clear, or
+        // extra hook: mtime alone cannot identify a directory generation.
+        #[cfg(unix)]
+        let directory = std::fs::File::open(&events).unwrap();
+        #[cfg(windows)]
+        let directory = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .access_mode(0x100)
+                .custom_flags(0x0200_0000)
+                .open(&events)
+                .unwrap()
+        };
+        directory
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&events).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
+        f.collect().await;
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        f.restart().await;
+        assert!(f.collect().await.records.is_empty());
+    }
+}
