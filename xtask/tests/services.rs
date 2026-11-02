@@ -232,7 +232,8 @@ mod unix {
 
         fn spawn(&self, data: &Path, args: &[&str]) -> Process {
             let log = self.home.join(format!("process-{}.jsonl", uuid_tag()));
-            let child = Command::new(&self.binary)
+            let mut command = Command::new(&self.binary);
+            command
                 .args(args)
                 .env_clear()
                 .env("HOME", &self.home)
@@ -241,9 +242,10 @@ mod unix {
                 .env("PILOT_FIXTURE_LOG", &log)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+                .stderr(Stdio::null());
+            let child =
+                spawn_with_writer_retry(&mut command, Instant::now() + Duration::from_secs(1))
+                    .unwrap();
             let process = Process(child);
             let start = Instant::now();
             while !log.is_file() {
@@ -252,6 +254,63 @@ mod unix {
             }
             process
         }
+    }
+
+    // Linux may briefly retain a writer after copying a fixture executable.
+    // Retry only ETXTBSY; permissions, missing files, and all other errors are
+    // returned immediately. The fixture's process readiness budget is unchanged.
+    fn spawn_with_writer_retry(command: &mut Command, deadline: Instant) -> std::io::Result<Child> {
+        loop {
+            match command.spawn() {
+                Err(error) if error.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                    std::thread::sleep(
+                        Duration::from_millis(10)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+                result => return result,
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copied_fixture_executable_waits_for_a_real_transient_writer_and_keeps_other_errors() {
+        let fixture = Fixture::new();
+        let before = fs::read(&fixture.binary).unwrap();
+        let writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&fixture.binary)
+            .unwrap();
+        let mut probe = Command::new(&fixture.binary);
+        probe
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let error = match probe.spawn() {
+            Err(error) => error,
+            Ok(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Linux must refuse an executable with an open writer");
+            }
+        };
+        assert_eq!(error.raw_os_error(), Some(26));
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+        let process = fixture.spawn(&fixture.data, &["run", "--quiet"]);
+        release.join().unwrap();
+        assert!(loongsuite_pilot::utils::is_process_alive(process.0.id()));
+        assert_eq!(fs::read(&fixture.binary).unwrap(), before);
+        let mut missing = Command::new(fixture.home.join("missing-native-fixture"));
+        assert_eq!(
+            spawn_with_writer_retry(&mut missing, Instant::now() + Duration::from_secs(1))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     fn uuid_tag() -> u128 {

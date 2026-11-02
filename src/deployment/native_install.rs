@@ -53,12 +53,17 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
         "仅发布操作允许部署 Hook"
     );
     ensure!(
-        paths.config_options.is_none() || operation != "sync-service",
+        paths.config_options.is_none() || !matches!(operation, "sync-service" | "rollback-package"),
         "服务同步不允许修改配置"
     );
+    let rollback_version = (operation == "rollback-package")
+        .then(|| rollback_source_version(&paths))
+        .transpose()?;
     let manifest = validate_runtime(
         &paths.source_dir,
-        env!("CARGO_PKG_VERSION"),
+        rollback_version
+            .as_deref()
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
         build_target(),
         build_edition(),
     )?;
@@ -82,7 +87,7 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
                     .and_then(|name| name.to_str())
                     .context("候选名称编码无效")?
                     .to_owned()),
-                "sync-service" | "publish-package" => {
+                "sync-service" | "publish-package" | "rollback-package" => {
                     let bin = paths.bin_dir.as_deref().context("服务同步缺少 binDir")?;
                     private_directory(bin)?;
                     let destination = bin.join(if cfg!(windows) {
@@ -104,13 +109,19 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
                                 );
                                 recover_runtime_files(&paths.cache_dir, targets.clone())?;
                                 let prepared = PreparedConfig::load(&paths)?;
+                                if operation == "rollback-package" {
+                                    ensure!(rollback_source_version(&paths)? == manifest.version,
+                                        "回滚目标在等待锁期间被修改");
+                                    validate_runtime(&paths.source_dir, &manifest.version,
+                                        build_target(), build_edition())?;
+                                }
                                 preflight(&paths, &manifest, prepared.as_ref()).await?;
                                 check_service_owner(
                                     &destination,
                                     &paths.cache_dir,
                                     &paths.data_dir,
                                 )?;
-                                let publish = operation == "publish-package";
+                                let publish = matches!(operation, "publish-package" | "rollback-package");
                                 let files = service_files(
                                     &paths.source_dir,
                                     &destination,
@@ -178,6 +189,14 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
                                     transaction.write(&key, &bytes, mode)?;
                                 }
                                 transaction.commit()?;
+                                if let Err(error) = cleanup_legacy_windows_cli(
+                                    &destination, &paths.cache_dir, &paths.data_dir,
+                                ) {
+                                    crate::utils::create_logger("NativeInstall").warn(
+                                        "legacy CLI cleanup failed; native publication remains committed",
+                                        json!({"error":format!("{error:#}")}).as_object(),
+                                    );
+                                }
                                 Ok(String::new())
                             },
                             5_000,
@@ -192,6 +211,35 @@ pub(crate) async fn run(operation: &str, input: Value) -> Result<String> {
         5_000,
     )
     .await
+}
+
+/// Rollback uses the current helper's validation and container capability
+/// gates, while accepting the installed previous native version's own semver.
+/// No caller-supplied package can replace the guarded previous pointer.
+fn rollback_source_version(paths: &InstallPaths) -> Result<String> {
+    ensure!(
+        paths.config_options.is_none() && !paths.deploy_hooks,
+        "回滚不允许修改配置或重新部署 Hook"
+    );
+    ensure!(
+        runtime_metadata(&paths.cache_dir)?.is_dir()
+            && runtime_metadata(&paths.cache_dir.join("versions"))?.is_dir(),
+        "回滚安装目录不是普通目录"
+    );
+    let previous =
+        read_pointer(&paths.cache_dir.join("previous"))?.context("没有可回滚的版本指针")?;
+    ensure!(
+        paths.source_dir == paths.cache_dir.join("versions").join(previous),
+        "回滚目标与本安装 previous 指针不匹配"
+    );
+    let manifest_path = resource_file(&paths.source_dir, "runtime-manifest.json")?;
+    let mut bytes = Vec::new();
+    fs::File::open(manifest_path)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 4 * 1024 * 1024, "回滚运行清单大小超限");
+    let manifest: RuntimeManifest = serde_json::from_slice(&bytes).context("回滚运行清单无效")?;
+    Ok(manifest.version)
 }
 
 pub(super) fn read_pointer(path: &Path) -> Result<Option<String>> {
@@ -500,6 +548,14 @@ pub(crate) fn recover_runtime_files(
     let mut legacy_targets = targets.clone();
     legacy_targets.remove("config");
     ActivationTransaction::recover_compatible(cache, targets, legacy_targets)
+}
+
+pub(crate) fn cleanup_legacy_windows_cli(
+    destination: &Path,
+    cache: &Path,
+    data: &Path,
+) -> Result<bool> {
+    super::legacy_cli_cleanup::cleanup(destination, cache, data)
 }
 
 pub(crate) fn check_service_owner(destination: &Path, cache: &Path, data: &Path) -> Result<()> {

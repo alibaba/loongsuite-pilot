@@ -42,14 +42,20 @@ pub(crate) fn command() -> Command {
         )
         .subcommands(["probe-count", "probe-detected"].map(input_command))
         .subcommands(
-            ["stage-package", "sync-service", "publish-package"].map(|name| {
+            [
+                "stage-package",
+                "sync-service",
+                "publish-package",
+                "rollback-package",
+            ]
+            .map(|name| {
                 let command = input_command(name).arg(
                     Arg::new("from-env")
                         .long("from-env")
                         .action(ArgAction::SetTrue)
                         .conflicts_with("input-env"),
                 );
-                if name == "sync-service" {
+                if matches!(name, "sync-service" | "rollback-package") {
                     command
                 } else {
                     command
@@ -178,7 +184,7 @@ pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
             };
             super::native_uninstall::run(value).await?
         }
-        "stage-package" | "sync-service" | "publish-package" => {
+        "stage-package" | "sync-service" | "publish-package" | "rollback-package" => {
             let mut value = if args.get_flag("from-env") {
                 let mut values = serde_json::Map::new();
                 for (key, env) in [
@@ -197,7 +203,7 @@ pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
                 input(args)?
             };
             ensure!(value.is_object(), "原生安装路径参数必须为对象");
-            if name != "sync-service" {
+            if matches!(name, "stage-package" | "publish-package") {
                 if args.get_flag("with-config") {
                     value["configOptions"] = Value::Object(options(args)?.0);
                 }

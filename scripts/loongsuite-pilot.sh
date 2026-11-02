@@ -872,6 +872,10 @@ resolve_version_pointer() {
     [ -f "$pointer" ] && [ ! -L "$pointer" ] && [ ! -L "$VERSIONS_DIR" ] || return 1
     [ "$(wc -c < "$pointer")" -le 1024 ] || return 1
     dir=$(cat "$pointer") || return 1
+    dir="${dir#$'\xef\xbb\xbf'}"
+    # Trim encoding boundaries only; internal whitespace remains invalid.
+    dir="${dir#"${dir%%[!$' \t\r\n']*}"}"
+    dir="${dir%"${dir##*[!$' \t\r\n']}"}"
     [[ "$dir" =~ ^[A-Za-z0-9_+.-]+$ ]] && [ "${#dir}" -le 240 ] || return 1
     case "$dir" in .|..|*.) return 1 ;; esac
     native_version_root "$VERSIONS_DIR/$dir" || return 1
@@ -1857,45 +1861,30 @@ try {
     done
 }
 
+publish_rollback_version() {
+    local version_dir="$1" pilot_bin
+    native_version_root "$version_dir" || return 1
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    LP_SOURCE_DIR="$version_dir" LP_CACHE_DIR="$CACHE_DIR" LP_DATA_DIR="$DATA_DIR" \
+        LP_CONFIG_PATH="$CONFIG_FILE" LP_BIN_DIR="${LOONGSUITE_PILOT_BIN%/*}" \
+        "$pilot_bin" installer-helper rollback-package --from-env
+}
+
 cmd_rollback() {
-    if [ ! -f "$PREVIOUS_FILE" ]; then
-        echo "❌ No previous version to roll back to"
-        exit 1
+    local prev_path prev_dir
+    prev_path=$(resolve_previous_version) || {
+        echo "❌ Previous version is not a supported native installation; pointers unchanged"
+        return 1
+    }
+    prev_dir="${prev_path##*/}"
+    # The current native helper validates the previous package/config first,
+    # then publishes both pointers and service files in the durable transaction.
+    # Never expose a legacy or unchecked current between a manual swap and sync.
+    if ! publish_rollback_version "$prev_path"; then
+        echo "❌ Failed to publish rollback target: $prev_dir; installation preserved"
+        return 1
     fi
-
-    local prev_dir
-    prev_dir=$(cat "$PREVIOUS_FILE" 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$prev_dir" ] || [ ! -d "$VERSIONS_DIR/$prev_dir" ]; then
-        echo "❌ Previous version directory not found: $prev_dir"
-        exit 1
-    fi
-
-    local curr_dir=""
-    if [ -f "$CURRENT_FILE" ]; then
-        curr_dir=$(cat "$CURRENT_FILE" 2>/dev/null | tr -d '[:space:]')
-    fi
-
-    echo "$prev_dir" > "$CURRENT_FILE.tmp"
-    mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-    if [ -n "$curr_dir" ]; then
-        echo "$curr_dir" > "$PREVIOUS_FILE.tmp"
-        mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-    fi
-
-    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
-        if [ -n "$curr_dir" ]; then
-            echo "$curr_dir" > "$CURRENT_FILE.tmp"
-            mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-            echo "$prev_dir" > "$PREVIOUS_FILE.tmp"
-            mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-            sync_installed_scripts_from_version "$VERSIONS_DIR/$curr_dir" 2>/dev/null || true
-        fi
-        echo "❌ Failed to sync scripts for rollback target: $prev_dir"
-        exit 1
-    fi
-
-    cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
-
+    cleanup_hermes_for_rollback "$prev_path"
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
     cmd_restart

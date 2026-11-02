@@ -1,9 +1,9 @@
 //! Port of `src/updater/updater.ts`.
 //!
 //! Version selection, pointer rollback, collector restart diagnostics, and
-//! version GC follow the TypeScript control flow. Managed Node download and
-//! `npm install` go through [`UpdaterNet`] so tests can supply scripted
-//! responses; the default net uses `reqwest` and the process executor.
+//! version GC follow the TypeScript control flow. Native release downloads and
+//! service commands use [`UpdaterNet`]; the default uses `reqwest` and the
+//! bounded process executor.
 
 use super::activation_transaction::ActivationTransaction;
 use super::release_manifest::{LatestManifest, VersionManifest};
@@ -42,6 +42,14 @@ pub const COLLECTOR_COMMAND_TIMEOUT_MS: u64 = 90_000;
 pub const COLLECTOR_HEALTH_TIMEOUT_MS: u64 = 30_000;
 pub const COLLECTOR_HEALTH_POLL_MS: u64 = 500;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+const INITIAL_CHECK_DELAY_MS: u64 = 60_000;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerEffect {
+    ScheduledCheck,
+    Heartbeat,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateChannel {
@@ -317,6 +325,8 @@ pub struct Updater {
     pid_alive: Arc<dyn Fn(u32) -> bool + Send + Sync>,
     health_timeout_ms: u64,
     health_poll_ms: u64,
+    #[cfg(test)]
+    timer_observer: Option<Arc<dyn Fn(TimerEffect) + Send + Sync>>,
 }
 
 impl Updater {
@@ -374,6 +384,8 @@ impl Updater {
             }),
             health_timeout_ms: COLLECTOR_HEALTH_TIMEOUT_MS,
             health_poll_ms: COLLECTOR_HEALTH_POLL_MS,
+            #[cfg(test)]
+            timer_observer: None,
         }
     }
 
@@ -468,7 +480,30 @@ impl Updater {
         tokio::pin!(shutdown);
         let maintenance = self.maintain();
         tokio::pin!(maintenance);
+        let origin = tokio::time::Instant::now();
+        let mut initial_pending = true;
+        let mut interval = self
+            .config
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .check_interval_ms
+            .max(1000);
+        let mut next_periodic_ms = u128::from(interval);
         while self.is_scheduled() && !*stopping.borrow() {
+            let next_ms = if initial_pending {
+                next_periodic_ms.min(u128::from(INITIAL_CHECK_DELAY_MS))
+            } else {
+                next_periodic_ms
+            };
+            let deadline =
+                origin + Duration::from_millis(u64::try_from(next_ms).unwrap_or(u64::MAX));
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                _ = stopping.changed() => break,
+                _ = &mut maintenance => break,
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
             tokio::select! {
                 biased;
                 _ = &mut shutdown => break,
@@ -476,23 +511,43 @@ impl Updater {
                 _ = &mut maintenance => break,
                 _ = self.scheduled_check() => {}
             }
-            let interval = self
+            let elapsed_ms = origin.elapsed().as_millis();
+            if elapsed_ms >= u128::from(INITIAL_CHECK_DELAY_MS) {
+                initial_pending = false;
+            }
+            let configured_interval = self
                 .config
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .check_interval_ms
                 .max(1000);
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => break,
-                _ = stopping.changed() => break,
-                _ = &mut maintenance => break,
-                _ = tokio::time::sleep(Duration::from_millis(interval)) => {}
+            if configured_interval != interval {
+                interval = configured_interval;
+                next_periodic_ms = elapsed_ms.saturating_add(u128::from(interval));
+            } else if elapsed_ms >= next_periodic_ms {
+                // Missed checks are skipped, preserving the startup phase. Do not
+                // queue concurrent checks behind a slow download/restart.
+                let period = u128::from(interval);
+                next_periodic_ms = elapsed_ms / period * period + period;
             }
         }
     }
 
+    #[cfg(test)]
+    fn timer_effect_for_test(&self, effect: TimerEffect) -> bool {
+        if let Some(observer) = &self.timer_observer {
+            observer(effect);
+            true
+        } else {
+            false
+        }
+    }
+
     async fn scheduled_check(&self) {
+        #[cfg(test)]
+        if self.timer_effect_for_test(TimerEffect::ScheduledCheck) {
+            return;
+        }
         let result = async {
             let file = read_config_for_update(&self.config_path).await?;
             let config = super::build_auto_update_config_with(Some(&file), self.platform, |key| {
@@ -543,6 +598,8 @@ impl Updater {
                 .clone();
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    #[cfg(test)]
+                    if self.timer_effect_for_test(TimerEffect::Heartbeat) { continue; }
                     if let Err(err) = self.write_heartbeat().await {
                         self.alarm("UPDATER_FAILURE_ALARM", "2", &format!("更新心跳写入失败：{err}"));
                     }
@@ -911,6 +968,7 @@ impl Updater {
                 .next_check_at
                 .lock()
                 .unwrap_or_else(|err| err.into_inner()) = 0;
+            self.cleanup_legacy_cli();
             self.gc_old_versions().await;
             self.write_heartbeat().await?;
             if recovered {
@@ -982,6 +1040,7 @@ impl Updater {
             }
             return Err(format!("更新提交失败：{err:#}"));
         }
+        self.cleanup_legacy_cli();
         self.emit(
             EVENT_COLLECTOR_RESTARTED,
             UpdaterEventExtra {
@@ -1001,6 +1060,19 @@ impl Updater {
         self.write_heartbeat().await?;
         self.schedule_updater_restart().await;
         Ok(true)
+    }
+
+    fn cleanup_legacy_cli(&self) {
+        if let Err(error) = crate::deployment::native_install::cleanup_legacy_windows_cli(
+            Path::new(&self.paths.loongsuite_pilot_bin),
+            Path::new(&self.paths.cache_dir),
+            Path::new(&self.paths.data_dir),
+        ) {
+            crate::utils::create_logger("Updater").warn(
+                "legacy CLI cleanup failed; native publication remains committed",
+                json!({"error":format!("{error:#}")}).as_object(),
+            );
+        }
     }
 
     async fn fetch_manifest(&self) -> Result<Option<LatestManifest>, String> {
@@ -3467,25 +3539,52 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_cancels_pending_checks_and_releases_reentry_guard_and_lock() {
         let root = tempfile::tempdir().unwrap();
         let net = Arc::new(PendingNet {
             entered: tokio::sync::Notify::new(),
             dropped: AtomicBool::new(false),
         });
-        let updater = Updater::with_net(base_config(), root.path().to_str(), net.clone());
+        let mut updater = Updater::with_net(base_config(), root.path().to_str(), net.clone());
+        updater.paths.loongsuite_pilot_bin = root
+            .path()
+            .join("service-bin/loongsuite-pilot")
+            .to_string_lossy()
+            .into_owned();
+        updater.config_path = root
+            .path()
+            .join("config.json")
+            .to_string_lossy()
+            .into_owned();
         std::fs::write(
             &updater.config_path,
             r#"{"autoUpdate":{"manifestUrl":"https://example.invalid/latest-rust.json"}}"#,
         )
         .unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            updater.run_until(net.entered.notified()),
-        )
-        .await
-        .unwrap();
+        let updater = Arc::new(updater);
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let runner = updater.clone();
+        let task = tokio::spawn(async move {
+            runner
+                .run_until(async {
+                    let _ = receive.await;
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!updater.is_checking());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(2), net.entered.notified())
+            .await
+            .unwrap();
+        assert!(updater.is_checking());
+        send.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(net.dropped.load(Ordering::SeqCst));
         assert!(!updater.is_checking());
         assert!(!updater.is_scheduled());

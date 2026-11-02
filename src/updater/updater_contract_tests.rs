@@ -83,35 +83,156 @@ mod migration_contract_tests {
         assert!(net.fetch_log.lock().unwrap().is_empty());
         assert!(net.exec_log.lock().unwrap().is_empty());
     }
-    #[tokio::test]
-    async fn enabled_scheduler_owns_and_cancels_a_real_pending_check_and_supports_idempotent_stop()
-    {
+    #[tokio::test(start_paused = true)]
+    async fn stop_during_initial_delay_cancels_all_automatic_work_and_is_idempotent() {
         let root = tempfile::tempdir().unwrap();
-        let net = Arc::new(PendingNet {
-            entered: tokio::sync::Notify::new(),
-            dropped: AtomicBool::new(false),
-        });
-        let updater = scoped_updater(base_config(), root.path().to_str(), net.clone());
-        std::fs::write(
-            &updater.config_path,
-            r#"{"autoUpdate":{"manifestUrl":"https://example.invalid/latest-rust.json"}}"#,
-        )
-        .unwrap();
-        updater.start();
+        let net = ScriptedNet::new(vec![], vec![]);
+        let mut updater = scoped_updater(base_config(), root.path().to_str(), net.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        updater.timer_observer = Some(Arc::new(move |effect| {
+            if effect == TimerEffect::ScheduledCheck {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let updater = Arc::new(updater);
+        let runner = updater.clone();
+        let task = tokio::spawn(async move { runner.run_until(std::future::pending()).await });
+        tokio::task::yield_now().await;
         assert!(updater.is_scheduled());
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            updater.run_until(net.entered.notified()),
-        )
-        .await
-        .unwrap();
-        assert!(net.dropped.load(Ordering::SeqCst));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        updater.stop();
+        updater.stop();
+        task.await.unwrap();
+        tokio::time::advance(Duration::from_secs(61)).await;
         assert!(!updater.is_scheduled());
         assert!(!updater.is_checking());
-        updater.stop();
-        updater.stop();
-        assert!(!updater.is_scheduled());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(net.fetch_log.lock().unwrap().is_empty());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn daemon_dispatches_at_sixty_seconds_with_startup_phased_interval_and_independent_heartbeats(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = base_config();
+        config.check_interval_ms = 70_000;
+        let mut updater = scoped_updater(
+            config,
+            root.path().to_str(),
+            ScriptedNet::new(vec![], vec![]),
+        );
+        let origin = tokio::time::Instant::now();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        updater.timer_observer = Some(Arc::new(move |effect| {
+            observed
+                .lock()
+                .unwrap()
+                .push((effect, origin.elapsed().as_millis()));
+        }));
+        let updater = Arc::new(updater);
+        let runner = updater.clone();
+        let task = tokio::spawn(async move { runner.run_until(std::future::pending()).await });
+        tokio::task::yield_now().await;
+        let checks = || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(effect, at)| (*effect == TimerEffect::ScheduledCheck).then_some(*at))
+                .collect::<Vec<_>>()
+        };
+        tokio::time::advance(Duration::from_millis(29_999)).await;
+        tokio::task::yield_now().await;
+        assert!(checks().is_empty());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(events
+            .lock()
+            .unwrap()
+            .contains(&(TimerEffect::Heartbeat, 30_000)));
+        tokio::time::advance(Duration::from_millis(29_999)).await;
+        tokio::task::yield_now().await;
+        assert!(checks().is_empty());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(checks(), vec![60_000]);
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(checks(), vec![60_000]);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(checks(), vec![60_000, 70_000]);
+        tokio::time::advance(Duration::from_millis(69_999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(checks(), vec![60_000, 70_000]);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(checks(), vec![60_000, 70_000, 140_000]);
+        updater.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_periodic_check_can_precede_the_separate_initial_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = base_config();
+        config.check_interval_ms = 10_000;
+        let mut updater = scoped_updater(
+            config,
+            root.path().to_str(),
+            ScriptedNet::new(vec![], vec![]),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        updater.timer_observer = Some(Arc::new(move |effect| {
+            if effect == TimerEffect::ScheduledCheck {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let updater = Arc::new(updater);
+        let runner = updater.clone();
+        let task = tokio::spawn(async move { runner.run_until(std::future::pending()).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        updater.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manual_check_remains_immediate_while_daemon_waits_for_its_first_scheduled_check() {
+        let root = tempfile::tempdir().unwrap();
+        let net = ScriptedNet::new(vec![Err("explicit manual transport".into())], vec![]);
+        let mut updater = scoped_updater(base_config(), root.path().to_str(), net.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        updater.timer_observer = Some(Arc::new(move |effect| {
+            if effect == TimerEffect::ScheduledCheck {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        let updater = Arc::new(updater);
+        let runner = updater.clone();
+        let task = tokio::spawn(async move { runner.run_until(std::future::pending()).await });
+        tokio::task::yield_now().await;
+        assert!(updater.is_scheduled());
+        let error = tokio::time::timeout(Duration::from_secs(2), updater.check())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("explicit manual transport"));
+        assert_eq!(net.fetch_log.lock().unwrap().len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        updater.stop();
+        task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn missing_manifest_url_does_not_fetch_or_spawn_any_service_command() {
         let root = tempfile::tempdir().unwrap();
@@ -1534,5 +1655,111 @@ mod migration_contract_tests {
             .await
             .unwrap()
             .unwrap();
+    }
+    #[tokio::test]
+    async fn actual_native_upgrade_cleans_only_owned_windows_shadow_after_commit_and_retries_current_install(
+    ) {
+        for mode in ["owned", "foreign", "cancel-before-commit", "current-retry"] {
+            let root = tempfile::tempdir().unwrap();
+            let bin = root.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let service = bin.join("loongsuite-pilot-service.ps1");
+            let legacy = bin.join("loongsuite-pilot.ps1");
+            let mut official = Vec::new();
+            std::io::Read::read_to_end(
+                &mut flate2::read::GzDecoder::new(
+                    &include_bytes!("../../tests/fixtures/updater/official-v1-windows-cli.ps1.gz")
+                        [..],
+                ),
+                &mut official,
+            )
+            .unwrap();
+            let original = if mode == "foreign" {
+                b"user script with same command name\n".to_vec()
+            } else {
+                official.clone()
+            };
+            std::fs::write(&legacy, &original).unwrap();
+            let (body, manifest) = cached_candidate_archive();
+            let scripted = ScriptedNet::new(
+                vec![
+                    Ok(manifest_response(&manifest)),
+                    Ok(FetchResponse {
+                        status: 200,
+                        status_text: "OK".into(),
+                        body,
+                    }),
+                    Ok(manifest_response(&manifest)),
+                ],
+                preflight_outputs(&manifest),
+            );
+            let paths = build_paths(root.path().to_str().unwrap());
+            let target = paths.clone();
+            let package = manifest.clone();
+            let legacy_during_restart = legacy.clone();
+            let reached = Arc::new(tokio::sync::Notify::new());
+            let signal = reached.clone();
+            let cancel = mode == "cancel-before-commit";
+            let net = Arc::new(ObservedNet {
+                scripted: scripted.clone(),
+                observe: Box::new(move |request| {
+                    if request
+                        .args
+                        .iter()
+                        .any(|value| value == "restart-collector")
+                    {
+                        // Still present throughout rollback-capable activation.
+                        assert!(legacy_during_restart.is_file());
+                        signal.notify_one();
+                        if !cancel {
+                            healthy_for(&target, &package, std::process::id());
+                        }
+                    }
+                }),
+            });
+            let mut updater = scoped_updater(base_config(), root.path().to_str(), net);
+            updater.platform = Platform::Win32;
+            updater.paths.loongsuite_pilot_bin = service.to_string_lossy().into_owned();
+            updater.set_pid_alive(Arc::new(|_| true));
+            if cancel {
+                let updater = Arc::new(updater);
+                let runner = updater.clone();
+                let task = tokio::spawn(async move { runner.check().await });
+                tokio::time::timeout(Duration::from_secs(2), reached.notified())
+                    .await
+                    .unwrap();
+                assert!(updater.is_checking());
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                assert_eq!(std::fs::read(&legacy).unwrap(), original);
+                assert!(!service.exists());
+                assert!(!bin.join("loongsuite-pilot.cmd").exists());
+                assert!(!Path::new(&paths.current_file).exists());
+                assert!(!updater.is_checking());
+                continue;
+            }
+            updater.check().await.unwrap();
+            assert!(std::fs::read(&service)
+                .unwrap()
+                .starts_with(b"\xef\xbb\xbf"));
+            assert!(std::fs::read_to_string(bin.join("loongsuite-pilot.cmd"))
+                .unwrap()
+                .contains("-File \"%~dp0loongsuite-pilot-service.ps1\" %*"));
+            if mode == "foreign" {
+                assert_eq!(std::fs::read(&legacy).unwrap(), original);
+            } else {
+                assert!(!legacy.exists());
+            }
+            let current = std::fs::read(&paths.current_file).unwrap();
+            if mode == "current-retry" {
+                // Simulate process exit immediately after the native commit
+                // but before best-effort cleanup. No next upgrade is required.
+                std::fs::write(&legacy, official).unwrap();
+                updater.check().await.unwrap();
+                assert!(!legacy.exists());
+                assert_eq!(std::fs::read(&paths.current_file).unwrap(), current);
+                assert_eq!(scripted.fetch_log.lock().unwrap().len(), 3);
+            }
+        }
     }
 }

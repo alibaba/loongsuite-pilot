@@ -2520,3 +2520,91 @@ fn native_uninstall_rejects_invalid_local_overrides_while_discovery_keeps_builti
         }
     }
 }
+
+#[test]
+fn first_native_install_publishes_command_before_owned_legacy_cleanup_and_preserves_foreign_shadow()
+{
+    for mode in ["owned", "foreign", "preflight-failure"] {
+        let fixture = Fixture::new();
+        fixture.package();
+        let bin = fixture.root.path().join(".local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let legacy = bin.join("loongsuite-pilot.ps1");
+        let mut official = Vec::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("fixtures/updater/official-v1-windows-cli.ps1.gz")[..],
+        )
+        .read_to_end(&mut official)
+        .unwrap();
+        let bytes = if mode == "foreign" {
+            b"Write-Output 'user-owned command'\n".to_vec()
+        } else {
+            official
+        };
+        fs::write(&legacy, &bytes).unwrap();
+        if mode == "preflight-failure" {
+            fs::write(
+                fixture.candidate.join("scripts/loongsuite-pilot.ps1"),
+                b"changed after manifest",
+            )
+            .unwrap();
+        }
+        let output = fixture.helper(
+            "sync-service",
+            &fixture.runtime_options(&fixture.candidate),
+            true,
+        );
+        if mode == "preflight-failure" {
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(fs::read(&legacy).unwrap(), bytes);
+            assert!(!bin.join("loongsuite-pilot-layout.json").exists());
+            continue;
+        }
+        success(&output);
+        let layout: Value =
+            serde_json::from_slice(&fs::read(bin.join("loongsuite-pilot-layout.json")).unwrap())
+                .unwrap();
+        assert_eq!(layout["cacheDir"], json!(fixture.root.path().join("cache")));
+        assert_eq!(layout["dataDir"], json!(fixture.data));
+        #[cfg(windows)]
+        {
+            let service = fs::read(bin.join("loongsuite-pilot-service.ps1")).unwrap();
+            assert!(service.starts_with(b"\xef\xbb\xbf"));
+            assert!(fs::read_to_string(bin.join("loongsuite-pilot.cmd"))
+                .unwrap()
+                .contains("-File \"%~dp0loongsuite-pilot-service.ps1\" %*"));
+            if mode == "owned" {
+                assert!(!legacy.exists());
+            } else {
+                assert_eq!(fs::read(&legacy).unwrap(), bytes);
+            }
+            let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let mut command = fixture.command(&shell);
+            let quoted = bin.to_str().unwrap().replace('\'', "''");
+            command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                &format!("$env:PATH='{quoted}'; $c=Get-Command loongsuite-pilot -CommandType Application,ExternalScript -ErrorAction Stop; [Console]::Write($c.Path)")]);
+            let resolution = bounded(command);
+            success(&resolution);
+            let resolved = PathBuf::from(String::from_utf8(resolution.stdout).unwrap().trim());
+            assert_eq!(
+                resolved,
+                if mode == "owned" {
+                    bin.join("loongsuite-pilot.cmd")
+                } else {
+                    legacy
+                }
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            // Unix never had PowerShell command-name precedence. The actual
+            // installer must publish its native entrypoint and retain this file.
+            assert!(bin.join("loongsuite-pilot").is_file());
+            assert_eq!(fs::read(&legacy).unwrap(), bytes);
+        }
+    }
+}
+
+#[path = "native_contracts/cross_version_upgrade.rs"]
+mod cross_version_upgrade;

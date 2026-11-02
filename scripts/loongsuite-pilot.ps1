@@ -2082,45 +2082,40 @@ function Remove-HermesPluginForRollback {
     }
 }
 
+function Publish-RollbackVersion {
+    param([string]$VersionDir)
+    if (-not (Test-NativeVersion $VersionDir)) { return $false }
+    $previousInput = $env:LOONGSUITE_PILOT_INSTALL_INPUT
+    try {
+        $env:LOONGSUITE_PILOT_INSTALL_INPUT = @{
+            sourceDir = $VersionDir
+            cacheDir = $CACHE_DIR
+            dataDir = $DATA_DIR
+            configPath = $CONFIG_FILE
+            binDir = (Split-Path $LOONGSUITE_PILOT_BIN)
+        } | ConvertTo-Json -Compress
+        Invoke-Pilot -Arguments @("installer-helper", "rollback-package", "--input-env") | Out-Null
+        return ($script:PilotExitCode -eq 0)
+    } finally {
+        if ($null -eq $previousInput) { Remove-Item Env:LOONGSUITE_PILOT_INSTALL_INPUT -ErrorAction SilentlyContinue }
+        else { $env:LOONGSUITE_PILOT_INSTALL_INPUT = $previousInput }
+    }
+}
+
 function Cmd-Rollback {
-    if (-not (Test-Path $PREVIOUS_FILE)) {
-        Write-Error "No previous version to roll back to"
+    $prevPath = Resolve-PreviousVersion
+    if (-not $prevPath) {
+        Write-Error "Previous version is not a supported native installation; pointers unchanged"
         exit 1
     }
-
-    $prevDir = (Get-Content $PREVIOUS_FILE -ErrorAction SilentlyContinue).Trim()
-    $prevPath = Join-Path $VERSIONS_DIR $prevDir
-    if (-not $prevDir -or -not (Test-Path $prevPath)) {
-        Write-Error "Previous version directory not found: $prevDir"
+    $prevDir = Split-Path $prevPath -Leaf
+    # Validate and publish through the current helper's durable native transaction.
+    # A rejected legacy artifact or failed service write cannot leave a pointer swap.
+    if (-not (Publish-RollbackVersion $prevPath)) {
+        Write-Error "Failed to publish rollback target: $prevDir; installation preserved"
         exit 1
     }
-
-    $currDir = ""
-    if (Test-Path $CURRENT_FILE) {
-        $currDir = (Get-Content $CURRENT_FILE -ErrorAction SilentlyContinue).Trim()
-    }
-
-    # Swap current/previous pointers
-    Set-Content -Path $CURRENT_FILE -Value $prevDir
-    if ($currDir) {
-        Set-Content -Path $PREVIOUS_FILE -Value $currDir
-    }
-
-    # Sync scripts from the rollback target
-    $ok = Sync-InstalledScriptsFromVersion $prevPath
-    if (-not $ok) {
-        # Revert pointer swap
-        if ($currDir) {
-            Set-Content -Path $CURRENT_FILE -Value $currDir
-            Set-Content -Path $PREVIOUS_FILE -Value $prevDir
-            Sync-InstalledScriptsFromVersion (Join-Path $VERSIONS_DIR $currDir) | Out-Null
-        }
-        Write-Error "Failed to sync scripts for rollback target: $prevDir"
-        exit 1
-    }
-
     Remove-HermesPluginForRollback $prevPath
-
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
     Cmd-Restart

@@ -1,0 +1,587 @@
+{
+  "baseline": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+  "path": "scripts/loongsuite-pilot.ps1",
+  "variants": "Only exact whole-file LF/CRLF, each with/without UTF-8 BOM. No content/whitespace normalization at runtime.",
+  "artifacts": [
+    {
+      "commit": "dff64ec9f87393be778fef013db74d6e60863be5",
+      "variant": "LF",
+      "sha256": "00cd262262c9a10cd57381e2b9bafc4be23f412f0955355f972017ac12d812ce",
+      "bytes": 114066
+    },
+    {
+      "commit": "dff64ec9f87393be778fef013db74d6e60863be5",
+      "variant": "CRLF",
+      "sha256": "b1bf932cc1f1cdae740662a50d04651475b27efcce445aaa14630eb029dde2ef",
+      "bytes": 116652
+    },
+    {
+      "commit": "dff64ec9f87393be778fef013db74d6e60863be5",
+      "variant": "BOM-LF",
+      "sha256": "f5c005e0f97a58517c1f954f92e7eeffc640bc05c8f9931bb1389bb13b8e0f9b",
+      "bytes": 114069
+    },
+    {
+      "commit": "dff64ec9f87393be778fef013db74d6e60863be5",
+      "variant": "BOM-CRLF",
+      "sha256": "4fba4e559440d5102c73408f8ba194f04e1ccd3b25951e9599b3f661f0a63552",
+      "bytes": 116655
+    },
+    {
+      "commit": "7393dff040c3172cd8b5324a8951e9c5c8e6351c",
+      "variant": "LF",
+      "sha256": "bd3dd0bec5c286685df2a0e33736806318de5a4c0b64cb2bb3559480c1eae4f4",
+      "bytes": 113487
+    },
+    {
+      "commit": "7393dff040c3172cd8b5324a8951e9c5c8e6351c",
+      "variant": "CRLF",
+      "sha256": "1df93a812b1a96c884ccd657e1b45a1b4f98ce91f8be58febcfce03baf05f9e6",
+      "bytes": 116058
+    },
+    {
+      "commit": "7393dff040c3172cd8b5324a8951e9c5c8e6351c",
+      "variant": "BOM-LF",
+      "sha256": "02505a4a1c2ea9239ff49d796ba2867d0d3c03a3ea491e21ff56ea7847021819",
+      "bytes": 113490
+    },
+    {
+      "commit": "7393dff040c3172cd8b5324a8951e9c5c8e6351c",
+      "variant": "BOM-CRLF",
+      "sha256": "42ed300566b7aee3df252f2b8a4713030d1207db4f3034bde3edaa5efa413f4c",
+      "bytes": 116061
+    },
+    {
+      "commit": "a44f4af0ec42c38e63529f4c858141362364d003",
+      "variant": "LF",
+      "sha256": "fa47632a34638ceb885c6c3ba96fb291b92ae8d24a8c5e3fc73f6be48ef14126",
+      "bytes": 113005
+    },
+    {
+      "commit": "a44f4af0ec42c38e63529f4c858141362364d003",
+      "variant": "CRLF",
+      "sha256": "95a183fd264fdca0e3741cb6abadf1bd999c662bed8bd52b4e8c10079c100d17",
+      "bytes": 115556
+    },
+    {
+      "commit": "a44f4af0ec42c38e63529f4c858141362364d003",
+      "variant": "BOM-LF",
+      "sha256": "4ccb051f92513c83b5400c0c88da9a7b7ecc29015810163e9a2f67d01f8d20d7",
+      "bytes": 113008
+    },
+    {
+      "commit": "a44f4af0ec42c38e63529f4c858141362364d003",
+      "variant": "BOM-CRLF",
+      "sha256": "297d550447e2e01b375aa4a0dd4656c1abb6a16f224abedf1b02786d6ce5a649",
+      "bytes": 115559
+    },
+    {
+      "commit": "240dac84428febdee945540f5edfe342683b8299",
+      "variant": "LF",
+      "sha256": "2c347326531a6c9421f86a45d6f27fcdc600024d35006e1b4f43b8e201ebf42b",
+      "bytes": 112891
+    },
+    {
+      "commit": "240dac84428febdee945540f5edfe342683b8299",
+      "variant": "CRLF",
+      "sha256": "d9145b6946e0a698bb78a0a8f476a11fd29ea086b41e659fb173cc96d5a14976",
+      "bytes": 115441
+    },
+    {
+      "commit": "240dac84428febdee945540f5edfe342683b8299",
+      "variant": "BOM-LF",
+      "sha256": "f60142da32ee55dd1a2b955f938a277efe6b8faabae17fa6d4c16cbbf54f27ce",
+      "bytes": 112894
+    },
+    {
+      "commit": "240dac84428febdee945540f5edfe342683b8299",
+      "variant": "BOM-CRLF",
+      "sha256": "7dd0982378fe13ff033268e7809fcfff3a56699ab2e4987537126f3ee0652ed7",
+      "bytes": 115444
+    },
+    {
+      "commit": "80a41c48f847fd44d071f127b87f62f4e23e4ad5",
+      "variant": "LF",
+      "sha256": "7db6a6c63e639e0f167063ba7ed5d66f1c92c03c1a55b1f480ef01d904c17597",
+      "bytes": 79217
+    },
+    {
+      "commit": "80a41c48f847fd44d071f127b87f62f4e23e4ad5",
+      "variant": "CRLF",
+      "sha256": "b55e9e93926746cba53c57e8b4146c430c72c5b7891ac28633cc985cd73968b0",
+      "bytes": 81060
+    },
+    {
+      "commit": "80a41c48f847fd44d071f127b87f62f4e23e4ad5",
+      "variant": "BOM-LF",
+      "sha256": "8782673bb4b171bd00e7f7c79a239f3bd03a16a5a9869634ef2912b63c032969",
+      "bytes": 79220
+    },
+    {
+      "commit": "80a41c48f847fd44d071f127b87f62f4e23e4ad5",
+      "variant": "BOM-CRLF",
+      "sha256": "4a863a4db65bc54c470998bb7a3e299323e2f21b16b7006747c5c4ae23cd15d1",
+      "bytes": 81063
+    },
+    {
+      "commit": "0035004b26d9b233e6173a187c167815772e50df",
+      "variant": "LF",
+      "sha256": "3ad7c9a0aa30f8695b41b9ab29fc3a363059d8c92348b994e687274de7667b35",
+      "bytes": 78624
+    },
+    {
+      "commit": "0035004b26d9b233e6173a187c167815772e50df",
+      "variant": "CRLF",
+      "sha256": "aee6cb793d246d91d55bbf9fa9cbeac8be5d98c04c5c7e0bc4b5bab40dd7cce5",
+      "bytes": 80443
+    },
+    {
+      "commit": "0035004b26d9b233e6173a187c167815772e50df",
+      "variant": "BOM-LF",
+      "sha256": "ef49f2f27924716cdbf2b0f7e15794cb63fc2dd15af6480573563ac5140aceef",
+      "bytes": 78627
+    },
+    {
+      "commit": "0035004b26d9b233e6173a187c167815772e50df",
+      "variant": "BOM-CRLF",
+      "sha256": "634e2960aeb5bc2e69f85b83f4690043d0204691bbbfac4720d6d0a42cf0e629",
+      "bytes": 80446
+    },
+    {
+      "commit": "49304c574e508e888d7fa1cec3e0a4dfff913154",
+      "variant": "LF",
+      "sha256": "cc11147a8858ae132bac4d8ebbc67e5662b72dc2a5d20167b41c50dc0c0d5b88",
+      "bytes": 74403
+    },
+    {
+      "commit": "49304c574e508e888d7fa1cec3e0a4dfff913154",
+      "variant": "CRLF",
+      "sha256": "a05024bc2c8573e9998b5726b53fd4a1b397fd2e34673f2b3cc2e41655952343",
+      "bytes": 76126
+    },
+    {
+      "commit": "49304c574e508e888d7fa1cec3e0a4dfff913154",
+      "variant": "BOM-LF",
+      "sha256": "f8e44d8c705af741635f7012aa4a1237ce80aed1f813cf712c902ef3467b8314",
+      "bytes": 74406
+    },
+    {
+      "commit": "49304c574e508e888d7fa1cec3e0a4dfff913154",
+      "variant": "BOM-CRLF",
+      "sha256": "0fe3d4d3852432f0f182d8bdd8febf022901fe35232390088df22ada669ea752",
+      "bytes": 76129
+    },
+    {
+      "commit": "ce2f9fdedceb7c0d1a1d295217c3a084c164085b",
+      "variant": "LF",
+      "sha256": "856bde65bad2ee97ac61e58e05c7ca155c5c081079f5ecfa60b1a022f396e13d",
+      "bytes": 70100
+    },
+    {
+      "commit": "ce2f9fdedceb7c0d1a1d295217c3a084c164085b",
+      "variant": "CRLF",
+      "sha256": "a7ef0192e147d13991fc05b8abe588177e22bbb843ee1146aae40b2de9831074",
+      "bytes": 71703
+    },
+    {
+      "commit": "ce2f9fdedceb7c0d1a1d295217c3a084c164085b",
+      "variant": "BOM-LF",
+      "sha256": "0c693f1a77cbc17024a6758d3ce4b96e7658e49bb362a3c440f628acc2b3bdda",
+      "bytes": 70103
+    },
+    {
+      "commit": "ce2f9fdedceb7c0d1a1d295217c3a084c164085b",
+      "variant": "BOM-CRLF",
+      "sha256": "0ece0bbf51997a8460ee69a74a6c094de98503817a929c70c44e7afda7738a4f",
+      "bytes": 71706
+    },
+    {
+      "commit": "2fe29142a064b0874db11b7cb3f2b71762399c17",
+      "variant": "LF",
+      "sha256": "71e79bd5b69c7ceee5ad5f5167362fc9fce7d9d0758cdc6d5ed7f8b8efb036b9",
+      "bytes": 67165
+    },
+    {
+      "commit": "2fe29142a064b0874db11b7cb3f2b71762399c17",
+      "variant": "CRLF",
+      "sha256": "dba32774efda363a1a8db5fab34199e43ee59095b41727d96a5d25177f0c22bc",
+      "bytes": 68736
+    },
+    {
+      "commit": "2fe29142a064b0874db11b7cb3f2b71762399c17",
+      "variant": "BOM-LF",
+      "sha256": "0bbec447e670e894335e4ef5fa31c499009e409f827e1486740a498c110cc077",
+      "bytes": 67168
+    },
+    {
+      "commit": "2fe29142a064b0874db11b7cb3f2b71762399c17",
+      "variant": "BOM-CRLF",
+      "sha256": "15b92a5c656e8bb17b1bb91abe746f2ce0c562155b5eef170ac479454cf528e5",
+      "bytes": 68739
+    },
+    {
+      "commit": "7f6e18c4c3c17cecc40ff86421b8720b9a50382a",
+      "variant": "LF",
+      "sha256": "4a5365bef1950e32d0ec4306646783de47af88072d69dad7913ef577e71c0929",
+      "bytes": 61103
+    },
+    {
+      "commit": "7f6e18c4c3c17cecc40ff86421b8720b9a50382a",
+      "variant": "CRLF",
+      "sha256": "b340ff83a720e79321e937238aa32e4989badf029625e572fd9dc3f991230822",
+      "bytes": 62581
+    },
+    {
+      "commit": "7f6e18c4c3c17cecc40ff86421b8720b9a50382a",
+      "variant": "BOM-LF",
+      "sha256": "0fa12616cab8995feacfd3b6624c95da034c8c5efc5c406f1334f39cbbf5661d",
+      "bytes": 61106
+    },
+    {
+      "commit": "7f6e18c4c3c17cecc40ff86421b8720b9a50382a",
+      "variant": "BOM-CRLF",
+      "sha256": "3a0e0e6b262107debe6f09a1d605c0bbe4eb964a5e33fba25adcc119069b8709",
+      "bytes": 62584
+    },
+    {
+      "commit": "04beee97881e5d12f77ba54bdd191085d59df756",
+      "variant": "LF",
+      "sha256": "33dda1280e2e84506cbec372e487a6da9e92719eee66e339a85e45cb1f7f53fc",
+      "bytes": 59844
+    },
+    {
+      "commit": "04beee97881e5d12f77ba54bdd191085d59df756",
+      "variant": "CRLF",
+      "sha256": "338961384614724990b14b3f4e8c6ee4939df87ed421f007a639bdfb4e702a22",
+      "bytes": 61288
+    },
+    {
+      "commit": "04beee97881e5d12f77ba54bdd191085d59df756",
+      "variant": "BOM-LF",
+      "sha256": "abd5bca30dc693f19ae98c59bc081523ff7255f4808759015c7698777a5e8ae9",
+      "bytes": 59847
+    },
+    {
+      "commit": "04beee97881e5d12f77ba54bdd191085d59df756",
+      "variant": "BOM-CRLF",
+      "sha256": "5b228ba8919b8b88d07ef69558a0873bdfaf1792d42daeb8f9c030a533c375b7",
+      "bytes": 61291
+    },
+    {
+      "commit": "6c111942297cc0c3d514a67de0ad6ce23053fdbf",
+      "variant": "LF",
+      "sha256": "15ea7522c3273f4c40ff78afeea14f47c7f10be073cc21a50b7c9fd875905a41",
+      "bytes": 58734
+    },
+    {
+      "commit": "6c111942297cc0c3d514a67de0ad6ce23053fdbf",
+      "variant": "CRLF",
+      "sha256": "656b4ae8b40ab800918aa1c0516f2ceec24b8f9718d549655b8f7442c5e23087",
+      "bytes": 60144
+    },
+    {
+      "commit": "6c111942297cc0c3d514a67de0ad6ce23053fdbf",
+      "variant": "BOM-LF",
+      "sha256": "c6672dd877c0e9964643aae74123054670e3cba64955843147501e0e268dbe58",
+      "bytes": 58737
+    },
+    {
+      "commit": "6c111942297cc0c3d514a67de0ad6ce23053fdbf",
+      "variant": "BOM-CRLF",
+      "sha256": "a15ddf74b70bebf1b22fa7930ee11258fd26505ae7c331a2383a67c7316185b5",
+      "bytes": 60147
+    },
+    {
+      "commit": "113ef55d3901ef7943e0e6738afb6f3101de6ab6",
+      "variant": "LF",
+      "sha256": "3048125e00d17a182fbedec6e4dd4e1aba6fb6b8b4e8e3f51d30932558752ed6",
+      "bytes": 56508
+    },
+    {
+      "commit": "113ef55d3901ef7943e0e6738afb6f3101de6ab6",
+      "variant": "CRLF",
+      "sha256": "48b53234e24f7ad2e9d37b43123e23aad8df1737af2d56ddedfdf7366ee19b14",
+      "bytes": 57845
+    },
+    {
+      "commit": "113ef55d3901ef7943e0e6738afb6f3101de6ab6",
+      "variant": "BOM-LF",
+      "sha256": "484920f80f5e56e29c717ce8f0c4298daf593459538d88851de496f64b2e8002",
+      "bytes": 56511
+    },
+    {
+      "commit": "113ef55d3901ef7943e0e6738afb6f3101de6ab6",
+      "variant": "BOM-CRLF",
+      "sha256": "d3aad5ab7dacfc1f6b426c2ae0c95fb01a786c5479775da5edf71f9e5414c0f7",
+      "bytes": 57848
+    },
+    {
+      "commit": "54a2b90867b7ede126a17a7f21066e3d4e591789",
+      "variant": "LF",
+      "sha256": "d82d77befa082b5e938eb7a312c375a91d37c44077e8d287f8f70d983d872162",
+      "bytes": 55208
+    },
+    {
+      "commit": "54a2b90867b7ede126a17a7f21066e3d4e591789",
+      "variant": "CRLF",
+      "sha256": "44de46a8a235a61d38fd4abb35fdcfa63c3b30872c5b210f4a0046d338e3bc2b",
+      "bytes": 56507
+    },
+    {
+      "commit": "54a2b90867b7ede126a17a7f21066e3d4e591789",
+      "variant": "BOM-LF",
+      "sha256": "cfe9539cfd1209a246848fe58664366a96b31eaad7d211872a67a3c93751ab2c",
+      "bytes": 55211
+    },
+    {
+      "commit": "54a2b90867b7ede126a17a7f21066e3d4e591789",
+      "variant": "BOM-CRLF",
+      "sha256": "91742e96740c9fa9035beb1d2797c6d31f3caec9578d1d119dda90784d5a87ef",
+      "bytes": 56510
+    },
+    {
+      "commit": "47e1f2cb808c649759ee0533aef5152f84c6fbe1",
+      "variant": "LF",
+      "sha256": "7a05070cbbadcc30fb3686e6fd25b532915ccaa3c8351f53adbcbf9872cd47f8",
+      "bytes": 52896
+    },
+    {
+      "commit": "47e1f2cb808c649759ee0533aef5152f84c6fbe1",
+      "variant": "CRLF",
+      "sha256": "e53359f9fb8baf84ce6d8ca2d1c796595292b2b8fb1b902fe08587804984e9a8",
+      "bytes": 54168
+    },
+    {
+      "commit": "47e1f2cb808c649759ee0533aef5152f84c6fbe1",
+      "variant": "BOM-LF",
+      "sha256": "98081c73227e7b0d41db58d737381b84d94652fad124ae6161b7f83c81f8e6eb",
+      "bytes": 52899
+    },
+    {
+      "commit": "47e1f2cb808c649759ee0533aef5152f84c6fbe1",
+      "variant": "BOM-CRLF",
+      "sha256": "e7464c2fcc4c934cb4f5fa5d50d328d945a263504ae324bcfb010afa9cfbce3d",
+      "bytes": 54171
+    },
+    {
+      "commit": "7eb866c59d0fb3991514aadcab35fc0126cfe1d4",
+      "variant": "LF",
+      "sha256": "1490ddbd56d10d1801c46bf4f48564d1c71ecd82f320727c7388fddc66372cfa",
+      "bytes": 52029
+    },
+    {
+      "commit": "7eb866c59d0fb3991514aadcab35fc0126cfe1d4",
+      "variant": "CRLF",
+      "sha256": "041641ab275c8709d999317caa30889f8b41678be479d879c0585eaa234ad3de",
+      "bytes": 53293
+    },
+    {
+      "commit": "7eb866c59d0fb3991514aadcab35fc0126cfe1d4",
+      "variant": "BOM-LF",
+      "sha256": "cd1084951577c7db25236aaf3d803a141d9aa8cf4de1303dc77709553e95aa66",
+      "bytes": 52032
+    },
+    {
+      "commit": "7eb866c59d0fb3991514aadcab35fc0126cfe1d4",
+      "variant": "BOM-CRLF",
+      "sha256": "8b640151b934cbffd1603187d102ea265527085ade28c9e947182bf735eb9693",
+      "bytes": 53296
+    },
+    {
+      "commit": "62858b156621797c2cd55e8646b5363dae5bd32c",
+      "variant": "LF",
+      "sha256": "f4ea7108c255a81ae179e4c2a17894f28b8a6a106ac1c196c91bd3cecd952bc8",
+      "bytes": 50545
+    },
+    {
+      "commit": "62858b156621797c2cd55e8646b5363dae5bd32c",
+      "variant": "CRLF",
+      "sha256": "c1ef58816bce54d15b3c558f6f549921357ef5d783eee6af230e4c105652e426",
+      "bytes": 51791
+    },
+    {
+      "commit": "62858b156621797c2cd55e8646b5363dae5bd32c",
+      "variant": "BOM-LF",
+      "sha256": "c336a9999cf27ee93fc21c0ea09a02c352f8b9e38db611cdcd948978b23f0694",
+      "bytes": 50548
+    },
+    {
+      "commit": "62858b156621797c2cd55e8646b5363dae5bd32c",
+      "variant": "BOM-CRLF",
+      "sha256": "935a9ba51e012cad2e95db8cda50902f7d5e1bc1bfacf56fc5cf33cabe28622d",
+      "bytes": 51794
+    },
+    {
+      "commit": "1478f41e0b5d474492df42309941814b7b618b9f",
+      "variant": "LF",
+      "sha256": "b043d2088c7018181ca227661b5562ee4789d5bea47e44d49a1d17c7b808b0a4",
+      "bytes": 48909
+    },
+    {
+      "commit": "1478f41e0b5d474492df42309941814b7b618b9f",
+      "variant": "CRLF",
+      "sha256": "7323216c71a86bc0a996189d9bdf32ea89b88bfe6ccf3ab84fb6c7d59ca3cc3b",
+      "bytes": 50114
+    },
+    {
+      "commit": "1478f41e0b5d474492df42309941814b7b618b9f",
+      "variant": "BOM-LF",
+      "sha256": "5f2539816e224661ea696b74d868b166e66801e5212c786c06481c546f6cd035",
+      "bytes": 48912
+    },
+    {
+      "commit": "1478f41e0b5d474492df42309941814b7b618b9f",
+      "variant": "BOM-CRLF",
+      "sha256": "6b79c96500717ba4c76cbf5895dbd8b305c2572a3a02ed8d0e84f9243145e04c",
+      "bytes": 50117
+    },
+    {
+      "commit": "6d048548bfbad690dcec94875cd0c459cfb397a0",
+      "variant": "LF",
+      "sha256": "ae006065323be277722cbc70d675612256a765345319bbe6a68018d6d71e52e8",
+      "bytes": 47825
+    },
+    {
+      "commit": "6d048548bfbad690dcec94875cd0c459cfb397a0",
+      "variant": "CRLF",
+      "sha256": "b704b22926ec7f19a21460c6dcdf4cab1609de58f076184e33df335576163b57",
+      "bytes": 49004
+    },
+    {
+      "commit": "6d048548bfbad690dcec94875cd0c459cfb397a0",
+      "variant": "BOM-LF",
+      "sha256": "68d5d5649af8cc8407c028457e5a7cecc37eb07a00f01eae7d1846a3677b61b4",
+      "bytes": 47828
+    },
+    {
+      "commit": "6d048548bfbad690dcec94875cd0c459cfb397a0",
+      "variant": "BOM-CRLF",
+      "sha256": "8ba103820ccbe57e7fcdbc5fa630ad90b01e0eb151d4c5abe81eaab555d7b80c",
+      "bytes": 49007
+    },
+    {
+      "commit": "d8b8da46020344e3e807c9f8045ee202b49eedb4",
+      "variant": "LF",
+      "sha256": "ee1acdf69942fe67b6a556c58891a212f4a0297392684324129fb7860e014654",
+      "bytes": 42998
+    },
+    {
+      "commit": "d8b8da46020344e3e807c9f8045ee202b49eedb4",
+      "variant": "CRLF",
+      "sha256": "685330130f1ef5de59864d61577d00b12c8e877b1dadd34965ac7ae18f08b47a",
+      "bytes": 44039
+    },
+    {
+      "commit": "d8b8da46020344e3e807c9f8045ee202b49eedb4",
+      "variant": "BOM-LF",
+      "sha256": "337be504d3b266cc0899444dded683ed64608c067d56ef19c9af6493fd15dae3",
+      "bytes": 43001
+    },
+    {
+      "commit": "d8b8da46020344e3e807c9f8045ee202b49eedb4",
+      "variant": "BOM-CRLF",
+      "sha256": "700d2f8fb8c7ae81e0f8fc802a222298e769dda0829064212ab1e967350c2c2d",
+      "bytes": 44042
+    },
+    {
+      "commit": "3ca5e62301b9c84cbc5517a6c5b21e2b871316c3",
+      "variant": "LF",
+      "sha256": "dfb3281288df2065710af9942ccfdd4ef8f7d32fa4619c55d83c9c60b1873830",
+      "bytes": 41444
+    },
+    {
+      "commit": "3ca5e62301b9c84cbc5517a6c5b21e2b871316c3",
+      "variant": "CRLF",
+      "sha256": "2b46dd7b905de1c9665288d1fe1c16314d31adf48d4af40d189a28b1defcbf41",
+      "bytes": 42459
+    },
+    {
+      "commit": "3ca5e62301b9c84cbc5517a6c5b21e2b871316c3",
+      "variant": "BOM-LF",
+      "sha256": "93866484ef73a48258e79473bed3b1f267872220e61df970acc33cd7c6e6b7bd",
+      "bytes": 41447
+    },
+    {
+      "commit": "3ca5e62301b9c84cbc5517a6c5b21e2b871316c3",
+      "variant": "BOM-CRLF",
+      "sha256": "0b1113398cbbd4a73f22569f78e9fa4c78633f65166e2b29eabc3ec4436a645a",
+      "bytes": 42462
+    },
+    {
+      "commit": "e1264e54061115e90128e83c1227c198213372d8",
+      "variant": "LF",
+      "sha256": "c410a6daf4e3f1fdce94e6fdd1d851e99e71d776d55e6b94bd5b735454609e2b",
+      "bytes": 38108
+    },
+    {
+      "commit": "e1264e54061115e90128e83c1227c198213372d8",
+      "variant": "CRLF",
+      "sha256": "8828736465988034b401b057128ee91b55dbf24b89978f1153f1707e7cec1af0",
+      "bytes": 39068
+    },
+    {
+      "commit": "e1264e54061115e90128e83c1227c198213372d8",
+      "variant": "BOM-LF",
+      "sha256": "c7ca178aec978a823d7b3144928c1635400d1eda3f9861a3f44daca8ddf7e7f6",
+      "bytes": 38111
+    },
+    {
+      "commit": "e1264e54061115e90128e83c1227c198213372d8",
+      "variant": "BOM-CRLF",
+      "sha256": "469648de54d155ec1366a897d38ed85ce36169d90d8d6a8a2a8799ec95180433",
+      "bytes": 39071
+    },
+    {
+      "commit": "78293fdd839e81d951da23b5a55b6e3f7c631dd0",
+      "variant": "LF",
+      "sha256": "1242c213afbbf95d13f6b3312f95003a67b8be45ce21b2e59c6c461983e2e0f8",
+      "bytes": 30736
+    },
+    {
+      "commit": "78293fdd839e81d951da23b5a55b6e3f7c631dd0",
+      "variant": "CRLF",
+      "sha256": "4968110296443b927e0f8358e7f2889855a9845f9232fef8a14710a4f6ab09b7",
+      "bytes": 31579
+    },
+    {
+      "commit": "78293fdd839e81d951da23b5a55b6e3f7c631dd0",
+      "variant": "BOM-LF",
+      "sha256": "eb8d153559ca08bacc34cc949fdc8a28c1ee6bc7b8367ed5960c2c0bfce41790",
+      "bytes": 30739
+    },
+    {
+      "commit": "78293fdd839e81d951da23b5a55b6e3f7c631dd0",
+      "variant": "BOM-CRLF",
+      "sha256": "25a7771b1df973c5fc61541e1ffa99c3b7f65ae70320f169994aa5edf644258b",
+      "bytes": 31582
+    },
+    {
+      "commit": "ff9c1b3f68d988cb4612e01b1367b9ba6ee6517a",
+      "variant": "LF",
+      "sha256": "d2b21cadf27d860843bfac57b99ba52ec816c471590e92d9565eacbf454b1120",
+      "bytes": 29673
+    },
+    {
+      "commit": "ff9c1b3f68d988cb4612e01b1367b9ba6ee6517a",
+      "variant": "CRLF",
+      "sha256": "db4ee840a0f9f01a8cb97da9038140438c623f13da1b4dd3a93e9ad801d12ae5",
+      "bytes": 30499
+    },
+    {
+      "commit": "ff9c1b3f68d988cb4612e01b1367b9ba6ee6517a",
+      "variant": "BOM-LF",
+      "sha256": "3cab484480ab03c16258a69010eb897aedbb3fd106dbc6422398153cc0af72a5",
+      "bytes": 29676
+    },
+    {
+      "commit": "ff9c1b3f68d988cb4612e01b1367b9ba6ee6517a",
+      "variant": "BOM-CRLF",
+      "sha256": "c6296fe6bfb534ea32ce4bb6ca5a7bf4d8f56fd8a14015c138289842ca033105",
+      "bytes": 30502
+    }
+  ],
+  "fixture": {
+    "path": "tests/fixtures/updater/official-v1-windows-cli.ps1.gz",
+    "raw_sha256": "00cd262262c9a10cd57381e2b9bafc4be23f412f0955355f972017ac12d812ce"
+  }
+}
