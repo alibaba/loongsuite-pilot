@@ -87392,6 +87392,4035 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/deployment/agent-def-loader.test.ts",
+      "source_hash": "6c798abfc4a7bfb4c06ac14c4d5ae4e8cabafccfb222c09e2aafc7612351f74c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All 31 frozen ef8953 and f84 declarations are backed by actual temporary-definition public-loader and shipped-asset assertions; sources are byte-identical, main delta 0, retired 0. Linux actually verified, Windows/macOS applicable pending platform execution. Existing Windows shell/path adaptation retained.",
+      "cases": [
+        {
+          "source": {
+            "id": "L42:C3",
+            "title": "loads valid definitions from builtin directory",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualtemporarybuiltinJSON containsoriginaltest-agent/hookdefinition, publicloadreturns1withidtest-agent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l42_valid_builtin_definition_is_loaded"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "skips invalid JSON files",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualinvalidJSONbytes{invalid are skipped, publicloadreturns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l59_invalid_json_file_is_skipped"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "skips definitions missing required fields",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual{id:missing-fields} withoutotherrequiredfields returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l68_missing_required_fields_are_skipped"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L78:C3",
+            "title": "local definitions override builtin by id",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "RealbuiltinCursorBuiltin+localCursorLocalOverride sameid merge toexactly1andlocaldisplayName.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l78_local_definition_overrides_builtin_by_exact_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L102:C3",
+            "title": "loads a valid registered PI SDK definition and rejects malformed markers",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Reallocalvalidacme-codePI SDKschema1/agentDirplusbadconfigKeyandspoofedpluginId definitions:publicloadIDsexactly[acme-code],piSdkobjectexact.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l102_valid_pi_sdk_loads_and_malformed_or_spoofed_markers_are_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "rejects a local PI SDK definition that shadows a built-in Agent id",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualbuiltinpi-coding-agent pluslocalPI SDKshadow ofreservedid:oneoriginaldisplaynamePiCodingAgent remains, shadow rejected.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l137_pi_sdk_local_shadow_cannot_replace_reserved_builtin"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C3",
+            "title": "replaces $PILOT_DIR and $PILOT_DATA variables",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualloadedPILOT_DATA/logs resolvesliteral/home/user/.loongsuite-pilot/logs;PILOT_DIRhookCommand/opt/pilot/hooks/test.sh onUnix. ExistingnativeWindowsadaptationselects.ps1;notnewproductionchange.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l170_pilot_dir_and_data_placeholders_reach_actual_loaded_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L192:C3",
+            "title": "expands ~ to home directory",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualtildeJSON expandsrelative.cursor underactualsyntheticHOME/USERPROFILE, independentlycomputedPath.joinexpected (notcallingresolverasoracle).",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l192_tilde_expands_to_actual_synthetic_user_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L207:C3",
+            "title": "resolves HERMES_HOME for directory plugins",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp definition passes through public load: directory-plugin mode, explicit Hermes profile detection, PILOT_DIR source directory, profile target directory and explicit HERMES_CLI activation command all match original assertions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l207_hermes_home_cli_and_directory_plugin_fields_are_resolved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L250:C3",
+            "title": "falls back to the Hermes command on PATH when the bundled CLI is absent",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual isolated missing bundled executable and missing uv shim fall back to hermes (hermes.exe on Windows); no external command executes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l250_absent_hermes_bundle_and_uv_shim_fall_back_to_path_command"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L295:C3",
+            "title": "resolves the default uv tool shim before falling back to PATH",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp home/.local/bin/hermes locator file is selected ahead of PATH fallback with native path normalization.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l295_existing_uv_tool_shim_is_selected_before_path_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L345:C3",
+            "title": "uses the official bundled Hermes CLI when it exists",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp HERMES_HOME/hermes-agent/venv/bin/hermes locator file is selected; Windows applicable counterpart is Scripts/hermes.exe.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l345_official_bundled_hermes_cli_is_selected_when_present"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C3",
+            "title": "resolves PI_CODING_AGENT_DIR for Pi detection and settings",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit PI_CODING_AGENT_DIR reaches both detection.paths[0] and pluginInject.configPaths[0] through actual public loader.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L418:C3",
+            "title": "defaults $PI_CODING_AGENT_DIR to ~/.pi/agent",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent PI_CODING_AGENT_DIR expands synthetic HOME/.pi/agent for detection and its settings.json for injection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L447:C3",
+            "title": "treats a blank PI_CODING_AGENT_DIR as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space PI_CODING_AGENT_DIR is unset and actual loaded detection uses synthetic HOME/.pi/agent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L473:C3",
+            "title": "ships $PI_CODING_AGENT_DIR in the built-in Pi definition",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Pi JSON retains exact detection placeholder array and settings placeholder array; raw asset is parsed using include_str rather than resolver output.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L481:C3",
+            "title": "resolves GROK_HOME for Grok detection and hook settings",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit GROK_HOME reaches actual detection path and hook settingsPath ending hooks/loongsuite-pilot.json.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l481_grok_override_reaches_detection_and_hook_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L510:C3",
+            "title": "defaults $GROK_HOME to ~/.grok",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent GROK_HOME expands synthetic HOME/.grok for both detection and hook settings.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l510_grok_unset_defaults_to_user_home_for_detection_and_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L539:C3",
+            "title": "treats a blank GROK_HOME as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space GROK_HOME is unset and actual loaded detection uses synthetic HOME/.grok.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l539_grok_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L559:C3",
+            "title": "ships $GROK_HOME in the built-in Grok definition",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Grok JSON retains exact GROK_HOME detection array and hook settings placeholder.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L567:C3",
+            "title": "resolves DSH_HOME for DSH detection",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit DSH_HOME reaches detection path while DSH yaml patchPath remains absent, retaining dynamic process-locator selection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l567_dsh_override_keeps_detection_and_absent_patch_path_for_process_locator"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L595:C3",
+            "title": "defaults $DSH_HOME to ~/.dsh",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent DSH_HOME resolves actual loaded detection to synthetic HOME/.dsh.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l595_dsh_unset_defaults_to_user_dsh"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L620:C3",
+            "title": "treats a blank DSH_HOME as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space DSH_HOME is unset and actual loaded detection uses synthetic HOME/.dsh.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l620_dsh_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L645:C3",
+            "title": "ships $DSH_HOME on detection and omits patchPath so locator keeps process discovery",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped DSH JSON has exact DSH_HOME detection array and no patchPath property, preserving process discovery.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L653:C3",
+            "title": "handles missing directories gracefully",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Realnonexistentbuiltin/localpaths publicloadreturns0withoutfailure.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l653_missing_definition_directories_return_empty"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L678:C5",
+            "title": "loads a valid dsh-yaml-patch definition",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualvalidDSHyamlpatchdefinitionloads1andexactentryIdloongsuite-pilot-observability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l678_valid_dsh_yaml_patch_keeps_entry_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L685:C5",
+            "title": "rejects an unknown deployMode",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualunknownmade-updeployMode definitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l685_unknown_deploy_mode_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L695:C5",
+            "title": "rejects dsh-yaml-patch when dshYamlPatch is missing",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualomitteddshYamlPatchdefinitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l695_dsh_patch_configuration_is_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L705:C5",
+            "title": "rejects dsh-yaml-patch when required field is empty",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualemptyrequiredentryIddefinitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l705_empty_required_dsh_field_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L715:C5",
+            "title": "rejects dsh-yaml-patch when field has wrong type",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualnumericmarker123wrongtyperejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l715_wrong_required_dsh_field_type_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L725:C5",
+            "title": "rejects dsh-yaml-patch when patchPath is non-empty but wrong type",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualnonemptynumericpatchPath42wrongtyperejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l725_wrong_nonempty_dsh_patch_path_type_is_rejected"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/agent-matrix.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "52f415fefaea7a81bd85458d198fd0482c169ef779ed7ff1f94461d48d0b341f",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L11:C3",
+            "title": "loads agents with ensure + probe fields",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: loads agents with ensure + probe fields. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > loads agents with ensure + probe fields"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "resolveE2eCursorInstallStrategy: official by default, watzon for linux-7u",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: resolveE2eCursorInstallStrategy: official by default, watzon for linux-7u. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > resolveE2eCursorInstallStrategy: official by default, watzon for linux-7u"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "resolveEnsureInstallSh: official by default; watzon for linux-7u or explicit; strategy flag overrides profile",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: resolveEnsureInstallSh: official by default; watzon for linux-7u or explicit; strategy flag overrides profile. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > resolveEnsureInstallSh: official by default; watzon for linux-7u or explicit; strategy flag overrides profile"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "buildEnsureAgentClisScript: default output covers npm prefix, all agents, official cursor; watzon when strategy/profile set",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildEnsureAgentClisScript: default output covers npm prefix, all agents, official cursor; watzon when strategy/profile set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > buildEnsureAgentClisScript: default output covers npm prefix, all agents, official cursor; watzon when strategy/profile set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C3",
+            "title": "buildMatrixProbeScript: base64 isolation per agent, numeric exit status, no hard exit",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildMatrixProbeScript: base64 isolation per agent, numeric exit status, no hard exit. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > buildMatrixProbeScript: base64 isolation per agent, numeric exit status, no hard exit"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "buildEnsureAgentClisScript + buildMatrixProbeScript: cursor incompat detection and SKIP_IF_INCOMPAT flag",
+            "suites": [
+              "agent-matrix"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildEnsureAgentClisScript + buildMatrixProbeScript: cursor incompat detection and SKIP_IF_INCOMPAT flag. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-matrix.test.mjs",
+            "names": [
+              "agent-matrix > buildEnsureAgentClisScript + buildMatrixProbeScript: cursor incompat detection and SKIP_IF_INCOMPAT flag"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-matrix.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/agent-probe-body.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "0356e9b2b692f7643c405e3506ddf05b1113956a883ca14f387d3744c9befe30",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L5:C3",
+            "title": "wrapInBase64Bash produces decodable pipeline",
+            "suites": [
+              "agent-probe-body"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: wrapInBase64Bash produces decodable pipeline. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-probe-body.test.mjs",
+            "names": [
+              "agent-probe-body > wrapInBase64Bash produces decodable pipeline"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-probe-body.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L11:C3",
+            "title": "splits on --- into preamble + isolated blocks",
+            "suites": [
+              "agent-probe-body"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: splits on --- into preamble + isolated blocks. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-probe-body.test.mjs",
+            "names": [
+              "agent-probe-body > splits on --- into preamble + isolated blocks"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-probe-body.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "single segment uses one inner bash",
+            "suites": [
+              "agent-probe-body"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: single segment uses one inner bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/agent-probe-body.test.mjs",
+            "names": [
+              "agent-probe-body > single segment uses one inner bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/agent-probe-body.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "54f7b01f7acc7f97e08a20e26f2cd8468c9b023229326109fa38a7b4ff33cafb",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L14:C3",
+            "title": "checks node, npm, and the L1 CLI binaries",
+            "suites": [
+              "preflightScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: checks node, npm, and the L1 CLI binaries. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "preflightScript > checks node, npm, and the L1 CLI binaries"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L25:C3",
+            "title": "uses the local installer package and passes userId to installer.sh",
+            "suites": [
+              "localBuildInstallScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: uses the local installer package and passes userId to installer.sh. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "localBuildInstallScript > uses the local installer package and passes userId to installer.sh"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "injects SLS config into config.json when E2E_PROPAGATE_SLS_INSTALL is set",
+            "suites": [
+              "localBuildInstallScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: injects SLS config into config.json when E2E_PROPAGATE_SLS_INSTALL is set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "localBuildInstallScript > injects SLS config into config.json when E2E_PROPAGATE_SLS_INSTALL is set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "calls installer with uninstall --purge",
+            "suites": [
+              "uninstallScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: calls installer with uninstall --purge. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "uninstallScript > calls installer with uninstall --purge"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "emits per-agent existence checks for the comma-separated list",
+            "suites": [
+              "buildJsonlAgentCoverageCheck"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: emits per-agent existence checks for the comma-separated list. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildJsonlAgentCoverageCheck > emits per-agent existence checks for the comma-separated list"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L71:C3",
+            "title": "returns empty string when no WRITE_REMOTE_* flags are set",
+            "suites": [
+              "buildAgentConfigSetupScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns empty string when no WRITE_REMOTE_* flags are set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentConfigSetupScript > returns empty string when no WRITE_REMOTE_* flags are set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "builds codex config when E2E_WRITE_REMOTE_CODEX_CONFIG=1",
+            "suites": [
+              "buildAgentConfigSetupScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: builds codex config when E2E_WRITE_REMOTE_CODEX_CONFIG=1. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentConfigSetupScript > builds codex config when E2E_WRITE_REMOTE_CODEX_CONFIG=1"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "returns empty string when neither matrix probe nor custom probe is set",
+            "suites": [
+              "buildAgentProbeOnlyScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns empty string when neither matrix probe nor custom probe is set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentProbeOnlyScript > returns empty string when neither matrix probe nor custom probe is set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "builds matrix probe script when E2E_USE_MATRIX_PROBE=1",
+            "suites": [
+              "buildAgentProbeOnlyScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: builds matrix probe script when E2E_USE_MATRIX_PROBE=1. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentProbeOnlyScript > builds matrix probe script when E2E_USE_MATRIX_PROBE=1"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "returns ensure script for matrix probes by default",
+            "suites": [
+              "buildAgentEnsureOnlyScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns ensure script for matrix probes by default. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentEnsureOnlyScript > returns ensure script for matrix probes by default"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "can be disabled explicitly",
+            "suites": [
+              "buildAgentEnsureOnlyScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: can be disabled explicitly. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildAgentEnsureOnlyScript > can be disabled explicitly"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "exports QODER_PERSONAL_ACCESS_TOKEN when set",
+            "suites": [
+              "buildProbeEnvInjections"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: exports QODER_PERSONAL_ACCESS_TOKEN when set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildProbeEnvInjections > exports QODER_PERSONAL_ACCESS_TOKEN when set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C3",
+            "title": "exports CURSOR_API_KEY when E2E_CURSOR_API_KEY is set",
+            "suites": [
+              "buildProbeEnvInjections"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: exports CURSOR_API_KEY when E2E_CURSOR_API_KEY is set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildProbeEnvInjections > exports CURSOR_API_KEY when E2E_CURSOR_API_KEY is set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "exports qwen and opencode probe credentials and overrides",
+            "suites": [
+              "buildProbeEnvInjections"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: exports qwen and opencode probe credentials and overrides. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildProbeEnvInjections > exports qwen and opencode probe credentials and overrides"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L135:C3",
+            "title": "returns empty when no keys set",
+            "suites": [
+              "buildProbeEnvInjections"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns empty when no keys set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs",
+            "names": [
+              "buildProbeEnvInjections > returns empty when no keys set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/expand-features.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "1587080e452b48254a3f4d66e6dd9d82537f4ce0290344ff7db860993b16856e",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L23:C5",
+            "title": "produces valid bash",
+            "suites": [
+              "expand-features script builders",
+              "buildAgentDiscoveryPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: produces valid bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAgentDiscoveryPhaseScript > produces valid bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L28:C5",
+            "title": "includes discovery interval wait",
+            "suites": [
+              "expand-features script builders",
+              "buildAgentDiscoveryPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: includes discovery interval wait. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAgentDiscoveryPhaseScript > includes discovery interval wait"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C5",
+            "title": "references codex detection path removal and recreation",
+            "suites": [
+              "expand-features script builders",
+              "buildAgentDiscoveryPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: references codex detection path removal and recreation. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAgentDiscoveryPhaseScript > references codex detection path removal and recreation"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C5",
+            "title": "produces valid bash",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoUpgradePhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: produces valid bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoUpgradePhaseScript > produces valid bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C5",
+            "title": "injects manifest URL with mock port",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoUpgradePhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: injects manifest URL with mock port. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoUpgradePhaseScript > injects manifest URL with mock port"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L51:C5",
+            "title": "checks current pointer for update",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoUpgradePhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: checks current pointer for update. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoUpgradePhaseScript > checks current pointer for update"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C5",
+            "title": "produces valid bash",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoRollbackPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: produces valid bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoRollbackPhaseScript > produces valid bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L63:C5",
+            "title": "uses installer.sh upgrade with broken package URL",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoRollbackPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: uses installer.sh upgrade with broken package URL. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoRollbackPhaseScript > uses installer.sh upgrade with broken package URL"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C5",
+            "title": "verifies current restored after rollback",
+            "suites": [
+              "expand-features script builders",
+              "buildAutoRollbackPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: verifies current restored after rollback. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildAutoRollbackPhaseScript > verifies current restored after rollback"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L77:C5",
+            "title": "produces valid bash",
+            "suites": [
+              "expand-features script builders",
+              "buildDualSendPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: produces valid bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildDualSendPhaseScript > produces valid bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C5",
+            "title": "configures two endpoints with different ports",
+            "suites": [
+              "expand-features script builders",
+              "buildDualSendPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: configures two endpoints with different ports. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildDualSendPhaseScript > configures two endpoints with different ports"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C5",
+            "title": "sets redact: false for raw and redact: true for redacted",
+            "suites": [
+              "expand-features script builders",
+              "buildDualSendPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: sets redact: false for raw and redact: true for redacted. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildDualSendPhaseScript > sets redact: false for raw and redact: true for redacted"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L96:C5",
+            "title": "produces valid bash",
+            "suites": [
+              "expand-features script builders",
+              "buildMaskingPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: produces valid bash. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildMaskingPhaseScript > produces valid bash"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C5",
+            "title": "includes sensitive test patterns",
+            "suites": [
+              "expand-features script builders",
+              "buildMaskingPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: includes sensitive test patterns. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildMaskingPhaseScript > includes sensitive test patterns"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L107:C5",
+            "title": "sets mask mode to all",
+            "suites": [
+              "expand-features script builders",
+              "buildMaskingPhaseScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: sets mask mode to all. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/expand-features.test.mjs",
+            "names": [
+              "expand-features script builders > buildMaskingPhaseScript > sets mask mode to all"
+            ],
+            "resources": [
+              "scripts/e2e/lib/expand-features.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/l1-env.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "10ca3c0fda6b25c3e613a3a943bff2d9e144a98d43577a691c2ba0ed0ea3638b",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L10:C3",
+            "title": "returns empty missing[] when all required env present for install-smoke",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns empty missing[] when all required env present for install-smoke. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > returns empty missing[] when all required env present for install-smoke"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L24:C3",
+            "title": "does NOT require E2E_CURSOR_API_KEY (cursor is skipped by default in L1)",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: does NOT require E2E_CURSOR_API_KEY (cursor is skipped by default in L1). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > does NOT require E2E_CURSOR_API_KEY (cursor is skipped by default in L1)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L30:C3",
+            "title": "reports ALL missing env (not first only) for install-smoke",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: reports ALL missing env (not first only) for install-smoke. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > reports ALL missing env (not first only) for install-smoke"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L43:C3",
+            "title": "uninstall scenario requires same env as install-smoke (because it installs first)",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: uninstall scenario requires same env as install-smoke (because it installs first). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > uninstall scenario requires same env as install-smoke (because it installs first)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "preflight requires no env",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: preflight requires no env. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > preflight requires no env"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "rejects unknown scenario",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: rejects unknown scenario. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > rejects unknown scenario"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "treats empty string and whitespace as missing",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: treats empty string and whitespace as missing. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > treats empty string and whitespace as missing"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "exposes L1_SCENARIOS and L1_REQUIRED_BY_SCENARIO",
+            "suites": [
+              "assertL1Env"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: exposes L1_SCENARIOS and L1_REQUIRED_BY_SCENARIO. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "assertL1Env > exposes L1_SCENARIOS and L1_REQUIRED_BY_SCENARIO"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C3",
+            "title": "sets all hardcoded defaults",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: sets all hardcoded defaults. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > sets all hardcoded defaults"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "respects pre-set E2E_SLS_ENDPOINT",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: respects pre-set E2E_SLS_ENDPOINT. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > respects pre-set E2E_SLS_ENDPOINT"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "does not overwrite user-set bailian model",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: does not overwrite user-set bailian model. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > does not overwrite user-set bailian model"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "does not skip cursor by default (cursor is still deployed/probed for detection + auth, even though cursor-cli is excluded from JSONL coverage)",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: does not skip cursor by default (cursor is still deployed/probed for detection + auth, even though cursor-cli is excluded from JSONL coverage). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > does not skip cursor by default (cursor is still deployed/probed for detection + auth, even though cursor-cli is excluded from JSONL coverage)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L134:C3",
+            "title": "respects user-set E2E_PROBE_SKIP_AGENTS",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: respects user-set E2E_PROBE_SKIP_AGENTS. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > respects user-set E2E_PROBE_SKIP_AGENTS"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C3",
+            "title": "leaves E2E_CLAUDE_BAILIAN_API_KEY alone when explicitly set",
+            "suites": [
+              "applyL1Defaults"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: leaves E2E_CLAUDE_BAILIAN_API_KEY alone when explicitly set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/l1-env.test.mjs",
+            "names": [
+              "applyL1Defaults > leaves E2E_CLAUDE_BAILIAN_API_KEY alone when explicitly set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/l1-env.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/mock-server.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "ab03870e40420fe0c71ce3cbd981b286291d9e112f9e86ac1e2f17a26b3bd869",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "routes requests to matching handler",
+            "suites": [
+              "createMockServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: routes requests to matching handler. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createMockServer > routes requests to matching handler"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "returns 404 for unregistered paths",
+            "suites": [
+              "createMockServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns 404 for unregistered paths. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createMockServer > returns 404 for unregistered paths"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "collects POST bodies into received array",
+            "suites": [
+              "createWebtrackingCollector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: collects POST bodies into received array. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createWebtrackingCollector > collects POST bodies into received array"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "collects multiple requests",
+            "suites": [
+              "createWebtrackingCollector"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: collects multiple requests. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createWebtrackingCollector > collects multiple requests"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L78:C3",
+            "title": "serves manifest.json and package tar.gz",
+            "suites": [
+              "createManifestServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: serves manifest.json and package tar.gz. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createManifestServer > serves manifest.json and package tar.gz"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "returns 404 when package path does not exist",
+            "suites": [
+              "createManifestServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns 404 when package path does not exist. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createManifestServer > returns 404 when package path does not exist"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "generates a valid tar.gz with crashing dist/index.js",
+            "suites": [
+              "createBrokenPackage"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: generates a valid tar.gz with crashing dist/index.js. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/mock-server.test.mjs",
+            "names": [
+              "createBrokenPackage > generates a valid tar.gz with crashing dist/index.js"
+            ],
+            "resources": [
+              "scripts/e2e/lib/mock-server.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/propagate-sls-install.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "ee02a868700323ed591e7f20cfd6bb081e7f234c54c4b0efbac728a00e991ad8",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L18:C3",
+            "title": "normalizeSlsEndpoint adds https when missing",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: normalizeSlsEndpoint adds https when missing. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > normalizeSlsEndpoint adds https when missing"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "shellSingleQuoteBash escapes single quotes",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: shellSingleQuoteBash escapes single quotes. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > shellSingleQuoteBash escapes single quotes"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "does not propagate when E2E_PROPAGATE_SLS_INSTALL=0",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: does not propagate when E2E_PROPAGATE_SLS_INSTALL=0. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > does not propagate when E2E_PROPAGATE_SLS_INSTALL=0"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L39:C3",
+            "title": "propagates endpoint project logstore with Hangzhou default when endpoint unset",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: propagates endpoint project logstore with Hangzhou default when endpoint unset. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > propagates endpoint project logstore with Hangzhou default when endpoint unset"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "uses E2E_SLS_ENDPOINT when set (adds https)",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: uses E2E_SLS_ENDPOINT when set (adds https). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > uses E2E_SLS_ENDPOINT when set (adds https)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "adds AK flags when both key vars set",
+            "suites": [
+              "propagate-sls-install"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: adds AK flags when both key vars set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/propagate-sls-install.test.mjs",
+            "names": [
+              "propagate-sls-install > adds AK flags when both key vars set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/propagate-sls-install.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/qoder-pat.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "9de7cfb6cc2d9d7744694ed495abf4eb5de31ce3a02d58476886006a2a0129fb",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L5:C3",
+            "title": "trims and strips CR",
+            "suites": [
+              "normalizeE2eQoderPersonalAccessToken"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: trims and strips CR. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/qoder-pat.test.mjs",
+            "names": [
+              "normalizeE2eQoderPersonalAccessToken > trims and strips CR"
+            ],
+            "resources": [
+              "scripts/e2e/lib/qoder-pat.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L9:C3",
+            "title": "strips Bearer prefix",
+            "suites": [
+              "normalizeE2eQoderPersonalAccessToken"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: strips Bearer prefix. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/qoder-pat.test.mjs",
+            "names": [
+              "normalizeE2eQoderPersonalAccessToken > strips Bearer prefix"
+            ],
+            "resources": [
+              "scripts/e2e/lib/qoder-pat.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L13:C3",
+            "title": "strips wrapping quotes when both ends match",
+            "suites": [
+              "normalizeE2eQoderPersonalAccessToken"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: strips wrapping quotes when both ends match. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/qoder-pat.test.mjs",
+            "names": [
+              "normalizeE2eQoderPersonalAccessToken > strips wrapping quotes when both ends match"
+            ],
+            "resources": [
+              "scripts/e2e/lib/qoder-pat.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/remote-agent-config.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "228d4e14d7bd7f450ea56366f182b4e37bff0e6417f469a423f2c698e3d996ce",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L12:C3",
+            "title": "buildRemoteCodexConfigSh is empty unless E2E_WRITE_REMOTE_CODEX_CONFIG=1",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteCodexConfigSh is empty unless E2E_WRITE_REMOTE_CODEX_CONFIG=1. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteCodexConfigSh is empty unless E2E_WRITE_REMOTE_CODEX_CONFIG=1"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "buildRemoteCodexConfigSh sets replace when E2E_WRITE_REMOTE_CODEX_CONFIG_REPLACE=1",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteCodexConfigSh sets replace when E2E_WRITE_REMOTE_CODEX_CONFIG_REPLACE=1. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteCodexConfigSh sets replace when E2E_WRITE_REMOTE_CODEX_CONFIG_REPLACE=1"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L29:C3",
+            "title": "buildRemoteCodexConfigSh encodes Dashscope-style defaults",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteCodexConfigSh encodes Dashscope-style defaults. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteCodexConfigSh encodes Dashscope-style defaults"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L42:C3",
+            "title": "buildRemoteSecretExportsSh emits CODEX_OPENAI_API_KEY and ANTHROPIC exports",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteSecretExportsSh emits CODEX_OPENAI_API_KEY and ANTHROPIC exports. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteSecretExportsSh emits CODEX_OPENAI_API_KEY and ANTHROPIC exports"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "isE2eClaudeBailianEnabled respects E2E_CLAUDE_BAILIAN",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: isE2eClaudeBailianEnabled respects E2E_CLAUDE_BAILIAN. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > isE2eClaudeBailianEnabled respects E2E_CLAUDE_BAILIAN"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L60:C3",
+            "title": "buildRemoteClaudeBailianExportsSh emits apps/anthropic base URL and model",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteClaudeBailianExportsSh emits apps/anthropic base URL and model. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteClaudeBailianExportsSh emits apps/anthropic base URL and model"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "buildRemoteSecretExportsSh: 百炼 wins over legacy ANTHROPIC key",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteSecretExportsSh: 百炼 wins over legacy ANTHROPIC key. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteSecretExportsSh: 百炼 wins over legacy ANTHROPIC key"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "buildRemoteClaudeOnboardingSkipSh writes ~/.claude.json when enabled",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteClaudeOnboardingSkipSh writes ~/.claude.json when enabled. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteClaudeOnboardingSkipSh writes ~/.claude.json when enabled"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L97:C3",
+            "title": "buildRemoteClaudeProxyConfigSh writes proxy config when key set",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteClaudeProxyConfigSh writes proxy config when key set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteClaudeProxyConfigSh writes proxy config when key set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L109:C3",
+            "title": "buildRemoteCodexConfigSh merge node script dedupes [hooks.state.\"...\"] duplicates",
+            "suites": [
+              "remote-agent-config"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildRemoteCodexConfigSh merge node script dedupes [hooks.state.\"...\"] duplicates. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/remote-agent-config.test.mjs",
+            "names": [
+              "remote-agent-config > buildRemoteCodexConfigSh merge node script dedupes [hooks.state.\"...\"] duplicates"
+            ],
+            "resources": [
+              "scripts/e2e/lib/remote-agent-config.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/e2e-remote/version-matrix.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "3482181282af70d002ca261d3a13d3bd620b84f79453573696a71fffc36d0b64",
+      "note": "Original optional developer E2E-harness contracts remain JavaScript because they test the actual shipped developer scripts. All original declarations/literals executed without test edits in isolated HOME/network-none glibc2.34. The user-modified e2e-scenarios.mjs was additionally overridden READ-ONLY by committed9df95aa bytes inside Docker; actual source remains untouched. This proves harness/helper contracts only, not live remote Agent/SLS acceptance, and adds no Node dependency to Collector.",
+      "cases": [
+        {
+          "source": {
+            "id": "L45:C3",
+            "title": "resolveVersionMatrixN: defaults to 3, respects env, clamps invalid/oversized",
+            "suites": [
+              "version-matrix helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: resolveVersionMatrixN: defaults to 3, respects env, clamps invalid/oversized. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "version-matrix helpers > resolveVersionMatrixN: defaults to 3, respects env, clamps invalid/oversized"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L53:C3",
+            "title": "resolveVersionMatrixFilter: null when empty, parses comma-separated lowercase",
+            "suites": [
+              "version-matrix helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: resolveVersionMatrixFilter: null when empty, parses comma-separated lowercase. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "version-matrix helpers > resolveVersionMatrixFilter: null when empty, parses comma-separated lowercase"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "resolveVersionMatrixAgents: filters out no-npmPackage agents and respects binary/id filter",
+            "suites": [
+              "version-matrix helpers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: resolveVersionMatrixAgents: filters out no-npmPackage agents and respects binary/id filter. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "version-matrix helpers > resolveVersionMatrixAgents: filters out no-npmPackage agents and respects binary/id filter"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "emits error stub when no matching agents",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: emits error stub when no matching agents. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > emits error stub when no matching agents"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C3",
+            "title": "includes precondition checks for npm / node / pilot by default",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: includes precondition checks for npm / node / pilot by default. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > includes precondition checks for npm / node / pilot by default"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "skips pilot check when E2E_VERSION_MATRIX_REQUIRE_PILOT=0",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: skips pilot check when E2E_VERSION_MATRIX_REQUIRE_PILOT=0. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > skips pilot check when E2E_VERSION_MATRIX_REQUIRE_PILOT=0"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "emits per-agent blocks only for npm-based agents",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: emits per-agent blocks only for npm-based agents. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > emits per-agent blocks only for npm-based agents"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "installs, probes (base64 bash), uninstalls serially per version",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: installs, probes (base64 bash), uninstalls serially per version. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > installs, probes (base64 bash), uninstalls serially per version"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L109:C3",
+            "title": "restores @latest by default; skips when RESTORE_LATEST=0",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: restores @latest by default; skips when RESTORE_LATEST=0. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > restores @latest by default; skips when RESTORE_LATEST=0"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "respects E2E_AGENT_VERSIONS_FILTER",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: respects E2E_AGENT_VERSIONS_FILTER. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > respects E2E_AGENT_VERSIONS_FILTER"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C3",
+            "title": "filters platform-specific subpackage tags (win32/linux/darwin etc.)",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: filters platform-specific subpackage tags (win32/linux/darwin etc.). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > filters platform-specific subpackage tags (win32/linux/darwin etc.)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "falls back to qodercli only for qoder agent; others SKIPPED when bin missing",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: falls back to qodercli only for qoder agent; others SKIPPED when bin missing. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > falls back to qodercli only for qoder agent; others SKIPPED when bin missing"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L139:C3",
+            "title": "uses npm global prefix absolute path to avoid PATH pollution",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: uses npm global prefix absolute path to avoid PATH pollution. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > uses npm global prefix absolute path to avoid PATH pollution"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "cleans up stale ~/.local/bin/<bin> symlinks pointing to qodercli (spares qoder)",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: cleans up stale ~/.local/bin/<bin> symlinks pointing to qodercli (spares qoder). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > cleans up stale ~/.local/bin/<bin> symlinks pointing to qodercli (spares qoder)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C3",
+            "title": "smoke-tests --version before probe, skips incompat; truncates probe output at threshold",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: smoke-tests --version before probe, skips incompat; truncates probe output at threshold. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > smoke-tests --version before probe, skips incompat; truncates probe output at threshold"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L162:C3",
+            "title": "auto-upgrades Node via nvm (min=22 default, disable flag, wget fallback)",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: auto-upgrades Node via nvm (min=22 default, disable flag, wget fallback). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > auto-upgrades Node via nvm (min=22 default, disable flag, wget fallback)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L174:C3",
+            "title": "auto-applies Aliyun patchelf on old-glibc hosts (disable flag present)",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: auto-applies Aliyun patchelf on old-glibc hosts (disable flag present). Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > auto-applies Aliyun patchelf on old-glibc hosts (disable flag present)"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "deduplicates codex [hooks.state.\"...\"] entries per probe round via awk",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: deduplicates codex [hooks.state.\"...\"] entries per probe round via awk. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > deduplicates codex [hooks.state.\"...\"] entries per probe round via awk"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "injects install prelude when E2E_USER_ID set; prelude precedes pilot check",
+            "suites": [
+              "versionMatrixScript"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: injects install prelude when E2E_USER_ID set; prelude precedes pilot check. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "versionMatrixScript > injects install prelude when E2E_USER_ID set; prelude precedes pilot check"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L199:C3",
+            "title": "returns empty string when no agent envs set",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: returns empty string when no agent envs set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > returns empty string when no agent envs set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L203:C3",
+            "title": "exports CODEX / ANTHROPIC / QODER secrets from env",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: exports CODEX / ANTHROPIC / QODER secrets from env. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > exports CODEX / ANTHROPIC / QODER secrets from env"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L215:C3",
+            "title": "injects Claude 百炼 ANTHROPIC_* when E2E_CLAUDE_BAILIAN=1 + key",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: injects Claude 百炼 ANTHROPIC_* when E2E_CLAUDE_BAILIAN=1 + key. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > injects Claude 百炼 ANTHROPIC_* when E2E_CLAUDE_BAILIAN=1 + key"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L225:C3",
+            "title": "writes Claude onboarding skip file when enabled",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: writes Claude onboarding skip file when enabled. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > writes Claude onboarding skip file when enabled"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L231:C3",
+            "title": "embeds prologue before main body in full script",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: embeds prologue before main body in full script. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > embeds prologue before main body in full script"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        },
+        {
+          "source": {
+            "id": "L240:C3",
+            "title": "buildVersionMatrixInstallPreludeSh: empty without E2E_USER_ID, includes SLS flags when set",
+            "suites": [
+              "buildVersionMatrixPrologueSh"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unmodified original developer-tool assertion executes against actual committed E2E helper modules: buildVersionMatrixInstallPreludeSh: empty without E2E_USER_ID, includes SLS flags when set. Source104 and executed104 align exactly; no real SSH/Agent/SLS call is claimed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/e2e-remote/version-matrix.test.mjs",
+            "names": [
+              "buildVersionMatrixPrologueSh > buildVersionMatrixInstallPreludeSh: empty without E2E_USER_ID, includes SLS flags when set"
+            ],
+            "resources": [
+              "scripts/e2e/lib/e2e-scenarios.mjs"
+            ],
+            "npm_script": "test:host:e2e-tools"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/dashboard/dashboard-server.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "27730a927a0630ca0e500ceee2d22c4c47e29511a3547ef716cf6a93804455df",
+      "note": "Original ef/f84/main7 declarations unchanged. Existing native production DashboardServer tests use real TCP and preserve exact8765/Host80vs8765/page+summarybytes/identity+CORP/404/421JSON/503pathredaction/occupiedport nonfatal/start-stop expectations. Native owned listener/thread join does not call a Node optional closeAllConnections method; actual start/stop and running=false preserve the public fallback behavior without retiring that case. Reuse independently executed full-workspace exact test records; platform evidence remains separate.",
+      "cases": [
+        {
+          "source": {
+            "id": "L37:C3",
+            "title": "defaults to port 8765",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: defaults to port 8765. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::defaults_and_loopback_host_rules"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "accepts loopback Host headers without a port only on HTTP port 80",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: accepts loopback Host headers without a port only on HTTP port 80. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::defaults_and_loopback_host_rules"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "serves only the static page and the unmodified summary file",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: serves only the static page and the unmodified summary file. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::serves_the_page_and_the_unmodified_summary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "rejects requests whose Host header is not loopback",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: rejects requests whose Host header is not loopback. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::serves_the_page_and_the_unmodified_summary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "returns 503 while metrics-summary.json is not ready",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: returns 503 while metrics-summary.json is not ready. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::returns_503_until_the_summary_exists_and_ignores_an_occupied_port"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "treats an occupied port as non-fatal",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: treats an occupied port as non-fatal. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::returns_503_until_the_summary_exists_and_ignores_an_occupied_port"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "stops safely when closeAllConnections is unavailable",
+            "suites": [
+              "DashboardServer"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original assertion preserved against the real Rust loopback server: stops safely when closeAllConnections is unavailable. Native stop owns/join its server thread and requires no JavaScript method.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/dashboard/dashboard_server.rs",
+                "test": "tests::serves_the_page_and_the_unmodified_summary"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

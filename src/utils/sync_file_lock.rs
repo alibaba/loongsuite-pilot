@@ -9,7 +9,7 @@ pub fn with_file_lock<T>(
     stale_ms: u64,
     action: impl FnOnce() -> T,
 ) -> Option<T> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    let deadline = lock_now() + std::time::Duration::from_millis(wait_ms);
     if let Some(parent) = lock_file.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -38,10 +38,10 @@ pub fn with_file_lock<T>(
                         }
                     }
                 }
-                if std::time::Instant::now() >= deadline {
+                if lock_now() >= deadline {
                     break None;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                lock_sleep(std::time::Duration::from_millis(10));
             }
             Err(_) => break None,
         }
@@ -50,4 +50,44 @@ pub fn with_file_lock<T>(
         let _ = fs::remove_file(lock_file);
     }
     result
+}
+
+fn lock_now() -> std::time::Instant {
+    #[cfg(test)]
+    if let Some(clock) = TEST_CLOCK.with_borrow(Clone::clone) {
+        return (clock.now)();
+    }
+    std::time::Instant::now()
+}
+fn lock_sleep(duration: std::time::Duration) {
+    #[cfg(test)]
+    if let Some(clock) = TEST_CLOCK.with_borrow(Clone::clone) {
+        (clock.sleep)(duration);
+        return;
+    }
+    std::thread::sleep(duration);
+}
+#[cfg(test)]
+#[derive(Clone)]
+struct TestClock {
+    now: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    sleep: std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>,
+}
+#[cfg(test)]
+thread_local! {static TEST_CLOCK:std::cell::RefCell<Option<TestClock>>=const{std::cell::RefCell::new(None)};}
+#[cfg(test)]
+pub(crate) fn with_test_clock<T>(
+    now: std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
+    sleep: std::sync::Arc<dyn Fn(std::time::Duration) + Send + Sync>,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<TestClock>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_CLOCK.with_borrow_mut(|clock| *clock = self.0.take());
+        }
+    }
+    let prior = TEST_CLOCK.with_borrow_mut(|clock| clock.replace(TestClock { now, sleep }));
+    let _restore = Restore(prior);
+    action()
 }

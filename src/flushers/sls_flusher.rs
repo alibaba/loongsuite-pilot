@@ -1147,7 +1147,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    fn endpoint(
+    pub(super) fn endpoint(
         name: &str,
         mode: SlsMode,
         project: &str,
@@ -1169,7 +1169,7 @@ mod tests {
         }
     }
 
-    fn config(endpoints: Vec<SlsEndpoint>) -> SlsFlusherConfig {
+    pub(super) fn config(endpoints: Vec<SlsEndpoint>) -> SlsFlusherConfig {
         SlsFlusherConfig {
             enabled: true,
             mode: endpoints
@@ -2398,3 +2398,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sls_flusher_main_tests.rs"]
+mod main_tests;

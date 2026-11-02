@@ -4,7 +4,7 @@
 //! the batch back at the head of the buffer, matching axios rejecting and the
 //! flusher calling `unshift`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +24,10 @@ struct HttpInner {
     config: HttpFlusherConfig,
     codex_gate: tokio::sync::Mutex<()>,
     stopped: AtomicBool,
+    tracked_waiting_retry: AtomicBool,
+    pending_tracked: AtomicUsize,
+    tracked_progress: tokio::sync::watch::Sender<u64>,
+    retry_requested: tokio::sync::Notify,
     shutdown: tokio::sync::Notify,
     client: reqwest::Client,
     buffer: std::sync::Mutex<Vec<SerializedLogEntry>>,
@@ -40,6 +44,10 @@ impl HttpFlusher {
                 config,
                 codex_gate: tokio::sync::Mutex::new(()),
                 stopped: AtomicBool::new(false),
+                tracked_waiting_retry: AtomicBool::new(false),
+                pending_tracked: AtomicUsize::new(0),
+                tracked_progress: tokio::sync::watch::channel(0).0,
+                retry_requested: tokio::sync::Notify::new(),
                 shutdown: tokio::sync::Notify::new(),
                 client,
                 buffer: std::sync::Mutex::new(Vec::new()),
@@ -148,7 +156,7 @@ impl BaseFlusher for HttpFlusher {
     }
 
     async fn flush(&self) -> Result<(), FlushError> {
-        self.inner.flush_buffer().await;
+        tokio::join!(self.inner.flush_buffer(), self.inner.flush_tracked());
         Ok(())
     }
 
@@ -189,13 +197,27 @@ impl BaseFlusher for HttpFlusher {
     }
 }
 
+struct PendingTracked<'a>(&'a HttpInner);
+
+impl Drop for PendingTracked<'_> {
+    fn drop(&mut self) {
+        self.0.pending_tracked.fetch_sub(1, Ordering::SeqCst);
+        self.0.tracked_progress.send_modify(|_| {});
+    }
+}
+
 impl HttpInner {
     async fn accept_tracked(
         &self,
         entries: Vec<SerializedLogEntry>,
         owner: &str,
     ) -> Result<(), FlushError> {
+        // The payload remains owned by this send future, so cancelling the
+        // input still drops it and its actual request rather than queueing a copy.
+        self.pending_tracked.fetch_add(1, Ordering::SeqCst);
+        let _pending = PendingTracked(self);
         let _gate = self.codex_gate.lock().await;
+        self.tracked_waiting_retry.store(false, Ordering::SeqCst);
         let body = json!({"entries":entries.iter().map(string_map_value).collect::<Vec<_>>()});
         loop {
             let stopped = self.shutdown.notified();
@@ -218,10 +240,39 @@ impl HttpInner {
             if self.stopped.load(Ordering::SeqCst) {
                 return Err(FlushError::output_durability(owner, "HTTP"));
             }
+            // Register before publishing retained state: flush must neither
+            // miss this wake nor leave a stored wake for a later unrelated batch.
+            let retry_requested = self.retry_requested.notified();
+            tokio::pin!(retry_requested);
+            retry_requested.as_mut().enable();
+            self.tracked_waiting_retry.store(true, Ordering::SeqCst);
+            self.tracked_progress.send_modify(|failures| *failures += 1);
             tokio::select! {
                 biased;
                 _=stopped=>return Err(FlushError::output_durability(owner, "HTTP")),
+                _=&mut retry_requested=>{},
                 _=tokio::time::sleep(Duration::from_millis(self.config.flush_interval_ms.max(1)))=>{},
+            }
+            self.tracked_waiting_retry.store(false, Ordering::SeqCst);
+        }
+    }
+
+    async fn flush_tracked(&self) {
+        let mut progress = self.tracked_progress.subscribe();
+        let starting_failures = *progress.borrow_and_update();
+        if self.tracked_waiting_retry.load(Ordering::SeqCst) {
+            self.retry_requested.notify_waiters();
+        }
+        loop {
+            if self.pending_tracked.load(Ordering::SeqCst) == 0
+                || *progress.borrow() != starting_failures
+            {
+                return;
+            }
+            // A flush wave ends on its first failed attempt, like the source.
+            // The send future remains pending until its own subsequent ACK.
+            if progress.changed().await.is_err() {
+                return;
             }
         }
     }
@@ -594,3 +645,7 @@ mod tests {
         assert_eq!(requests[0].1["entries"].as_array().unwrap().len(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "http_flusher_main_tests.rs"]
+mod main_tests;

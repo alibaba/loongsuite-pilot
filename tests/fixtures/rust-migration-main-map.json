@@ -20515,6 +20515,3044 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/flushers/http-flusher.test.ts",
+      "source_hash": "1a3e73c586063acb0c5041dd0d0d734e20fe47537b7142920f334b7aac3fa404",
+      "coverage": "complete",
+      "rust": [],
+      "note": "main15=baseline8+ACK/cancellation新增7。原8复用；新7全部真实loopback，不发真实HTTP业务。L95暴露flush不唤醒retained batch，最小private通知/attempt-progress修复；payload仍由send future独占，无额外journal/queue或checkpoint语义改动。实际网络ACK与socketEOF分别验收，原99999/10000/100ms预算保持。",
+      "cases": [
+        {
+          "source": {
+            "id": "L45:C5",
+            "title": "posts one Codex batch immediately and waits for network ACK below the buffer threshold",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2条Codex低于阈值5，实际TCP请求ACK前send future不完成，ACK后flush不会重复发送。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l45_batch_below_threshold_waits_for_its_one_actual_network_ack"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C5",
+            "title": "retries the same failed Codex batch on the existing timer and only accepts its ACK",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原100ms timer、ordinary queue+Codex一次500失败，actual请求精确[codex,ordinary,codex]、仅ACK完成，flush后共3。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l61_timer_keeps_ordinary_queue_separate_and_retries_only_the_failed_codex_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C5",
+            "title": "serializes Codex retries across timer and concurrent flush calls",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实同个未ACK socket期间并发2个flush，仅1网络请求，ACK后全部future完成且再次flush不重复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l82_concurrent_flush_calls_do_not_duplicate_the_inflight_codex_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C5",
+            "title": "keeps every pending Codex batch until its own ACK",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原first failed/second queued，配置99999ms原值；显式flush实际驱动[first,first,second]各自ACK，无等待完整interval；旧实现真实3s无请求红灯。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l95_explicit_flush_drives_every_pending_codex_batch_until_its_own_ack"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C5",
+            "title": "cancels a retained Codex batch without retrying it after its input stops",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原retained Codex批input cancel语言适配为Rust拥有future abort/drop；实际一次500后cancel再flush不重试。Rust无JS AbortSignal参数，未伪称同参数/同返回reject对象。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l106_input_future_cancel_discards_retained_codex_without_a_later_retry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C5",
+            "title": "buffers entries until batchMaxSize is reached",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "buffers_until_batch_size_then_posts_entries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C5",
+            "title": "sends { entries: batch } payload to configured URL",
+            "suites": [
+              "HttpFlusher",
+              "buffer and auto-flush (T018)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "buffers_until_batch_size_then_posts_entries"
+              },
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "configured_url_path_headers_and_raw_body_reach_the_real_socket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C5",
+            "title": "unshifts batch back to buffer head on failure",
+            "suites": [
+              "HttpFlusher",
+              "failure re-queue (T019)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "requeues_the_batch_at_the_head_after_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L158:C5",
+            "title": "stops timer and flushes remaining buffer",
+            "suites": [
+              "HttpFlusher",
+              "shutdown (T020)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "shutdown_aborts_the_actual_timer_before_returning"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C5",
+            "title": "releases a failed Codex send during shutdown and leaves ordinary flushing intact",
+            "suites": [
+              "HttpFlusher",
+              "shutdown (T020)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际failed Codex在shutdown返回typed CodexOutputDurability错误，ordinary最终仍发，timer handle已清除，实际总2请求。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l170_shutdown_rejects_retained_codex_and_flushes_the_ordinary_buffer"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L184:C5",
+            "title": "aborts an in-flight Codex request before waiting for shutdown",
+            "suites": [
+              "HttpFlusher",
+              "shutdown (T020)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实held socket未ACK，shutdown先取消请求后完成；send typed durability Err、server实际EOF而非只读配置signal标志，1请求。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher_main_tests.rs",
+                "test": "main_l184_shutdown_aborts_the_actual_inflight_request_before_waiting"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L196:C5",
+            "title": "does not flush when buffer is empty",
+            "suites": [
+              "HttpFlusher",
+              "shutdown (T020)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "shutdown_flushes_the_remaining_buffer_and_skips_an_empty_one"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C5",
+            "title": "passes custom headers and timeout",
+            "suites": [
+              "HttpFlusher",
+              "request config (T021)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "sends_custom_headers_and_stores_the_timeout"
+              },
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "configured_request_timeout_is_effective_and_preserves_the_failed_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C5",
+            "title": "posts topic and payload to configured URL",
+            "suites": [
+              "HttpFlusher",
+              "sendRaw"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "send_raw_and_send_batch_post_the_configured_body"
+              },
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "configured_url_path_headers_and_raw_body_reach_the_real_socket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L233:C5",
+            "title": "buffers all entries and auto-flushes when threshold met",
+            "suites": [
+              "HttpFlusher",
+              "sendBatch"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际loopback请求与原生HttpFlusher；保留原始阈值5、失败重发>=5、两条shutdown缓冲、空缓冲、raw topic/payload等字面断言。新增路径/query与真实超时、真实timer终止补强，不把get_timeout元数据当网络执行证明。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/http_flusher.rs",
+                "test": "send_raw_and_send_batch_post_the_configured_body"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/metrics/hook-metrics-spool.test.ts",
+      "source_hash": "f1acc8d7e4524d1436b62bdc70c01ec44d5fd6d196ab38a429703b5de8960435",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Frozenf84 newlyintroduced15declarations/16parameter-expandedscenarios. Reuse8actualnativeunitcases,9newexactcontracts,0retired. Actualtempfiles/publicproducer/drain;time/IO-faultseamsrestrictedtocfgtestclock/producerstagesandsharednormaldrainbody. Productionlock50ms/stale10s/spool1MiB/64keysunchanged. Nativehook_process capturesdurationbeforeproducer(lock/persistence excluded),explicitAPIadapterforJSinternalperformance.now. Linuxactualonly,Windows/macOSCIpending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "returns nothing before any Hook has recorded a call",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existingactualpublicnew(root).drain beforeanyrecord returns[]; no directory prerequisite.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::roundtrip_sums_rounds_and_separates_dimensions_including_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "reads what recordHookTiming writes and consumes it",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualpublicproducer records codexstop2/session-start1, exact2dimensionkeys/callcounts;actualdirectoryemptyafterconsume andnextdrain[].",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l59_exact_producer_two_stop_calls_and_session_start_are_consumed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "captures the duration before lock acquisition and sample persistence",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "NativeAPI explicitlyaccepts duration capturedbyhook_process beforecall. RealproducerStage lock/append changescontrolledclock40.4→90→140;actualJSONL exact2keys/stop/numeric40,lockopen1/append1/capture1. Measurement ownershipv2adapterexplicit,noclaimJSperformance.nowisqueriedinsidenativefunction.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l75_captured_duration_excludes_lock_and_persistence_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "drops a sample after the 50 ms lock wait budget without removing the held lock",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualproducer heldlock usesexistinglockbody underprivatecfgtest monotonicclock/sleep;exact5waits10mseach/elapsed50;heldholderfileunchanged andactiveonlyoriginal1sample,no panic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l98_exact_fifty_ms_five_wait_budget_preserves_held_lock_and_active_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "records once when contention clears within the budget, excluding the wait from duration",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Contentionclearedonfirst10mswait;captured12.4notwaitinflated,exact1wait/elapsed10/lockgone;actualdrain mergesprior20+new12=2calls,total32,max20.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l118_contention_clearing_after_ten_ms_records_once_without_wait_duration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L142:C3",
+            "title": "sums durations and keeps the slowest call per agent and event",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Originalliteralcodexstop40+250/codexuserprompt35/qoderstop90 publicdrain producesexact3fullstats objects,290/max250andseparateagents/events.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l142_literal_samples_sum_and_keep_per_agent_event_maximum"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L161:C3",
+            "title": "counts samples an interrupted drain left behind together with new ones",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Interruptedpending10+active30 arebothconsumed:2calls,total40,max30,actualdirectoryempty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::pending_recovery_and_rotation_never_overwrite_unconsumed_samples"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L171:C3",
+            "title": "%s failure counts nothing, keeps the pending file, and counts exactly once after recovery",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": [
+              "it.each(['readFileSync', 'unlinkSync'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Bothordinaryread andunlinkPermissionDenied viaactualpublicdrainbodyseam countnothing/keepPending/active30unchanged;restoredpublicdrain yields2calls40/max30 once,nextempty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l171_read_and_unlink_errors_keep_pending_and_active_then_recover_exactly_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L195:C3",
+            "title": "rotation must not overwrite existing pending samples",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualrotatepending10+active30 returnsfalse,bothfilecontentsretainedbeforelaterdrain; nooverwrite.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::pending_recovery_and_rotation_never_overwrite_unconsumed_samples"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C3",
+            "title": "leaves the spool for the next cycle while a Hook holds the lock",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualheldemptylock preventsrotation/consumption,activeexists;afterrelease realpublicdrain exact1call20/20.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::contention_drops_only_sample_and_drain_waits_until_lock_clears"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L219:C3",
+            "title": "reclaims a stale lock left by a crashed process and keeps consuming",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualstaleemptylockmtime60spast reclaimed;realdrain exact1call20/20 andspooldirectoryempty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::stale_empty_node_lock_is_reclaimed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L231:C3",
+            "title": "skips malformed and out-of-range samples without losing valid ones",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactmalformedtruncated/null/missingevent/badname/stringduration/negative/>24h rows skipped,onevalid12 preserved:exactcalls1,total12,max12.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l231_literal_malformed_and_out_of_range_rows_do_not_hide_valid_twelve_ms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L248:C3",
+            "title": "discards a spool larger than the writer would ever produce",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualvalidJSONsamplelines repeatedpast1MiBlimit discardedbeforecounting;drain[]anddirectoryempty,notonlymalformedoversizedbytes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l248_valid_repeated_samples_over_the_size_limit_are_discarded_before_counting"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L258:C3",
+            "title": "ignores files that are not agent spools",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "OnlyinvalidCodex Agent.jsonl/codex.json filenames produce[],bothnamesbyte-preservedinexactremainingdirectorylist.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_spool_main_contract_tests.rs",
+                "test": "source_l258_non_agent_spool_filenames_remain_untouched_and_generate_no_stats"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L266:C3",
+            "title": "bounds how many agent and event pairs one drain reports",
+            "suites": [
+              "HookMetricsSpool"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual80codexeventkeys plus80qodereventkeys globallycapped64, strongerthanoriginalsingleagent80ceiling;invalidfilenamesremain.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/hook_metrics_spool.rs",
+                "test": "tests::malformed_rows_are_rejected_and_dimension_count_is_capped"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deployment/agent-def-loader.test.ts",
+      "source_hash": "6c798abfc4a7bfb4c06ac14c4d5ae4e8cabafccfb222c09e2aafc7612351f74c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All 31 frozen ef8953 and f84 declarations are backed by actual temporary-definition public-loader and shipped-asset assertions; sources are byte-identical, main delta 0, retired 0. Linux actually verified, Windows/macOS applicable pending platform execution. Existing Windows shell/path adaptation retained.",
+      "cases": [
+        {
+          "source": {
+            "id": "L42:C3",
+            "title": "loads valid definitions from builtin directory",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualtemporarybuiltinJSON containsoriginaltest-agent/hookdefinition, publicloadreturns1withidtest-agent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l42_valid_builtin_definition_is_loaded"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "skips invalid JSON files",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualinvalidJSONbytes{invalid are skipped, publicloadreturns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l59_invalid_json_file_is_skipped"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "skips definitions missing required fields",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual{id:missing-fields} withoutotherrequiredfields returns0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l68_missing_required_fields_are_skipped"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L78:C3",
+            "title": "local definitions override builtin by id",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "RealbuiltinCursorBuiltin+localCursorLocalOverride sameid merge toexactly1andlocaldisplayName.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l78_local_definition_overrides_builtin_by_exact_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L102:C3",
+            "title": "loads a valid registered PI SDK definition and rejects malformed markers",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Reallocalvalidacme-codePI SDKschema1/agentDirplusbadconfigKeyandspoofedpluginId definitions:publicloadIDsexactly[acme-code],piSdkobjectexact.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l102_valid_pi_sdk_loads_and_malformed_or_spoofed_markers_are_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "rejects a local PI SDK definition that shadows a built-in Agent id",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualbuiltinpi-coding-agent pluslocalPI SDKshadow ofreservedid:oneoriginaldisplaynamePiCodingAgent remains, shadow rejected.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l137_pi_sdk_local_shadow_cannot_replace_reserved_builtin"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C3",
+            "title": "replaces $PILOT_DIR and $PILOT_DATA variables",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualloadedPILOT_DATA/logs resolvesliteral/home/user/.loongsuite-pilot/logs;PILOT_DIRhookCommand/opt/pilot/hooks/test.sh onUnix. ExistingnativeWindowsadaptationselects.ps1;notnewproductionchange.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l170_pilot_dir_and_data_placeholders_reach_actual_loaded_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L192:C3",
+            "title": "expands ~ to home directory",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualtildeJSON expandsrelative.cursor underactualsyntheticHOME/USERPROFILE, independentlycomputedPath.joinexpected (notcallingresolverasoracle).",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l192_tilde_expands_to_actual_synthetic_user_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L207:C3",
+            "title": "resolves HERMES_HOME for directory plugins",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp definition passes through public load: directory-plugin mode, explicit Hermes profile detection, PILOT_DIR source directory, profile target directory and explicit HERMES_CLI activation command all match original assertions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l207_hermes_home_cli_and_directory_plugin_fields_are_resolved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L250:C3",
+            "title": "falls back to the Hermes command on PATH when the bundled CLI is absent",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual isolated missing bundled executable and missing uv shim fall back to hermes (hermes.exe on Windows); no external command executes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l250_absent_hermes_bundle_and_uv_shim_fall_back_to_path_command"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L295:C3",
+            "title": "resolves the default uv tool shim before falling back to PATH",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp home/.local/bin/hermes locator file is selected ahead of PATH fallback with native path normalization.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l295_existing_uv_tool_shim_is_selected_before_path_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L345:C3",
+            "title": "uses the official bundled Hermes CLI when it exists",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temp HERMES_HOME/hermes-agent/venv/bin/hermes locator file is selected; Windows applicable counterpart is Scripts/hermes.exe.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l345_official_bundled_hermes_cli_is_selected_when_present"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C3",
+            "title": "resolves PI_CODING_AGENT_DIR for Pi detection and settings",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit PI_CODING_AGENT_DIR reaches both detection.paths[0] and pluginInject.configPaths[0] through actual public loader.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L418:C3",
+            "title": "defaults $PI_CODING_AGENT_DIR to ~/.pi/agent",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent PI_CODING_AGENT_DIR expands synthetic HOME/.pi/agent for detection and its settings.json for injection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L447:C3",
+            "title": "treats a blank PI_CODING_AGENT_DIR as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space PI_CODING_AGENT_DIR is unset and actual loaded detection uses synthetic HOME/.pi/agent.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L473:C3",
+            "title": "ships $PI_CODING_AGENT_DIR in the built-in Pi definition",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Pi JSON retains exact detection placeholder array and settings placeholder array; raw asset is parsed using include_str rather than resolver output.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L481:C3",
+            "title": "resolves GROK_HOME for Grok detection and hook settings",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit GROK_HOME reaches actual detection path and hook settingsPath ending hooks/loongsuite-pilot.json.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l481_grok_override_reaches_detection_and_hook_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L510:C3",
+            "title": "defaults $GROK_HOME to ~/.grok",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent GROK_HOME expands synthetic HOME/.grok for both detection and hook settings.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l510_grok_unset_defaults_to_user_home_for_detection_and_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L539:C3",
+            "title": "treats a blank GROK_HOME as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space GROK_HOME is unset and actual loaded detection uses synthetic HOME/.grok.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l539_grok_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L559:C3",
+            "title": "ships $GROK_HOME in the built-in Grok definition",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Grok JSON retains exact GROK_HOME detection array and hook settings placeholder.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L567:C3",
+            "title": "resolves DSH_HOME for DSH detection",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Explicit DSH_HOME reaches detection path while DSH yaml patchPath remains absent, retaining dynamic process-locator selection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l567_dsh_override_keeps_detection_and_absent_patch_path_for_process_locator"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L595:C3",
+            "title": "defaults $DSH_HOME to ~/.dsh",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Absent DSH_HOME resolves actual loaded detection to synthetic HOME/.dsh.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l595_dsh_unset_defaults_to_user_dsh"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L620:C3",
+            "title": "treats a blank DSH_HOME as unset",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Three-space DSH_HOME is unset and actual loaded detection uses synthetic HOME/.dsh.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l620_dsh_blank_override_is_unset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L645:C3",
+            "title": "ships $DSH_HOME on detection and omits patchPath so locator keeps process discovery",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped DSH JSON has exact DSH_HOME detection array and no patchPath property, preserving process discovery.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L653:C3",
+            "title": "handles missing directories gracefully",
+            "suites": [
+              "AgentDefLoader"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Realnonexistentbuiltin/localpaths publicloadreturns0withoutfailure.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l653_missing_definition_directories_return_empty"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L678:C5",
+            "title": "loads a valid dsh-yaml-patch definition",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualvalidDSHyamlpatchdefinitionloads1andexactentryIdloongsuite-pilot-observability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l678_valid_dsh_yaml_patch_keeps_entry_id"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L685:C5",
+            "title": "rejects an unknown deployMode",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualunknownmade-updeployMode definitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l685_unknown_deploy_mode_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L695:C5",
+            "title": "rejects dsh-yaml-patch when dshYamlPatch is missing",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualomitteddshYamlPatchdefinitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l695_dsh_patch_configuration_is_required"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L705:C5",
+            "title": "rejects dsh-yaml-patch when required field is empty",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualemptyrequiredentryIddefinitionrejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l705_empty_required_dsh_field_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L715:C5",
+            "title": "rejects dsh-yaml-patch when field has wrong type",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualnumericmarker123wrongtyperejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l715_wrong_required_dsh_field_type_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L725:C5",
+            "title": "rejects dsh-yaml-patch when patchPath is non-empty but wrong type",
+            "suites": [
+              "AgentDefLoader",
+              "dsh-yaml-patch validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualnonemptynumericpatchPath42wrongtyperejectedwith0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_core_history_contract_tests.rs",
+                "test": "source_l725_wrong_nonempty_dsh_patch_path_type_is_rejected"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/sls-flusher.test.ts",
+      "source_hash": "988e7a70cc50dd764499f5cd667d848181b867f9a5915c3b448d425c689737c6",
+      "coverage": "complete",
+      "rust": [],
+      "note": "main40=原baseline33+ACK/取消新增7。原33业务assert未改，复用现有Native；新7在原mock SDK/fetch同一边界受控AkPoster/SlsHttp+真实filesystem元数据验收，未改生产ACK/checkpoint/transport。原4097/4096、10s/30s/100ms预算保留。Node AbortSignal/abort listener/JS timer-count是语言适配而非宣称Rust同属性，业务取消经ownedfuture真实Drop与后续无请求验证。",
+      "cases": [
+        {
+          "source": {
+            "id": "L85:C5",
+            "title": "does not send or enqueue an already cancelled Codex batch",
+            "suites": [
+              "SlsFlusher",
+              "Codex cancellation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "源already-aborted输入适配Rust ownedfuture在首次poll前取消/drop；实际flush后transport调用0、in/out/failure counters全部0。Rust不存在同一JS AbortSignal参数，未伪称属性等价。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l85_cancel_before_first_poll_cannot_send_or_enqueue_the_codex_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C5",
+            "title": "cancels retry backoff and skips later endpoint waves without retaining abort listeners",
+            "suites": [
+              "SlsFlusher",
+              "Codex cancellation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原flushConcurrency1/两endpoint/3attempt/10s无jitter，真实首transport ECONNRESET后drop输入future；源fakeTimer等价Tokio paused advance完整30s，实际总1次且无第二endpoint/后续retry。JS listener-count检查由拥有future的Drop及后续无执行验收替代。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l94_cancelled_backoff_skips_later_endpoint_waves_after_original_thirty_seconds"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C5",
+            "title": "cancels a webtracking request before later chunks and clears its timeout",
+            "suites": [
+              "SlsFlusher",
+              "Codex cancellation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原4097 Codex entries实际分成首4096 WebTracking chunk，pending transport ACK receiver在取消前真打开、drop后关闭；transport guard真正Drop；advance完整30001ms后无下一chunk/第二请求，生产timeout未缩短。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l121_cancels_first_of_original_4097_webtracking_records_before_later_chunks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L148:C5",
+            "title": "releases the cancellable retry sleep after network recovery",
+            "suites": [
+              "SlsFlusher",
+              "Codex cancellation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原100ms retry，无jitter，一次ECONNRESET后按原100ms fake-clock推进并ACK恢复，实际请求2且同entry；之后推进30s无多余请求/失败，输出计数1/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l148_original_hundred_ms_retry_recovers_and_releases_its_wait_resources"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L167:C5",
+            "title": "waits for a single network acknowledgement per Codex endpoint below the buffer threshold",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3条Codex低于阈值，实际单请求3条且未ACK时send未完成，counter3in/0out；ACK后3in/3out/0fail且flush不重复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l167_three_below_threshold_entries_are_counted_out_only_after_their_one_ack"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L188:C5",
+            "title": "rejects Codex output failure after every endpoint settles without sending ordinary queued entries",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原ordinary先入两endpoint、Codex一次bad/一次good，先bad失败仍等good真ACK后typed durability Err；bad独立redact，good保留arguments；good counter2/1/0、bad2/0/1、实际failure record1；随后flush仅ordinary两请求，总4。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l188_endpoint_failure_settles_all_outputs_preserves_ordinary_queue_and_redacts_only_its_leg"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L217:C5",
+            "title": "also waits for Codex single-entry output and does not retain a second timer copy",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原Codex单条actual transport ACK前pending，ACK后flush不留第二timer拷贝，实际请求1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher_main_tests.rs",
+                "test": "main_l217_single_entry_waits_for_ack_and_does_not_leave_a_timer_copy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L224:C5",
+            "title": "enqueues per endpoint and flushes grouped by project/logstore",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实IPv4格式source、proj-a/store-a路由及完整两端各2条batch；原一条路由断言由更强两条输入保留。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "independent_endpoint_redaction_preserves_routing_ip_and_success_counters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L237:C5",
+            "title": "sends to multiple endpoints",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "agentActivity/agentTelemetry两端独立路由且共两次AK调用；telemetry独立redact不污染原始activity。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "independent_endpoint_redaction_preserves_routing_ip_and_success_counters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L252:C5",
+            "title": "omits agent-scoped extension fields from SLS content",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两个agent.*扩展字段不存在，canonical file_path与agenttype正确。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "routes_serialised_entries_and_overrides_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L268:C5",
+            "title": "sets version to the Pilot version for every SLS entry",
+            "suites": [
+              "SlsFlusher",
+              "send and flush — multi endpoint routing (T012)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "输入agent-runtime-version最终被固定Pilot0.0.0-test替换。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "routes_serialised_entries_and_overrides_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L279:C5",
+            "title": "applies redactCodeGenerationFields when redact=true",
+            "suites": [
+              "SlsFlusher",
+              "redact logic (T013)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实redact=true endpoint序列化，原4个缺字段断言加canonical inline diff亦不存在。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "independent_endpoint_redaction_preserves_routing_ip_and_success_counters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L303:C5",
+            "title": "keeps fields when redact=false",
+            "suites": [
+              "SlsFlusher",
+              "redact logic (T013)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "redact=false endpoint保留visible/file.ts及secret content canonical字段。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "independent_endpoint_redaction_preserves_routing_ip_and_success_counters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L318:C5",
+            "title": "auto-flushes when enqueued count reaches batchMaxSize",
+            "suites": [
+              "SlsFlusher",
+              "batch threshold trigger (T014)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "3条阈值前2条零调用，第3条自动AK发送3条。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "batch_threshold_three_and_actual_shutdown_timer_finish_the_pending_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L336:C5",
+            "title": "persists bounded metadata without the failed payload",
+            "suites": [
+              "SlsFlusher",
+              "failure persistence (T015)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际隔离tempdir下logs/sls-failed-logs仅1个单行metadata文件，proj/kind/mode/endpoint/count1/bytes>0，无logGroup/__logs__和synthetic内容。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "ak_and_webtracking_failures_write_only_one_bounded_metadata_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C5",
+            "title": "uses the same lightweight metadata format for webtracking failures",
+            "suites": [
+              "SlsFlusher",
+              "failure persistence (T015)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际WebTracking400仅1个单行metadata文件，与AK同schema，count1/bytes>0，无原payload。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "ak_and_webtracking_failures_write_only_one_bounded_metadata_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C5",
+            "title": "counts a written batch as bytes out",
+            "suites": [
+              "SlsFlusher",
+              "endpoint counters follow the flush outcome"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际两条成功AKbatch计out_entries2/bytes>0/out_failed0。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "independent_endpoint_redaction_preserves_routing_ip_and_success_counters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L399:C5",
+            "title": "bills a failed batch as failed, not as bytes out",
+            "suites": [
+              "SlsFlusher",
+              "endpoint counters follow the flush outcome"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际两条失败AKbatch计out_entries0/out_bytes0/out_failed2且last_flush_time空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "failed_batches_are_counted_as_failed_and_persisted"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L417:C5",
+            "title": "stops timer and executes final flush",
+            "suites": [
+              "SlsFlusher",
+              "shutdown (T016)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start持有timer AbortHandle，shutdown执行最终1条flush且timer有界终止、slot为空。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "batch_threshold_three_and_actual_shutdown_timer_finish_the_pending_batch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L428:C5",
+            "title": "only forwards to mcp or trace endpoints",
+            "suites": [
+              "SlsFlusher",
+              "sendRaw (T017)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "既有真实路由到mcp+trace且不发送activity；新raw断言精确调用次数与prefix/payload。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "send_raw_only_forwards_mcp_and_trace"
+              },
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "raw_prefix_has_no_agent_suffix_and_one_endpoint_failure_is_swallowed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L447:C5",
+            "title": "skips silently when sendRaw fails",
+            "suites": [
+              "SlsFlusher",
+              "sendRaw (T017)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实AK raw失败返回Ok、只调用目标一次，无activity误发送。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "raw_prefix_has_no_agent_suffix_and_one_endpoint_failure_is_swallowed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L461:C5",
+            "title": "appends agentType to serviceNamePrefix via AK",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "prefix loongsuite-pilot+claude-code精确标签与hostname存在；两端均验证。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "prefix_tags_distinguish_agents_unknown_and_empty_endpoint_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L473:C5",
+            "title": "uses one exact serviceName for different agent types and all endpoints",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两个agent类型和两个endpoint形成4次调用，每组精确shared-service覆盖endpointname和prefix。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "splits_service_names_and_keeps_an_exact_global_name"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L494:C5",
+            "title": "uses per-endpoint serviceName override for its own __service_name__",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两个endpoint2次调用，分别user-svc-claude-code及managed-svc-claude-code。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "per_endpoint_service_name_appends_the_agent_type"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L518:C5",
+            "title": "per-endpoint serviceName works even when the shared prefix is empty",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "empty shared prefix时用户endpoint无service tag，inner仍managed-svc-claude-code；hostname仍存在。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "prefix_tags_distinguish_agents_unknown_and_empty_endpoint_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L541:C5",
+            "title": "omits __service_name__ tag when serviceNamePrefix is empty",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "empty shared prefix且无override，两端无service标签，hostname存在。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "prefix_tags_distinguish_agents_unknown_and_empty_endpoint_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L553:C5",
+            "title": "sendRaw uses prefix without agentType suffix",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实send_raw生成my-service无agent后缀，保留topic与key。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "raw_prefix_has_no_agent_suffix_and_one_endpoint_failure_is_swallowed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L568:C5",
+            "title": "webtracking appends agentType to serviceNamePrefix",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实WebTrackingURL含project及JSON __service_name__精确loongsuite-pilot-cursor。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "webtracking_posts_json_and_skips_an_empty_project"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L590:C5",
+            "title": "webtracking skips subdomain prepend when project is empty",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "project为空的实际请求目标等于http://127.0.0.1:9999/logstores/raw/track。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "webtracking_posts_json_and_skips_an_empty_project"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L611:C5",
+            "title": "different agentTypes produce separate batches",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "claude-code/cursor/empty三种agent生成三个独立batch与排序后精确pilot-claude-code/pilot-cursor/pilot-unknown。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "prefix_tags_distinguish_agents_unknown_and_empty_endpoint_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L629:C5",
+            "title": "appends normalized fallback when agentType is empty",
+            "suites": [
+              "SlsFlusher",
+              "__service_name__ tag injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空agent经normalize生成pilot-unknown标签，非仅调用helper。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "prefix_tags_distinguish_agents_unknown_and_empty_endpoint_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L642:C5",
+            "title": "uses custom timeoutMs from config.timeout",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "配置25000ms传入每个真实SlsHttpRequest.timeout；覆盖旧仅检查AbortSignal存在的配置断言。此test使用记录transport，不能当25秒网络超时执行证明。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "custom_timeout_and_retry_attempts_reach_the_transport_including_zero_guard"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L664:C5",
+            "title": "uses custom retryMaxAttempts from config.retry",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "TimeoutError连续失败，configured5实际5次transport调用，base1ms且jitterfalse。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "custom_timeout_and_retry_attempts_reach_the_transport_including_zero_guard"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L685:C5",
+            "title": "applies jitter by default (delay varies between runs)",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留20次jitter1000/attempt1输入且唯一delay数>1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "backoff_is_exponential_capped_and_jittered"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L695:C5",
+            "title": "produces deterministic delay when jitter is disabled",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留0/1/2三个attempt精确1000/2000/4000。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "backoff_is_exponential_capped_and_jittered"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L702:C5",
+            "title": "caps backoff at 60s regardless of attempt number",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留attempt10/20精确60000上限。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "backoff_is_exponential_capped_and_jittered"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L708:C5",
+            "title": "guards against zero retryMaxAttempts — still retries at least once",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "configured0经实际失败请求仍调用1次。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "custom_timeout_and_retry_attempts_reach_the_transport_including_zero_guard"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L728:C5",
+            "title": "guards against zero flushConcurrency — still processes batches",
+            "suites": [
+              "SlsFlusher",
+              "configurable timeout and retry (Proposal A + B)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "configured0五种agent真实处理5批且最大并发<=1，至少1。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "default_concurrency_three_and_zero_guard_process_every_agent_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L746:C5",
+            "title": "limits parallel flush tasks to flushConcurrency",
+            "suites": [
+              "SlsFlusher",
+              "flush concurrency control (Proposal C)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "四个原agent类型输入，实际AK调用4次且原子计数max<=2；Codex采用既有独立durable路径不回退。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "limits_flush_concurrency"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L780:C5",
+            "title": "defaults to concurrency of 3 when not configured",
+            "suites": [
+              "SlsFlusher",
+              "flush concurrency control (Proposal C)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "未配置concurrency，原五种agent输入均处理共5次，原子计数max<=3且>=1；Codex采用既有独立durable路径。新草案待中央执行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/sls_flusher.rs",
+                "test": "default_concurrency_three_and_zero_guard_process_every_agent_bucket"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/contract/agent-activity-entry.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "4c9cbd6e71f101b0ad5a361b65d925623704c0ec0f8e43f934459681ed1bb77f",
+      "note": "Frozen main11 declarations:10 same original contracts retained; new6parameter standard-event case checks real native builder, canonical type validator and original schema-required shape, then exactidentity preservation. Operational JSONL record validation is intentionally stronger than this schema on missing tool fields/emptyuser; no production validation weakened. Execution and platforms separate.",
+      "cases": [
+        {
+          "source": {
+            "id": "L10:C3",
+            "title": "accepts and preserves the standard event %s",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": [
+              "it.each([\n    'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call',\n    'gen_ai.tool.result', 'gen_ai.agent.invoke', 'gen_ai.agent.result',\n  ] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Main新增it.each的6个standard event经真实Rust builder、canonical字段类型验证和原始schema-required shape验证；逐一比对event/session/turn/step/agent/parent/peer/outgoing/incoming字段，禁止重写子Agent身份。保留原输入literal与全部六事件名；本次中央运行证据另记，Windows待Native矩阵。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "tests::main_activity_standard_events_preserve_child_and_delegation_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "should validate a minimal entry from buildAgentActivityEntry",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L53:C3",
+            "title": "should validate an entry with all optional fields",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "should produce a valid uuid v4",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "should default timestamp to unix nanoseconds",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L96:C3",
+            "title": "should reject an entry without event_t required fields",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "正式 JSONL 记录验证器拒绝缺失必需字段、非法事件名和非数字纳秒，并核对错误分类和时间字段诊断。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_rejects_missing_required_fields_invalid_event_names_and_non_numeric_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "should reject an entry with invalid event name",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "正式 JSONL 记录验证器拒绝缺失必需字段、非法事件名和非数字纳秒，并核对错误分类和时间字段诊断。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_rejects_missing_required_fields_invalid_event_names_and_non_numeric_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L120:C3",
+            "title": "should accept and preserve agent.input",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L135:C3",
+            "title": "should reject a non-numeric time_unix_nano",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "正式 JSONL 记录验证器拒绝缺失必需字段、非法事件名和非数字纳秒，并核对错误分类和时间字段诊断。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_rejects_missing_required_fields_invalid_event_names_and_non_numeric_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "should cover all ClientType enum values",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "should cover all ActionType enum values",
+            "suites": [
+              "AgentActivityEntry contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 builder 的最小/全部可选字段、UUID v4 版本及变体、正数纳秒和固定历史 Client/Action 全量枚举均经生产记录验证器校验，agent.input 保持并可归一化。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/jsonl_validate.rs",
+                "test": "activity_contract_accepts_real_builder_outputs_optional_fields_and_every_enum_value"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

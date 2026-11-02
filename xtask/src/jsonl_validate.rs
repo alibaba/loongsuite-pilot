@@ -924,6 +924,51 @@ mod tests {
     }
 
     #[test]
+    fn main_activity_standard_events_preserve_child_and_delegation_identity() {
+        for event in [
+            "gen_ai.model.request",
+            "gen_ai.model.response",
+            "gen_ai.tool.call",
+            "gen_ai.tool.result",
+            "gen_ai.agent.invoke",
+            "gen_ai.agent.result",
+        ] {
+            let options = json!({
+                "event.name": event,
+                "gen_ai.session.id": "child-session",
+                "gen_ai.turn.id": "child-turn",
+                "gen_ai.step.id": "child-step",
+                "gen_ai.agent.type": ClientType::CodexCliHook.as_str(),
+                "gen_ai.agent.id": "child-agent",
+                "gen_ai.agent.parent.id": "parent-agent",
+                "gen_ai.agent.peer.id": "grandchild-agent",
+                "gen_ai.agent.invocation.id": "outgoing",
+                "gen_ai.agent.parent.invocation.id": "incoming"
+            });
+            let entry = serde_json::to_value(build_agent_activity_entry(&options)).unwrap();
+            // The original contract checks the entry schema, which permits
+            // empty user IDs and omits optional tool fields. The operational
+            // JSONL validator additionally requires complete tool/audit records.
+            assert!(types(&entry).is_empty(), "{event}");
+            assert!(EVENTS.contains(&entry["event.name"].as_str().unwrap()));
+            assert!(entry["time_unix_nano"]
+                .as_str()
+                .is_some_and(|s| { !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) }));
+            assert!(entry["event.id"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(entry["user.id"].is_string());
+            assert!(entry["gen_ai.session.id"].is_string());
+            for key in ["gen_ai.agent.type", "gen_ai.provider.name"] {
+                assert!(entry[key].as_str().is_some_and(|s| !s.is_empty()));
+            }
+            serde_json::from_value::<loongsuite_pilot::types::AgentActivityEntry>(entry.clone())
+                .unwrap();
+            for (key, value) in options.as_object().unwrap() {
+                assert_eq!(&entry[key], value, "{event}: {key}");
+            }
+        }
+    }
+
+    #[test]
     fn activity_contract_rejects_missing_required_fields_invalid_event_names_and_non_numeric_time()
     {
         let minimal = json!({"time_unix_nano":"1700000000000000000","event.id":"event-1","event.name":"other",

@@ -544,3 +544,11 @@ mod tests {
         assert!(!root.path().join("synthetic-local").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "loader_core_history_contract_tests.rs"]
+mod core_history_contract_tests;
+
+#[cfg(test)]
+#[path = "loader_env_history_contract_tests.rs"]
+mod env_history_contract_tests;

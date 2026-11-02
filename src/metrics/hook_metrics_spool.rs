@@ -57,17 +57,23 @@ pub fn record_hook_timing(data_dir: &Path, agent: &str, event: &str, duration_ms
         serde_json::json!({"hook_event":event,"duration_ms":duration_ms.round()})
     );
     let file = directory(data_dir).join(format!("{agent}.jsonl"));
+    #[cfg(test)]
+    producer_stage("before-lock");
     let _ = with_file_lock(
         &suffix(&file, ".lock"),
         50,
         LOCK_STALE_MS,
         || -> io::Result<()> {
+            #[cfg(test)]
+            producer_stage("lock-acquired");
             let size = match fs::metadata(&file) {
                 Ok(meta) => meta.len(),
                 Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
                 Err(err) => return Err(err),
             };
             if size.saturating_add(line.len() as u64) <= HOOK_METRICS_SPOOL_MAX_BYTES {
+                #[cfg(test)]
+                producer_stage("append");
                 OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -106,6 +112,14 @@ impl HookMetricsSpool {
     }
 
     pub fn drain(&self) -> Vec<HookTimingStats> {
+        self.drain_with_io(read_pending, |path| fs::remove_file(path))
+    }
+
+    fn drain_with_io(
+        &self,
+        read: impl Fn(&Path) -> io::Result<Option<Vec<u8>>>,
+        remove: impl Fn(&Path) -> io::Result<()>,
+    ) -> Vec<HookTimingStats> {
         let names = match fs::read_dir(&self.dir) {
             Ok(names) => names,
             Err(err) => {
@@ -130,27 +144,12 @@ impl HookMetricsSpool {
         for agent in agents {
             let active = self.dir.join(format!("{agent}.jsonl"));
             let pending = suffix(&active, ".draining");
-            if consume(
-                &pending,
-                &agent,
-                &mut totals,
-                read_pending,
-                fs::remove_file::<&Path>,
-            )
-            .is_err()
-            {
+            if consume(&pending, &agent, &mut totals, &read, &remove).is_err() {
                 warn("hook timing spool drain failed");
                 continue;
             }
             if rotate(&active, &pending)
-                && consume(
-                    &pending,
-                    &agent,
-                    &mut totals,
-                    read_pending,
-                    fs::remove_file::<&Path>,
-                )
-                .is_err()
+                && consume(&pending, &agent, &mut totals, &read, &remove).is_err()
             {
                 warn("hook timing spool drain failed");
             }
@@ -339,9 +338,12 @@ mod tests {
         );
         assert!(!rotate(&active, &pending));
         assert!(fs::read_to_string(&pending).unwrap().contains("10"));
+        assert!(fs::read_to_string(&active).unwrap().contains("30"));
         let rows = HookMetricsSpool::new(root.path()).drain();
         assert_eq!(rows[0].calls, 2);
         assert_eq!(rows[0].total_duration_ms, 40.0);
+        assert_eq!(rows[0].max_duration_ms, 30.0);
+        assert_eq!(fs::read_dir(directory(root.path())).unwrap().count(), 0);
     }
 
     #[test]
@@ -386,7 +388,16 @@ mod tests {
         assert_eq!(fs::read_to_string(&lock).unwrap(), "holder");
         assert!(HookMetricsSpool::new(root.path()).drain().is_empty());
         fs::remove_file(lock).unwrap();
-        assert_eq!(HookMetricsSpool::new(root.path()).drain()[0].calls, 1);
+        assert_eq!(
+            HookMetricsSpool::new(root.path()).drain(),
+            vec![HookTimingStats {
+                agent: "codex".into(),
+                hook_event: "stop".into(),
+                calls: 1,
+                total_duration_ms: 20.0,
+                max_duration_ms: 20.0
+            }]
+        );
     }
 
     #[test]
@@ -402,8 +413,18 @@ mod tests {
         let file = OpenOptions::new().write(true).open(&lock).unwrap();
         file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
             .unwrap();
-        assert_eq!(HookMetricsSpool::new(root.path()).drain()[0].calls, 1);
+        assert_eq!(
+            HookMetricsSpool::new(root.path()).drain(),
+            vec![HookTimingStats {
+                agent: "codex".into(),
+                hook_event: "stop".into(),
+                calls: 1,
+                total_duration_ms: 20.0,
+                max_duration_ms: 20.0
+            }]
+        );
         assert!(!lock.exists());
+        assert_eq!(fs::read_dir(directory(root.path())).unwrap().count(), 0);
     }
 
     #[test]
@@ -444,3 +465,17 @@ mod tests {
         assert!(directory(root.path()).join("Codex Agent.jsonl").exists());
     }
 }
+
+#[cfg(test)]
+type ProducerStage = std::sync::Arc<dyn Fn(&'static str) + Send + Sync>;
+#[cfg(test)]
+thread_local! {static PRODUCER_STAGE:std::cell::RefCell<Option<ProducerStage>>=const{std::cell::RefCell::new(None)};}
+#[cfg(test)]
+fn producer_stage(stage: &'static str) {
+    if let Some(hook) = PRODUCER_STAGE.with_borrow(Clone::clone) {
+        hook(stage);
+    }
+}
+#[cfg(test)]
+#[path = "hook_spool_main_contract_tests.rs"]
+mod main_contract_tests;

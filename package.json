@@ -58,7 +58,8 @@
     "test:host:hermes": "vitest run tests/unit/hooks/hermes-agent-plugin.test.mjs tests/unit/hooks/hermes-agent-realtime.test.mjs tests/unit/hooks/hermes-agent-ttft.test.mjs tests/unit/hooks/hermes-subagent.test.mjs tests/unit/hooks/hermes-delayed-input.test.mjs",
     "test:host:opencode": "vitest run tests/unit/hooks/opencode-plugin-cwd.test.mjs tests/unit/hooks/opencode-plugin-session.test.mjs tests/unit/hooks/opencode-plugin-tokens.test.mjs tests/unit/hooks/opencode-plugin-v2.test.mjs",
     "test:host:jsonl-builder": "vitest run tests/host/jsonl-validation-builder.test.mjs",
-    "test:host:trace-rules": "vitest run tests/host/trace-rule-generator.test.mjs"
+    "test:host:trace-rules": "vitest run tests/host/trace-rule-generator.test.mjs",
+    "test:host:e2e-tools": "vitest run tests/e2e-remote/agent-matrix.test.mjs tests/e2e-remote/agent-probe-body.test.mjs tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs tests/e2e-remote/expand-features.test.mjs tests/e2e-remote/l1-env.test.mjs tests/e2e-remote/mock-server.test.mjs tests/e2e-remote/propagate-sls-install.test.mjs tests/e2e-remote/qoder-pat.test.mjs tests/e2e-remote/remote-agent-config.test.mjs tests/e2e-remote/version-matrix.test.mjs"
   },
   "dependencies": {
     "@alicloud/log": "^1.2.6",
