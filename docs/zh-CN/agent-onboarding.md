@@ -293,7 +293,8 @@ per-session spool：
    文件权限。
 5. 按 canonical transcript path 和 session ID 限定匹配范围。Hook 只补充
    transcript，并且只消费能够唯一匹配的结构证据。
-6. transcript 区间完成 checkpoint 后删除对应的已发布 event；只有完整扫描确认
+6. 只删除已经关联到已保存来源代次的具体 event 版本。单靠字节水位不能确认同水位
+   新 prompt 或原地重写后较小水位的新通知已消费。只有完整扫描确认
    transcript 已删除后，才删除 session spool。废弃临时文件必须等待 grace period
    后清理，避免与仍存活的 writer 竞争。
 
@@ -305,6 +306,86 @@ per-session spool：
 `src/inputs/workbuddy/workbuddy-input.ts`，以及
 `tests/unit/hooks/workbuddy-hook-event-writer.test.ts` 和
 `tests/unit/inputs/workbuddy-input.test.ts`。
+
+### Qoder / QoderCN 的 transcript 所有权
+
+两者共用轻量 Hook 和 collector 内的增量读取器，参考 Codex 的生命周期通知与
+后台解析模式。Hook 只发布 session、路径、文件大小和调用时的身份/属性快照，
+不读取 transcript 正文、不查询 CLI 登录状态，也不派生重试 worker。原有同步
+Interceptor 规则判定是另一条路径。
+
+定位信息保存在 `state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/`：
+`source.json` 保留首次观察，`events/` 合并同一水位、事件和上下文的重复通知。
+单个通知最多 16 KiB，每个来源最多保留 128 个不同通知。发布前通过短小的来源级
+SQLite 事务门禁预占容量，多个 Hook 进程竞争时也受上限约束。使用已要求的 Node
+SQLite 运行时，不写业务数据或表结构；持有者崩溃后由 OS 释放，不能仅因 mtime
+陈旧就抢走活跃锁，来源活跃时也不删除门禁文件。清理使用同一门禁，核对保存的
+具体通知版本，避免按旧字节水位误删未来 prompt 或重写文件的新 Stop。Hook 锁等待预算为 25 ms，锁内不读取原生正文、
+不执行 CLI；单次同步 OS I/O 不受此预算强制中断。达到边界会记录限频诊断，
+已有来源仍由 collector 轮询。正文留在 Agent 原生文件中，标量游标使用现有 Input
+StateStore 保存。只有 `extra.qoderTranscripts` 对应版本实际写盘成功，下一轮才清理通知；普通写盘
+失败时保留通知并暂停该原生来源推进，由现有周期重试保存。不能用 save Promise
+已结束或仅靠 `saveFailed` 判断持久化；其他字段更新不使已落盘的原生游标失效。
+来源描述和游标随已知会话
+数量增长，不对历史会话设置永久的准入数量上限，不按日期删除未消费数据。
+
+文件尚未创建时也规范化已存在的父目录，覆盖父目录符号链接和悬空文件链接，保证
+创建前后来源键不变。旧重试锁允许短暂半写宽限；过期但 PID 仍存在时核对进程出生
+时间，避免 PID 复用造成永久等待。真实活跃的旧 worker 仍受保护，长时间/无法确认
+的持有者会记录诊断；身份探测有预算并缓存结果。
+
+原生 transcript 恢复会保留原始坏字节，最多记录 32 个隔离范围。已换行坏记录可推进物理游标；超限半行只持久化扫描位置和小型 witness，继续有界寻找换行。旧游标迁移只计物理行，不解析旧 JSON，并兼容旧版已计入游标的无末尾换行尾行；普通采集仍不提交未完成半行。后续合法 Turn 继续采集；受损或超预算轮次中保留的有效事件以 `agent.transcript_incomplete=true` 透传 JSONL 和 OTLP，不伪造完成或承诺任意大记录无损。
+
+首条迟到 prompt 通过真实 Hook 的 `request_set_id` 与同 session 的 SQLite 用户请求顺序关联，每次只读取 256 条元数据。transcript UUID 属于另一命名空间；时间仅校验顺序配对，不靠时间接近或相同文本选择归属。归属扫描遇到完整坏行时只推进物理偏移、不消耗数据库用户序号；必须配对完整的元数据页及最终库存，才能回补，避免坏行遮住用户请求后误归属。证据不足保留待定范围，实时游标独立前进；证据到达后只回补该范围，避免重放已交付 Turn。每周期一次的归属查询预算在来源间公平轮转，每次最多探测四个数据库，跨周期继续覆盖其他候选，不永久截掉后续 profile 或 JetBrains 库。小型搜索游标随来源 checkpoint 保存；已确认的库优先查询，仍检查 session/request 与库文件代次。
+
+Qoder/CN 的 `.sh`/`.ps1` 要求无需实验开关即可加载 SQLite 的 Node（22.13+、23.4+ 或更新版本，依据 [Node 官方说明](https://nodejs.org/download/release/v24.20.0/docs/api/sqlite.html)），拒绝旧 pin 后选择托管运行时，并保持 Hook 输出协议。旧锁 PID 探测遇到 `EPERM` 仍进行有界出生时间核验；无法确认的活跃 owner 保留保护和诊断，不能按年龄强抢。
+
+
+仅升级兼容的旧 Hook history 使用独立的跨块读取器：每轮 4 MiB，完整记录上限
+32 MiB。合法大行可跨多轮完成，游标只提交完整行，UTF-8 半行和重启不丢不重；
+不变半行不重复读正文。超出整行上限时释放内存正文、保留源文件并记录有界隔离
+字节区间/诊断，扫描到换行后继续后续记录。这类超限记录不冒充采集成功，也不承诺
+任意大记录无损采集。
+
+每个 Input 串行采集，通常每轮最多扫描 4 MiB、访问 64 个来源、完成 32 个 Turn。
+完整行和缓存恢复可能使扫描超过软预算，但单个 Turn 最多 16 MiB / 8,192 条记录，
+正文缓存按源字节计最多 32 MiB，元数据缓存最多 4 MiB。这些是读取与缓存预算，
+不是进程 RSS 上限。坏行/超限范围按上述隔离协议恢复，原始字节保留；损坏元数据
+或 I/O 失败保留原游标并限频告警，不会确认未处理数据已消费。其他来源继续采集。
+
+回归按真实 Input 顺序组合：上次保存 → 新 prompt 先于 user 行 → ACK → 采集，
+以及原地截短 → 新 Stop → 旧游标 ACK。补缺失/符号链接路径创建、损坏升级锁、
+活跃持有者过期、崩溃释放、大旧行后接正常行等转换。分别测过 ACK、截短或大文件
+的正常路径不能替代这些组合，断言还应覆盖来源身份、最终内容和读取工作量。
+
+打开原生文件和元数据后会再次确认文件句柄属于普通文件。在 Unix 上还使用非阻塞
+打开，避免路径在 `stat` 与 `open` 之间被替换成 FIFO 后卡住采集。拒绝时关闭句柄、
+保留原游标，文件修复后可继续采集。
+
+首次 `UserPromptSubmit` 通知从当时的完整行水位等待新用户消息；首次 `Stop` 通知
+向后定位当前真实用户消息，避免重放全部历史。后续按字节增量读取，并保留半行、
+活动 Turn 和重启恢复信息。第三方 Hook 的进度行可能晚到，不作为新 Turn 的依据。
+`last-prompt`、`SessionEnd` 或下一条真实用户消息可封口；仅有终止信号时等待尾部
+稳定和最多 5 秒的写入宽限，等待发生在 collector 中。工具及 Token 仍走原有
+Qoder/QoderCN 补全与统一输出链路。
+
+这条路径覆盖 Qoder IDE、Qoder CLI、QoderCN，以及复用 Qoder 数据目录和 SQLite
+补全的 JetBrains 版（输出标识 `qoder-idea`）。Qoder Work/Work CN 使用独立的
+Hook、解析器和 Input，不能因名称相近就视为覆盖；其旧版 Hook 仍有全量 snapshot
+读取，需要单独迁移和验收，不属于这里的 transcript reader。
+
+Trace 转换时，独立会话的 ENTRY 是真正的根节点。`otel-util-genai` beta.13
+通过虚拟父节点 `0000000000000001` 沿用源 Trace ID；Pilot 的 Qoder 适配器改用
+SDK 的公开 `IdGenerator` 和根 Context 创建 ENTRY，保留同一个 Trace ID，
+不改写已结束的 Span。只有输入标记（`event.name=other`）没有有效
+`parent_span_id` 时才使用这一适配；显式上游父节点原样保留，包括值恰好为
+`0000000000000001` 的真实父节点。LLM/TOOL 事件的内部父引用不充当上游父节点。
+ENTRY、AGENT、STEP、LLM、TOOL 的数量和内容不因这一适配改变。
+
+升级时读取旧版按 session 保存的行游标并分块换算为字节偏移；仍存活的旧 retry
+worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的增量消费能力，
+不要求删除已有 checkpoint 或会话文件。回滚不复用新字节游标，需按目标版本的
+原有历史恢复策略核对数据边界。
 
 ## 注册 Agent
 

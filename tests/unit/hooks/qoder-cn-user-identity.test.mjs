@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const processor = process.env.QODER_CN_IDENTITY_PROCESSOR
-  ?? fileURLToPath(new URL('../../../assets/hooks/qoder-hook-processor.mjs', import.meta.url));
+  ?? fileURLToPath(new URL('../../helpers/qoder-hook-collector-driver.mjs', import.meta.url));
 let root;
 let transcript;
 let statusPath;

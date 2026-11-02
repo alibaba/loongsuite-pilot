@@ -17,6 +17,7 @@ import {
 } from '@loongsuite/otel-util-genai';
 import { convertDelegatedTurn } from './delegated-turn-converter.js';
 import { convertCodexTurn } from './codex-turn-converter.js';
+import { convertQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
@@ -1237,7 +1238,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
             )];
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
-          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source'] : [];
+          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
@@ -1289,6 +1291,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
             : agentType === 'codex' ? convertCodexTurn
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? convertQoderTurn
             : agentType === 'doubao-work' ? convertDoubaoWorkTurn
             : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
             : convertEventLogToTrace;

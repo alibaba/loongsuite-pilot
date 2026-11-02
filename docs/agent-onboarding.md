@@ -320,7 +320,9 @@ Hook evidence as an ephemeral per-session spool:
 5. Scope matching by canonical transcript path and session ID. Treat Hook data
    as a supplement to the transcript, and consume only uniquely matched
    structural evidence.
-6. Delete published events after their transcript range has been checkpointed.
+6. Delete only the exact observed event versions associated with a checkpointed
+   source generation. A byte watermark alone does not acknowledge a newly
+   published prompt at that same offset or a rewritten file's smaller offset.
    Remove the session spool when deletion of the corresponding transcript is
    confirmed by a complete scan. Clean abandoned temporary files only after a
    grace period so a live writer is not raced.
@@ -334,6 +336,114 @@ For a working reference, see
 `src/inputs/workbuddy/workbuddy-input.ts`, and their tests in
 `tests/unit/hooks/workbuddy-hook-event-writer.test.ts` and
 `tests/unit/inputs/workbuddy-input.test.ts`.
+
+### Qoder / QoderCN transcript ownership
+
+Both adapters use a thin Hook and a collector-owned incremental reader, following
+Codex's lifecycle notification/background parsing pattern. The Hook publishes
+bounded session/path/size metadata and invocation identity/context snapshots. It
+does not read transcript bodies, query CLI login status, or spawn retry workers.
+Synchronous Interceptor policy evaluation remains a separate path.
+
+`state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/source.json` preserves the
+first observation. `events/` coalesces identical watermark/event/context notices.
+Each notice is at most 16 KiB, with up to 128 distinct notices per source. A
+short per-source SQLite transaction gate reserves capacity before publication,
+including competing Hook processes. It writes no business/schema data and uses
+the required Node SQLite runtime. The OS releases a crashed process's gate;
+mtime does not authorize stealing a live holder. Keep the gate file in place
+while sources are active. Reclamation uses the same gate and checks the exact
+notice version recorded in the saved checkpoint, so an old byte cursor cannot
+delete a future prompt or rewritten-file Stop. Hook contention
+has a 25 ms wait budget; native parsing and CLI commands never run inside this
+gate. This does not impose a hard timeout on synchronous OS I/O. A
+capacity condition produces a rate-limited diagnostic; existing sources continue
+native polling. Bodies remain in Agent-owned files. Scalar offsets use the
+existing Input StateStore; covered notices are reclaimed on the following cycle
+after its save. Source descriptors and scalar cursors grow with known sessions;
+there is no lifetime session admission cap or age-based deletion of unread data.
+
+Qoder native recovery keeps corrupt/over-limit bytes in the original transcript and stores at most 32 quarantine ranges. Complete bad lines advance the physical cursor; partial over-limit lines persist only their scan position and a small witness while seeking LF. Legacy migration counts physical newlines without parsing JSON. Valid later Turns continue. Retained valid events in a damaged or over-budget Turn carry `agent.transcript_incomplete=true` through JSONL and OTLP; this is not arbitrary-size lossless capture or a fabricated completion.
+
+Initial delayed prompt ownership uses the real Hook `request_set_id` and the same session's ordered SQLite user-request inventory, read in 256-row metadata-only keyset pages. Transcript UUIDs use a different namespace. Source clocks validate the ordered pairing; timestamps or repeated prompt text never select a nearest candidate. Missing, tied or contradictory evidence leaves an explicit unresolved range. The live cursor proceeds independently, and later positive evidence backfills only that range without replaying delivered Turns. Ownership lookups rotate fairly under one shared lookup budget per cycle.
+
+The Qoder/CN Hook wrappers require an unflagged SQLite-capable runtime (Node 22.13+, 23.4+, or newer; see [Node documentation](https://nodejs.org/download/release/v24.20.0/docs/api/sqlite.html)). An obsolete pin is rejected before selecting a managed runtime. The runtime/diagnostic paths must preserve the Hook protocol. An `EPERM` PID probe is not ownership proof: old retry locks still undergo the bounded birth-time check; an unverified genuinely live owner remains protected and diagnosed rather than stolen by age.
+
+Qoder acknowledges only the revision of `extra.qoderTranscripts` that actually
+reached disk. An ordinary write failure retains notices and pauses optimistic
+native progress while the existing cycle retries the save. A settled save promise
+or the output-hold-only `saveFailed` flag does not establish durability. Updates to
+unrelated fields do not invalidate a saved native cursor. Regression tests must
+exercise collect → output queue → successful save, rather than calling `collect`
+directly and assuming its in-memory state models a durable restart.
+
+Canonicalize the nearest existing ancestor before publishing a missing path,
+including symlink parents and dangling file links. File creation must not change
+its source key. Legacy retry locks get a short incomplete-write grace; expired
+live PIDs are checked against process birth time before being treated as owners.
+An actually active old worker remains protected from concurrent takeover, with a
+diagnostic for prolonged/unverified ownership. Inspection is bounded and cached.
+
+Upgrade-only Hook history uses a separate 4 MiB/cycle chunked reader with a
+32 MiB complete-record limit. A legal record can span cycles; complete-line
+offsets and partial UTF-8 survive restart without replay. Unchanged tails read
+zero body bytes. Beyond the record limit, discard only the in-memory body,
+retain the source file, record a bounded quarantine byte range/diagnostic, and
+scan through its newline before consuming following records. Such over-limit
+records are not reported as successfully collected; arbitrary-size lossless
+collection is not claimed.
+
+Each Input serializes collection. A normal cycle scans up to 4 MiB, visits 64
+sources and completes 32 Turns. Completing a line or restoring an evicted active
+Turn can exceed this soft scan budget. One Turn is limited to 16 MiB / 8,192
+records, the body cache to 32 MiB of source bytes, and the metadata cache to 4 MiB.
+These are read/cache budgets, not process RSS limits. Damaged/over-limit native
+ranges follow the quarantine protocol above and retain their original bytes.
+Corrupt metadata and I/O failures retain the prior cursor and a rate-limited
+diagnostic; other sources continue.
+
+Test state transitions in the actual Input order: saved checkpoint → next prompt
+before its user row → ACK → collect, and in-place truncation → new Stop → ACK.
+Also cover missing/symlink paths becoming real files, stale/corrupt upgrade
+locks, live-owner expiry, crash release, and a large old line followed by a
+normal line. Independent happy-path tests of each component do not establish
+these combined behaviors; check source identities/payloads and read work too.
+
+Native and metadata opens verify the opened handle is a regular file. On Unix,
+nonblocking open also prevents a path replaced with a FIFO between `stat` and
+`open` from stranding collection. Rejected handles are closed and leave the
+previous cursor intact, allowing recovery when the file is repaired.
+
+A first UserPromptSubmit anchors an open native user row or leaves a closed
+prefix unresolved until request ownership is proved. A first Stop searches backward for the current real
+user message instead of replaying the full history. Later reads use byte offsets,
+preserving partial lines, active Turns and restart recovery. Late third-party
+Hook progress does not define a new Turn. A last-prompt, SessionEnd or next real
+user row seals a range; a terminal-only tail waits for stability and a five-second
+writer grace period inside the collector. Existing tool/token enrichment and
+shared outputs remain in use.
+
+This path covers Qoder IDE, Qoder CLI, QoderCN and the JetBrains integration
+(`qoder-idea`), which reuses Qoder storage and SQLite enrichment. Qoder Work
+and Work CN have separate Hooks, parsers and Inputs. Their legacy Hook still
+reads a full snapshot and requires its own migration and acceptance; it does
+not use this transcript reader.
+
+Independent Qoder turns export ENTRY as an actual root. The beta.13 util
+converter uses a virtual parent (`0000000000000001`) to inherit the source
+Trace ID. Pilot's Qoder adapter instead uses the public SDK IdGenerator and
+root Context to create ENTRY under that same Trace ID, without modifying
+ended spans. This applies only when input markers (`event.name=other`) carry
+no valid `parent_span_id`. Explicit upstream parents, including a real parent
+whose ID happens to equal the virtual value, pass through unchanged. Internal
+LLM/TOOL parent pointers are not treated as upstream parents. Span counts,
+messages, tool results and token usage remain unchanged.
+
+Upgrade converts legacy per-session line cursors into byte offsets in bounded
+chunks, and defers takeover while an old retry worker is alive. Existing Hook
+history JSONL is still consumed incrementally; deleting checkpoints or native
+sessions is unnecessary. Rollback does not consume the new byte cursor: verify
+its data boundary using the target version's original history recovery policy.
 
 ## Register The Agent
 

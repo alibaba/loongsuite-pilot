@@ -122,6 +122,44 @@ describe('StateStore', () => {
     });
   });
 
+  it('reports only successfully written per-input revisions without unrelated-input interference', async () => {
+    store.setOffset('qoder-trace', 1);
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    store.setOffset('other-input', 2);
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(false);
+    vi.mocked(writeJsonFile).mockRejectedValueOnce(new Error('synthetic disk failure'));
+    store.setOffset('qoder-trace', 3);
+    await expect(store.save()).rejects.toThrow('synthetic disk failure');
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.saveFailed).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace')).toBe(true);
+    expect(store.isPersisted('other-input')).toBe(true);
+  });
+
+  it('distinguishes a durable native cursor from unrelated metadata and pending writes', async () => {
+    const native = { source: { offset: 10 } };
+    store.set('qoder-trace', { extra: { qoderTranscripts: native, other: 1 } });
+    await store.save();
+    store.update('qoder-trace', { extra: { other: 2 } });
+    expect(store.isPersisted('qoder-trace')).toBe(false);
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    store.update('qoder-trace', { extra: { qoderTranscripts: { source: { offset: 20 } } } });
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await store.save();
+    expect(store.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    const loaded = new StateStore(filePath);
+    await loaded.load();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+    loaded.delete('qoder-trace');
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(false);
+    await loaded.save();
+    expect(loaded.isPersisted('qoder-trace', 'qoderTranscripts')).toBe(true);
+  });
+
   describe('revision optimization', () => {
     it('should not write without a new revision', async () => {
       await store.load();

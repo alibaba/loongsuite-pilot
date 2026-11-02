@@ -26,9 +26,12 @@ import {
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { QoderTranscriptSource } from './transcript-source.js';
+import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  dataDir?: string;
   /** Cached multimodal policy; IDE + CLI extraction when enabled. */
   multimodal?: {
     enabled: boolean;
@@ -114,10 +117,14 @@ export class QoderTraceInput extends BaseInput {
   private readonly multimodalProcessor: MultimodalProcessor | null;
   private readonly allowedRootPaths: string[];
   private multimodalStopped = false;
+  private readonly transcriptSource: QoderTranscriptSource;
+  private readonly legacyHookReader = new QoderLegacyHookReader();
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder',
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = opts.multimodal?.processor ?? null;
@@ -128,6 +135,8 @@ export class QoderTraceInput extends BaseInput {
 
   override async stop(): Promise<void> {
     this.multimodalStopped = true;
+    this.transcriptSource.stop();
+    this.legacyHookReader.reset();
     await super.stop();
   }
 
@@ -144,6 +153,7 @@ export class QoderTraceInput extends BaseInput {
 
   protected override async onStart(): Promise<void> {
     this.multimodalStopped = false;
+    this.transcriptSource.start();
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -181,9 +191,18 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
+    const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
-    if (rawEntries.length === 0) return [];
+    const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
+    for (const record of native.records) {
+      const entry = await this.transformRecord(record);
+      if (entry) rawEntries.push(entry);
+    }
+    if (rawEntries.length === 0) {
+      if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
+      return [];
+    }
 
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
@@ -321,6 +340,7 @@ export class QoderTraceInput extends BaseInput {
       injectTraceId(turnEntries);
     }
 
+    if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
     return rawEntries;
   }
 
@@ -349,32 +369,33 @@ export class QoderTraceInput extends BaseInput {
     if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
-    const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
-    try {
-      // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
-      // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
-      const buf = Buffer.alloc(stat.size - offset);
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+    {
+      const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      const completeBytes = batch.buffer;
+      const completeLength = batch.nextOffset - offset;
+      const skipped = batch.quarantine.filter(record => record.to !== null);
+      const skippedMax = Math.max(0, ...skipped.map(record => record.bytes));
+      if (batch.quarantine.length) {
+        const previous = Array.isArray(state.extra?.qoderLegacyQuarantine) ? state.extra.qoderLegacyQuarantine : [];
+        this.setState({ extra: { ...this.getState().extra,
+          qoderLegacyQuarantine: [...previous, ...batch.quarantine.map(record => ({ file: logFileName, ...record }))].slice(-32) } });
+        for (const record of batch.quarantine) this.logger.warn('oversized legacy Hook record quarantined; source retained', { file: logFile, ...record });
       }
-      const snapshot = buf.subarray(0, bytesRead);
-      const lastNewline = snapshot.lastIndexOf(0x0a);
-      if (lastNewline < 0) return [];
-
-      const completeLength = lastNewline + 1;
-      const completeBytes = snapshot.subarray(0, completeLength);
-      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+      if (completeLength) this.setState({ lastFile: logFileName, lastOffset: batch.nextOffset });
+      if (!completeBytes.length) {
+        if (completeLength) runtime?.observeCommittedBatch({ records: skipped.length,
+          bytes: completeLength, parseSuccessRecords: 0, parseFailedRecords: skipped.length, maxRecordBytes: skippedMax });
+        return [];
+      }
 
       const completeText = completeBytes.toString('utf-8');
       const asciiBatch = completeText.length === completeBytes.length;
       const lines = completeText.split('\n');
-      let records = 0;
+      let records = skipped.length;
       let parseSuccessRecords = 0;
-      let parseFailedRecords = 0;
-      let maxRecordBytes = 0;
+      let parseFailedRecords = skipped.length;
+      let maxRecordBytes = skippedMax;
       let recordStartOffset = 0;
 
       for (const line of lines) {
@@ -417,8 +438,6 @@ export class QoderTraceInput extends BaseInput {
         parseFailedRecords,
         maxRecordBytes,
       });
-    } finally {
-      await handle.close();
     }
 
     entries = filterBootstrapHistoryTurns(entries);

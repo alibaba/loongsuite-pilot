@@ -6,6 +6,7 @@ import type { InputState } from '../../src/types/index.js';
  */
 export class MockStateStore {
   private readonly states = new Map<string, InputState>();
+  private readonly persistedStates = new Map<string, InputState>();
   private _dirty = false;
   private _saveCount = 0;
 
@@ -17,14 +18,21 @@ export class MockStateStore {
     return this._saveCount;
   }
 
+  isPersisted(inputId: string, extraKey?: string): boolean {
+    return extraKey === undefined ? !this._dirty
+      : this.states.get(inputId)?.extra?.[extraKey] === this.persistedStates.get(inputId)?.extra?.[extraKey];
+  }
+
   async load(): Promise<void> {
     this.states.clear();
+    this.persistedStates.clear();
     this._dirty = false;
   }
 
   async save(): Promise<void> {
     this._saveCount++;
     this._dirty = false;
+    for (const [id, state] of this.states) this.persistedStates.set(id, { ...state, extra: { ...state.extra } });
   }
 
   get(inputId: string): InputState {
@@ -60,6 +68,7 @@ export class MockStateStore {
 
   reset(): void {
     this.states.clear();
+    this.persistedStates.clear();
     this._dirty = false;
     this._saveCount = 0;
   }

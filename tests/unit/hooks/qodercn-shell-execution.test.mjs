@@ -6,6 +6,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { QoderTranscriptCollector } from '../../../assets/hooks/qoder/transcript-collector.mjs';
 
 const HOOK_DIR = resolve('assets/hooks');
 const HOOK = 'qodercn-loongsuite-pilot-hook.sh';
@@ -24,7 +25,7 @@ const CAPTURE = `import fs from 'node:fs';
 console.log(JSON.stringify({ args: process.argv.slice(2), stdin: fs.readFileSync(0, 'utf8') }));
 `;
 
-function withInstallation(run) {
+async function withInstallation(run) {
   const root = mkdtempSync(join(tmpdir(), "pilot hook's shell-"));
   const data = join(root, '.loongsuite-pilot');
   const hooks = join(data, 'hooks');
@@ -40,7 +41,7 @@ function withInstallation(run) {
   delete env.BASH_ENV;
   delete env.ENV;
   delete env.POSIXLY_CORRECT;
-  try { return run({ root, data, hooks, env }); }
+  try { return await run({ root, data, hooks, env }); }
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -60,8 +61,8 @@ function expectSuccess(result) {
 
 describe.skipIf(process.platform === 'win32')('Qoder CN Hook shell execution', () => {
   for (const launcher of LAUNCHERS) {
-    it.skipIf(launcher.skip)(`hands stdin and the agent argument to Node via ${launcher.name}`, () => {
-      withInstallation(({ hooks, env }) => {
+    it.skipIf(launcher.skip)(`hands stdin and the agent argument to Node via ${launcher.name}`, async () => {
+      await withInstallation(({ hooks, env }) => {
         const script = join(hooks, HOOK);
         copyFileSync(join(HOOK_DIR, HOOK), script);
         chmodSync(script, 0o755);
@@ -79,8 +80,8 @@ describe.skipIf(process.platform === 'win32')('Qoder CN Hook shell execution', (
   // Execute the shipped processor as well as the wrapper: an exit code of zero
   // alone could mean the wrapper silently skipped collection.
   for (const launcher of LAUNCHERS) {
-    it.skipIf(launcher.skip)(`collects a Qoder CN transcript via ${launcher.name} without replay`, () => {
-      withInstallation(({ data, hooks, env }) => {
+    it.skipIf(launcher.skip)(`collects a Qoder CN transcript via ${launcher.name} without replay`, async () => {
+      await withInstallation(async ({ data, hooks, env }) => {
         const script = join(hooks, HOOK);
         // Model an upgrade from the failing wrapper and run the real asset
         // installer, rather than assuming the patched source reaches users.
@@ -103,11 +104,11 @@ describe.skipIf(process.platform === 'win32')('Qoder CN Hook shell execution', (
         writeFileSync(transcript, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
         const payload = JSON.stringify({ session_id: sessionId, transcript_path: transcript, cwd: data });
         expectSuccess(execute(launcher, script, [], env, payload));
-        const history = join(data, 'logs/qoder-cn/history');
-        const readRecords = () => readdirSync(history).filter(name => name.endsWith('.jsonl'))
-          .flatMap(name => readFileSync(join(history, name), 'utf8').trim().split('\n'))
-          .map(line => JSON.parse(line));
-        const records = readRecords();
+        expect(readFileSync(join(hooks, 'qoder/hook-wakeup.mjs'), 'utf8'))
+          .toBe(readFileSync(join(HOOK_DIR, 'qoder/hook-wakeup.mjs'), 'utf8'));
+        const collector = new QoderTranscriptCollector({ dataDir: data, agentId: 'qoder-cn' });
+        const first = await collector.collect({});
+        const records = first.records;
         expect(records.length).toBeGreaterThan(0);
         expect(records.every(record => record['gen_ai.session.id'] === sessionId)).toBe(true);
         expect(records.every(record => record['gen_ai.agent.type'] === 'qoder-cn')).toBe(true);
@@ -115,7 +116,8 @@ describe.skipIf(process.platform === 'win32')('Qoder CN Hook shell execution', (
         expect(serialized).toContain('shell compatibility prompt');
         expect(serialized).toContain('shell compatibility answer');
         expectSuccess(execute(launcher, script, [], env, payload));
-        expect(readRecords()).toEqual(records);
+        expect((await collector.collect(first.state)).records).toEqual([]);
+        collector.stop();
       });
     });
   }

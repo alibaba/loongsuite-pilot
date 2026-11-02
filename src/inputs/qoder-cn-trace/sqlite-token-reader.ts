@@ -116,7 +116,7 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
  * because the substring is `-cn/` rather than `/`. That is a coincidence, not a guarantee.
  * Copying that pattern here, or loosening the test, would mislabel every Qoder CN user.
  */
-function resolveQoderCnDbPaths(): string[] {
+export function resolveQoderCnDbPaths(): string[] {
   const appSupportRoot = process.platform === 'darwin'
     ? resolveHome('~/Library/Application Support')
     : process.platform === 'win32'

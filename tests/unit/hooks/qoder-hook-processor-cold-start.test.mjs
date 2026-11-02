@@ -11,7 +11,7 @@ import {
 import { VALID_FINISH_REASONS } from '../../../scripts/validate-trace.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROCESSOR = path.resolve(__dirname, '../../../assets/hooks/qoder-hook-processor.mjs');
+const PROCESSOR = path.resolve(__dirname, '../../helpers/qoder-hook-collector-driver.mjs');
 
 let dataDir;
 let transcriptPath;
@@ -101,7 +101,7 @@ function runRetry(triggerEndLine, sessionId = 'session-old', userIdentity, extra
   });
 }
 
-function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay = '0' } = {}) {
+function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay = '0', onPublished } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       PROCESSOR,
@@ -122,8 +122,9 @@ function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay =
         HOOK_RETRY_BOUNDARY_POLL_INTERVAL_MS: '10',
         HOOK_RETRY_LOCK_WAIT_MS: '2000',
         HOOK_RETRY_LOCK_POLL_MS: '5',
+        QODER_TEST_CAPTURE_BARRIER: onPublished ? '1' : '',
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', ...(onPublished ? ['ipc'] : [])],
     });
     let stdout = '';
     let stderr = '';
@@ -131,6 +132,9 @@ function runRetryAsync(triggerEndLine, sessionId = 'session-old', { retryDelay =
     child.stderr.setEncoding('utf-8');
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
+    if (onPublished) child.on('message', message => {
+      if (message.type === 'hook-published') onPublished(child);
+    });
     child.once('error', reject);
     child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
   });
@@ -144,6 +148,10 @@ function readHistory() {
     .flatMap(file => fs.readFileSync(path.join(historyDir, file), 'utf-8').split('\n'))
     .filter(Boolean)
     .map(line => JSON.parse(line));
+}
+
+function nativeCheckpoints() {
+  return JSON.parse(fs.readFileSync(path.join(dataDir, 'state/qoder-test-native-checkpoints.json'), 'utf8'));
 }
 
 function installFakeQoderCli(root) {
@@ -261,8 +269,7 @@ describe('qoder-hook-processor cold-start recovery', () => {
       new Set(['missing-cursor']),
     );
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    expect(fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'))).toHaveLength(1);
+    expect(Object.keys(nativeCheckpoints())).toHaveLength(1);
 
     const before = bootstrapRecords.length;
     fs.appendFileSync(transcriptPath, [
@@ -298,11 +305,11 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(new Set(secondSessionRecords.map(r => r['agent.transcript.cursor_mode']))).toEqual(
       new Set(['bootstrap']),
     );
-    const cursorFiles = fs.readdirSync(cursorDir).filter(file => file.endsWith('.json'));
+    const cursorFiles = Object.keys(nativeCheckpoints());
     expect(cursorFiles).toHaveLength(2);
-    const persistedSessionIds = cursorFiles.map(file =>
-      JSON.parse(fs.readFileSync(path.join(cursorDir, file), 'utf-8')).session_id
-    );
+    const persistedSessionIds = cursorFiles.map(key => JSON.parse(fs.readFileSync(
+      path.join(dataDir, 'state/qoder-transcripts/qoder/sources', key, 'source.json'), 'utf8',
+    )).sessionId);
     expect(new Set(persistedSessionIds)).toEqual(
       new Set(['session-old', 'session-second-old']),
     );
@@ -344,10 +351,10 @@ describe('qoder-hook-processor cold-start recovery', () => {
     expect(first.status).toBe(0);
     expect(userBoundaryPrompts(readHistory())).toEqual(['target prompt']);
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    const cursorFile = path.join(cursorDir, fs.readdirSync(cursorDir)[0]);
-    const firstCursor = JSON.parse(fs.readFileSync(cursorFile, 'utf-8'));
-    expect(firstCursor.last_line_count).toBe(8);
+    const firstCursor = Object.values(nativeCheckpoints())[0];
+    const committedBytes = Buffer.byteLength(initialRows.slice(0, -1).map(row => JSON.stringify(row)).join('\n') + '\n');
+    expect(firstCursor.committedOffset).toBe(committedBytes);
+    expect(firstCursor.activeStart).toBe(committedBytes);
 
     const secondTriggerEndLine = initialRows.length + 1;
     fs.appendFileSync(transcriptPath, [
@@ -501,21 +508,21 @@ describe('qoder-hook-processor cold-start recovery', () => {
     ];
     fs.writeFileSync(transcriptPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 
-    const first = runRetryAsync(4, 'ide-session', { retryDelay: '50' });
-    await new Promise(resolve => setTimeout(resolve, 10));
-    const second = runRetryAsync(8, 'ide-session', { retryDelay: '50' });
+    const published = [];
+    const onPublished = child => {
+      published.push(child);
+      if (published.length === 2) published.forEach(worker => worker.send('collect'));
+    };
+    const first = runRetryAsync(4, 'ide-session', { onPublished });
+    const second = runRetryAsync(8, 'ide-session', { onPublished });
     const results = await Promise.all([first, second]);
 
     expect(results.map(result => result.status)).toEqual([0, 0]);
     expect(userBoundaryPrompts(readHistory())).toEqual(['first prompt', 'second prompt']);
     expect(readHistory().filter(record => record['event.name'] === 'llm.response')).toHaveLength(2);
 
-    const cursorDir = path.join(dataDir, 'state', 'hooks', 'qoder-line-records');
-    const cursor = JSON.parse(fs.readFileSync(
-      path.join(cursorDir, fs.readdirSync(cursorDir)[0]),
-      'utf-8',
-    ));
-    expect(cursor.last_line_count).toBe(rows.length);
+    const cursor = Object.values(nativeCheckpoints())[0];
+    expect(cursor.committedOffset).toBe(fs.statSync(transcriptPath).size);
   });
 
   it('keeps equal PostToolUse events from separate tool cycles', () => {
