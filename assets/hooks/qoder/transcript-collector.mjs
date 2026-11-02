@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import { constants, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import {
   buildLlmBoundaries, buildEventsFromBoundaries, isRealUserPrompt, isControlUserRow,
   hasQoderCnTerminalMarker, resolveQoderCliUserIdentity,
@@ -24,6 +25,8 @@ const MAX_WARNING_KEYS = 1024;
 const MAX_TURN_RECORDS = 8192;
 const MAX_TAIL_SCANS = 256;
 const MAX_DEFERRED_SOURCES = 1024;
+const LEGACY_LOCK_GRACE_MS = 1000;
+const LEGACY_LOCK_AGE_MS = 60_000;
 const DEFERRED_CONTENT_ERRORS = new Set([
   'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
   'bootstrap-record-byte-limit', 'invalid-json-line',
@@ -32,6 +35,9 @@ const fileVersion = stat => [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.c
 const eventOf = row => row?.type === 'progress' ? row.data?.hookEvent ?? '' : '';
 const clone = value => JSON.parse(JSON.stringify(value));
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const noticeVersion = (value, stat) => typeof value.observationId === 'string' && value.observationId.length <= 128
+  ? `id:${value.observationId}` : `stat:${digest([stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs])}`;
+const noticeName = name => /^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd)-[a-f0-9]{24}\.json$/.test(name);
 
 async function openRegular(file) {
   // A file can become a FIFO between the path stat and open. O_NONBLOCK makes
@@ -110,6 +116,7 @@ export class QoderTranscriptCollector {
     // complete records. Keep only a small append witness, never partial bodies.
     this.tailScans = new Map();
     this.deferredSources = new Map();
+    this.legacyOwners = new Map();
     this.discovery = null;
     this.pendingSources = [];
     this.cleanupRotation = 0;
@@ -123,6 +130,7 @@ export class QoderTranscriptCollector {
     this.cache.clear(); this.cacheSize = 0;
     this.metadata.clear(); this.metadataBytes = 0;
     this.tailScans.clear(); this.deferredSources.clear();
+    this.legacyOwners.clear();
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
@@ -189,6 +197,7 @@ export class QoderTranscriptCollector {
     let changed = false;
     this.metrics = { bytesRead: 0, recordsParsed: 0, sourceFilesOpened: 0, peakCachedBytes: this.cacheSize };
     this.remainingBytes = this.scanBytes;
+    this.ownerInspectionBudget = 1;
     if (this.stopped) return { records, state: next, metrics: this.metrics, changed };
     try {
       const capacity = await smallJson(path.join(this.root, '..', 'capacity.json'));
@@ -242,6 +251,18 @@ export class QoderTranscriptCollector {
           || (after.size === stat.size && after.mtimeMs !== stat.mtimeMs)) throw new Error('source-changed-during-read');
         checkpoint.fileMtime = stat.mtimeMs;
         checkpoint.fileCtime = stat.ctimeMs;
+        // A durable cursor alone is not an ACK for notices published later at
+        // that same watermark (or after an in-place rewrite). Persist the exact
+        // versions observed while a completed range was accepted instead.
+        const advanced = checkpoint.committedOffset !== old?.committedOffset
+          || checkpoint.inode !== old?.inode || rewritten;
+        const saved = new Set((checkpoint.receipts ?? []).map(receipt => `${receipt.name}:${receipt.version}`));
+        checkpoint.receipts = contexts.filter(context => context.receipt && (
+          saved.has(`${context.receipt.name}:${context.receipt.version}`)
+          || (advanced && context.observedSize <= checkpoint.committedOffset
+            && (!['UserPromptSubmit', 'SessionStart'].includes(context.event)
+              || context.observedSize < checkpoint.committedOffset))
+        )).map(context => context.receipt);
         records.push(...batch);
         next[key] = checkpoint;
         changed ||= JSON.stringify(old) !== JSON.stringify(checkpoint);
@@ -269,14 +290,14 @@ export class QoderTranscriptCollector {
     this.cleanupRotation = (start + selected.length) % keys.length;
     for (const key of selected) {
       const checkpoint = state[key];
-      if (!/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(checkpoint?.committedOffset)) continue;
-      const directory = path.join(this.root, key, 'events');
-      for (const entry of await names(directory, MAX_CONTEXT_FILES)) {
-        if (!entry.isFile() || !/^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd)-[a-f0-9]{24}\.json$/.test(entry.name)) continue;
+      if (!/^[a-f0-9]{64}$/.test(key) || !Array.isArray(checkpoint?.receipts)) continue;
+      for (const receipt of checkpoint.receipts.slice(0, MAX_CONTEXT_FILES)) {
+        if (!receipt || !noticeName(receipt.name) || typeof receipt.version !== 'string') continue;
+        const directory = path.join(this.root, key, 'events');
         try {
-          const file = path.join(directory, entry.name);
+          const file = path.join(directory, receipt.name);
           const { value: event, stat } = await jsonSnapshot(file);
-          if (event.inode === checkpoint.inode && event.observedSize <= checkpoint.committedOffset) {
+          if (noticeVersion(event, stat) === receipt.version) {
             withQoderWakeupLock(path.dirname(directory), () => {
               // A same-watermark publication can replace the path after our
               // async read. Reclaim only the exact metadata generation read.
@@ -292,19 +313,52 @@ export class QoderTranscriptCollector {
 
   async legacyWorkerAlive(transcriptPath) {
     const lock = path.join(this.dataDir, 'hooks/.retry-locks', crypto.createHash('sha1').update(transcriptPath).digest('hex') + '.lock');
-    let value;
-    try { value = await smallJson(lock); } catch (error) { return error.code !== 'ENOENT'; }
-    if (!Number.isInteger(value?.pid) || value.pid <= 0) return true;
-    try { process.kill(value.pid, 0); return true; }
+    let value, stat;
+    try { ({ value, stat } = await jsonSnapshot(lock)); }
+    catch (error) {
+      if (error.code === 'ENOENT') return false;
+      try { stat = await fs.stat(lock); } catch { return false; }
+      // The old writer creates an empty file before writing its JSON. Give
+      // that publication a bounded grace, without deleting another writer's
+      // lock or treating a crash/corrupt file as a permanently live worker.
+      return this.now() - stat.mtimeMs < LEGACY_LOCK_GRACE_MS;
+    }
+    if (!Number.isInteger(value?.pid) || value.pid <= 0 || !Number.isFinite(value.startedAt)) {
+      return this.now() - stat.mtimeMs < LEGACY_LOCK_GRACE_MS;
+    }
+    try { process.kill(value.pid, 0); }
     catch (error) { return error.code === 'EPERM'; }
+    if (this.now() - value.startedAt <= LEGACY_LOCK_AGE_MS) return true;
+    const version = fileVersion(stat);
+    const known = this.legacyOwners.get(lock);
+    if (known?.version === version && (!known.alive || this.now() - known.checkedAt < 5000)) return known.alive;
+    if (this.ownerInspectionBudget === 0) return true;
+    this.ownerInspectionBudget = 0;
+    // PID existence alone is not ownership: a recycled PID starts after this
+    // lock's acquisition. Read only the process birth time, never argv/auth.
+    const command = process.platform === 'win32' ? 'powershell.exe' : 'ps';
+    const args = process.platform === 'win32'
+      ? ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${value.pid}).StartTime.ToUniversalTime().ToString('o')`]
+      : ['-p', String(value.pid), '-o', 'lstart='];
+    const born = await new Promise(resolve => execFile(command, args, {
+      encoding: 'utf8', timeout: 1500, maxBuffer: 1024, windowsHide: true,
+      env: { ...process.env, LC_ALL: 'C' },
+    }, (error, stdout) => resolve(error ? NaN : Date.parse(stdout.trim()))));
+    const alive = !Number.isFinite(born) || born <= value.startedAt + 1000;
+    if (this.legacyOwners.size >= MAX_TAIL_SCANS) this.legacyOwners.delete(this.legacyOwners.keys().next().value);
+    this.legacyOwners.set(lock, { version, alive, checkedAt: this.now() });
+    this.report(crypto.createHash('sha1').update(transcriptPath).digest('hex'), !alive ? 'legacy-lock-pid-reused'
+      : Number.isFinite(born) ? 'legacy-worker-still-active' : 'legacy-owner-unverified');
+    return alive;
   }
 
   async contexts(directory, source) {
     const result = [source];
     for (const entry of await names(path.join(directory, 'events'), MAX_CONTEXT_FILES)) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const context = await smallJson(path.join(directory, 'events', entry.name));
+      const { value: context, stat } = await jsonSnapshot(path.join(directory, 'events', entry.name));
       if (!validSource(context, this.agentId, source.key)) throw new Error('invalid-context');
+      context.receipt = { name: entry.name, version: noticeVersion(context, stat) };
       result.push(context);
     }
     return result.sort((a, b) => a.observedSize - b.observedSize || a.observedAt - b.observedAt);

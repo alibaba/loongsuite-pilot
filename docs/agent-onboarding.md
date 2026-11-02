@@ -320,7 +320,9 @@ Hook evidence as an ephemeral per-session spool:
 5. Scope matching by canonical transcript path and session ID. Treat Hook data
    as a supplement to the transcript, and consume only uniquely matched
    structural evidence.
-6. Delete published events after their transcript range has been checkpointed.
+6. Delete only the exact observed event versions associated with a checkpointed
+   source generation. A byte watermark alone does not acknowledge a newly
+   published prompt at that same offset or a rewritten file's smaller offset.
    Remove the session spool when deletion of the corresponding transcript is
    confirmed by a complete scan. Clean abandoned temporary files only after a
    grace period so a live writer is not raced.
@@ -346,9 +348,13 @@ Synchronous Interceptor policy evaluation remains a separate path.
 `state/qoder-transcripts/<qoder|qoder-cn>/sources/<hash>/source.json` preserves the
 first observation. `events/` coalesces identical watermark/event/context notices.
 Each notice is at most 16 KiB, with up to 128 distinct notices per source. A
-short per-source metadata gate reserves capacity before publication, including
-competing Hook processes. Reclamation uses the same gate and checks the file
-generation so an old ACK cannot delete a newly published notice. Hook contention
+short per-source SQLite transaction gate reserves capacity before publication,
+including competing Hook processes. It writes no business/schema data and uses
+the required Node SQLite runtime. The OS releases a crashed process's gate;
+mtime does not authorize stealing a live holder. Keep the gate file in place
+while sources are active. Reclamation uses the same gate and checks the exact
+notice version recorded in the saved checkpoint, so an old byte cursor cannot
+delete a future prompt or rewritten-file Stop. Hook contention
 has a 25 ms wait budget; native parsing and CLI commands never run inside this
 gate. This does not impose a hard timeout on synchronous OS I/O. A
 capacity condition produces a rate-limited diagnostic; existing sources continue
@@ -357,6 +363,22 @@ existing Input StateStore; covered notices are reclaimed on the following cycle
 after its save. Source descriptors and scalar cursors grow with known sessions;
 there is no lifetime session admission cap or age-based deletion of unread data.
 
+Canonicalize the nearest existing ancestor before publishing a missing path,
+including symlink parents and dangling file links. File creation must not change
+its source key. Legacy retry locks get a short incomplete-write grace; expired
+live PIDs are checked against process birth time before being treated as owners.
+An actually active old worker remains protected from concurrent takeover, with a
+diagnostic for prolonged/unverified ownership. Inspection is bounded and cached.
+
+Upgrade-only Hook history uses a separate 4 MiB/cycle chunked reader with a
+32 MiB complete-record limit. A legal record can span cycles; complete-line
+offsets and partial UTF-8 survive restart without replay. Unchanged tails read
+zero body bytes. Beyond the record limit, discard only the in-memory body,
+retain the source file, record a bounded quarantine byte range/diagnostic, and
+scan through its newline before consuming following records. Such over-limit
+records are not reported as successfully collected; arbitrary-size lossless
+collection is not claimed.
+
 Each Input serializes collection. A normal cycle scans up to 4 MiB, visits 64
 sources and completes 32 Turns. Completing a line or restoring an evicted active
 Turn can exceed this soft scan budget. One Turn is limited to 16 MiB / 8,192
@@ -364,6 +386,13 @@ records, the body cache to 32 MiB of source bytes, and the metadata cache to 4 M
 These are read/cache budgets, not process RSS limits. Oversized records/Turns,
 corrupt metadata and I/O failures defer that source with its cursor intact and a
 rate-limited diagnostic; other sources continue.
+
+Test state transitions in the actual Input order: saved checkpoint → next prompt
+before its user row → ACK → collect, and in-place truncation → new Stop → ACK.
+Also cover missing/symlink paths becoming real files, stale/corrupt upgrade
+locks, live-owner expiry, crash release, and a large old line followed by a
+normal line. Independent happy-path tests of each component do not establish
+these combined behaviors; check source identities/payloads and read work too.
 
 Native and metadata opens verify the opened handle is a regular file. On Unix,
 nonblocking open also prevents a path replaced with a FIFO between `stat` and

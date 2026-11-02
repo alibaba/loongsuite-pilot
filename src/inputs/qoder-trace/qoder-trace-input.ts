@@ -27,6 +27,7 @@ import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { QoderTranscriptSource } from './transcript-source.js';
+import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -117,6 +118,7 @@ export class QoderTraceInput extends BaseInput {
   private readonly allowedRootPaths: string[];
   private multimodalStopped = false;
   private readonly transcriptSource: QoderTranscriptSource;
+  private readonly legacyHookReader = new QoderLegacyHookReader();
 
   constructor(opts: QoderTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
@@ -134,6 +136,7 @@ export class QoderTraceInput extends BaseInput {
   override async stop(): Promise<void> {
     this.multimodalStopped = true;
     this.transcriptSource.stop();
+    this.legacyHookReader.reset();
     await super.stop();
   }
 
@@ -365,31 +368,33 @@ export class QoderTraceInput extends BaseInput {
     if (stat.size <= offset) return [];
     runtime?.observeBacklog(stat.size - offset);
 
-    const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
-    try {
-      // Drain the upgrade-only Hook backlog in bounded complete-line batches.
-      const buf = Buffer.alloc(Math.min(16 * 1024 * 1024, stat.size - offset));
-      const readStartedAt = runtime?.now();
-      const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
-      if (runtime && readStartedAt !== undefined) {
-        runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
+    {
+      const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      const completeBytes = batch.buffer;
+      const completeLength = batch.nextOffset - offset;
+      const skipped = batch.quarantine.filter(record => record.to !== null);
+      const skippedMax = Math.max(0, ...skipped.map(record => record.bytes));
+      if (batch.quarantine.length) {
+        const previous = Array.isArray(state.extra?.qoderLegacyQuarantine) ? state.extra.qoderLegacyQuarantine : [];
+        this.setState({ extra: { ...this.getState().extra,
+          qoderLegacyQuarantine: [...previous, ...batch.quarantine.map(record => ({ file: logFileName, ...record }))].slice(-32) } });
+        for (const record of batch.quarantine) this.logger.warn('oversized legacy Hook record quarantined; source retained', { file: logFile, ...record });
       }
-      const snapshot = buf.subarray(0, bytesRead);
-      const lastNewline = snapshot.lastIndexOf(0x0a);
-      if (lastNewline < 0) return [];
-
-      const completeLength = lastNewline + 1;
-      const completeBytes = snapshot.subarray(0, completeLength);
-      this.setState({ lastFile: logFileName, lastOffset: offset + completeLength });
+      if (completeLength) this.setState({ lastFile: logFileName, lastOffset: batch.nextOffset });
+      if (!completeBytes.length) {
+        if (completeLength) runtime?.observeCommittedBatch({ records: skipped.length,
+          bytes: completeLength, parseSuccessRecords: 0, parseFailedRecords: skipped.length, maxRecordBytes: skippedMax });
+        return [];
+      }
 
       const completeText = completeBytes.toString('utf-8');
       const asciiBatch = completeText.length === completeBytes.length;
       const lines = completeText.split('\n');
-      let records = 0;
+      let records = skipped.length;
       let parseSuccessRecords = 0;
-      let parseFailedRecords = 0;
-      let maxRecordBytes = 0;
+      let parseFailedRecords = skipped.length;
+      let maxRecordBytes = skippedMax;
       let recordStartOffset = 0;
 
       for (const line of lines) {
@@ -432,8 +437,6 @@ export class QoderTraceInput extends BaseInput {
         parseFailedRecords,
         maxRecordBytes,
       });
-    } finally {
-      await handle.close();
     }
 
     entries = filterBootstrapHistoryTurns(entries);

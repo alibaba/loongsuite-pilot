@@ -4,14 +4,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { decodePayload } from '../shared/decode-payload.mjs';
 import { collectResourceAttributesFromEnv, parseSpanAttributesFromEnv } from '../shared/resource-context.mjs';
 import { recordUpstreamContextOnce } from '../shared/upstream-context.mjs';
-import { withSyncFileLock } from '../shared/sync-file-lock.mjs';
 
 export const MAX_WAKEUP_BYTES = 16 * 1024;
 export const MAX_WAKEUPS_PER_SOURCE = 128;
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd']);
+const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const require = createRequire(import.meta.url);
+let GateDatabase;
+
+function gateDatabase() {
+  if (GateDatabase) return GateDatabase;
+  // Node 22 advertises the required builtin as experimental at require time.
+  // Hook stderr is a protocol surface. Suppress only that exact advertisement
+  // during synchronous loading; preserve every other warning and restore the
+  // process handler before running any caller action.
+  const original = process.emitWarning;
+  process.emitWarning = function emitGateWarning(...args) {
+    if (args[0] === 'SQLite is an experimental feature and might change at any time'
+      && args[1] === 'ExperimentalWarning') return;
+    return original.apply(this, args);
+  };
+  try { GateDatabase = require('node:sqlite').DatabaseSync; }
+  finally { process.emitWarning = original; }
+  return GateDatabase;
+}
 
 function field(value, limit = 4096) {
   return typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= limit ? value : undefined;
@@ -24,6 +44,31 @@ export function qoderWakeupRoot(dataDir, agentId) {
 
 export function qoderSourceKey(sessionId, transcriptPath) {
   return crypto.createHash('sha256').update(JSON.stringify([sessionId, transcriptPath])).digest('hex');
+}
+
+function canonicalSourcePath(file) {
+  let candidate = path.resolve(file);
+  const suffix = [];
+  // realpath of the nearest existing ancestor also works before the native
+  // writer creates a file or several trailing directories. Resolve dangling
+  // symlinks explicitly so their eventual target keeps the same source key.
+  for (let count = 0; count < 64; count++) {
+    try { return path.join(fs.realpathSync(candidate), ...suffix); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      try {
+        if (fs.lstatSync(candidate).isSymbolicLink()) {
+          candidate = path.resolve(path.dirname(candidate), fs.readlinkSync(candidate));
+          continue;
+        }
+      } catch (statError) { if (statError.code !== 'ENOENT') throw statError; }
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw error;
+      suffix.unshift(path.basename(candidate));
+      candidate = parent;
+    }
+  }
+  throw new Error('Qoder source path exceeds normalization budget');
 }
 
 function atCapacity(directory, limit) {
@@ -64,7 +109,37 @@ function warnCapacity(root, reason) {
 // Coordinate only tiny metadata publication/reclamation, never native parsing.
 // Capacity must be reserved before publishing, including competing Hook PIDs.
 export function withQoderWakeupLock(directory, action, waitMs = 25) {
-  return withSyncFileLock(path.join(directory, '.wakeup.lock'), waitMs, 60_000, action);
+  // Node's required SQLite runtime provides a process-owned OS transaction
+  // lock: no age-based stealing, PID reuse, or path-unlink ownership race.
+  // No schema or business data is written. Keep this file in place: unlinking
+  // a database while another process has it open would split the lock domain.
+  const file = path.join(directory, '.wakeup-gate.sqlite');
+  const deadline = performance.now() + Math.max(0, Math.min(25, Number(waitMs) || 0));
+  let database;
+  let acquired = false;
+  try {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try { fs.closeSync(fs.openSync(file, 'wx', 0o600)); }
+    catch (error) { if (error.code !== 'EEXIST') return { acquired: false }; }
+    if (!fs.lstatSync(file).isFile()) return { acquired: false };
+    const Database = gateDatabase();
+    database = new Database(file);
+    database.exec('PRAGMA busy_timeout=0');
+    while (!acquired) {
+      try { database.exec('BEGIN IMMEDIATE'); acquired = true; }
+      catch (error) {
+        if ((error.errcode !== 5 && error.errcode !== 6) || performance.now() >= deadline) return { acquired: false };
+        Atomics.wait(LOCK_WAIT, 0, 0, Math.min(5, Math.max(0, deadline - performance.now())));
+      }
+    }
+    return { acquired: true, value: action() };
+  } catch (error) {
+    if (acquired) throw error;
+    return { acquired: false };
+  } finally {
+    if (acquired) { try { database.exec('ROLLBACK'); } catch {} }
+    try { database?.close(); } catch {}
+  }
 }
 
 /** No transcript body, tool input/result or prompt is read or copied here. */
@@ -75,13 +150,12 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   let transcriptPath;
   let stat;
   try {
-    transcriptPath = fs.realpathSync(suppliedPath);
-    stat = fs.statSync(transcriptPath);
-    if (!stat.isFile()) return false;
+    transcriptPath = canonicalSourcePath(suppliedPath);
+    try { stat = fs.statSync(transcriptPath); }
+    catch (error) { if (error.code !== 'ENOENT') return false; }
+    if (stat && !stat.isFile()) return false;
   } catch (error) {
-    if (error.code !== 'ENOENT') return false;
-    // A Hook can precede the native writer. Keep the observation for polling.
-    transcriptPath = path.resolve(suppliedPath);
+    return false;
   }
   const root = qoderWakeupRoot(dataDir, agentId);
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -91,6 +165,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   const event = EVENTS.has(payload.hook_event_name) ? payload.hook_event_name : 'Stop';
   const record = {
     schema: 1, key, agentId, sessionId, transcriptPath, event,
+    observationId: crypto.randomUUID(),
     ...(transcriptPath !== suppliedPath ? { suppliedPath } : {}),
     observedSize: stat?.size ?? 0, observedAt: Date.now(),
     ...(stat ? { inode: stat.ino } : {}),
