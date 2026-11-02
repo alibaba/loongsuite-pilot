@@ -77,9 +77,10 @@ impl FilePipeline {
             .join(format!("{}.json", opts.config.config_name))
             .to_string_lossy()
             .to_string();
-        let tailer = FileTailer::new(
+        let tailer = FileTailer::new_with_encoding(
             input.file_paths.clone(),
             input.max_dir_search_depth.unwrap_or(0),
+            input.file_encoding.as_deref(),
         );
         Ok(Self {
             opts,
@@ -391,14 +392,7 @@ impl FilePipelineHandle {
 }
 
 pub fn parse_checkpoint_key(key: &str) -> Option<String> {
-    let last = key.rfind('*')?;
-    if last == 0 {
-        return None;
-    }
-    // No star at all: the `?` above returns None. Legacy keys have no star and
-    // the TypeScript function returns the key itself.
-    let _ = last;
-    None
+    parse_checkpoint_key_or_legacy(key)
 }
 
 pub fn parse_checkpoint_key_or_legacy(key: &str) -> Option<String> {
@@ -558,3 +552,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+#[path = "file_pipeline_history_tests.rs"]
+mod history_tests;

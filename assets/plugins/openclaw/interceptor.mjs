@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const AGENT = "openclaw";
 const INTERCEPTOR_SERVICE = "loongsuite-pilot-interceptor";
@@ -175,19 +176,79 @@ function interceptorAccessLogPath(dataDir) {
   return path.join(dataDir, "interceptor", "logs", "access.log");
 }
 
-function resolveCli(dataDir) {
-  const explicit = process.env.INTERCEPTOR_CLI;
-  if (typeof explicit === "string" && explicit.length > 0 && fs.existsSync(explicit)) {
-    return explicit;
-  }
+// Match native hook/runtime boundaries: an installed current pointer is a
+// bounded single safe component, and default candidates never cross links or
+// search PATH/cwd. Explicit legacy INTERCEPTOR_CLI scripts remain opt-in.
+function nativeImage(file) {
+  let fd;
   try {
-    const version = fs.readFileSync(path.join(dataDir, "current"), "utf8").replace(/^\uFEFF/, "").trim();
-    if (!version) return undefined;
-    const cli = path.join(dataDir, "versions", version, "dist", "interceptor", "cli.cjs");
-    return fs.existsSync(cli) ? cli : undefined;
-  } catch {
-    return undefined;
+    fd = fs.openSync(file, "r");
+    const header = Buffer.alloc(4);
+    if (fs.readSync(fd, header, 0, 4, 0) < 2) return false;
+    return header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+      || header.subarray(0, 2).equals(Buffer.from([0x4d, 0x5a]))
+      || header.readUInt32BE(0) === 0xfeedfacf || header.readUInt32BE(0) === 0xcffaedfe;
+  } catch { return false; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+}
+function pathEntryExists(file) {
+  try { fs.lstatSync(file); return true; }
+  catch (error) { return error?.code !== "ENOENT"; }
+}
+function ordinaryPath(file, directory = false) {
+  try {
+    const stat = fs.lstatSync(file);
+    return !stat.isSymbolicLink() && (directory ? stat.isDirectory() : stat.isFile());
+  } catch { return false; }
+}
+function nativeCommand(binary) {
+  if (!path.isAbsolute(binary) || !ordinaryPath(binary) || !nativeImage(binary)) return undefined;
+  try { fs.accessSync(binary, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK); }
+  catch { return undefined; }
+  return { binary, args: ["interceptor", "hook", "--agent", "openclaw"] };
+}
+function nativeAt(root) {
+  if (!ordinaryPath(root, true) || !ordinaryPath(path.join(root, "bin"), true)) return undefined;
+  return nativeCommand(path.join(root, "bin", process.platform === "win32" ? "loongsuite-pilot.exe" : "loongsuite-pilot"));
+}
+function currentVersion(cache) {
+  const pointer = path.join(cache, "current");
+  if (!ordinaryPath(pointer)) return undefined;
+  let fd;
+  try {
+    fd = fs.openSync(pointer, "r");
+    const buffer = Buffer.alloc(1025);
+    const count = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (count > 1024) return undefined;
+    const version = buffer.subarray(0, count).toString("utf8").replace(/^\uFEFF/, "").trim();
+    return version.length > 0 && version.length <= 240 && version !== "." && version !== ".."
+      && !version.endsWith(".") && /^[A-Za-z0-9._+-]+$/.test(version) ? version : undefined;
+  } catch { return undefined; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+}
+function resolveCli(dataDir, deps) {
+  const env = deps.env;
+  const explicit = env.INTERCEPTOR_CLI;
+  if (typeof explicit === "string" && explicit.length > 0 && fs.existsSync(expandHome(explicit))) {
+    const file = path.resolve(expandHome(explicit));
+    return nativeImage(file) ? nativeCommand(file)
+      : { binary: deps.execPath, args: [file, "hook", "--agent", "openclaw"], legacyScript: true };
   }
+  if (typeof env.LOONGSUITE_PILOT_BIN === "string" && env.LOONGSUITE_PILOT_BIN.length > 0) {
+    return nativeCommand(env.LOONGSUITE_PILOT_BIN);
+  }
+  const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
+  const manifest = path.join(packageRoot, "runtime-manifest.json");
+  if (pathEntryExists(manifest)) return ordinaryPath(manifest) ? nativeAt(packageRoot) : undefined;
+  const data = path.resolve(expandHome(dataDir));
+  const cache = path.resolve(expandHome(env.LOONGSUITE_PILOT_CACHE_DIR || data));
+  if (!ordinaryPath(cache, true)) return undefined;
+  if (pathEntryExists(path.join(cache, "current"))) {
+    const version = currentVersion(cache);
+    if (!version || !ordinaryPath(path.join(cache, "versions"), true)) return undefined;
+    return nativeAt(path.join(cache, "versions", version));
+  }
+  return nativeAt(data);
 }
 
 function rotateAccessLog(filePath) {
@@ -393,6 +454,7 @@ export function createOpenClawInterceptor(overrides = {}) {
   function toCliPayload(request) {
     return {
       hook_event_name: request.event,
+      openclaw_hook: request.raw?.openclaw_hook,
       session_id: request.sessionId,
       cwd: request.cwd,
       prompt: request.prompt,
@@ -407,21 +469,21 @@ export function createOpenClawInterceptor(overrides = {}) {
     const dataDir = deps.resolveDataDir();
     const runtime = currentRuntime();
     if (!runtime) return undefined;
-    const cli = resolveCli(dataDir);
+    const cli = resolveCli(dataDir, deps);
     if (!cli) {
       writeFailOpen(dataDir, request, "interceptor cli missing");
       return undefined;
     }
-    const result = deps.spawnSyncImpl(deps.execPath, [cli, "hook", "--agent", "openclaw"], {
+    const result = deps.spawnSyncImpl(cli.binary, cli.args, {
       input: JSON.stringify(toCliPayload(request)),
       encoding: "utf8",
       timeout: INTERCEPTOR_HOOK_TIMEOUT_MS,
       windowsHide: true,
       maxBuffer: 1024 * 1024,
-      env: deps.env,
+      env: { ...deps.env, LOONGSUITE_PILOT_DATA_DIR: path.resolve(expandHome(dataDir)) },
     });
-    if (result.error) {
-      writeFailOpen(dataDir, request, result.error.message);
+    if (result.error || (!cli.legacyScript && result.status !== 0)) {
+      writeFailOpen(dataDir, request, result.error?.message || `interceptor cli exited ${result.status}`);
       return undefined;
     }
     const text = typeof result.stdout === "string" ? result.stdout.trim() : "";

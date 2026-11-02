@@ -2,7 +2,6 @@
 
 use crate::interceptor::types::HookRequest;
 use serde_json::Value;
-use std::collections::HashSet;
 
 const MAX_LEAF_DEPTH: usize = 32;
 
@@ -19,15 +18,18 @@ pub fn collect_hook_text(request: &HookRequest) -> String {
         }
     }
     if let Some(input) = &request.tool_input {
-        parts.extend(collect_text_leaves(input, &mut HashSet::new(), 0));
+        parts.extend(collect_text_leaves(input, 0));
     }
     if let Some(response) = &request.tool_response {
-        parts.extend(collect_text_leaves(response, &mut HashSet::new(), 0));
+        parts.extend(collect_text_leaves(response, 0));
     }
     parts.join("\n")
 }
 
-fn collect_text_leaves(value: &Value, seen: &mut HashSet<usize>, depth: usize) -> Vec<String> {
+// Value owns its children and cannot form reference cycles. Container addresses
+// are not object identities: a Vec's first element can share its address with
+// an Object payload, causing an address set to silently omit sensitive text.
+fn collect_text_leaves(value: &Value, depth: usize) -> Vec<String> {
     if value.is_null() || depth > MAX_LEAF_DEPTH {
         return Vec::new();
     }
@@ -41,25 +43,14 @@ fn collect_text_leaves(value: &Value, seen: &mut HashSet<usize>, depth: usize) -
         }
         Value::Number(number) => vec![number.to_string()],
         Value::Bool(flag) => vec![flag.to_string()],
-        Value::Array(items) => {
-            let id = items.as_ptr() as usize;
-            if !seen.insert(id) {
-                return Vec::new();
-            }
-            items
-                .iter()
-                .flat_map(|item| collect_text_leaves(item, seen, depth + 1))
-                .collect()
-        }
-        Value::Object(map) => {
-            let id = map as *const _ as usize;
-            if !seen.insert(id) {
-                return Vec::new();
-            }
-            map.values()
-                .flat_map(|item| collect_text_leaves(item, seen, depth + 1))
-                .collect()
-        }
+        Value::Array(items) => items
+            .iter()
+            .flat_map(|item| collect_text_leaves(item, depth + 1))
+            .collect(),
+        Value::Object(map) => map
+            .values()
+            .flat_map(|item| collect_text_leaves(item, depth + 1))
+            .collect(),
         Value::Null => Vec::new(),
     }
 }
@@ -117,5 +108,61 @@ mod tests {
             )),
             "Read\ntext\nintro\nmysql://agent:eMCyjl4XWcVzpXFb@127.0.0.1:3306/pilot"
         );
+    }
+    #[test]
+    fn reads_every_nested_content_object_including_first_array_element() {
+        let text = collect_hook_text(&request(
+            None,
+            Some("Read"),
+            None,
+            Some(json!({
+                "toolCallId":"nested-array","content":[
+                    {"type":"text","text":"LTAI1234567890ABCD"},
+                    {"type":"text","text":"second leaf"}
+                ]
+            })),
+        ));
+        assert!(text.contains("LTAI1234567890ABCD"), "{text:?}");
+        assert!(text.contains("second leaf"), "{text:?}");
+    }
+    #[test]
+    fn owned_arrays_keep_equal_but_independent_objects_and_nested_primitives() {
+        assert_eq!(
+            collect_text_leaves(
+                &json!([
+                    {"text":"same"},{"text":"same"},[[{"text":"nested"}]],null,true,17
+                ]),
+                0
+            ),
+            vec!["same", "same", "nested", "true", "17"]
+        );
+    }
+    #[test]
+    fn owned_tree_traversal_keeps_the_existing_depth_limit() {
+        fn nested(depth: usize) -> Value {
+            (0..depth).fold(json!("leaf"), |v, _| json!([v]))
+        }
+        assert_eq!(
+            collect_text_leaves(&nested(MAX_LEAF_DEPTH), 0),
+            vec!["leaf"]
+        );
+        assert!(collect_text_leaves(&nested(MAX_LEAF_DEPTH + 1), 0).is_empty());
+    }
+    #[test]
+    fn native_openclaw_post_tool_content_reaches_the_builtin_block_rule() {
+        use crate::interceptor::adapters::parse_openclaw_hook_request;
+        use crate::interceptor::rules::{builtin_rules, RuleEngine};
+        use crate::interceptor::VerdictAction;
+        let body = json!({"hook_event_name":"PostToolUse","openclaw_hook":"tool_result_persist","tool_name":"read",
+            "tool_response":{"toolCallId":"nested-array","content":[{"type":"text","text":"LTAI1234567890ABCD"}]}});
+        let request = parse_openclaw_hook_request(body.as_object().unwrap(), None).unwrap();
+        let result = RuleEngine::new(
+            builtin_rules(),
+            std::collections::HashSet::from(["cloudAccessKey".into()]),
+        )
+        .evaluate(&request);
+        assert_eq!(result.action, VerdictAction::Block);
+        assert_eq!(result.reason.as_deref(), Some("[ACCESSKEY_BLOCKED]"));
+        assert_eq!(result.rule_id.as_deref(), Some("cloudAccessKey"));
     }
 }

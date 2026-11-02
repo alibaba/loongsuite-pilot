@@ -18172,7 +18172,7 @@
           ],
           "target": {
             "kind": "retired",
-            "reason": "旧env合并错误仍success已在主迁移映射明确批准改为失败/回滚；真实非法env形状返回failure、原hooks/user/theme字节全部保留。不恢复吞disk-full，也不声称旧best-effort断言继续成立。",
+            "reason": "本分支将旧env合并失败仍success收紧为失败/回滚。这是v2有意的事务行为变化，不能用映射中的“批准”措辞冒充直接的人类授权，也不能声称旧best-effort断言仍成立。真实非法env及IO失败均返回failure并保留原hooks/user/theme字节；该差异单列验收。",
             "replacement": [
               {
                 "file": "src/deployment/hook_strategy_contract_tests.rs",
@@ -85121,9 +85121,26 @@
     {
       "legacy": "tests/unit/hooks/openclaw/interceptor.test.mjs",
       "source_hash": "99fd5ea1d234bafa31fabe800adf7bbf194a623de4ba43dd3197f32f5583879d",
-      "coverage": "partial",
-      "rust": [],
-      "note": "ef/f84同源。仍部署到OpenClaw宿主的JS资源保留，真实离线stream/diagnostics_channel、temp版本树、accessor负控及受控loopback/注入同步client执行原断言。原39声明→64展开Linux全PASS；默认Native同步CLI能力缺口单列L139partial，不用host mock自证完整运行。Windows/macOS及真实OpenClaw宿主待另外验收；默认Cargo不新增Node依赖。",
+      "coverage": "complete",
+      "rust": [
+        {
+          "file": "src/interceptor/rules/hook_text.rs",
+          "test": "tests::reads_every_nested_content_object_including_first_array_element"
+        },
+        {
+          "file": "src/interceptor/rules/hook_text.rs",
+          "test": "tests::owned_arrays_keep_equal_but_independent_objects_and_nested_primitives"
+        },
+        {
+          "file": "src/interceptor/rules/hook_text.rs",
+          "test": "tests::owned_tree_traversal_keeps_the_existing_depth_limit"
+        },
+        {
+          "file": "src/interceptor/rules/hook_text.rs",
+          "test": "tests::native_openclaw_post_tool_content_reaches_the_builtin_block_rule"
+        }
+      ],
+      "note": "固定ef/f84同源13声明；原host13全部保持且实跑，新24真实Native进程/生产规则验收闭合L139。默认失效dist/interceptor/cli.cjs私有Node机制替换为原生安装/资源二进制，显式用户JS override协议保留；默认Cargo无需Node。还修复owned Value容器地址误去重导致content[0]敏感数据漏判，正式lib4回归保留depth32和既有传输/长度预算。Linux实际验证，Windows/macOS实际仍待，不将路径分支或模拟视为平台已通过。",
       "cases": [
         {
           "source": {
@@ -85208,8 +85225,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "原Agent宿主资产、夹具与断言未改，实际可选host运行所有展开场景：uses spawnSync for tool_result_persist so the handler stays synchronous；原case以临时INTERCEPTOR_CLI和spawnSyncImpl注入验证同步返回，已通过；默认resolveCli仍指向已退役dist/interceptor/cli.cjs，尚缺真实Native最终安装路由，因此先partial，下一小批真实Native进程验收闭合。",
+          "coverage": "complete",
+          "behavior": "真实plugin.register modern hook→同步tool_result_persist→temp版本/资源根实际Native CLI→生产Rust loopback Server/RuleEngine/builtin cloudAccessKey，block与clean allow、原message身份/原因协议准确，无Promise。24实跑场景覆盖cache/data分离、BOM/CRLF current、packaged自身binary优先、Native override、旧Node默认不复活、恶意/悬空pointer、linked bin、实际daemon identity、4s hung Native child。Native与f84官方CLI合法block均return0；原显式JS override历史上忽略非零status但接收有效JSON，此分支保留并真实7+JSON正控，Native7+JSON负控fail-open。原JS显式适配器精确旧DATABASEURL_MASKED/同步message结构也实跑。继承f84 legacy3.8仅采集不拦截边界实测保持，不宣称现代拦截覆盖旧宿主。",
           "platforms": [
             "linux",
             "macos",
@@ -85217,23 +85234,44 @@
           ],
           "target": {
             "kind": "retained",
-            "file": "tests/unit/hooks/openclaw/interceptor.test.mjs",
+            "file": "tests/host/openclaw-native-interceptor.test.mjs",
             "names": [
-              "OpenClaw interceptor client > uses spawnSync for tool_result_persist so the handler stays synchronous"
+              "OpenClaw installed native synchronous interception > uses the versioned native binary for a real synchronous block and clean allow",
+              "OpenClaw installed native synchronous interception > supports a separate native binary override without using the host Node executable",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 0",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 1",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 2",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 3",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 4",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 5",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 6",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 7",
+              "OpenClaw installed native synchronous interception > fails open for unsafe current pointer 8",
+              "OpenClaw installed native synchronous interception > uses the explicit native hook binary and preserves a real allow decision",
+              "OpenClaw installed native synchronous interception > uses the data/bin layout when no current pointer exists",
+              "OpenClaw installed native synchronous interception > refuses an invalid explicit native binary rather than falling back to current",
+              "OpenClaw installed native synchronous interception > does not revive the retired default Node collector path",
+              "OpenClaw installed native synchronous interception > rejects a linked installed bin directory while the real native service remains healthy",
+              "OpenClaw installed native synchronous interception > checks real native daemon identity before accepting a rule verdict",
+              "OpenClaw installed native synchronous interception > preserves an explicitly configured legacy JS adapter and its exact synchronous response",
+              "OpenClaw installed native synchronous interception > preserves the legacy explicit JS adapter nonzero-plus-valid-JSON behavior",
+              "OpenClaw installed native synchronous interception > bounds an actually hung native child at the existing four-second timeout and fails open",
+              "OpenClaw installed native synchronous interception > uses the native executable beside packaged plugin resources rather than an unrelated current version",
+              "OpenClaw installed native synchronous interception > does not treat a dangling current pointer as permission to run a fallback binary",
+              "OpenClaw installed native synchronous interception > fails open on a genuinely native nonzero exit even if it prints a block JSON object",
+              "OpenClaw installed native synchronous interception > retains the inherited legacy-host collection-only boundary without claiming modern interception"
             ],
             "resources": [
               "assets/plugins/openclaw/interceptor.mjs",
               "assets/plugins/openclaw/plugin.mjs",
-              "assets/plugins/openclaw/subagent-context.mjs",
-              "assets/plugins/openclaw/compatibility.mjs",
-              "assets/plugins/openclaw/runtime-version.mjs",
-              "assets/plugins/openclaw/legacy-adapter.mjs",
-              "assets/plugins/openclaw/legacy-utils.mjs",
-              "assets/plugins/openclaw/first-token.mjs",
-              "assets/plugins/openclaw/openclaw.plugin.json",
-              "assets/plugins/shared/resource-context.mjs"
+              "tests/host/openclaw-native-interceptor.test.mjs",
+              "examples/host_openclaw_interceptor_server.rs",
+              "src/interceptor/cli/hook.rs",
+              "src/interceptor/cli/daemon_client.rs",
+              "src/interceptor/daemon/server.rs",
+              "src/interceptor/rules/hook_text.rs"
             ],
-            "npm_script": "test:host:openclaw"
+            "npm_script": "test:host:openclaw-native"
           }
         },
         {
@@ -85604,6 +85642,908 @@
               "assets/plugins/shared/resource-context.mjs"
             ],
             "npm_script": "test:host:openclaw"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pipeline/file-tailer.test.ts",
+      "source_hash": "37d9197efa430009c26edc2121f6aae0fe43875e729cf513bf40fbfc7b19aca1",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84测试逐字相同，23声明无退役。Windows旧(0,1) stub替换为同handle属性ID；实际read/signature各自校验FD身份防换代误写CP，错误保留队列稍后重试。真实Linux执行与平台适用性分列，Windows/Mac默认分支仍需Native CI。原4MiB/20queue/1h/1MiB缓存预算保持。额外3真实竞态/生命周期回归不冒充新增历史声明。",
+      "cases": [
+        {
+          "source": {
+            "id": "L18:C3",
+            "title": "discovers files matching glob pattern",
+            "suites": [
+              "FileTailer.discoverFiles"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两个.log/一个.txt真实glob返回2且全部.log。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer.rs",
+                "test": "discovers_matching_files_and_respects_depth"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "returns empty array for non-existent directory",
+            "suites": [
+              "FileTailer.discoverFiles"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原不存在目录返回空；实际磁盘不创建该路径。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer.rs",
+                "test": "discovers_matching_files_and_respects_depth"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L38:C3",
+            "title": "respects maxDirSearchDepth=0 (no subdirectory scanning)",
+            "suites": [
+              "FileTailer.discoverFiles"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原根a.log/子b.log且maxDepth0，返回唯一根文件，深度断言精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l38_zero_depth_ignores_the_only_nested_matching_file"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "reads all lines from a new file (no checkpoint)",
+            "suites": [
+              "FileTailer.readNewLines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原3条完整行完整相等，offset>0/inode>0/hasMore=false；身份来自真实FD。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l55_new_file_reads_all_complete_lines_with_nonzero_actual_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "reads only new lines from an existing checkpoint",
+            "suites": [
+              "FileTailer.readNewLines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原先读两行、append另两行，仅输出新增两行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l68_append_only_emits_later_lines"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L81:C3",
+            "title": "does not emit incomplete lines (no trailing newline)",
+            "suites": [
+              "FileTailer.readNewLines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原writeFile重写不完整行的完全相同字节序列，先line1，后incomplete_now_done及line3。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l81_incomplete_cache_survives_original_rewrite_sequence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "returns empty for non-existent file",
+            "suites": [
+              "FileTailer.readNewLines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实临时目录内缺失文件返回空/hasMore=false，跨平台避免不存在POSIX路径偶然指向真实Windows文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l94_nonexistent_file_returns_empty_without_more"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C3",
+            "title": "returns hasMore=true when file has more data than MAX_READ_BYTES",
+            "suites": [
+              "FileTailer.readNewLines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原1000x+换行重复5000，首批非空且<5000/hasMore=true，额外断言准确4MiB/两批总5000/全行内容。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l101_original_five_thousand_lines_exceed_the_four_mib_budget"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C3",
+            "title": "handles copytruncate rotation (same inode, smaller size)",
+            "suites": [
+              "FileTailer rotation detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原copytruncate真实同inode缩短，读new_line1且offset下降。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l116_copytruncate_resets_offset_and_reads_the_new_generation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L130:C3",
+            "title": "handles rename rotation (different inode)",
+            "suites": [
+              "FileTailer rotation detection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实rename+重建读取新两行且inode变化，额外CP tuple等于实际打开句柄u64 IDs。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l130_rename_reads_new_file_and_changes_its_actual_inode"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L148:C3",
+            "title": "rename rotation: reads old file remnants via reader queue",
+            "suites": [
+              "FileTailer reader queue"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原旧文件append未读残留、rename+新文件，先旧line2_added且hasMore，再new_file_line1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l148_reader_queue_drains_old_remnants_before_new_file_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L168:C3",
+            "title": "reader queue max length is 20",
+            "suites": [
+              "FileTailer reader queue"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原四次rotate workload仍active；额外25次checkRotation真正触达生产20 cap，各次<=20最终20。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l168_original_queue_workload_keeps_the_file_active_and_cap_is_twenty"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L185:C3",
+            "title": "checkRotation detects rotation without reading data",
+            "suites": [
+              "FileTailer reader queue"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原checkRotation不读bytes，随后读取新行；额外队列2及新reader offset0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l185_check_rotation_updates_identity_without_consuming_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L201:C3",
+            "title": "cleanupStaleReaders removes old inactive readers",
+            "suites": [
+              "FileTailer reader queue"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原actualID checkpoint age4e6ms，清理前active、后消失；不缩小时级生产预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l201_real_old_checkpoint_reader_is_evicted_by_stale_cleanup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C3",
+            "title": "caches incomplete lines across reads",
+            "suites": [
+              "FileTailer incomplete line cache"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原complete_line/incomplete后append _rest_of_line和next，两个read的完整数组精确相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l221_no_newline_is_cached_until_the_original_append_completes_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L236:C3",
+            "title": "initReaderFromCheckpoint restores state",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原首读3行、另实例真实checkpoint恢复成功、append line4只输出line4。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l236_checkpoint_restoration_reads_only_the_later_append"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L253:C3",
+            "title": "initReaderFromCheckpoint returns false for non-existent file",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原missing file+offset100/inode999/dev1/signatureabc恢复false。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l253_nonexistent_checkpoint_file_is_rejected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L262:C3",
+            "title": "initReaderFromCheckpoint returns false on inode mismatch",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实文件身份+999错误inode恢复false，保持原类型规则。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l262_real_identity_mismatch_rejects_the_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L275:C3",
+            "title": "initReaderFromCheckpoint detects inode reuse via signature mismatch",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原unlink/recreate不同内容，用新实际dev/inode携带旧签名恢复false，覆盖重用或不同inode两个源分支。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l275_signature_mismatch_rejects_same_or_reused_inode_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L301:C3",
+            "title": "getCheckpoints returns current state",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原getCheckpoints实际路径CP offset/inode>0/signature非空/cache空，额外身份tuple一致。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l301_checkpoints_expose_actual_integer_file_identity_and_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L318:C3",
+            "title": "getAllReaderCheckpoints returns all readers with dev*inode keys",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原旧reader append/rename+new、checkRotation，两个dev*inode key都精确存在且count2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l318_all_reader_keys_use_distinct_actual_dev_inode_pairs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "refreshReaderTimestamps prevents stale cleanup after sleep",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实50ms sleep后refresh，时间增加且offset保持，不伪造默认预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l344_refresh_after_real_fifty_ms_sleep_preserves_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C3",
+            "title": "refreshReaderTimestamps also refreshes deleted readers",
+            "suites": [
+              "FileTailer checkpoint management"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原含deleted/active两个reader refresh后，所有lastUpdate均新鲜<1000ms；额外确认真有deleted及两条。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_tailer_history_tests.rs",
+                "test": "source_l363_refresh_updates_deleted_and_active_readers"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pipeline/file-pipeline.test.ts",
+      "source_hash": "6ef6891406b2b63d18604a5ccc787c5f49017bfdb8daf47738763b0574a1fda2",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef/f84声明逐字相同，11声明无退役；保留原真实3s/2s/2s+2s默认预算与真实FS/CP及同mock边界sink。新增的FileEncoding配置到最终rows/CP验证是f84生产BufferEncoding原能力补缺，不算历史新增声明。manager真实入口为FilePipelineHandle，未把FilePipeline本体dead trait noop映射为生命周期完成。",
+      "cases": [
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "parses path*dev*inode format",
+            "suites": [
+              "parseCheckpointKey"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原公开parseCheckpointKey(path*dev*inode)精确path；直接跑Rust同名公共入口，旧恒None红灯，最小复用已有正确实现。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l66_l70_l74_l78_actual_exported_checkpoint_parser"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C3",
+            "title": "handles paths with special characters",
+            "suites": [
+              "parseCheckpointKey"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原含空格path*dev*inode公共parser精确path。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l66_l70_l74_l78_actual_exported_checkpoint_parser"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "returns the key itself for legacy plain path keys",
+            "suites": [
+              "parseCheckpointKey"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原legacy plain path公共parser精确返回该key。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l66_l70_l74_l78_actual_exported_checkpoint_parser"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L78:C3",
+            "title": "returns null for malformed key with single star",
+            "suites": [
+              "parseCheckpointKey"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原仅一个星号畸形key公共parser返回None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l66_l70_l74_l78_actual_exported_checkpoint_parser"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "still delivers public rows when the exclusion marker directory cannot be written",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实marker目录位置写成普通文件导致marker持久化失败，最终独立sender仍含public、不含secret，文件未被覆盖；保持原mock transport边界。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l84_marker_write_failure_keeps_public_rows_deliverable"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "filters workspace JSON records before independent SLS delivery and advances their offsets",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原同批先unknown blocked session、后明确private cwd，全部secret过滤，unknown/plain保留；实际state.lastOffset等于完整文件size。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l99_filters_before_independent_delivery_and_advances_full_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "starts and stops without error",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实manager-facing Handle启动/停止，不是无动作FilePipeline trait；额外检查running/task实际创建与清理。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l121_starts_and_stops_the_actual_handle"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "collects lines from log files on poll cycle",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实3秒等待不缩短，实际poll/sender第一post包含恰好{content:hello}/{content:world}。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l132_actual_poll_and_sender_keep_original_three_second_wait"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C3",
+            "title": "persists checkpoints with path*dev*inode key format",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原真实2秒后实际state文件，非空key逐个3段、path精确、dev为非负整数/inode>0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l155_persisted_keys_are_actual_path_dev_inode_after_two_seconds"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "handleWake preserves checkpoint and picks up new data",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2秒+真实append+handleWake+2秒等待；磁盘CP offset增加，实际独立sender有after-wake行。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l183_wake_preserves_checkpoint_and_delivers_new_data_after_original_waits"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L220:C3",
+            "title": "handleWake is safe when pipeline is stopped",
+            "suites": [
+              "FilePipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start/stop后wake成功且未再启动runtime/task。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pipeline/input/file/file_pipeline_history_tests.rs",
+                "test": "source_l220_wake_after_stop_is_safe_and_does_not_restart_the_task"
+              }
+            ]
           }
         }
       ]

@@ -140,7 +140,7 @@ jobs:
             status_bar::jsonl_tail_reader:: \
             pi_sdk:: \
             utils::process_discovery::tests \
-            interceptor::cli::qoder_surface::tests \
+            interceptor:: \
             hook_process::qoder:: \
             utils::single_instance_lock::tests \
             deployment::hook_strategy:: \

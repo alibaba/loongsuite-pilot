@@ -1,14 +1,19 @@
 //! Tail local files, including rename and copytruncate rotation.
 //!
 //! Port of `src/pipeline/input/file/file-tailer.ts`. Signatures are MD5 of the
-//! first 1024 bytes. Offsets are byte offsets. Only UTF-8 decoding is implemented.
+//! first 1024 bytes. Offsets are byte offsets. Decoding follows FileEncoding.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::utils::create_logger;
+use crate::utils::file_identity::identity_from_open;
 use serde_json::{json, Map, Value};
+
+#[path = "file_encoding.rs"]
+mod encoding;
+use encoding::FileEncoding;
 
 use super::super::super::digest::md5_hex;
 use super::super::super::types::{DevInode, FileCheckpoint, FileReaderState};
@@ -34,14 +39,24 @@ pub struct ReadResult {
 pub struct FileTailer {
     file_paths: Vec<String>,
     max_dir_search_depth: u32,
+    encoding: FileEncoding,
     reader_queues: HashMap<String, Vec<FileReaderState>>,
 }
 
 impl FileTailer {
     pub fn new(file_paths: Vec<String>, max_dir_search_depth: u32) -> Self {
+        Self::new_with_encoding(file_paths, max_dir_search_depth, None)
+    }
+
+    pub fn new_with_encoding(
+        file_paths: Vec<String>,
+        max_dir_search_depth: u32,
+        encoding: Option<&str>,
+    ) -> Self {
         Self {
             file_paths,
             max_dir_search_depth,
+            encoding: FileEncoding::parse(encoding),
             reader_queues: HashMap::new(),
         }
     }
@@ -63,8 +78,8 @@ impl FileTailer {
         file_path: &str,
         checkpoint: &FileCheckpoint,
     ) -> bool {
-        let meta = match tokio::fs::metadata(file_path).await {
-            Ok(meta) => meta,
+        let observed = match observe_file(Path::new(file_path)).await {
+            Ok(observed) => observed,
             Err(_) => {
                 logger().info(
                     "checkpoint file no longer exists, skipping",
@@ -73,7 +88,7 @@ impl FileTailer {
                 return false;
             }
         };
-        let (dev, ino) = dev_ino(&meta);
+        let (dev, ino) = (observed.dev, observed.ino);
         if dev != checkpoint.dev || ino != checkpoint.inode {
             logger().info(
                 "checkpoint dev/inode mismatch, skipping",
@@ -82,7 +97,9 @@ impl FileTailer {
             return false;
         }
         if !checkpoint.signature_hash.is_empty() {
-            let current = compute_file_signature(file_path).await;
+            let Ok(current) = compute_file_signature(file_path, dev, ino) else {
+                return false;
+            };
             if !current.is_empty() && current != checkpoint.signature_hash {
                 logger().info(
                     "inode reused (signature mismatch), discarding checkpoint",
@@ -160,16 +177,19 @@ impl FileTailer {
             .map(|queue| queue.is_empty())
             .unwrap_or(true)
         {
-            let meta = match tokio::fs::metadata(file_path).await {
-                Ok(meta) => meta,
+            let observed = match observe_file(Path::new(file_path)).await {
+                Ok(observed) => observed,
                 Err(_) => return empty_result(),
             };
-            let (dev, ino) = dev_ino(&meta);
+            let (dev, ino) = (observed.dev, observed.ino);
             let reader = FileReaderState {
                 file_path: file_path.to_string(),
                 dev_inode: DevInode { dev, ino },
                 offset: 0,
-                signature_hash: compute_file_signature(file_path).await,
+                signature_hash: match compute_file_signature(file_path, dev, ino) {
+                    Ok(sig) => sig,
+                    Err(_) => return empty_result(),
+                },
                 last_update_time: now_ms(),
                 cache: String::new(),
                 deleted: false,
@@ -232,8 +252,8 @@ impl FileTailer {
     }
 
     async fn detect_rotation(&mut self, file_path: &str) {
-        let meta = match tokio::fs::metadata(file_path).await {
-            Ok(meta) => meta,
+        let observed = match observe_file(Path::new(file_path)).await {
+            Ok(observed) => observed,
             Err(_) => {
                 if let Some(latest) = self
                     .reader_queues
@@ -248,8 +268,8 @@ impl FileTailer {
                 return;
             }
         };
-        let (dev, ino) = dev_ino(&meta);
-        let size = meta.len();
+        let (dev, ino) = (observed.dev, observed.ino);
+        let size = observed.size;
         let latest = match self
             .reader_queues
             .get(file_path)
@@ -263,6 +283,9 @@ impl FileTailer {
                 "inode changed (rename rotation detected)",
                 Some(&meta_file(file_path)),
             );
+            let Ok(sig) = compute_file_signature(file_path, dev, ino) else {
+                return;
+            };
             if let Some(latest) = self
                 .reader_queues
                 .get_mut(file_path)
@@ -271,7 +294,6 @@ impl FileTailer {
                 latest.deleted = true;
                 latest.deleted_time = now_ms();
             }
-            let sig = compute_file_signature(file_path).await;
             let new_reader = FileReaderState {
                 file_path: file_path.to_string(),
                 dev_inode: DevInode { dev, ino },
@@ -301,7 +323,9 @@ impl FileTailer {
                 "file truncated (copytruncate rotation)",
                 Some(&meta_file(file_path)),
             );
-            let sig = compute_file_signature(file_path).await;
+            let Ok(sig) = compute_file_signature(file_path, dev, ino) else {
+                return;
+            };
             if let Some(latest) = self
                 .reader_queues
                 .get_mut(file_path)
@@ -344,8 +368,41 @@ impl FileTailer {
                 }
                 break;
             };
-            let (lines, has_more) =
-                read_from_reader(&read_path, file_path, &mut self.reader_queues).await;
+            let (lines, has_more) = match read_from_reader(
+                &read_path,
+                file_path,
+                &mut self.reader_queues,
+                &self.encoding,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    logger().warn(
+                        "file read deferred",
+                        Some(&map_pairs(&[
+                            ("file", json!(read_path)),
+                            ("error", json!(error.to_string())),
+                        ])),
+                    );
+                    return ReadResult {
+                        lines: Vec::new(),
+                        checkpoint: self
+                            .reader_queues
+                            .get(file_path)
+                            .and_then(|queue| queue.last())
+                            .map(reader_to_checkpoint)
+                            .unwrap_or_else(|| reader_to_checkpoint(&reader)),
+                        has_more: false,
+                    };
+                }
+            };
+            let updated_reader = self
+                .reader_queues
+                .get(file_path)
+                .and_then(|queue| queue.first())
+                .cloned()
+                .unwrap_or(reader);
             let deleted = self
                 .reader_queues
                 .get(file_path)
@@ -374,7 +431,7 @@ impl FileTailer {
                 .get(file_path)
                 .and_then(|queue| queue.last())
                 .cloned()
-                .unwrap_or(reader);
+                .unwrap_or(updated_reader);
             let has_unprocessed = if removed_front {
                 queue_len > 0
             } else {
@@ -386,6 +443,9 @@ impl FileTailer {
                 has_more: has_more || has_unprocessed,
             };
         }
+        // The unavailable generation cannot be drained. Match the frozen
+        // processQueue contract: clear it so the next poll can start the live file.
+        self.reader_queues.remove(file_path);
         empty_result()
     }
 }
@@ -394,40 +454,54 @@ async fn read_from_reader(
     read_path: &str,
     queue_key: &str,
     queues: &mut HashMap<String, Vec<FileReaderState>>,
-) -> (Vec<String>, bool) {
-    let meta = match tokio::fs::metadata(read_path).await {
-        Ok(meta) => meta,
-        Err(_) => return (Vec::new(), false),
+    encoding: &FileEncoding,
+) -> std::io::Result<(Vec<String>, bool)> {
+    read_from_reader_with_open(read_path, queue_key, queues, encoding, |path| {
+        std::fs::File::open(path)
+    })
+    .await
+}
+
+async fn read_from_reader_with_open(
+    read_path: &str,
+    queue_key: &str,
+    queues: &mut HashMap<String, Vec<FileReaderState>>,
+    encoding: &FileEncoding,
+    open: impl FnOnce(&str) -> std::io::Result<std::fs::File>,
+) -> std::io::Result<(Vec<String>, bool)> {
+    // Identity, size and bytes all belong to this same open handle. A path
+    // replacement after rotation detection must not advance the prior reader.
+    let mut file = open(read_path)?;
+    let identity = identity_from_open(&file)?;
+    let Some(reader) = queues.get(queue_key).and_then(|queue| queue.first()) else {
+        return Ok((Vec::new(), false));
     };
-    let reader_offset = queues
-        .get(queue_key)
-        .and_then(|queue| queue.first())
-        .map(|reader| reader.offset)
-        .unwrap_or(0);
-    if meta.len() <= reader_offset {
-        return (Vec::new(), false);
+    if identity.dev != reader.dev_inode.dev || identity.ino != reader.dev_inode.ino {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file identity changed before read",
+        ));
     }
-    let read_size = (meta.len() - reader_offset).min(MAX_READ_BYTES) as usize;
-    let mut file = match std::fs::File::open(read_path) {
-        Ok(file) => file,
-        Err(_) => return (Vec::new(), false),
-    };
-    if file.seek(SeekFrom::Start(reader_offset)).is_err() {
-        return (Vec::new(), false);
+    let reader_offset = reader.offset;
+    let size = identity.size;
+    if size <= reader_offset {
+        return Ok((Vec::new(), false));
     }
+    let read_size = (size - reader_offset).min(MAX_READ_BYTES) as usize;
+    file.seek(SeekFrom::Start(reader_offset))?;
     let mut buf = vec![0u8; read_size];
-    let read = file.read(&mut buf).unwrap_or(0);
+    let read = file.read(&mut buf)?;
     buf.truncate(read);
-    let text = String::from_utf8_lossy(&buf).to_string();
+    let text = encoding.decode(&buf)?;
     let Some(reader) = queues
         .get_mut(queue_key)
         .and_then(|queue| queue.first_mut())
     else {
-        return (Vec::new(), false);
+        return Ok((Vec::new(), false));
     };
     let Some(last_newline) = text.rfind('\n') else {
         let new_cache = format!("{}{text}", reader.cache);
-        if new_cache.len() > MAX_CACHE_BYTES {
+        if encoding.byte_length(&new_cache) > MAX_CACHE_BYTES {
             logger().warn("cache overflow, discarding", Some(&meta_file(read_path)));
             reader.cache.clear();
         } else {
@@ -435,8 +509,7 @@ async fn read_from_reader(
         }
         reader.offset += read as u64;
         reader.last_update_time = now_ms();
-        let has_more = meta.len() > reader.offset;
-        return (Vec::new(), has_more);
+        return Ok((Vec::new(), size > reader.offset));
     };
     let complete = format!("{}{}", reader.cache, &text[..last_newline]);
     reader.cache = text[last_newline + 1..].to_string();
@@ -447,8 +520,7 @@ async fn read_from_reader(
         .collect();
     reader.offset += read as u64;
     reader.last_update_time = now_ms();
-    let has_more = meta.len() > reader.offset;
-    (lines, has_more)
+    Ok((lines, size > reader.offset))
 }
 
 async fn find_file_by_dev_inode(dir: &Path, dev_inode: &DevInode) -> Option<String> {
@@ -463,8 +535,8 @@ async fn find_file_by_dev_inode(dir: &Path, dev_inode: &DevInode) -> Option<Stri
         {
             continue;
         }
-        if let Ok(meta) = tokio::fs::metadata(&path).await {
-            let (dev, ino) = dev_ino(&meta);
+        if let Ok(observed) = observe_file(&path).await {
+            let (dev, ino) = (observed.dev, observed.ino);
             if dev == dev_inode.dev && ino == dev_inode.ino {
                 return Some(path.to_string_lossy().to_string());
             }
@@ -501,18 +573,26 @@ fn empty_result() -> ReadResult {
     }
 }
 
-async fn compute_file_signature(file_path: &str) -> String {
-    let mut file = match tokio::fs::File::open(file_path).await {
+fn compute_file_signature(file_path: &str, dev: u64, ino: u64) -> std::io::Result<String> {
+    let mut file = match std::fs::File::open(file_path) {
         Ok(file) => file,
-        Err(_) => return String::new(),
+        // Frozen source treats unavailable signatures as unknown, not a mismatch.
+        Err(_) => return Ok(String::new()),
     };
-    use tokio::io::AsyncReadExt;
-    let mut buf = vec![0u8; SIGNATURE_BYTES];
-    let read = file.read(&mut buf).await.unwrap_or(0);
-    if read == 0 {
-        return String::new();
+    let identity = identity_from_open(&file)?;
+    if identity.dev != dev || identity.ino != ino {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file identity changed before signature",
+        ));
     }
-    md5_hex(&buf[..read])
+    let mut buf = [0u8; SIGNATURE_BYTES];
+    let read = file.read(&mut buf).unwrap_or(0);
+    Ok(if read == 0 {
+        String::new()
+    } else {
+        md5_hex(&buf[..read])
+    })
 }
 
 fn match_glob(pattern: &str, max_depth: u32) -> Vec<String> {
@@ -573,16 +653,45 @@ pub fn glob_to_regex(pattern: &str) -> regex::Regex {
         .unwrap_or_else(|_| regex::Regex::new("^$").unwrap())
 }
 
-fn dev_ino(meta: &std::fs::Metadata) -> (u64, u64) {
+struct FileObservation {
+    dev: u64,
+    ino: u64,
+    size: u64,
+}
+
+async fn observe_file(path: &Path) -> std::io::Result<FileObservation> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        (meta.dev(), meta.ino())
+        let meta = tokio::fs::metadata(path).await?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a file",
+            ));
+        }
+        Ok(FileObservation {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.len(),
+        })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = meta;
-        (0, 1)
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)?;
+        let identity = identity_from_open(&file)?;
+        Ok(FileObservation {
+            dev: identity.dev,
+            ino: identity.ino,
+            size: identity.size,
+        })
     }
 }
 
@@ -731,3 +840,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "file_tailer_history_tests.rs"]
+mod history_tests;

@@ -39,6 +39,7 @@
     "test": "vitest run",
     "test:host:shortcut": "vitest run tests/unit/scripts/dashboard-shortcut.test.mjs",
     "test:host:openclaw": "vitest run tests/unit/hooks/openclaw/first-token.test.mjs tests/unit/hooks/openclaw/runtime-version.test.mjs tests/unit/hooks/openclaw/legacy-utils.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
+    "test:host:openclaw-native": "vitest run tests/host/openclaw-native-interceptor.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
     "test:host:claude-fetch": "vitest run tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
     "test:host:mimo": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/mimo-code/plugin-replay.test.mjs tests/unit/hooks/mimo-code/resource-context.test.mjs",
     "test:host:pi": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/pi-coding-agent-extension.test.mjs",

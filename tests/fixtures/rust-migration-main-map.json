@@ -17511,6 +17511,579 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "9446ba14aa84114a86ab1b8ee0c3caceddfa846e30f9082ebbf19f2a410c94ea",
+      "note": "This file was added after fixed ef baseline. Its19 source declarations produce37 actual passing host cases in the existing OpenCode suite. This record does not recount the baseline13 declarations in3 other files. Source and current deployed V2 module are unchanged; actual Linux Node22/glibc2.34 execution already recorded with the standard reporter, platform execution remains separate. No old JS Collector projection is substituted for native output.",
+      "cases": [
+        {
+          "source": {
+            "id": "L39:C3",
+            "title": "captures model input/output, native times, model identity and non-duplicated token usage",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "captures model input/output, native times, model identity and non-duplicated token usage; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > captures model input/output, native times, model identity and non-duplicated token usage"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "pairs parallel tools by native ID and records failures without inventing successful results",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "pairs parallel tools by native ID and records failures without inventing successful results; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > pairs parallel tools by native ID and records failures without inventing successful results"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L77:C3",
+            "title": "gives each pending step/tool a distinct replay-stable ID on %s",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": [
+              "it.each(['session.execution.interrupted', 'session.execution.failed', 'session.deleted'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "gives each pending step/tool a distinct replay-stable ID on %s; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > gives each pending step/tool a distinct replay-stable ID on session.execution.interrupted",
+              "OpenCode V2 adapter > gives each pending step/tool a distinct replay-stable ID on session.execution.failed",
+              "OpenCode V2 adapter > gives each pending step/tool a distinct replay-stable ID on session.deleted"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "keeps the start and input records distinct when inbox delivery begins a turn",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "keeps the start and input records distinct when inbox delivery begins a turn; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > keeps the start and input records distinct when inbox delivery begins a turn"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "bounds a %s-character tool argument consistently without changing small JSON types",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": [
+              "it.each([20, 200000])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "bounds a %s-character tool argument consistently without changing small JSON types; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > bounds a 20-character tool argument consistently without changing small JSON types",
+              "OpenCode V2 adapter > bounds a 200000-character tool argument consistently without changing small JSON types"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C3",
+            "title": "carries native tool result parts into the next request without stringifying the parts array",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "carries native tool result parts into the next request without stringifying the parts array; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > carries native tool result parts into the next request without stringifying the parts array"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L148:C3",
+            "title": "does not evict an active session while more than 100 other turns complete",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not evict an active session while more than 100 other turns complete; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > does not evict an active session while more than 100 other turns complete"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C3",
+            "title": "preserves admitted active sessions at capacity and diagnoses overflow without fabricating completion",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "preserves admitted active sessions at capacity and diagnoses overflow without fabricating completion; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > preserves admitted active sessions at capacity and diagnoses overflow without fabricating completion"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L180:C5",
+            "title": "preserves output and finite usage with %s",
+            "suites": [
+              "OpenCode V2 adapter",
+              "%s token tolerance"
+            ],
+            "parameters": [
+              "describe.each(['session.step.ended', 'session.step.failed'])",
+              "it.each([\n      ['missing cache', { input: 10, output: 5 }, 10, 0, 0],\n      ['null cache', { input: 10, output: 5, cache: null }, 10, 0, 0],\n      ['empty cache', { input: 10, output: 5, cache: {} }, 10, 0, 0],\n      ['read-only cache', { input: 10, output: 5, cache: { read: 20 } }, 30, 20, 0],\n      ['write-only cache', { input: 10, output: 5, cache: { write: 3 } }, 13, 0, 3],\n    ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "preserves output and finite usage with %s; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > session.step.ended token tolerance > preserves output and finite usage with missing cache",
+              "OpenCode V2 adapter > session.step.ended token tolerance > preserves output and finite usage with null cache",
+              "OpenCode V2 adapter > session.step.ended token tolerance > preserves output and finite usage with empty cache",
+              "OpenCode V2 adapter > session.step.ended token tolerance > preserves output and finite usage with read-only cache",
+              "OpenCode V2 adapter > session.step.ended token tolerance > preserves output and finite usage with write-only cache",
+              "OpenCode V2 adapter > session.step.failed token tolerance > preserves output and finite usage with missing cache",
+              "OpenCode V2 adapter > session.step.failed token tolerance > preserves output and finite usage with null cache",
+              "OpenCode V2 adapter > session.step.failed token tolerance > preserves output and finite usage with empty cache",
+              "OpenCode V2 adapter > session.step.failed token tolerance > preserves output and finite usage with read-only cache",
+              "OpenCode V2 adapter > session.step.failed token tolerance > preserves output and finite usage with write-only cache"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C5",
+            "title": "does not fabricate usage when tokens is %s",
+            "suites": [
+              "OpenCode V2 adapter",
+              "%s token tolerance"
+            ],
+            "parameters": [
+              "describe.each(['session.step.ended', 'session.step.failed'])",
+              "it.each([undefined, null])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "does not fabricate usage when tokens is %s; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > session.step.ended token tolerance > does not fabricate usage when tokens is undefined",
+              "OpenCode V2 adapter > session.step.ended token tolerance > does not fabricate usage when tokens is null",
+              "OpenCode V2 adapter > session.step.failed token tolerance > does not fabricate usage when tokens is undefined",
+              "OpenCode V2 adapter > session.step.failed token tolerance > does not fabricate usage when tokens is null"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L224:C3",
+            "title": "omits invalid token counts (%s) and dependent totals",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": [
+              "it.each([NaN, Infinity, -1, '10'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "omits invalid token counts (%s) and dependent totals; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > omits invalid token counts (NaN) and dependent totals",
+              "OpenCode V2 adapter > omits invalid token counts (Infinity) and dependent totals",
+              "OpenCode V2 adapter > omits invalid token counts (-1) and dependent totals",
+              "OpenCode V2 adapter > omits invalid token counts (10) and dependent totals"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "keeps a step open for execution termination if response emission throws",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "keeps a step open for execution termination if response emission throws; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > keeps a step open for execution termination if response emission throws"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L258:C3",
+            "title": "keeps retries inside one turn and seals observed requests on interruption",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "keeps retries inside one turn and seals observed requests on interruption; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > keeps retries inside one turn and seals observed requests on interruption"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L271:C3",
+            "title": "does not start a queued prompt as a turn before delivery and removes cancelled prompts",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not start a queued prompt as a turn before delivery and removes cancelled prompts; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > does not start a queued prompt as a turn before delivery and removes cancelled prompts"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L280:C3",
+            "title": "isolates sessions and locations, and stops processing after disposal",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "isolates sessions and locations, and stops processing after disposal; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > isolates sessions and locations, and stops processing after disposal"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L294:C3",
+            "title": "keeps source Agent usable if telemetry writes fail",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "keeps source Agent usable if telemetry writes fail; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > keeps source Agent usable if telemetry writes fail"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L301:C3",
+            "title": "fails open if an unexpected context value cannot be serialized",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "fails open if an unexpected context value cannot be serialized; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > fails open if an unexpected context value cannot be serialized"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L310:C3",
+            "title": "reports content and error text despite the obsolete capture flag",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "reports content and error text despite the obsolete capture flag; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > reports content and error text despite the obsolete capture flag"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        },
+        {
+          "source": {
+            "id": "L326:C3",
+            "title": "seals outstanding tools on interruption and uses the provider stream boundary for LLM time",
+            "suites": [
+              "OpenCode V2 adapter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "seals outstanding tools on interruption and uses the provider stream boundary for LLM time; exact original Agent-hosted V2 callbacks, timing, identities, usage, error and lifecycle assertions execute against the deployed module. This source contains no Collector converter projection.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/opencode-plugin-v2.test.mjs",
+            "names": [
+              "OpenCode V2 adapter > seals outstanding tools on interruption and uses the provider stream boundary for LLM time"
+            ],
+            "resources": [
+              "assets/plugins/opencode/v2.mjs"
+            ],
+            "npm_script": "test:host:opencode"
+          }
+        }
+      ]
     }
   ]
 }
