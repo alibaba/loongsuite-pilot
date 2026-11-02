@@ -800,7 +800,7 @@ async fn find_last_result_boundary(file: &mut tokio::fs::File, size: u64) -> f64
     boundary as f64
 }
 
-async fn open_log_file(
+pub(super) async fn open_log_file(
     path: &str,
 ) -> std::io::Result<(
     tokio::fs::File,
@@ -834,7 +834,16 @@ fn model_for_tier(policy: &ModelPolicy, tier: &str) -> String {
 fn parse_ts(text: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(text)
         .map(|time| time.timestamp_millis())
-        .unwrap_or_else(|_| now_ms())
+        .ok()
+        .or_else(|| {
+            use chrono::TimeZone;
+            let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f").ok()?;
+            chrono::Local
+                .from_local_datetime(&naive)
+                .earliest()
+                .map(|time| time.timestamp_millis())
+        })
+        .unwrap_or_else(now_ms)
 }
 
 fn string_or(value: Option<&Value>) -> String {

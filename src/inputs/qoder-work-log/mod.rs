@@ -10,3 +10,6 @@ pub use qoder_work_log_input::{
     parse_sdk_log_line, resolve_qoder_work_root, QoderWorkLogInput, QoderWorkLogOptions, SdkEvent,
 };
 pub use qoder_work_trace_input::{QoderWorkLogTraceInput, QoderWorkLogTraceOptions};
+
+mod sdk_trace_model;
+mod sdk_trace_output;

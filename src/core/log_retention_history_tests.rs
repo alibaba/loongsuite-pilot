@@ -461,18 +461,25 @@ async fn history_l401_continues_after_two_real_unlink_errors() {
     }
     #[cfg(windows)]
     {
-        for path in &paths {
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_readonly(true);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        // Readonly attributes do not reliably prevent std::fs::remove_file.
+        // These live handles allow metadata IO but deliberately deny delete
+        // sharing, making both real unlink attempts fail with a sharing violation.
+        let held = paths
+            .iter()
+            .map(|path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                    .open(path)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         let outcome = f.service(config()).run_cleanup().await;
-        for path in &paths {
-            let mut permissions = std::fs::metadata(path).unwrap().permissions();
-            permissions.set_readonly(false);
-            std::fs::set_permissions(path, permissions).unwrap();
-        }
         assert_eq!(outcome, (0, 2));
+        assert!(paths.iter().all(|path| path.exists()));
+        drop(held);
     }
     assert!(paths.iter().all(|p| p.exists()));
 }

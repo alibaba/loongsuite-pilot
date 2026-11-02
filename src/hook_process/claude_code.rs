@@ -3515,3 +3515,7 @@ mod partial_transcript_recovery_contracts {
 #[cfg(test)]
 #[path = "claude_tool_context_history.rs"]
 mod tool_context_history;
+
+#[cfg(test)]
+#[path = "claude_skill_history.rs"]
+mod skill_history;

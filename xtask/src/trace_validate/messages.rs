@@ -45,7 +45,10 @@ pub(super) fn validate(span: &Span, key: &str, id: &str) -> Vec<Check> {
             continue;
         }
         if !message["role"].is_string() {
-            issue("error", format!("{location} 缺少 string role"));
+            issue(
+                "error",
+                format!("{location} missing required string \"role\""),
+            );
         }
         if input
             && message
@@ -65,7 +68,10 @@ pub(super) fn validate(span: &Span, key: &str, id: &str) -> Vec<Check> {
         }
         let Some(parts) = message["parts"].as_array() else {
             if input {
-                issue("error", format!("{location} 缺少 array parts"));
+                issue(
+                    "error",
+                    format!("{location} missing required array \"parts\""),
+                );
             }
             continue;
         };
@@ -76,7 +82,10 @@ pub(super) fn validate(span: &Span, key: &str, id: &str) -> Vec<Check> {
                 continue;
             }
             let Some(kind) = part["type"].as_str() else {
-                issue("error", format!("{location} 缺少 string type"));
+                issue(
+                    "error",
+                    format!("{location} missing required string \"type\""),
+                );
                 continue;
             };
             if input {
@@ -121,12 +130,18 @@ fn input_part(part: &Value, kind: &str) -> Vec<(&'static str, String)> {
         "file" => ("FilePart", &["modality", "file_id"], &["mime_type"], None),
         "uri" => ("UriPart", &["modality", "uri"], &["mime_type"], None),
         "reasoning" => ("ReasoningPart", &["content"], &[], None),
-        _ => return vec![("warn", "GenericPart 扩展类型".into())],
+        "image" | "compaction" => {
+            return vec![("warn", format!("GenericPart extension type=\"{kind}\""))]
+        }
+        _ => return vec![("warn", "GenericPart extension type (unrecognized)".into())],
     };
     let mut errors = Vec::new();
     for field in required {
         if !part[*field].is_string() {
-            errors.push(("error", format!("{title} 缺少或无效 string {field}")));
+            errors.push((
+                "error",
+                format!("{title} missing required \"{field}\" (string)"),
+            ));
         }
     }
     for field in optional {
@@ -138,11 +153,17 @@ fn input_part(part: &Value, kind: &str) -> Vec<(&'static str, String)> {
         }
     }
     if kind == "tool_call_response" && part.get("response").is_none() {
-        errors.push(("error", "ToolCallResponsePart 缺少 response".into()));
+        errors.push((
+            "error",
+            "ToolCallResponsePart missing required \"response\"".into(),
+        ));
     }
     if let Some(field) = nested {
         if !part[field].is_object() || !part[field]["type"].is_string() {
-            errors.push(("error", format!("{title} 缺少或无效 {field}.type")));
+            errors.push((
+                "error",
+                format!("{title} missing required \"{field}\" with string \"type\""),
+            ));
         }
     }
     errors
@@ -254,5 +275,98 @@ mod tests {
             assert_eq!(checks.len(), 1);
             assert_eq!(checks[0].status, "warn");
         }
+    }
+
+    #[test]
+    fn history_input_schema_preserves_each_required_field_and_known_extension_diagnostic() {
+        let cases = [
+            (
+                json!([{"role":123,"parts":[]}]),
+                r#"missing required string "role""#,
+            ),
+            (
+                json!([{"role":"user"}]),
+                r#"missing required array "parts""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{}]}]),
+                r#"missing required string "type""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{"type":"text"}]}]),
+                r#"TextPart missing required "content""#,
+            ),
+            (
+                json!([{"role":"assistant","parts":[{"type":"tool_call"}]}]),
+                r#"ToolCallRequestPart missing required "name""#,
+            ),
+            (
+                json!([{"role":"assistant","parts":[{"type":"server_tool_call","name":"web_search"}]}]),
+                r#"ServerToolCallPart missing required "server_tool_call""#,
+            ),
+            (
+                json!([{"role":"assistant","parts":[{"type":"server_tool_call_response"}]}]),
+                r#"ServerToolCallResponsePart missing required "server_tool_call_response""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{"type":"blob","content":""}]}]),
+                r#"BlobPart missing required "modality""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{"type":"blob","modality":"image"}]}]),
+                r#"BlobPart missing required "content""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{"type":"file","modality":"document"}]}]),
+                r#"FilePart missing required "file_id""#,
+            ),
+            (
+                json!([{"role":"user","parts":[{"type":"uri","modality":"image"}]}]),
+                r#"UriPart missing required "uri""#,
+            ),
+            (
+                json!([{"role":"assistant","parts":[{"type":"reasoning"}]}]),
+                r#"ReasoningPart missing required "content""#,
+            ),
+            (
+                json!([{"role":"tool","parts":[{"type":"tool_call_response","id":"call-1","result":{"ok":true}}]}]),
+                r#"ToolCallResponsePart missing required "response""#,
+            ),
+        ];
+        for (input, expected) in cases {
+            let checks = validate(
+                &span(input),
+                "gen_ai.input.messages",
+                "schema.input_messages",
+            );
+            assert!(
+                checks
+                    .iter()
+                    .any(|c| c.status == "error" && c.detail.contains(expected)),
+                "missing {expected}: {}",
+                serde_json::to_string(&checks).unwrap()
+            );
+        }
+        for kind in ["image", "compaction"] {
+            let checks = validate(
+                &span(json!([{"role":"user","parts":[{"type":kind}]}])),
+                "gen_ai.input.messages",
+                "schema.input_messages",
+            );
+            assert_eq!(checks.len(), 1);
+            assert_eq!(checks[0].status, "warn");
+            assert!(checks[0]
+                .detail
+                .contains(&format!("GenericPart extension type=\"{kind}\"")));
+        }
+        let sensitive = "synthetic-secret-as-untrusted-part-type";
+        let checks = validate(
+            &span(json!([{"role":"user","parts":[{"type":sensitive}]}])),
+            "gen_ai.input.messages",
+            "schema.input_messages",
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, "warn");
+        assert!(!checks[0].detail.contains(sensitive));
     }
 }

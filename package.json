@@ -38,6 +38,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:host:shortcut": "vitest run tests/unit/scripts/dashboard-shortcut.test.mjs",
+    "test:host:claude-fetch": "vitest run tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "bash scripts/e2e/run-e2e.sh",

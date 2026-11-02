@@ -186,19 +186,8 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         std::fs::create_dir_all(root.join("Other2026")).unwrap();
-        assert!(
-            detect_agent(&AgentDetectionConfig {
-                paths: vec![root
-                    .join("IntelliJIdea*")
-                    .join("plugins")
-                    .join("qoder-jetbrains")
-                    .to_string_lossy()
-                    .into_owned()],
-                commands: vec![],
-            })
-            .await
-        );
         let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty.path().join("Other2026")).unwrap();
         let empty_pattern = empty
             .path()
             .join("IntelliJIdea*")

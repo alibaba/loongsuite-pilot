@@ -341,39 +341,78 @@ mod migration_contract_tests {
     }
     #[cfg(windows)]
     fn link_directory(target: &Path, alias: &Path) {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
+        // cmd built-ins do not use CommandLineToArgvW quoting, nor accept the
+        // verbatim namespace returned by canonicalize. Both paths are private
+        // fixture paths; retain quoting even when the runner home has spaces.
+        fn cmd_path(path: &Path) -> String {
+            let raw = path.to_str().expect("fixture UTF-8 path");
+            if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                raw.strip_prefix(r"\\?\").unwrap_or(raw).to_owned()
+            }
+        }
         let command_path =
             std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
                 .join("System32/cmd.exe");
+        let mut stdout = tempfile::tempfile().unwrap();
+        let mut stderr = tempfile::tempfile().unwrap();
         let mut command = Command::new(command_path);
         command
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(alias)
-            .arg(target)
+            .args(["/D", "/V:OFF", "/S", "/C"])
+            .raw_arg(format!(
+                "\"mklink /J \"{}\" \"{}\"\"",
+                cmd_path(alias),
+                cmd_path(target)
+            ))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(stdout.try_clone().unwrap()))
+            .stderr(Stdio::from(stderr.try_clone().unwrap()));
         let mut child =
             crate::utils::candidate_process::CandidateChild::spawn(&mut command).unwrap();
         let started = Instant::now();
-        loop {
+        let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success(), "junction creation failed");
-                break;
+                break Some(status);
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "junction creation timed out"
-            );
+            if started.elapsed() >= Duration::from_secs(5) {
+                break None;
+            }
             std::thread::sleep(Duration::from_millis(10));
-        }
+        };
+        drop(child);
+        stdout.seek(SeekFrom::Start(0)).unwrap();
+        stderr.seek(SeekFrom::Start(0)).unwrap();
+        let mut out_bytes = Vec::new();
+        let mut err_bytes = Vec::new();
+        stdout
+            .take(1024 * 1024)
+            .read_to_end(&mut out_bytes)
+            .unwrap();
+        stderr
+            .take(1024 * 1024)
+            .read_to_end(&mut err_bytes)
+            .unwrap();
+        let out = String::from_utf8_lossy(&out_bytes);
+        let err = String::from_utf8_lossy(&err_bytes);
+        assert!(
+            status.is_some_and(|status| status.success()),
+            "junction creation failed: status={status:?} stdout={out:?} stderr={err:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(alias).unwrap(),
+            std::fs::canonicalize(target).unwrap()
+        );
     }
     #[test]
     fn resolves_directory_links_including_not_yet_created_descendants() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("private");
-        let alias = directory.path().join("alias");
+        let root = directory.path().join("private with spaces");
+        let alias = directory.path().join("alias with spaces");
         std::fs::create_dir(&root).unwrap();
         link_directory(&root, &alias);
         assert!(policy(&root, None).excludes(&alias.join("not-created").to_string_lossy()));
