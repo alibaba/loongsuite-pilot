@@ -286,8 +286,9 @@ mod tests {
     use crate::pipeline::sls_transport::RecordingSink;
     use crate::pipeline::types::PipelineSlsFlusherConfig;
 
-    fn sender(sink: Arc<RecordingSink>) -> FileSlsSender {
-        FileSlsSender::new(
+    fn sender(sink: Arc<RecordingSink>) -> (FileSlsSender, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let sender = FileSlsSender::new(
             &PipelineSlsFlusherConfig {
                 endpoint: "cn-hangzhou.log.aliyuncs.com".into(),
                 project: "test-project".into(),
@@ -297,16 +298,17 @@ mod tests {
                 telemetry_type: None,
             },
             "test-config",
-            "/tmp/test-failed",
-            "/tmp/test-data",
+            root.path().join("failed").to_str().unwrap(),
+            root.path().join("data").to_str().unwrap(),
             Some(sink),
-        )
+        );
+        (sender, root)
     }
 
     #[tokio::test]
     async fn enqueue_flush_and_backpressure() {
         let sink = Arc::new(RecordingSink::default());
-        let sender = sender(Arc::clone(&sink));
+        let (sender, _root) = sender(Arc::clone(&sink));
         assert_eq!(sender.buffer_size(), 0);
         assert!(sender.enqueue(
             &["line1".into(), "line2".into(), "line3".into()],
@@ -327,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn flush_posts_the_enqueued_lines() {
         let sink = Arc::new(RecordingSink::default());
-        let sender = sender(Arc::clone(&sink));
+        let (sender, _root) = sender(Arc::clone(&sink));
         sender.enqueue(&["line1".into(), "line2".into()], "/tmp/test.log");
         sender.flush().await;
         let posts = sink.posts.lock().unwrap();
@@ -346,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn empty_flush_and_failure_persist() {
         let sink = Arc::new(RecordingSink::default());
-        let sender = sender(Arc::clone(&sink));
+        let (sender, _root) = sender(Arc::clone(&sink));
         sender.flush().await;
         assert!(sink.posts.lock().unwrap().is_empty());
         *sink.fail_posts.lock().unwrap() = true;
@@ -356,6 +358,8 @@ mod tests {
         assert_eq!(persists.len(), 1);
         assert_eq!(persists[0].mode, "webtracking");
         assert_eq!(persists[0].project, "test-project");
+        assert_eq!(persists[0].logstore, "test-logstore");
+        assert_eq!(persists[0].kind, "test-config");
         assert_eq!(persists[0].batch_count, 1);
         assert!(persists[0].batch_bytes > 0);
     }
@@ -363,7 +367,8 @@ mod tests {
     #[tokio::test]
     async fn shutdown_flushes_remaining() {
         let sink = Arc::new(RecordingSink::default());
-        let sender = Arc::new(sender(Arc::clone(&sink)));
+        let (sender, _root) = sender(Arc::clone(&sink));
+        let sender = Arc::new(sender);
         sender.start();
         sender.enqueue(&["line1".into()], "/tmp/test.log");
         sender.shutdown().await;
@@ -374,9 +379,12 @@ mod tests {
     #[test]
     fn buffer_size_counts_across_files() {
         let sink = Arc::new(RecordingSink::default());
-        let sender = sender(sink);
+        let (sender, _root) = sender(sink);
+        assert_eq!(sender.buffer_size(), 0);
         sender.enqueue(&["a".into(), "b".into()], "/tmp/a.log");
+        assert_eq!(sender.buffer_size(), 2);
         sender.enqueue(&["c".into()], "/tmp/b.log");
         assert_eq!(sender.buffer_size(), 3);
     }
+    include!("file_sls_sender_history_tests.rs");
 }

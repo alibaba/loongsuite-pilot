@@ -2781,7 +2781,10 @@ fn reserve_tool_context(
         "tracestate": turn.tracestate,
         "ts": iso_now(),
     });
-    publish_record(&path, &record).and_then(|value| tool_context_from_value(&value))
+    publish_record(&path, &record, |value| {
+        tool_context_from_value(value).is_some()
+    })
+    .and_then(|value| tool_context_from_value(&value))
 }
 
 struct TurnSeed {
@@ -2838,7 +2841,9 @@ fn reserve_turn_context(
             "ts": iso_now(),
         })
     };
-    let published = publish_record(&path, &record)?;
+    let published = publish_record(&path, &record, |value| {
+        read_turn_seed_value(value).is_some()
+    })?;
     read_turn_seed_value(&published)
 }
 
@@ -2903,22 +2908,53 @@ fn consume_tool_context(env: &Env, session_id: &str, tool_use_id: &str) -> Optio
     Some(record)
 }
 
-fn publish_record(path: &Path, record: &Value) -> Option<Value> {
+// Match the Agent-hosted publisher: complete same-directory temp, immutable
+// create-if-absent link, and losers read the validated winner. A rename would
+// replace another process's seed on Unix and split parallel hooks into traces.
+fn publish_record(path: &Path, record: &Value, valid: fn(&Value) -> bool) -> Option<Value> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
-    if path.exists() {
-        return serde_json::from_str(&fs::read_to_string(path).ok()?).ok();
-    }
     let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), random_hex(4)));
-    fs::write(&tmp, serde_json::to_vec(record).ok()?).ok()?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Some(record.clone()),
-        Err(_) => {
-            let _ = fs::remove_file(&tmp);
-            serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+    let result = (|| -> Option<Value> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).ok()?;
+        file.write_all(&serde_json::to_vec(record).ok()?).ok()?;
+        drop(file);
+        match fs::hard_link(&tmp, path) {
+            Ok(()) => Some(record.clone()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                read_published_record(path, valid)
+            }
+            Err(_) => None,
+        }
+    })();
+    let _ = fs::remove_file(&tmp);
+    result
+}
+
+fn read_published_record(path: &Path, valid: fn(&Value) -> bool) -> Option<Value> {
+    // A pre-upgrade writer may create the target before filling it. Retain the
+    // original 20 x 5ms bounded retry and never invent a competing local seed.
+    for attempt in 0..=20 {
+        if let Some(value) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(valid)
+        {
+            return Some(value);
+        }
+        if attempt < 20 {
+            thread::sleep(Duration::from_millis(5));
         }
     }
+    None
 }
 
 fn sanitize_tracestate(value: Option<&str>) -> Option<String> {
@@ -3475,3 +3511,7 @@ mod partial_transcript_recovery_contracts {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "claude_tool_context_history.rs"]
+mod tool_context_history;

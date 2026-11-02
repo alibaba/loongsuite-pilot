@@ -277,8 +277,19 @@ fn native_jsonl_accepts_incomplete_compatibility_and_agent_specific_turns() {
             rows[0].as_object_mut().unwrap().remove("gen_ai.turn.end");
             write(root.path(), "workbuddy", &rows);
             let (output, result) = report(root.path());
-            assert_eq!(output.status.code(), Some(1));
-            assert_eq!(result["issueCounts"]["turn_boundary_error"], 1);
+            if case == "codex" {
+                // f84 replaces the old status-implies-terminal assumption.
+                assert!(output.status.success(), "{result}");
+                assert_eq!(
+                    result["issueCounts"]["turn_boundary_error"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    0
+                );
+            } else {
+                assert_eq!(output.status.code(), Some(1));
+                assert_eq!(result["issueCounts"]["turn_boundary_error"], 1);
+            }
         }
     }
 }
@@ -555,4 +566,355 @@ fn native_jsonl_accepts_standard_names_and_audits_but_rejects_duplicate_alias_fa
     let (output, parsed) = report(root.path());
     assert!(!output.status.success());
     assert!(parsed.to_string().contains("gen_ai.agent.invocation.id"));
+}
+
+#[test]
+fn native_jsonl_f84_mixed_standard_aliases_and_audit_coverage() {
+    let root = tempfile::tempdir().unwrap();
+    let mut rows = graph();
+    for (index, row) in rows.iter_mut().enumerate() {
+        if [4, 6].contains(&index) {
+            continue;
+        }
+        row["event.name"] = json!(match row["event.name"].as_str().unwrap() {
+            "llm.request" => "gen_ai.model.request",
+            "llm.response" => "gen_ai.model.response",
+            "tool.call" => "gen_ai.tool.call",
+            "tool.result" => "gen_ai.tool.result",
+            name => name,
+        });
+    }
+    for (index, name) in ["gen_ai.agent.invoke", "gen_ai.agent.result"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut row = entry(&format!("delegation-{index}"), name);
+        row["gen_ai.turn.id"] = json!("turn-1");
+        row["gen_ai.agent.invocation.id"] = json!("invocation-1");
+        row["gen_ai.tool.call.id"] = json!("call-a");
+        rows.push(row);
+    }
+    write(root.path(), "workbuddy", &rows);
+    let (output, result) = report(root.path());
+    assert!(output.status.success(), "{result}");
+    for category in ["bad_event_name", "model_pair_error", "tool_pair_error"] {
+        assert_eq!(
+            result["issueCounts"][category].as_u64().unwrap_or(0),
+            0,
+            "{category}: {result}"
+        );
+    }
+    assert_eq!(result["coverage"]["gen_ai.agent.invoke"]["count"], 1);
+    assert_eq!(result["coverage"]["gen_ai.agent.result"]["count"], 1);
+    let mut duplicates = graph();
+    let mut duplicate = duplicates[0].clone();
+    duplicate["event.id"] = json!("duplicate-standard-request");
+    duplicate["event.name"] = json!("gen_ai.model.request");
+    duplicate
+        .as_object_mut()
+        .unwrap()
+        .remove("gen_ai.turn.start");
+    duplicates.push(duplicate);
+    write(root.path(), "workbuddy", &duplicates);
+    let (output, result) = report(root.path());
+    assert_eq!(output.status.code(), Some(1), "{result}");
+    assert_eq!(
+        result["issueCounts"]["bad_event_name"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(result["issueCounts"]["model_pair_error"], 1);
+}
+
+#[test]
+fn native_jsonl_f84_standard_tool_fields_and_both_invocation_ids_are_required() {
+    let root = tempfile::tempdir().unwrap();
+    let mut rows = graph();
+    rows[2]["event.name"] = json!("gen_ai.tool.call");
+    rows[2].as_object_mut().unwrap().remove("gen_ai.tool.name");
+    write(root.path(), "workbuddy", &rows);
+    let (output, result) = report(root.path());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(result["issueCounts"]["missing_required"], 1);
+    for event in ["gen_ai.agent.invoke", "gen_ai.agent.result"] {
+        let mut row = entry("audit", event);
+        row["gen_ai.agent.type"] = json!("codex");
+        write(root.path(), "workbuddy", &[row.clone()]);
+        let (output, result) = report(root.path());
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(result["issueCounts"]["missing_required"], 1);
+        assert!(result.to_string().contains("gen_ai.agent.invocation.id"));
+        row["gen_ai.agent.invocation.id"] = json!("invocation-1");
+        write(root.path(), "workbuddy", &[row]);
+        assert!(report(root.path()).0.status.success());
+    }
+}
+
+#[test]
+fn native_jsonl_f84_codex_scope_and_status_wait_for_native_turn_end() {
+    for scope in [None, Some("subagent")] {
+        for status in [None, Some("interrupted"), Some("completed")] {
+            let root = tempfile::tempdir().unwrap();
+            let mut row = entry("running", "llm.request");
+            row["gen_ai.agent.type"] = json!("codex");
+            row["gen_ai.turn.id"] = json!("turn-1");
+            row["gen_ai.turn.start"] = json!(true);
+            if let Some(scope) = scope {
+                row["gen_ai.agent.scope"] = json!(scope);
+            }
+            if let Some(status) = status {
+                row["agent.codex.turn_status"] = json!(status);
+            }
+            write(root.path(), "workbuddy", &[row.clone()]);
+            let (output, result) = report(root.path());
+            assert!(
+                output.status.success(),
+                "scope={scope:?} status={status:?}: {result}"
+            );
+            assert_eq!(
+                result["issueCounts"]["turn_boundary_error"]
+                    .as_u64()
+                    .unwrap_or(0),
+                0
+            );
+            row["event.id"] = json!("native-end");
+            row.as_object_mut().unwrap().remove("gen_ai.turn.start");
+            row["gen_ai.turn.end"] = json!(true);
+            let mut start = row.clone();
+            start["event.id"] = json!("running");
+            start["gen_ai.turn.start"] = json!(true);
+            start.as_object_mut().unwrap().remove("gen_ai.turn.end");
+            write(root.path(), "workbuddy", &[start, row]);
+            assert!(report(root.path()).0.status.success());
+        }
+    }
+}
+
+#[test]
+fn native_jsonl_f84_rejects_missing_and_duplicate_codex_child_boundaries() {
+    for flags in [
+        vec![(false, true)],
+        vec![(true, false), (true, false)],
+        vec![(true, true), (false, true)],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let rows = flags
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start, end))| {
+                let mut row = entry(&format!("child-{index}"), "other");
+                row["gen_ai.agent.type"] = json!("codex");
+                row["gen_ai.agent.scope"] = json!("subagent");
+                row["gen_ai.turn.id"] = json!("child-turn");
+                if start {
+                    row["gen_ai.turn.start"] = json!(true);
+                }
+                if end {
+                    row["gen_ai.turn.end"] = json!(true);
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        write(root.path(), "workbuddy", &rows);
+        let (output, result) = report(root.path());
+        assert_eq!(output.status.code(), Some(1), "{result}");
+        assert_eq!(result["issueCounts"]["turn_boundary_error"], 1, "{result}");
+    }
+}
+
+#[test]
+fn native_jsonl_f84_non_codex_children_and_terminal_signals_keep_their_contracts() {
+    let root = tempfile::tempdir().unwrap();
+    let rows = (0..2)
+        .map(|index| {
+            let mut row = entry(&format!("child-{index}"), "other");
+            row["gen_ai.agent.type"] = json!("claude-code");
+            row["gen_ai.agent.scope"] = json!("subagent");
+            row["gen_ai.turn.id"] = json!("child-turn");
+            row["gen_ai.turn.start"] = json!(true);
+            row["gen_ai.turn.end"] = json!(true);
+            row
+        })
+        .collect::<Vec<_>>();
+    write(root.path(), "workbuddy", &rows);
+    assert!(report(root.path()).0.status.success());
+    for (agent, key, value) in [
+        (
+            "claude-code",
+            "gen_ai.response.finish_reasons",
+            json!(["stop"]),
+        ),
+        ("openclaw", "agent.openclaw.hook", json!("llm_output")),
+    ] {
+        let mut row = entry("terminal", "other");
+        row["gen_ai.agent.type"] = json!(agent);
+        row["gen_ai.turn.id"] = json!("turn-1");
+        row["gen_ai.turn.start"] = json!(true);
+        row[key] = value;
+        write(root.path(), "workbuddy", &[row.clone()]);
+        let (output, result) = report(root.path());
+        assert_eq!(output.status.code(), Some(1), "{result}");
+        assert_eq!(result["issueCounts"]["turn_boundary_error"], 1);
+        row["gen_ai.turn.end"] = json!(true);
+        write(root.path(), "workbuddy", &[row]);
+        assert!(report(root.path()).0.status.success());
+    }
+}
+
+#[test]
+fn native_jsonl_f84_codex_delegation_audits_do_not_create_a_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let rows = ["gen_ai.agent.invoke", "gen_ai.agent.result"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| {
+            let mut row = entry(&format!("delegation-{index}"), event);
+            row["gen_ai.agent.type"] = json!("codex");
+            row["gen_ai.turn.id"] = json!("parent-turn");
+            row["gen_ai.agent.invocation.id"] = json!("invocation-1");
+            row
+        })
+        .collect::<Vec<_>>();
+    write(root.path(), "workbuddy", &rows);
+    let (output, result) = report(root.path());
+    assert!(output.status.success(), "{result}");
+    assert_eq!(
+        result["issueCounts"]["turn_boundary_error"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[test]
+fn native_jsonl_baseline_exact_text_hints_prefixes_and_private_value_redaction() {
+    let empty = tempfile::tempdir().unwrap();
+    let output = invoke(empty.path(), &[], &[]);
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("no .jsonl files"));
+
+    let missing = tempfile::tempdir().unwrap();
+    let good = entry("evt-1", "llm.request");
+    let mut bad = good.clone();
+    bad.as_object_mut().unwrap().remove("user.id");
+    write(missing.path(), "codex", &[good, bad]);
+    let output = invoke(missing.path(), &["--strict"], &[]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(text.contains("FAIL codex-2026-05-11.jsonl"), "{text}");
+    assert!(text.contains("missing_required=1"), "{text}");
+    assert!(
+        text.contains("category=missing_required fields=[user.id]"),
+        "{text}"
+    );
+
+    let filtered = tempfile::tempdir().unwrap();
+    write(filtered.path(), "claude", &[entry("claude", "llm.request")]);
+    let mut bad = entry("codex", "llm.request");
+    bad.as_object_mut().unwrap().remove("event.name");
+    write(filtered.path(), "codex", &[bad]);
+    let output = invoke(
+        filtered.path(),
+        &[],
+        &[
+            ("E2E_JSONL_AGENT_FILTER", "claude"),
+            ("E2E_JSONL_STRICT", "1"),
+        ],
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("claude-2026-05-11.jsonl"));
+    assert!(!text.contains("codex-2026-05-11.jsonl"));
+
+    let invalid = tempfile::tempdir().unwrap();
+    // f84 explicitly replaces the former standard-name negative fixture.
+    write(
+        invalid.path(),
+        "claude-code",
+        &[entry("bad", "invalid.event.name")],
+    );
+    for strict in [false, true] {
+        let output = invoke(
+            invalid.path(),
+            if strict { &["--strict"] } else { &[] },
+            &[],
+        );
+        assert_eq!(output.status.code(), Some(if strict { 1 } else { 0 }));
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("bad_event_name=1"));
+    }
+
+    let input = tempfile::tempdir().unwrap();
+    write(
+        input.path(),
+        "claude-code",
+        &[entry("input", "agent.input")],
+    );
+    let output = invoke(input.path(), &["--strict"], &[]);
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("bad_event_name=0"));
+
+    let all = tempfile::tempdir().unwrap();
+    write(all.path(), "cursor", &[entry("cursor", "llm.request")]);
+    let output = invoke(
+        all.path(),
+        &[],
+        &[("E2E_JSONL_AGENT_FILTER", "all"), ("E2E_JSONL_STRICT", "1")],
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("cursor-2026-05-11.jsonl"));
+
+    let privacy = tempfile::tempdir().unwrap();
+    let mut rows = graph();
+    rows[2]["gen_ai.tool.call.arguments"] = json!(
+        "{\"secret\":\"SENSITIVE_MARKER_MUST_NOT_APPEAR\",\"path\":\"/Users/private/person\"}"
+    );
+    write(privacy.path(), "workbuddy", &rows);
+    let output = invoke(
+        privacy.path(),
+        &["--strict", "--agent-filter", "workbuddy"],
+        &[],
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(text.contains("type_error=1"), "{text}");
+    assert!(!text.contains("SENSITIVE_MARKER_MUST_NOT_APPEAR"));
+    assert!(!text.contains("/Users/private/person"));
+
+    let defaults = tempfile::tempdir().unwrap();
+    for agent in [
+        "claude-code",
+        "codex",
+        "qoder-cli",
+        "cursor-cli",
+        "qwen-code-cli",
+        "opencode",
+        "qoder",
+    ] {
+        write(defaults.path(), agent, &[entry(agent, "llm.request")]);
+    }
+    let output = invoke(defaults.path(), &["--strict"], &[]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{text}");
+    for agent in [
+        "claude-code",
+        "codex",
+        "qoder-cli",
+        "cursor-cli",
+        "qwen-code-cli",
+        "opencode",
+    ] {
+        assert!(
+            text.contains(&format!("{agent}-2026-05-11.jsonl")),
+            "{agent}: {text}"
+        );
+    }
+    assert!(!text.contains("qoder-2026-05-11.jsonl"));
 }

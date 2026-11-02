@@ -355,24 +355,27 @@ fn types(entry: &Value) -> Vec<&'static str> {
     bad
 }
 
+fn normalized_agent(agent: &str) -> String {
+    agent
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 fn terminal(entry: &Value) -> bool {
-    if entry["gen_ai.agent.scope"] == "subagent" {
+    let agent = normalized_agent(&text(&entry["gen_ai.agent.type"]));
+    if entry["gen_ai.agent.scope"] == "subagent" && agent != "codex" {
         return false;
     }
     if entry["gen_ai.turn.end"] == true {
         return true;
     }
-    let agent = text(&entry["gen_ai.agent.type"]).to_ascii_lowercase();
-    let agent = agent
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
     match agent.as_str() {
-        "codex" => matches!(
-            entry["agent.codex.turn_status"].as_str(),
-            Some("completed" | "interrupted")
-        ),
+        // Status annotates every Codex record. Only its native end marker
+        // closes a turn, including a child turn.
+        "codex" => false,
         "openclaw" => entry["agent.openclaw.hook"] == "llm_output",
         _ => entry["gen_ai.response.finish_reasons"]
             .as_array()
@@ -399,6 +402,7 @@ struct Row {
     call: String,
     tool: String,
     subagent: bool,
+    codex: bool,
     start: bool,
     end: bool,
     terminal: bool,
@@ -416,6 +420,7 @@ impl Row {
             call: text(&entry["gen_ai.tool.call.id"]),
             tool: text(&entry["gen_ai.tool.name"]),
             subagent: entry["gen_ai.agent.scope"] == "subagent",
+            codex: normalized_agent(&text(&entry["gen_ai.agent.type"])) == "codex",
             start: entry["gen_ai.turn.start"] == true,
             end: entry["gen_ai.turn.end"] == true,
             terminal: terminal(entry),
@@ -545,7 +550,13 @@ fn graph(report: &mut Report, rows: &[Row], limit: usize) {
                 .or_default()
                 .push(row);
         }
-        if !row.turn.is_empty() && !row.subagent {
+        if !row.turn.is_empty()
+            && (!row.subagent || row.codex)
+            && !matches!(
+                row.event.as_str(),
+                "gen_ai.agent.invoke" | "gen_ai.agent.result"
+            )
+        {
             turns
                 .entry((&row.agent, &row.session, &row.turn))
                 .or_default()

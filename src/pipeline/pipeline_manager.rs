@@ -546,6 +546,7 @@ mod tests {
         std::fs::create_dir_all(&config).unwrap();
         let manager = Arc::new(PipelineManager::new(opts(&root)));
         manager.start().await;
+        assert!(manager.pipelines.lock().unwrap().is_empty());
         manager.stop().await;
         manager.stop().await;
 
@@ -560,7 +561,14 @@ mod tests {
         std::fs::write(config.join("readme.txt"), "hello").unwrap();
         let manager = Arc::new(PipelineManager::new(opts(&root)));
         manager.start().await;
+        {
+            let pipelines = manager.pipelines.lock().unwrap();
+            assert_eq!(pipelines.len(), 2);
+            assert!(pipelines.contains_key("app-logs"));
+            assert!(pipelines.contains_key("nginx-logs"));
+        }
         manager.stop().await;
+        assert!(manager.pipelines.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

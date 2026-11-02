@@ -312,3 +312,11 @@ mod tests {
         assert!(parse_traceparent("not-a-traceparent").is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "trace_linker_history_tests.rs"]
+mod history_tests;
+
+#[cfg(test)]
+#[path = "trace_linker_load_history_tests.rs"]
+mod load_history_tests;
