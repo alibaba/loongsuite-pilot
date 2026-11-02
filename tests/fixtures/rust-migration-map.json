@@ -65875,10 +65875,10 @@
     },
     {
       "legacy": "tests/unit/hooks/codex/powershell-wrapper.test.mjs",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
       "source_hash": "b23788059563b126f8e4ab658213a3cc924df5805385a93b6cb9022dc750cb09",
-      "note": "All3 source declarations have concrete Native Windows acceptance code; retain partial until actual Windows CI runs new assertions. No Linux cfg-noop counted as Windows success. Only Node/MSYS lookup mechanism replaced by signed Native binary absolute.exe binding; UTF8/stdin/path/home/fail-open business retained. f84 L33/L121 timing assertions explicitly added to true wrapper roundtrip.",
+      "note": "Exact source3 retained as native stdin/argv/timing and legacy-node-pin compatibility contracts. Rust wrappers no longer launch Node. E commit e4fa696 actual Windows x64 and ARM64 Native run41383594300 passed both required test functions with PS5.1/PS7 and language-mode roundtrips. No shell-availability early return: absent shells panic. Evidence /tmp/pilot-powershell-history3-native-proof-20261102.json; platform evidence pertains to that commit, not later unrelated additions.",
       "cases": [
         {
           "source": {
@@ -65891,7 +65891,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
@@ -65921,7 +65921,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
@@ -65951,7 +65951,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
@@ -69231,6 +69231,2521 @@
               {
                 "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
                 "test": "source_l245_actual_segment_reader_defers_incomplete_row_and_pair_until_newline"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pi-sdk/pi-sdk-agent-cli.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "c1394050de19ac2aa84ce7bcdb86121305a06f6370035a0cb9490eb1e4e741eb",
+      "note": "Immutable declarations and every original assertion audited individually. ef8953/f84 byte identical. Actual temporary native registry/settings/locks and public API are exercised; one private cleanup seam represents the same strategy failure boundary mocked by the source. JS process event listeners are explicitly retired in favor of native scoped resource ownership. Linux results are recorded separately from Windows/macOS execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "registers repeated detection flags and unregisters through the public command shape",
+            "suites": [
+              "PI SDK Agent CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual registration JSON has the exact repeated detection paths/commands; public unregister removes the actual definition.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_cli.rs",
+                "test": "registers_repeated_detection_flags_and_rejects_missing_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C3",
+            "title": "does not claim unrelated commands and reports invalid agent commands",
+            "suites": [
+              "PI SDK Agent CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unrelated argv unclaimed; missing name returns claimed command, error exit and exact missing-name diagnosis.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_cli.rs",
+                "test": "registers_repeated_detection_flags_and_rejects_missing_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L94:C3",
+            "title": "routes operational logs away from stdout in JSON mode",
+            "suites": [
+              "PI SDK Agent CLI"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Fresh env-cleared child proves default operational stdout, then actual JSON command redirects subsequent logger output to stderr while exactly one parseable id/name result remains on stdout.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_cli_history.rs",
+                "test": "history_json_mode_redirects_actual_operational_logs_in_an_isolated_process"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/pi-sdk/pi-sdk-agent-registry.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "1bbb708de7acf4b3e3293ffa0f7656906b4d29b25d256a3997c92f4f47a2edfa",
+      "note": "Immutable declarations and every original assertion audited individually. ef8953/f84 byte identical. Actual temporary native registry/settings/locks and public API are exercised; one private cleanup seam represents the same strategy failure boundary mocked by the source. JS process event listeners are explicitly retired in favor of native scoped resource ownership. Linux results are recorded separately from Windows/macOS execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "materializes a managed plugin-inject definition and injects its wrapper",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual settings extension array, complete plugin/identity/agentDir/detection fields, real generated wrapper content and Unix0600 modes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry.rs",
+                "test": "registers_injects_and_unregisters"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "is idempotent and supports doctor, list, and unregister",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Repeated registration yields one exact extension and one listing; real doctor transitions detected/healthy after detection deletion; public unregister removes settings entry and both wrapper/definition.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_complete_lifecycle_retains_exact_settings_and_negative_doctor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "removes the old settings entry when a registration moves to another agentDir",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Public re-registration moves agentDir, empties old actual settings, creates one next extension.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_registration_move_removes_old_settings_entry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L129:C3",
+            "title": "preserves the registration and wrapper when settings cleanup fails",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original extension-removal fault boundary is controlled; native lock/disk definition/wrapper/settings stay byte identical and real doctor stays healthy after failure.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_failed_extension_cleanup_preserves_registration_wrapper_and_health"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L154:C3",
+            "title": "restores a missing generated wrapper from the durable registration",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Public restore recreates byte-identical wrapper from durable native definition, returns1 then0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_restores_exact_missing_wrapper_and_then_is_idempotent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C3",
+            "title": "retries transient registry contention before restoring a wrapper",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual owner holds native lock until20ms; bounded public restore retries, restores real wrapper and releases its own lock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_retries_real_transient_lock_before_restoring_wrapper"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L189:C3",
+            "title": "bounds wrapper restore retries and preserves a typed busy error",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual blocked public restore waits its100/300ms retry budget and retains downcastable PiSdkRegistryBusyError with a finite bound.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_restore_busy_preserves_a_typed_error_after_bounded_retries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L201:C3",
+            "title": "recognizes collector and Agent CLI processes as valid registry lock owners",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Every original collector/Agent CLI/PowerShell positive and unrelated IDE negative runs through actual production lock owner patterns; native executable command is a further control.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_process_owner_patterns_cover_all_four_source_commands"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L217:C3",
+            "title": "scopes exit and signal cleanup listeners to the registry critical section",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Node EventEmitter exit/SIGINT/SIGTERM listener-count mechanism is retired. Native per-operation Drop ownership is verified with actual live lock, future cancellation and immediate reacquisition; process-death stale-lock recovery belongs to the native lock implementation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Node process EventEmitter listener API is absent from the Rust runtime. Preserve native critical-section ownership and cleanup with a per-operation Drop guard; no process-global signal listener is installed.",
+            "replacement": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_registry_critical_section_releases_lock_when_cancelled"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L253:C3",
+            "title": "rejects unsafe, reserved, and under-specified registrations",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All original reserved/unsafe/no-detection construction failures call actual typed definition builder and check original reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_rejects_reserved_unsafe_and_under_specified_registration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L273:C3",
+            "title": "does not overwrite an unrelated local Agent definition",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual unrelated detection-only JSON is unchanged after native public registration refusal.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_unrelated_definition_is_not_overwritten"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L292:C3",
+            "title": "refuses to inject a wrapper that cannot load the Pilot PI runtime",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Removing the real packaged plugin entry prevents registration and never creates Agent settings.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_missing_pi_runtime_never_injects_settings"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L305:C3",
+            "title": "requires a dedicated agentDir to prevent duplicate telemetry identities",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Public duplicate directory refusal plus env-cleared independent default/PI_CODING_AGENT_DIR child controls preserve the three original identity exclusions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_dedicated_agent_dir_checks_duplicate_default_and_override"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L347:C3",
+            "title": "serializes concurrent registrations before checking the dedicated agentDir",
+            "suites": [
+              "PI SDK Agent registry"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Concurrent public registration attempts produce one success/one busy, one durable identity, one actual extension and no residual lock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/pi-sdk/pi_sdk_agent_registry_history.rs",
+                "test": "history_concurrent_registrations_preserve_one_identity_and_one_extension"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/edge-cases.test.ts",
+      "source_hash": "f83c831868eb5484627d692bb14e5f57f2e6f9f718a16328b87b63b751da0f46",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L73:C5",
+            "title": "should handle completely empty JSONL file",
+            "suites": [
+              "Edge cases",
+              "empty file handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual empty Hook log produces zero batches/transform calls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/tests.rs",
+                "test": "hook_missing_and_empty_logs_emit_no_batches_or_transform_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C5",
+            "title": "should handle session file with only empty lines",
+            "suites": [
+              "Edge cases",
+              "empty file handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual three-blank-line session produces zero entries and zero record processor calls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "edge_special_paths_unchanged_restart_and_empty_session_are_real_file_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C5",
+            "title": "should handle file paths with spaces",
+            "suites": [
+              "Edge cases",
+              "special character paths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original space-containing path survives real Hook transform/read.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "edge_special_paths_unchanged_restart_and_empty_session_are_real_file_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C5",
+            "title": "should handle file paths with unicode characters",
+            "suites": [
+              "Edge cases",
+              "special character paths"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original Chinese path survives real UTF8 Hook file read.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "edge_special_paths_unchanged_restart_and_empty_session_are_real_file_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C5",
+            "title": "should produce no entries when file size has not changed",
+            "suites": [
+              "Edge cases",
+              "no new data within poll interval"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual new Hook object same store, unchanged file, initial2 then zero callbacks.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "edge_special_paths_unchanged_restart_and_empty_session_are_real_file_contracts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L169:C5",
+            "title": "should process valid lines and skip invalid ones",
+            "suites": [
+              "Edge cases",
+              "mixed valid and invalid JSONL lines"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual mixed invalid/valid Hook lines skip bad JSON and preserve both valid entries, subsequent append works.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/tests.rs",
+                "test": "hook_transforms_each_new_line_once_and_skips_bad_json_without_aborting_valid_siblings"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/error-recovery.test.ts",
+      "source_hash": "722065d10983264b1efac91837a3f057be8453622eb7f95b8ae8e69a2f9ce917",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L70:C5",
+            "title": "should emit warn log for malformed JSONL but continue processing",
+            "suites": [
+              "US4: Error recovery",
+              "malformed JSON warning"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual captured WARN JSON has invalid JSONL line and BAD_JSON_LINE preview; good sibling reaches real callback.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "actual_json_logs_preserve_lifecycle_count_error_and_malformed_line_diagnostics"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C5",
+            "title": "should handle missing log file and retry on next cycle",
+            "suites": [
+              "US4: Error recovery",
+              "missing file handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual initially missing Hook dir emits nothing; create file and recreate input same store emits exact recovered path.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "missing_hook_source_recovers_on_recreated_input_with_same_store"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C5",
+            "title": "should continue polling after collect throws an error",
+            "suites": [
+              "US4: Error recovery",
+              "runCycle exception resilience"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual initial failed collection reports no entries; next 5000ms scheduled tick delivers one real entry without replacing scheduler.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/tests.rs",
+                "test": "collect_error_reports_zero_raw_delta_then_next_scheduled_tick_recovers"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/logging.test.ts",
+      "source_hash": "de03cfbfa7be4ce6e53fcd250ef9d21150a50b403f2621c4dff382a77a47dcf7",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L47:C5",
+            "title": "should log info on start",
+            "suites": [
+              "US4: Logging verification",
+              "lifecycle logging"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual isolated child stdout JSON logger emits INFO starting.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "actual_json_logs_preserve_lifecycle_count_error_and_malformed_line_diagnostics"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C5",
+            "title": "should log info on stop",
+            "suites": [
+              "US4: Logging verification",
+              "lifecycle logging"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual real stop lifecycle emits INFO stopped.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "actual_json_logs_preserve_lifecycle_count_error_and_malformed_line_diagnostics"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L65:C5",
+            "title": "should log debug with entry count on successful collect",
+            "suites": [
+              "US4: Logging verification",
+              "collect success logging"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual two collected entries produce DEBUG cycle produced entries with numeric count2.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "actual_json_logs_preserve_lifecycle_count_error_and_malformed_line_diagnostics"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C5",
+            "title": "should log error on collect failure",
+            "suites": [
+              "US4: Logging verification",
+              "collect error logging"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual failed production cycle emits ERROR collection cycle failed and exact native anyhow reason test collection error; JavaScript Error: class prefix is representational and absent from native errors.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "actual_json_logs_preserve_lifecycle_count_error_and_malformed_line_diagnostics"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/extensibility.test.ts",
+      "source_hash": "152633bcf631911d7064bb86f5da4914eec08eba8fd0da1f196e62206729be0a",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "should register and collect data without modifying existing code",
+            "suites": [
+              "US2: Extensibility - MockSessionInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Custom real SessionBody feeds the unchanged hosted adapter; exact original /proj/ext.ts and Qoder identity, one callback.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "session_extension_preserves_original_action_fields_and_validates_schema"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "should produce entries conforming to AgentActivityEntry schema",
+            "suites": [
+              "US2: Extensibility - MockSessionInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real emitted Session entry validated against all original external Zod schema fields; invalid clones rejected so validation is not vacuous.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "session_extension_preserves_original_action_fields_and_validates_schema"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "should inherit collectionMethod from BaseSessionInput",
+            "suites": [
+              "US2: Extensibility - MockSessionInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual hosted session collection method is session-file-polling.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "session_extension_preserves_original_action_fields_and_validates_schema"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "should skip non-action records via processSessionLine",
+            "suites": [
+              "US2: Extensibility - MockSessionInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real meta/action/status input file invokes custom processSessionLine filter and emits one Qoder action.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/tests.rs",
+                "test": "extensibility_session_collects_action_lines_only"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/extensibility-hook.test.ts",
+      "source_hash": "9db174770f798bef8199fccdddcfa8d16ad61db192a68276b7de54b2086c316f",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "should call transformRecord for each JSONL line",
+            "suites": [
+              "US2: Extensibility - MockHookInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual two JSONL lines call custom HookBody twice; non-tool-use filtered, one Claude hook event.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "hook_extension_filters_per_line_and_restarts_at_owned_offset_with_schema_valid_output"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "should have offset management handled by base class",
+            "suites": [
+              "US2: Extensibility - MockHookInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real shared byte Store positive offset and recreated Hook input consumes only appended /second.ts.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "hook_extension_filters_per_line_and_restarts_at_owned_offset_with_schema_valid_output"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L114:C3",
+            "title": "should produce schema-valid entries",
+            "suites": [
+              "US2: Extensibility - MockHookInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual emitted Hook entries validate every original schema requirement, with missing/invalid-field negative controls.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "hook_extension_filters_per_line_and_restarts_at_owned_offset_with_schema_valid_output"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "should inherit collectionMethod from BaseHookInput",
+            "suites": [
+              "US2: Extensibility - MockHookInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual hosted Hook collection method inherited as hook-jsonl.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "hook_extension_filters_per_line_and_restarts_at_owned_offset_with_schema_valid_output"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/extensibility-ide.test.ts",
+      "source_hash": "27c3c4510cb4bf39657ed8123f335495dd8ce58b4d6744e11b74d0e879a63efa",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84六文件逐字相同；逐assert迁移为真实HostedInput/Hook/Session/IDE adapter+StateStore/SnapshotStore临时文件行为。Schema断言来自原外部contract，含非空输出及负控；日志由env_clear独立子进程的真实结构化stdout采集，不使用mock logger自证。Linux实际验证，Windows/macOS留各自平台；无生产改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L45:C3",
+            "title": "should call scanHistoryEntries and buildEntry correctly",
+            "suites": [
+              "US2: Extensibility - MockIdeInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual IdeBody scan/build counters1/2 and two distinct emitted event paths through shared adapter.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "ide_extension_scans_builds_validates_schema_and_recreated_snapshot_prevents_duplicate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "should have SnapshotStore dedup managed by base class",
+            "suites": [
+              "US2: Extensibility - MockIdeInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual new input/new SnapshotStore loaded from same disk path suppresses identical event:1 then0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "ide_extension_scans_builds_validates_schema_and_recreated_snapshot_prevents_duplicate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C3",
+            "title": "should produce schema-valid entries",
+            "suites": [
+              "US2: Extensibility - MockIdeInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual emitted IDE entries satisfy original external schema; negative invalid clones rejected.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "ide_extension_scans_builds_validates_schema_and_recreated_snapshot_prevents_duplicate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "should inherit collectionMethod from BaseIdeInput",
+            "suites": [
+              "US2: Extensibility - MockIdeInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual hosted IDE method is ide-snapshot-polling.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/base/shared_history_contracts.rs",
+                "test": "ide_extension_scans_builds_validates_schema_and_recreated_snapshot_prevents_duplicate"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/canary.test.ts",
+      "source_hash": "02fe802f2738b2b6cb7b24cef5ba3f7c532d73cc0f198818f534fef1854beab7",
+      "coverage": "complete",
+      "rust": [],
+      "note": "全部18精确声明收口；existing-ID真实文件系统红3pass/1fail→绿5pass，磁盘有效ID仍优先/并发锁保留。额外回归不扩baseline计数。",
+      "cases": [
+        {
+          "source": {
+            "id": "L97:C3",
+            "title": "returns stable when no canary field",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无canary返回stable，manifest.version精确1.0.35。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/updater_canary_history.rs",
+                "test": "stable_selection_preserves_manifest_version_without_canary_or_with_policy_off"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "returns stable when canaryPolicy is off",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Off返回stable，manifest.version精确1.0.35。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/updater_canary_history.rs",
+                "test": "stable_selection_preserves_manifest_version_without_canary_or_with_policy_off"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "returns canary when canaryPolicy is latest",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Latest返回canary，manifest.version精确1.0.36。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "returns canary via bucketing when canaryPolicy is auto",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "显式Auto、原1000个test-index候选搜索<50桶，50%灰度返回canary。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/updater_canary_history.rs",
+                "test": "explicit_auto_policy_uses_the_fifty_percent_bucket_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L134:C3",
+            "title": "returns canary when bucket is within rollout_percentage",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原1000候选搜索<10桶，10%灰度返回canary。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "returns stable when bucket is outside rollout_percentage",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原1000候选搜索>=10桶，10%灰度返回stable。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L166:C3",
+            "title": "returns stable when rollout_percentage is 0",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "0%灰度返回stable。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L172:C3",
+            "title": "returns canary for all when rollout_percentage is 100",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "100%灰度返回canary。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C3",
+            "title": "falls back to stable on malformed canary (missing rollout_percentage)",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺rollout_percentage降级stable。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "returns hotfixVersion from canary manifest",
+            "suites": [
+              "resolveTargetVersion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "canary hotfix精确3。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "resolves_canary_policy_and_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L200:C3",
+            "title": "returns true when canary hotfix_version is higher than local",
+            "suites": [
+              "needsUpdate with canary channel"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "相同版本/commit、远端hotfix2>本地1返回true。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "needs_update_honors_hotfix_only_on_canary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L213:C3",
+            "title": "returns false when canary hotfix_version equals local",
+            "suites": [
+              "needsUpdate with canary channel"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "相同版本/commit、远端hotfix1==本地1返回false。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "needs_update_honors_hotfix_only_on_canary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L226:C3",
+            "title": "stable channel does not check hotfix_version",
+            "suites": [
+              "needsUpdate with canary channel"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "stable相同version/commit返回false，不以canary hotfix触发更新。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "needs_update_honors_hotfix_only_on_canary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L237:C3",
+            "title": "defaults to stable channel when not specified",
+            "suites": [
+              "needsUpdate with canary channel"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Rust API以必填UpdateChannel::Stable承接TS省略channel默认stable合同；stable相同版本/commit无更新，生产调用显式传入resolved.channel，类型防止遗漏。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "needs_update_honors_hotfix_only_on_canary"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L258:C3",
+            "title": "generates installId when missing",
+            "suites": [
+              "installId auto-generation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实TempDir缺ID，ensure后磁盘生成非空字符串且重复调用保持相同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "persists_install_id_and_canary_hotfix"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L268:C3",
+            "title": "preserves existing installId",
+            "suites": [
+              "installId auto-generation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实TempDir、内存existing-id而无配置文件；ensure后不创建config.json且101个灰度阈值均保持同一bucket。额外真实回归覆盖磁盘非UUID/空白ID优先、不重写已有文件、缺磁盘字段不写、并发首次生成同ID、损坏/非object配置失败而原字节不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/updater_install_id_history.rs",
+                "test": "existing_memory_identity_does_not_create_a_config_or_change_its_bucket"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L285:C3",
+            "title": "writes hotfix_version to config after canary update",
+            "suites": [
+              "canary state persistence"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实TempDir persist hotfix2，读取磁盘精确2。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "persists_install_id_and_canary_hotfix"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L294:C3",
+            "title": "writes default hotfix_version 0 when not specified",
+            "suites": [
+              "canary state persistence"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实TempDir已有hotfix2，persist0后精确0；policy和userId保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/updater_canary_history.rs",
+                "test": "canary_zero_hotfix_is_written_and_other_fields_survive"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/config-auto-update.test.ts",
+      "source_hash": "e9cd4d8094367dbd271d5c0da26ddde0387d8a10124afdd8c01caed43985c392",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84逐字相同。环境getter隔离，不读真实HOME/config。保留原配置业务；manifest默认文件名按已授权Rust独立渠道安全设计适配latest-rust.json，依据docs/zh-CN/installation.md。不等价宣称仍接Node渠道。",
+      "cases": [
+        {
+          "source": {
+            "id": "L25:C3",
+            "title": "disabled when no packageUrl configured",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "无配置与env时enabled=false、package_url和manifest_url均None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "disables_when_no_package_url_is_configured"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L32:C3",
+            "title": "derives manifest URL from package URL",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留同目录推导合同；按Rust迁移设计推导latest-rust.json而不是Node latest.json，docs/zh-CN/installation.md独立Rust渠道约束。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "uses file values over defaults",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "enabled=false、interval120000、manifest与package_url四项精确保留，补充此前缺失package_url显式断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "env LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false disables",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "配置PACKAGE_URL同时AUTO_UPDATE_ENABLED=false禁用。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L63:C3",
+            "title": "env LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS overrides interval",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "INTERVAL_MS=300000精确覆盖。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "env LOONGSUITE_PILOT_PACKAGE_URL overrides package URL and enables",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "env package_url精确custom.com/pkg.tar.gz并enabled=true；manifest推导custom.com/latest-rust.json符合独立Rust渠道。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L77:C3",
+            "title": "env LOONGSUITE_PILOT_MANIFEST_URL overrides manifest URL",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "显式env manifest_url精确custom.com/versions.json。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "env overrides file values",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "env interval999覆盖file5000。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "derives_manifest_url_and_prefers_file_then_env"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "reads installId and canary fields from config",
+            "suites": [
+              "buildAutoUpdateConfig"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "install-id、Auto枚举、hotfix3精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/auto_update_config.rs",
+                "test": "reads_install_id_and_canary_fields"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/segment-token-reader-request-start.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "59d68de269136cca46227535405431d1cb2f9f095cdc0ebe105cf55b6e394620",
+      "note": "ef8953/f84 byte-identical8 declarations; actual temp segment files and production native reader, no pure build_data mirror. Legacy failure-anchor consumption was missing in Rust: red7pass1fail, one-line lazy remove matches old TS anchor-only deletion. Linux actual8 plus existing native identity2; Win/mac actual pending CI;0retire.",
+      "cases": [
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "prefers the exact model.request.started for the same request id",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual request's exact start4ms beats loop start0; exact end9000ms",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l54_exact_request_start_precedes_iteration_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C3",
+            "title": "anchors a retry on the attempt_failed it replaces, not on the iteration",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual failed-attempt60026ms anchors retry end68125ms, duration8099ms, exact retryID",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l70_retry_anchors_to_replaced_failure_not_iteration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "falls back to the loop iteration when nothing failed before it",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual orphan start uses same loop0ms and duration7500ms",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l86_unfailed_orphan_uses_own_iteration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "anchors each completion on its own iteration",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual two completions own different loop IDs and produce starts0ms/20000ms in original order",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l100_each_completion_uses_its_own_iteration"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "reports an unknown start rather than a degenerate one",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual no-loop orphan start0 remains different from measured completion time",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l115_no_anchor_reports_zero_instead_of_completion_time"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L124:C3",
+            "title": "never returns a start equal to its own end",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual known-loop/missing-loop/no-loop trio all avoid manufacturing start equal completion",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l124_missing_start_never_fabricates_instantaneous_span"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L141:C3",
+            "title": "does not reuse a failure anchor for a later request of the same iteration",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual failed attempt applies to one replacement; later same-loop request does not borrow same timestamp",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l141_failure_anchor_is_consumed_once_for_its_replacement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "anchors exactly when the start lands in a later-named file",
+            "suites": [
+              "readSegmentTokensForSession request start anchoring"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual later-named file's earlier start is globally timestamp sorted before its earlier-named completion, exact4ms retained",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_start_migration_contract_tests.rs",
+                "test": "source_l164_global_timestamp_sort_anchors_start_in_later_named_file"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/segment-token-reader-incremental.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "10ef351983d14192f5195decefedfe486089521456db0e9d6e2a3c4dee2e7ffc",
+      "note": "ef8953/f84 identical7. Actual file-backed public native reader; task-local cfg(test) probe counts actual read completions/bytes and caps actual native read slice7bytes. No returned record/mock parser. Process-local session cache isolated via explicit synthetic root andUUID. Linux7 actual plus request8 and same-handle identity2; Win/mac pending CI.0retire.",
+      "cases": [
+        {
+          "source": {
+            "id": "L91:C3",
+            "title": "reads only bytes appended after the last complete record",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual File read count and byte count: first body exactlyfull, appended pair exactlyappendbytes, unchanged snapshot0actualreads and sameIDs",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l91_real_reader_reads_only_appended_bytes_and_cached_snapshot_reads_zero"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "keeps a partial tail at the old offset until its newline arrives",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual half-start tail deferred; appended remaining start plus completion yields old/new requests without loss",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l115_partial_tail_is_revisited_from_last_complete_newline"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L134:C3",
+            "title": "does not consume a complete-looking final record until it is newline-terminated",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual complete JSON completion without newline produces0; newline commit makes exact request visible",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l134_complete_json_without_final_newline_waits_for_writer_commit"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "loops over short reads instead of treating them as truncation",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native File read slices limited7bytes, more2IOcalls and sumexactbodybytes; full pair parsed",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l146_actual_seven_byte_reads_loop_until_snapshot_complete"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L158:C3",
+            "title": "consumes a malformed complete line and continues with later records",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual malformed newline record consumed once; later valid pair parsed and unchanged secondlookup0bodyreads",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l158_malformed_complete_line_is_consumed_once_without_poisoning_later_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C3",
+            "title": "discovers a second segment file without reparsing the first one",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual newsecond file returns A/B while counted readbytes exactlynewfilebody, original file0bodyreread",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l175_new_file_is_discovered_without_rereading_first_file_body"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "rebuilds a file index after the writer truncates the file",
+            "suites": [
+              "readSegmentTokensForSession incremental JSONL reading"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual samefile truncate0/write shorter replacement dropsoldpair and rebuilds onlyB",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_incremental_migration_contract_tests.rs",
+                "test": "source_l190_real_truncation_rebuilds_file_index_and_removes_old_pair"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/state-restore.test.ts",
+      "source_hash": "c9bac735d6be3125c85ab473bd779782aa2b8b3622db9e5c911639f47b6e9dbe",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84逐字相同；真实StateStore/SnapshotStore/QoderTrace临时文件与对象重建，不使用MockStateStore。Linux Rust1.99.1/glibc2.34实跑；Windows/macOS未运行，不混验。",
+      "cases": [
+        {
+          "source": {
+            "id": "L18:C3",
+            "title": "should restore offsets after save → new instance → load cycle",
+            "suites": [
+              "US3: StateStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact1024/2048 offsets and row42 restored by new actual Store load.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "state_restore_preserves_offsets_row_id_extra_and_three_disk_generations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "should preserve extra metadata across restore",
+            "suites": [
+              "US3: StateStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactoffset500/inode123456/customField value survives real filesystem save/drop/new/load.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "state_restore_preserves_offsets_row_id_extra_and_three_disk_generations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "should handle multiple save/load cycles correctly",
+            "suites": [
+              "US3: StateStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual three disk generations preserve a100 then a200/b50 without dropping earlier unrelated agents.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "state_restore_preserves_offsets_row_id_extra_and_three_disk_generations"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/snapshot-restore.test.ts",
+      "source_hash": "9e6b1ec1e527e3aba5c1c5ed891ad4372bb231b46c523321f4a9b7d36017101e",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84逐字相同；真实StateStore/SnapshotStore/QoderTrace临时文件与对象重建，不使用MockStateStore。Linux Rust1.99.1/glibc2.34实跑；Windows/macOS未运行，不混验。",
+      "cases": [
+        {
+          "source": {
+            "id": "L18:C3",
+            "title": "should restore processed entries after flush → new instance → load",
+            "suites": [
+              "US3: SnapshotStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two processed keys excluded and unknown third allowed after real flush/drop/new/load.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "snapshot_restore_preserves_processed_pending_and_actual_max_watermark"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "should restore highWatermark correctly",
+            "suites": [
+              "US3: SnapshotStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual maximum of two distinct processed timestamps restored exactly; use future synthetic timestamps to make retention-floor fallback unable to satisfy original weak >=10000 assertion.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "snapshot_restore_preserves_processed_pending_and_actual_max_watermark"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L53:C3",
+            "title": "should handle pending entries across restore",
+            "suites": [
+              "US3: SnapshotStore restore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Separate actual pending-only snapshot restores key suppression and exactsize1.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "snapshot_restore_preserves_processed_pending_and_actual_max_watermark"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/restart-recovery.test.ts",
+      "source_hash": "88a1529600497b67e83ed45f0bef8b9fb94aa8cddb464c5f622615a6842becb2",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84逐字相同；真实StateStore/SnapshotStore/QoderTrace临时文件与对象重建，不使用MockStateStore。Linux Rust1.99.1/glibc2.34实跑；Windows/macOS未运行，不混验。",
+      "cases": [
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "should resume from saved offset after simulated restart",
+            "suites": [
+              "US3: End-to-end restart recovery (offset persisted across processes)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderTrace input baselines empty history, emits exactfirst3, saves complete bytes, recreated StateStore load emits only exactsecond2 tool.result IDs, subsequent reread empty.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/legacy_restore_flows.rs",
+                "test": "actual_qoder_trace_resumes_three_then_two_after_a_new_store_disk_load"
               }
             ]
           }

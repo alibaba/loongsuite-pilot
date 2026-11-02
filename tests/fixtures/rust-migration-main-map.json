@@ -11479,10 +11479,10 @@
     },
     {
       "legacy": "tests/unit/hooks/codex/powershell-wrapper.test.mjs",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
       "source_hash": "b22eb1e1651d63e12092c548359af2a252091d4cdbf237e823ecf259237915e3",
-      "note": "All3 source declarations have concrete Native Windows acceptance code; retain partial until actual Windows CI runs new assertions. No Linux cfg-noop counted as Windows success. Only Node/MSYS lookup mechanism replaced by signed Native binary absolute.exe binding; UTF8/stdin/path/home/fail-open business retained. f84 L33/L121 timing assertions explicitly added to true wrapper roundtrip.",
+      "note": "Exact source3 retained as native stdin/argv/timing and legacy-node-pin compatibility contracts. Rust wrappers no longer launch Node. E commit e4fa696 actual Windows x64 and ARM64 Native run41383594300 passed both required test functions with PS5.1/PS7 and language-mode roundtrips. No shell-availability early return: absent shells panic. Evidence /tmp/pilot-powershell-history3-native-proof-20261102.json; platform evidence pertains to that commit, not later unrelated additions.",
       "cases": [
         {
           "source": {
@@ -11495,7 +11495,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
@@ -11525,7 +11525,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
@@ -11555,7 +11555,7 @@
               "describe.runIf(process.platform === 'win32')"
             ]
           },
-          "coverage": "partial",
+          "coverage": "complete",
           "behavior": "Native safely binds an absolute .exe using pilot-bin; the obsolete Node/MSYS node-bin lookup mechanism is replaced, not a runtime fallback. Existing actual PS5.1/PS7 Full+ConstrainedLanguage roundtrip and new absent/empty/MSYS legacy-nodepin matrix preserve raw BOM/UTF8 stdin, exact session/turn/transcript/CODEX_HOME/session_dir/shared install root and no taskHOME fallback. New matrix exercises stop+session-start and exact shared-directory timing event/nonnegative duration. Linux actual Shell stop+session-start passed; new Windows assertions and matrix remain pending actual Windows compile/execution.",
           "platforms": [
             "windows"
