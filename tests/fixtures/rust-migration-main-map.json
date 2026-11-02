@@ -11575,6 +11575,201 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/inputs/openclaw-plugin-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "669fc69758ec57f3df57d4c6856c8819af32b69479e02f4115bb58f63bb4513f",
+      "cases": [
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "reports a clear contract error when stateStore is missing",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Mandatory native Arc<StateStore> field prevents invalid construction; real Rust E0063 compile-fail plus successful complete options doctests, and exact optional-store boundary diagnostic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "JavaScript Reflect.construct omitted-required-argument runtime failure is unrepresentable in the typed native constructor: mandatory Arc<StateStore>. E0063 negative and complete-options positive Rust doctests were actually compiled; optional boundary retains exact diagnostic.",
+            "replacement": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::reports_contract_error_when_state_store_is_missing"
+              },
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "resolves defaults and detection paths from the Pilot data directory",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual environment-selected data root, default path/watch/availability; existing helper runs isolated child automatically (not an empty early return).",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::resolves_defaults_from_pilot_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "accepts an explicit dataDir for standalone construction and detection",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual explicit data root drives constructor/watch/availability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "reads plugin JSONL and normalizes canonical fields",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual start/read/stop canonical record, all original provider/response/name/session/token expected values.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::reads_plugin_jsonl"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "drops session lifecycle events from the canonical pipeline",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both real session_start/session_end hook lines yield no canonical events.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::drops_session_lifecycle_events"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "uses before_agent_run as the single canonical turn input source",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "f84 explicitly supersedes old stripped before_model_resolve placeholder: completely discard redundant event and preserve exact before_agent_run prompt delta/system instructions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::uses_before_agent_run_as_turn_input_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "tightens an existing log directory when the input starts",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual 0755 temp log directory changed to 0700 by production startup; Unix-only contract.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::tightens_existing_log_directory"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

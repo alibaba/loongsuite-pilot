@@ -15,6 +15,33 @@ use crate::utils::{directory_exists, resolve_poll_interval_ms, DEFAULT_POLL_INTE
 const LOG_NAME: &str = "openclaw";
 const MISSING_STORE: &str = "OpenClawPluginInput requires a stateStore";
 
+/// Native construction requires a shared checkpoint store at compile time.
+/// Omitting it cannot create an input with an unusable lifecycle.
+///
+/// ```compile_fail,E0063
+/// use loongsuite_pilot::inputs::openclaw_plugin::OpenClawPluginInputOptions;
+/// let options = OpenClawPluginInputOptions {
+///     log_dir: None,
+///     log_prefix: None,
+///     poll_interval_ms: None,
+///     data_dir: None,
+///
+/// };
+/// ```
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use loongsuite_pilot::checkpoints::StateStore;
+/// use loongsuite_pilot::inputs::openclaw_plugin::{OpenClawPluginInputOptions, OpenClawPluginInput};
+/// let input = OpenClawPluginInput::new(OpenClawPluginInputOptions {
+///     state_store: Arc::new(StateStore::new("synthetic-state.json")),
+///     log_dir: None,
+///     log_prefix: None,
+///     poll_interval_ms: None,
+///     data_dir: None,
+///
+/// });
+/// ```
 pub struct OpenClawPluginInputOptions {
     pub state_store: Arc<StateStore>,
     pub log_dir: Option<String>,

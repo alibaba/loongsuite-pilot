@@ -18,6 +18,33 @@ const MISSING_STORE: &str = "PiCodingAgentLogInput requires a stateStore";
 
 pub type AgentEnabled = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Native construction requires a shared checkpoint store at compile time.
+/// Omitting it cannot create an input with an unusable lifecycle.
+///
+/// ```compile_fail,E0063
+/// use loongsuite_pilot::inputs::pi_coding_agent_log::PiCodingAgentLogInputOptions;
+/// let options = PiCodingAgentLogInputOptions {
+///     log_dir: None,
+///     log_prefix: None,
+///     poll_interval_ms: None,
+///     data_dir: None,
+///     agent_enabled: None,
+/// };
+/// ```
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use loongsuite_pilot::checkpoints::StateStore;
+/// use loongsuite_pilot::inputs::pi_coding_agent_log::{PiCodingAgentLogInputOptions, PiCodingAgentLogInput};
+/// let input = PiCodingAgentLogInput::new(PiCodingAgentLogInputOptions {
+///     state_store: Arc::new(StateStore::new("synthetic-state.json")),
+///     log_dir: None,
+///     log_prefix: None,
+///     poll_interval_ms: None,
+///     data_dir: None,
+///     agent_enabled: None,
+/// });
+/// ```
 pub struct PiCodingAgentLogInputOptions {
     pub state_store: Arc<StateStore>,
     pub log_dir: Option<String>,
@@ -320,6 +347,7 @@ mod tests {
         input.start().await;
         input.stop().await;
         let entries = seen.lock().unwrap();
+        assert_eq!(entries.len(), 1);
         let value = entry_json(&entries[0]);
         assert_eq!(value["gen_ai.agent.type"], "acme-code");
         assert_eq!(value["gen_ai.agent.id"], "acme-code");

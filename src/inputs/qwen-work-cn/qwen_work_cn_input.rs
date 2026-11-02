@@ -163,3 +163,7 @@ impl HookBody for QwenWorkCnBody {
         Ok(Some(entry))
     }
 }
+
+#[cfg(test)]
+#[path = "hook_migration_contract_tests.rs"]
+mod qwen_history_migration_contract_tests;

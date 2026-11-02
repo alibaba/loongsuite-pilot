@@ -1080,3 +1080,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 #[path = "segment_identity_tests.rs"]
 mod segment_identity_tests;
+
+#[cfg(test)]
+#[path = "trace_migration_contract_tests.rs"]
+mod qwen_history_migration_contract_tests;

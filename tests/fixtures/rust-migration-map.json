@@ -68202,6 +68202,1040 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/inputs/hermes-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "21a555baab4928108299377f588f3bacb1b7611d523b073679f82eb1990d2f7c",
+      "cases": [
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "has the Hermes identity and session-file collection method",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual typed Hermes input identity and session-file method; exact default watch path under synthetic HOME.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::identity_and_watch_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "returns no files when the configured directory does not exist",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Missing actual temp directory returns no files.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::missing_directory_yields_no_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L53:C3",
+            "title": "discovers matching regular files in stable order",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual mixed regular files and matching directory; only two matching files in stable lexical order.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::discovers_matching_files_in_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "supports a custom file pattern",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Custom worker-?.log glob excludes default matching name.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::supports_custom_file_pattern"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L71:C3",
+            "title": "collects multiple process files with independent checkpoints",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two real process files, exact a1/b1 order, positive separate offsets, independent a2 then b2 appends.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::collects_files_with_independent_checkpoints"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C3",
+            "title": "does not emit existing records again after restart",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Recreated input on same Store emits initial once, then none, then exact new appended event.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::does_not_emit_existing_records_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L102:C3",
+            "title": "preserves Hermes skill semantic attributes",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact four original skill fields; shared real-file fixture also verifies independent worker resource attributes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::preserves_skill_attributes_and_worker_resource"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "preserves the custom Hermes worker identity and Resource marker",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact planner agent name and resourceAttributes object; separate real worker file.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::preserves_skill_attributes_and_worker_resource"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "waits for an incomplete UTF-8 JSONL line before advancing its byte offset",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Split first Chinese UTF8 codepoint, zero offset before newline, exact reconstructed messages and full final byte count.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::waits_for_incomplete_utf8_line"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L168:C3",
+            "title": "skips malformed lines without blocking later records or appends",
+            "suites": [
+              "HermesLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual malformed line skipped without blocking later valid initial record or subsequent append.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/hermes-log/mod.rs",
+                "test": "tests::skips_malformed_lines"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/openclaw-plugin-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "e818479c1b6fd94232094f1769a4977b8dd5fb6cdf2e37431c789b607d694ec4",
+      "cases": [
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "reports a clear contract error when stateStore is missing",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Mandatory native Arc<StateStore> field prevents invalid construction; real Rust E0063 compile-fail plus successful complete options doctests, and exact optional-store boundary diagnostic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "JavaScript Reflect.construct omitted-required-argument runtime failure is unrepresentable in the typed native constructor: mandatory Arc<StateStore>. E0063 negative and complete-options positive Rust doctests were actually compiled; optional boundary retains exact diagnostic.",
+            "replacement": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::reports_contract_error_when_state_store_is_missing"
+              },
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "resolves defaults and detection paths from the Pilot data directory",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual environment-selected data root, default path/watch/availability; existing helper runs isolated child automatically (not an empty early return).",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::resolves_defaults_from_pilot_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "accepts an explicit dataDir for standalone construction and detection",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual explicit data root drives constructor/watch/availability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "reads plugin JSONL and normalizes canonical fields",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual start/read/stop canonical record, all original provider/response/name/session/token expected values.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::reads_plugin_jsonl"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "drops session lifecycle events from the canonical pipeline",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both real session_start/session_end hook lines yield no canonical events.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::drops_session_lifecycle_events"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C3",
+            "title": "uses before_agent_run as the single canonical turn input source",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "f84 explicitly supersedes old stripped before_model_resolve placeholder: completely discard redundant event and preserve exact before_agent_run prompt delta/system instructions.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Fixed f84e388 same test L138 explicitly changes expected2/stripped placeholder into expected1/no before_model_resolve event. Keep the current main single-source turn boundary, not the baseline duplicate placeholder.",
+            "replacement": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::uses_before_agent_run_as_turn_input_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L192:C3",
+            "title": "tightens an existing log directory when the input starts",
+            "suites": [
+              "OpenClawPluginInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual 0755 temp log directory changed to 0700 by production startup; Unix-only contract.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/openclaw-plugin/mod.rs",
+                "test": "tests::tightens_existing_log_directory"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/pi-coding-agent-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "97eafbcac46b704b8feaa51fff5adbea76ed33df2d207643de8b5cdf784da45c",
+      "cases": [
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "reports a clear contract error when stateStore is missing",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Mandatory native Arc<StateStore> construction; real E0063 negative and complete-options positive doctests, exact optional-store diagnostic.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "JavaScript Reflect.construct omitted-required-argument runtime failure is unrepresentable in the typed native constructor: mandatory Arc<StateStore>. E0063 negative and complete-options positive Rust doctests were actually compiled; optional boundary retains exact diagnostic.",
+            "replacement": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::reports_contract_error_when_state_store_is_missing"
+              },
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "resolves standalone defaults from the Pilot data directory",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual environment-selected root in independently spawned child, exact default path/watch/availability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::resolves_defaults_from_pilot_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "accepts an explicit dataDir for standalone construction and detection",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual explicit data root drives constructor/watch/availability.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::accepts_explicit_data_dir"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "reads extension JSONL and normalizes canonical fields",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual start/read/stop with exact original identity/provider/response/name/session/input and output tokens.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::reads_extension_jsonl"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C3",
+            "title": "uses byte offsets to avoid replaying consumed records",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual store byte cursor consumed by recreated input, one then zero callbacks.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::uses_byte_offsets_to_avoid_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L137:C3",
+            "title": "preserves the registered PI SDK Agent identity from canonical records",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual custom SDK record; exact single-entry count added plus all six registered identity/workspace fields.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::preserves_registered_sdk_agent_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L169:C3",
+            "title": "drops records for a disabled SDK Agent while collecting another PI Agent",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual mixed disabled/enabled SDK records emit only enabled; recreated allow-all input does not replay discarded disabled bytes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::drops_disabled_sdk_agent_without_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C3",
+            "title": "tightens an existing log directory when the input starts",
+            "suites": [
+              "PiCodingAgentLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual production startup changes pre-existing directory permissions 0755 to0700 on Unix.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/pi-coding-agent-log/mod.rs",
+                "test": "tests::tightens_existing_log_directory"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/mimo-code-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "d42e86afea8e0f7ad9d1dbf27aec80dd59f151d974c4ed955d170c59f6e3d73f",
+      "cases": [
+        {
+          "source": {
+            "id": "L20:C3",
+            "title": "normalizes plugin cwd into canonical workspace and Git fields",
+            "suites": [
+              "MimoCodeLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual temporary plugin JSONL production lifecycle; exact event id, agent type, namespaced cwd and canonical workspace fields.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/mimo-code-log/mod.rs",
+                "test": "tests::normalizes_plugin_cwd_into_workspace_and_git_fields"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/grok-build-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐assert审核ef8953/f84；已有真实Rust production input tests复用并补Pi SDK单条数、两组required-store正负编译合同。Linux Rust1.99.1/glibc2.34已实际运行；Windows/macOS未替代验证。未登记的Hermes itNonRoot别名不在固定AST分母，root容器下其原生额外权限测试提前返回，不将其声称为实际权限验收。",
+      "source_hash": "b6cf3ef24bab77ffc90a3d6953f8c16a5a9711806b20384c2790f8172c99a138",
+      "cases": [
+        {
+          "source": {
+            "id": "L36:C3",
+            "title": "registers as a Grok hook JSONL input and preserves reconstruction fields",
+            "suites": [
+              "GrokBuildLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual seeded Store and temporary JSONL production lifecycle; exact identity, hook method, duration125, failure status and both reconstruction fields.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/grok-build-log/mod.rs",
+                "test": "tests::registers_as_grok_hook_jsonl_and_preserves_reconstruction_fields"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qwen-work-cn-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "938d5eb043bd722a4e19862dc8d073718ce325585682ad4f08c97b01c6243e4f",
+      "note": "ef8953/f84 identical. Native actual temporary Hook/segment files, public per-client constructors and HostedInput, plus actual incomplete segment reader. Node vi.spyOn(readInterceptFile) is represented by native routing with no intercept reader and tainted matching-response legacy negative controls (unchanged bytes and no usage/system taint), not a replacement spy. Linux10 actual; Windows/macOS pending CI. No cases retired.",
+      "cases": [
+        {
+          "source": {
+            "id": "L28:C3",
+            "title": "has a product-specific identity",
+            "suites": [
+              "QwenWorkCNInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Qwen native Hook constructor identity and agent type are literal product-specific values",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/hook_migration_contract_tests.rs",
+                "test": "source_l28_actual_hook_has_product_specific_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "reads canonical hook output and enforces the QwenWorkCN agent type",
+            "suites": [
+              "QwenWorkCNInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual current-day canonical Hook record forces Qwen agent, preserves session/cwd-derived workspace and agent-scoped version, drops bare runtime version and reports native agent_version",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/hook_migration_contract_tests.rs",
+                "test": "source_l33_actual_hook_enforces_agent_workspace_and_agent_version_contract"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qwen-work-cn-trace-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "7977ced180a36f5009bd7a406cfb304750ca5519152062298960b7de297a2f31",
+      "note": "ef8953/f84 identical. Native actual temporary Hook/segment files, public per-client constructors and HostedInput, plus actual incomplete segment reader. Node vi.spyOn(readInterceptFile) is represented by native routing with no intercept reader and tainted matching-response legacy negative controls (unchanged bytes and no usage/system taint), not a replacement spy. Linux10 actual; Windows/macOS pending CI. No cases retired.",
+      "cases": [
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "has an independent QwenWorkCN identity and watches only native sources",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Trace constructor identity/method and default Qwen-only vs explicit two watch roots",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l74_real_trace_identity_and_default_and_explicit_native_watch_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "strips a legacy bare runtime version while preserving the agent-scoped version",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual canonical trace file drops version and preserves scoped agent version",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l89_real_trace_strips_bare_version_and_preserves_agent_scoped_version"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "keeps native model and timing but ignores legacy intercept data for zero-token segments",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual history plus zero-token native segments retains model and exact request/response nanoseconds, omits all usage/system overlays despite matching legacy intercept token/system records; legacy bytes unchanged, all4entries Qwen/model, trace32lowerhex",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l104_native_zero_usage_keeps_model_and_timing_without_legacy_intercept_overlay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L164:C3",
+            "title": "collects native token and cache usage without intercept overlays",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native100/20/120/cache60/create10 from segment pair beats tainted999/999 legacy matching responseID, no reasoning overlay and legacy bytes unchanged",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l164_native_tokens_and_both_cache_fields_win_without_intercept_reasoning"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L189:C3",
+            "title": "does not read the QoderWork intercept file",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual foreign qoderwork intercept with matching ID does not supply response usage and remains unchanged",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l189_foreign_qoder_intercept_does_not_supply_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C3",
+            "title": "drains every file after a legacy checkpoint across multi-day rollover without replay",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual legacy oldFile+byteOffset drains pending old, middle, current IDs in order, saves every exact EOF offset and fresh input emits0 repeats",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l204_actual_legacy_multiday_checkpoint_drains_pending_files_without_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L232:C3",
+            "title": "does not checkpoint an incomplete final JSONL row",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual incomplete Hook final row leaves offset0/no emission until newline, then exact event appears",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l232_incomplete_hook_tail_does_not_checkpoint_until_newline"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L245:C3",
+            "title": "does not checkpoint an incomplete final segment row",
+            "suites": [
+              "QwenWorkCNTraceInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual private native segment reader leaves offset0 and in-flight pair absent without newline; appended newline commits exact filesize and creates exact request pair",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qwen-work-cn/trace_migration_contract_tests.rs",
+                "test": "source_l245_actual_segment_reader_defers_incomplete_row_and_pair_until_newline"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }
