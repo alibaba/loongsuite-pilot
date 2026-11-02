@@ -130,10 +130,36 @@ mod json_file {
         if left == right {
             return true;
         }
-        match (left.as_f64(), right.as_f64()) {
+        // Converting both integers to f64 would merge adjacent identities above
+        // 2^53. Keep exact integer comparison, including signed/unsigned pairs.
+        match (integer_value(left), integer_value(right)) {
             (Some(left), Some(right)) => left == right,
-            _ => false,
+            (Some(integer), None) => float_equals_integer(right, integer),
+            (None, Some(integer)) => float_equals_integer(left, integer),
+            (None, None) => match (left.as_f64(), right.as_f64()) {
+                (Some(left), Some(right)) => left == right,
+                _ => false,
+            },
         }
+    }
+
+    fn integer_value(number: &serde_json::Number) -> Option<i128> {
+        number
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| number.as_u64().map(i128::from))
+    }
+
+    fn float_equals_integer(number: &serde_json::Number, integer: i128) -> bool {
+        let Some(value) = number.as_f64() else {
+            return false;
+        };
+        // The upper bound is exclusive: u64::MAX rounds to 2^64 in f64.
+        // Casting that rounded value to u64 would saturate and falsely match.
+        value.is_finite()
+            && value.fract() == 0.0
+            && (i64::MIN as f64..u64::MAX as f64).contains(&value)
+            && value as i128 == integer
     }
 
     impl<'de> Deserialize<'de> for JVal {
@@ -413,3 +439,7 @@ mod json_file {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "numeric_equality_tests.rs"]
+mod numeric_equality_tests;

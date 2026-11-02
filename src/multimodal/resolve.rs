@@ -358,6 +358,51 @@ pub struct OpenedImage {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum ImageIoTestPhase {
+    BeforeOpen,
+    AfterOpen,
+    AfterOpenedRealPath,
+    Allocation(usize),
+    ReadRequested(usize),
+    AfterRead(usize),
+}
+#[cfg(test)]
+type ImageIoTestHook = Arc<dyn Fn(ImageIoTestPhase, &str) -> Option<usize> + Send + Sync>;
+#[cfg(test)]
+tokio::task_local! {
+    static IMAGE_IO_TEST_HOOK: ImageIoTestHook;
+}
+#[cfg(test)]
+thread_local! {
+    static IMAGE_IO_TEST_CONTEXT: std::cell::RefCell<Option<(String, ImageIoTestHook)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+struct ImageIoTestScope(Option<(String, ImageIoTestHook)>);
+#[cfg(test)]
+impl ImageIoTestScope {
+    fn enter(path: &str, hook: Option<ImageIoTestHook>) -> Self {
+        Self(
+            IMAGE_IO_TEST_CONTEXT
+                .with(|slot| slot.replace(hook.map(|hook| (path.to_owned(), hook)))),
+        )
+    }
+}
+#[cfg(test)]
+impl Drop for ImageIoTestScope {
+    fn drop(&mut self) {
+        IMAGE_IO_TEST_CONTEXT.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+#[cfg(test)]
+fn image_io_test_phase(phase: ImageIoTestPhase) -> Option<usize> {
+    let context = IMAGE_IO_TEST_CONTEXT.with(|slot| slot.borrow().clone());
+    context.and_then(|(path, hook)| hook(phase, &path))
+}
+
+#[cfg(test)]
 pub(crate) type ImageReadWorkerHook = Arc<dyn Fn(bool, &str) + Send + Sync>;
 #[cfg(test)]
 tokio::task_local! {
@@ -457,8 +502,12 @@ pub(crate) async fn open_normalized_local_image_scoped(
     let roots = allowed_root_paths.map(<[String]>::to_vec);
     #[cfg(test)]
     let hook = IMAGE_READ_WORKER_HOOK.try_with(Arc::clone).ok();
+    #[cfg(test)]
+    let io_hook = IMAGE_IO_TEST_HOOK.try_with(Arc::clone).ok();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        #[cfg(test)]
+        let _io_test_scope = ImageIoTestScope::enter(&path, io_hook);
         #[cfg(test)]
         let before_read = || ImageReadWorkerObserver::new(hook, &path);
         #[cfg(not(test))]
@@ -492,7 +541,11 @@ fn read_image_blocking<T>(
             return None;
         }
     }
+    #[cfg(test)]
+    image_io_test_phase(ImageIoTestPhase::BeforeOpen);
     let mut file = open_nofollow(resolved_path).ok()?;
+    #[cfg(test)]
+    image_io_test_phase(ImageIoTestPhase::AfterOpen);
     if cancellation.aborted() {
         return None;
     }
@@ -552,6 +605,8 @@ fn opened_matches(
     if !real_path_inside_roots_blocking(resolved_path, roots, cancellation) {
         return false;
     }
+    #[cfg(test)]
+    image_io_test_phase(ImageIoTestPhase::AfterOpenedRealPath);
     // MetadataExt file_index is unstable on Windows; compare the exact handles
     // with the project's existing cross-platform file identity adapter.
     let Ok(left) = crate::utils::file_identity::identity_from_open(opened) else {
@@ -563,7 +618,86 @@ fn opened_matches(
     let Ok(right) = crate::utils::file_identity::identity_from_open(&current) else {
         return false;
     };
-    !cancellation.aborted() && left.dev == right.dev && left.ino == right.ino
+    if cancellation.aborted() || left.dev != right.dev || left.ino != right.ino {
+        return false;
+    }
+    // Reopening the name cannot bind authorization to the original handle:
+    // an attacker can swap a parent between realpath and both opens.
+    let Ok(actual_path) = path_from_opened_image(opened) else {
+        return false;
+    };
+    let Some(actual_path) = actual_path.to_str() else {
+        return false;
+    };
+    !cancellation.aborted() && is_path_inside_roots(&strip_extended_prefix(actual_path), roots)
+}
+
+/// Query the exact handle already used for reading. All calls stay inside the
+/// owned blocking worker and retain its IO permit. Failure is closed; a second
+/// path lookup is not a safe substitute for an unavailable handle path.
+#[cfg(target_os = "linux")]
+fn path_from_opened_image(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+#[cfg(target_os = "macos")]
+fn path_from_opened_image(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let mut buffer = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: the descriptor is owned by file; F_GETPATH receives a writable
+    // PATH_MAX-byte buffer as required by the native contract.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let length = buffer.iter().position(|byte| *byte == 0).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unterminated opened image path",
+        )
+    })?;
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buffer[..length],
+    )))
+}
+
+#[cfg(windows)]
+fn path_from_opened_image(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buffer = vec![0u16; 32_768];
+    // SAFETY: file owns the live handle and the UTF-16 output allocation has
+    // exactly the advertised capacity. Zero requests normalized DOS names.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            0,
+        )
+    };
+    if length == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length as usize >= buffer.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "opened image path exceeds bounded buffer",
+        ));
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn path_from_opened_image(_file: &std::fs::File) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opened image path unavailable",
+    ))
 }
 
 fn read_fully(
@@ -574,15 +708,26 @@ fn read_fully(
     if cancellation.aborted() {
         return None;
     }
+    #[cfg(test)]
+    image_io_test_phase(ImageIoTestPhase::Allocation(byte_length));
     let mut buf = vec![0u8; byte_length];
     let mut offset = 0;
     while offset < byte_length {
         if cancellation.aborted() {
             return None;
         }
-        match file.read(&mut buf[offset..]) {
+        let requested = byte_length - offset;
+        #[cfg(test)]
+        let requested = image_io_test_phase(ImageIoTestPhase::ReadRequested(requested))
+            .map(|limit| limit.min(requested))
+            .unwrap_or(requested);
+        match file.read(&mut buf[offset..offset + requested]) {
             Ok(0) => break,
-            Ok(read) => offset += read,
+            Ok(read) => {
+                offset += read;
+                #[cfg(test)]
+                image_io_test_phase(ImageIoTestPhase::AfterRead(read));
+            }
             Err(_) => return None,
         }
     }
@@ -859,7 +1004,7 @@ fn node_normalize(path: &str) -> String {
     }
     let absolute = is_absolute(path);
     let mut stack: Vec<&str> = Vec::new();
-    for part in path.split(['/', '\\']) {
+    for part in path.split('/') {
         if part.is_empty() || part == "." {
             continue;
         }
@@ -1130,8 +1275,8 @@ mod tests {
         let link = dir.join("y.png");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&file, &link).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(&file, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&file, &link).unwrap();
         let link_s = link.to_string_lossy().to_string();
         assert!(lstat_regular_image_file(&link_s, None).await.is_none());
         assert!(
@@ -1140,7 +1285,26 @@ mod tests {
                 .is_none()
         );
 
+        // Rejecting a link must not poison later reads of its valid target.
+        let target_again = open_normalized_local_image(
+            &file.to_string_lossy(),
+            MAX_MULTIMODAL_DATA_SIZE,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(target_again.bytes, bytes);
+        assert_eq!(target_again.mime_type, "image/png");
+
         let missing = dir.join("missing.png");
+        assert_eq!(
+            normalize_local_image_path(&missing.to_string_lossy()),
+            Some(strip_extended_prefix(
+                &std::path::absolute(&missing).unwrap().to_string_lossy()
+            ))
+        );
+        assert!(normalize_local_image_path(&dir.join("a.txt").to_string_lossy()).is_none());
         assert!(lstat_regular_image_file(&missing.to_string_lossy(), None)
             .await
             .is_none());
@@ -1164,8 +1328,8 @@ mod tests {
         std::fs::write(&secret, bytes).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, allowed.join("via")).unwrap();
-        #[cfg(not(unix))]
-        let _ = &outside;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, allowed.join("via")).unwrap();
         let escaped = allowed.join("via").join("secret.png");
         let roots = merge_allowed_root_paths(&[allowed.to_string_lossy().to_string()], None);
         assert!(is_path_inside_roots(
@@ -1211,7 +1375,7 @@ mod tests {
         let real = std::fs::canonicalize(&dir).unwrap();
         assert_eq!(
             canonicalize_root_path(&dir.to_string_lossy()),
-            real.to_string_lossy()
+            strip_extended_prefix(&real.to_string_lossy())
         );
         assert_eq!(
             canonicalize_root_path(&missing.to_string_lossy()),
@@ -1224,7 +1388,7 @@ mod tests {
             ],
             None,
         );
-        let real_text = real.to_string_lossy().into_owned();
+        let real_text = strip_extended_prefix(&real.to_string_lossy());
         assert!(merged.iter().any(|path| path == &real_text));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1259,3 +1423,7 @@ mod tests {
             .contains("standard regional aliyuncs.com endpoint"));
     }
 }
+
+#[cfg(test)]
+#[path = "resolve_contract_tests.rs"]
+mod migration_contract_tests;

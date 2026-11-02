@@ -54,6 +54,7 @@ pub struct SlsUploader {
     failure_warn_at: Mutex<LruMap<i64>>,
     abort: super::super::types::AbortFlag,
     closed: AtomicBool,
+    now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
     write_override: Mutex<Option<WriteFn>>,
 }
 
@@ -100,6 +101,7 @@ impl SlsUploader {
             failure_warn_at: Mutex::new(LruMap::new(MULTIMODAL_LRU_LIMIT).expect("lru")),
             abort: super::super::types::new_abort_flag(),
             closed: AtomicBool::new(false),
+            now_ms: Arc::new(now_ms),
             write_override: Mutex::new(None),
         })
     }
@@ -268,8 +270,12 @@ impl Uploader for SlsUploader {
                         callback();
                     }
                 }
-                self.warn_failure(status_code, error.as_deref().unwrap_or(""), &item);
-                let _ = request_id;
+                self.warn_failure(
+                    status_code,
+                    error.as_deref().unwrap_or(""),
+                    &item,
+                    request_id.as_deref(),
+                );
                 false
             }
             RetryOutcome::Ok(_) => {
@@ -293,7 +299,13 @@ impl Uploader for SlsUploader {
 }
 
 impl SlsUploader {
-    fn warn_failure(&self, status_code: Option<u16>, error: &str, item: &UploadItem) {
+    fn warn_failure(
+        &self,
+        status_code: Option<u16>,
+        error: &str,
+        item: &UploadItem,
+        request_id: Option<&str>,
+    ) {
         let reason = if status_code.is_none() {
             error.chars().take(200).collect::<String>()
         } else {
@@ -305,7 +317,7 @@ impl SlsUploader {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "none".into())
         );
-        let now = now_ms();
+        let now = (self.now_ms)();
         let mut map = self.failure_warn_at.lock().unwrap();
         let previous = map.get_copied(&key).unwrap_or(0);
         if now - previous < UPLOAD_FAILURE_WARN_INTERVAL_MS {
@@ -318,6 +330,7 @@ impl SlsUploader {
             Some(&log_meta(&[
                 ("statusCode", serde_json::json!(status_code)),
                 ("error", serde_json::json!(error)),
+                ("requestId", serde_json::json!(request_id)),
                 ("size", serde_json::json!(item.expected_size)),
                 ("targetPath", serde_json::json!(item.target_path)),
             ])),
@@ -384,3 +397,7 @@ mod tests {
         assert_eq!(left, "AccessDenied\0no");
     }
 }
+
+#[cfg(test)]
+#[path = "sls_uploader_contract_tests.rs"]
+mod migration_contract_tests;

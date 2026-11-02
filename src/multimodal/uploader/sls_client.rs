@@ -1347,3 +1347,7 @@ mod tests {
             .contains("timeoutMs must be a positive number"));
     }
 }
+
+#[cfg(test)]
+#[path = "sls_client_contract_tests.rs"]
+mod migration_contract_tests;
