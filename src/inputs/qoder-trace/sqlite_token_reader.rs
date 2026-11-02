@@ -396,3 +396,7 @@ fn parse_attached_image_paths(raw: Option<&str>) -> Vec<String> {
     }
     from_context
 }
+
+#[cfg(test)]
+#[path = "qoder_cn_reader_contract_tests.rs"]
+mod qoder_cn_migration_contract_tests;

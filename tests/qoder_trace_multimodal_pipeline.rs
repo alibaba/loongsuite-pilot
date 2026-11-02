@@ -520,3 +520,116 @@ async fn collect_l2680_real_sqlite_synthetic_clock_order_jsonl_and_llm_duration(
     assert_eq!(hr_time_to_nano(llm.duration), "5000000000");
     assert!(!p.uploader.0.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preserve_image_ownership()
+{
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let clip = dir.path().join("clip.png");
+    let at = dir.path().join("at.png");
+    let read = dir.path().join("read.png");
+    png(&clip);
+    std::fs::write(&at,base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC").unwrap()).unwrap();
+    std::fs::write(&read,base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC").unwrap()).unwrap();
+    let make = |id: &str, event: &str, turn: &str, text: &str| {
+        json!({
+            "event.id":id,"event.name":event,"gen_ai.agent.type":"qoder-cli","gen_ai.session.id":"cli-source-session","gen_ai.turn.id":turn,
+            "agent.qoder.cwd":dir.path(),"time_unix_nano":"1780000000000000000",
+            "gen_ai.input.messages_delta":[{"role":"user","parts":[{"type":"text","content":text}]}]
+        })
+    };
+    let clip_text = format!("[Image #0]看图 [Image: source: {}]", clip.display());
+    let read_text = "Read image: read.png (31KB)";
+    let records = vec![
+        make("cli-source-other", "other", "cli-source-turn", &clip_text),
+        make(
+            "cli-source-first",
+            "llm.request",
+            "cli-source-turn",
+            &clip_text,
+        ),
+        make(
+            "cli-source-follow",
+            "llm.request",
+            "cli-source-turn",
+            "tool follow-up without image",
+        ),
+        make(
+            "cli-source-at",
+            "llm.request",
+            "cli-source-at-turn",
+            "@at.png 这是什么",
+        ),
+        json!({"event.id":"cli-source-read","event.name":"tool.result","gen_ai.agent.type":"qoder-cli","gen_ai.session.id":"cli-source-session","gen_ai.turn.id":"cli-source-read-turn","gen_ai.tool.name":"Read","gen_ai.tool.call.result":read_text,"agent.qoder.cwd":dir.path(),"time_unix_nano":"1780000000000000000"}),
+    ];
+    let p = Pipeline::new(dir.path(), &records).await;
+    p.input.start().await.unwrap();
+    let output = p.settle().await;
+    let event = |id: &str| output.iter().find(|e| e["event.id"] == id).unwrap();
+    let input_uris = |entry: &Value| {
+        entry["gen_ai.input.messages_delta"][0]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|part| part.get("uri").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let uploads = p.uploader.0.lock().unwrap();
+    assert_eq!(
+        uploads.len(),
+        3,
+        "same carrier image deduplicates; distinct files still upload"
+    );
+    let image_uri = |file: &Path| {
+        let bytes = std::fs::read(file).unwrap();
+        let upload = uploads
+            .iter()
+            .find(|u| u.data.as_deref() == Some(bytes.as_slice()))
+            .expect("actual correct image body must reach uploader");
+        assert_eq!(upload.content_type, "image/png");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert!(upload.target_path.ends_with(&format!("/{digest}.png")));
+        format!("oss://bucket/pilot-mm/{}", upload.target_path)
+    };
+    let clip_uri = image_uri(&clip);
+    let at_uri = image_uri(&at);
+    let read_uri = image_uri(&read);
+    assert_eq!(
+        input_uris(event("cli-source-other")),
+        vec![clip_uri.clone()]
+    );
+    assert_eq!(
+        input_uris(event("cli-source-first")),
+        vec![clip_uri.clone()]
+    );
+    assert!(input_uris(event("cli-source-follow")).is_empty());
+    assert_eq!(input_uris(event("cli-source-at")), vec![at_uri.clone()]);
+    for (id, expected) in [
+        ("cli-source-other", &clip_uri),
+        ("cli-source-first", &clip_uri),
+        ("cli-source-at", &at_uri),
+    ] {
+        assert_eq!(
+            event(id)["gen_ai.input.multimodal_metadata"],
+            json!([{"uri":expected,"mime_type":"image/png","modality":"image"}])
+        );
+    }
+    assert!(event("cli-source-follow")
+        .get("gen_ai.input.multimodal_metadata")
+        .is_none());
+    assert_eq!(
+        event("cli-source-read")["gen_ai.tool.call.result"][0],
+        json!({"type":"text","content":read_text})
+    );
+    assert_eq!(
+        event("cli-source-read")["gen_ai.tool.call.result"][1]["uri"],
+        read_uri
+    );
+    assert_eq!(
+        event("cli-source-read")["gen_ai.input.multimodal_metadata"],
+        json!([{"uri":read_uri,"mime_type":"image/png","modality":"image"}])
+    );
+}

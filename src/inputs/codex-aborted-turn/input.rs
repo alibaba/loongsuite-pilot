@@ -726,6 +726,8 @@ async fn read_json_lines(
     file.seek(std::io::SeekFrom::Start(start_offset as u64))
         .await?;
     let mut buffer = vec![0u8; (end_offset - start_offset) as usize];
+    #[cfg(test)]
+    history_contracts::record_read_allocation(buffer.len());
     file.read_exact(&mut buffer).await?;
     let Some(last_newline) = buffer.iter().rposition(|byte| *byte == b'\n') else {
         return Ok(ReadLines {
@@ -777,6 +779,8 @@ async fn read_json_line_at(
     let mut size = available.min(64 * 1024);
     while size > 0 {
         let mut buffer = vec![0u8; size as usize];
+        #[cfg(test)]
+        history_contracts::record_read_allocation(buffer.len());
         file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
         let bytes_read = file.read(&mut buffer).await?;
         if let Some(newline) = buffer[..bytes_read].iter().position(|byte| *byte == b'\n') {
@@ -813,3 +817,7 @@ async fn open_rollout_file(
 #[cfg(test)]
 #[path = "identity_tests.rs"]
 mod identity_tests;
+
+#[cfg(test)]
+#[path = "history_contracts.rs"]
+mod history_contracts;

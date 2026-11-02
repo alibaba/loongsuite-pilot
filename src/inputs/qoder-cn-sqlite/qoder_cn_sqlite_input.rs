@@ -142,9 +142,19 @@ impl SqliteBody for QoderCnSqliteBody {
 
     async fn read_new_rows(
         &self,
-        _rt: &InputRuntime,
+        rt: &InputRuntime,
         last_row_id: f64,
     ) -> anyhow::Result<Vec<Map<String, Value>>> {
+        // A failed startup baseline leaves no owned cursor. Retry that boundary
+        // before reading rows; defaulting it to zero would replay old history.
+        // An explicit stored zero is already owned and must still collect.
+        if rt.state().last_row_id().is_none() {
+            let floor = read_max_eligible_row_id(&self.db_path)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            rt.state_store.set_row_id(rt.id.as_str(), floor);
+            return Ok(Vec::new());
+        }
         let sql = format!(
             "
       SELECT

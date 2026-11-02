@@ -1331,3 +1331,7 @@ fn same_usage(left: Option<&CodexTranscriptUsage>, right: &CodexTranscriptUsage)
 fn _json_number_used(value: f64) -> Value {
     json_number(value)
 }
+
+#[cfg(test)]
+#[path = "hook_parser_history.rs"]
+mod hook_parser_history;
