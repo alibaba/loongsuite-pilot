@@ -19,7 +19,7 @@ export class QoderTranscriptSource {
   ) {
     this.collector = new QoderTranscriptCollector({
       dataDir, agentId, runtime, warn,
-      resolveInitialPrompt: (source, requestId, cursor) => readQoderPromptOwnership(agentId, source.sessionId, requestId, cursor),
+      resolveInitialPrompt: (source, requestId, cursor, search) => readQoderPromptOwnership(agentId, source.sessionId, requestId, cursor, search),
     });
   }
 

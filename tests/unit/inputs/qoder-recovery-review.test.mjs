@@ -133,6 +133,85 @@ describe.each(['qoder', 'qoder-cn'])('%s review recovery', agentId => {
     expect((await c.collect(batch.state)).records).toEqual([]);
   });
 
+  it.each(['{broken}', JSON.stringify({ padding: 'x'.repeat(256 * 1024) })])('recovers the proven initial range through a complete bad record without replaying live Turns', async bad => {
+    const p = setup(agentId, { resolveInitialPrompt: ownership([{ requestId: 'owned-0', at: Date.parse(stamp(0)) }]) });
+    fs.writeFileSync(p.file, jsonl(turn(0).slice(0, 2)) + bad + '\n' + jsonl(turn(0).slice(2)));
+    p.wake('UserPromptSubmit', { request_set_id: 'owned-0' });
+    let c = p.create(), state = {}; const recovered = [];
+    for (let i = 0; i < 16; i++) {
+      const batch = await c.collect(state); state = batch.state; recovered.push(...batch.records);
+      expect(batch.metrics.bytesRead).toBeLessThan(128 * 1024);
+      if (i === 1) { c.stop(); c = p.create(); state = JSON.parse(JSON.stringify(state)); }
+    }
+    const responses = recovered.filter(row => row['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(1);
+    expect(JSON.stringify(responses)).toContain('answer-0');
+    expect(recovered.every(row => row['agent.transcript_incomplete'] === true)).toBe(true);
+    expect(Object.values(state)[0].initialOwnership).toBeUndefined();
+    expect(fs.readFileSync(p.file, 'utf8')).toContain(bad);
+    fs.appendFileSync(p.file, jsonl(turn(1))); p.wake('Stop', { request_set_id: 'owned-1' });
+    const live = [];
+    for (let i = 0; i < 8; i++) { const batch = await c.collect(state); state = batch.state; live.push(...batch.records); }
+    expect(live.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(JSON.stringify(live)).toContain('answer-1');
+    expect(live.some(row => row['agent.transcript_incomplete'])).toBe(false);
+    expect(new Set([...recovered, ...live].map(row => row['event.id'])).size).toBe(recovered.length + live.length);
+    c.stop(); c = p.create();
+    expect((await c.collect(JSON.parse(JSON.stringify(state)))).records).toEqual([]);
+  });
+
+  it('does not claim a different prompt when a damaged line may hide an inventory user', async () => {
+    const inventory = [{ requestId: 'missing-user', at: Date.parse(stamp(0)) },
+      { requestId: 'real-user', at: Date.parse(stamp(0)) + 1 }];
+    const p = setup(agentId, { resolveInitialPrompt: ownership(inventory) });
+    const rows = turn(0); rows[0].timestamp = new Date(inventory[1].at).toISOString();
+    fs.writeFileSync(p.file, '{broken-user}\n' + jsonl(rows));
+    p.wake('UserPromptSubmit', { request_set_id: 'missing-user' });
+    const c = p.create(); let state = {};
+    for (let i = 0; i < 8; i++) { const batch = await c.collect(state); state = batch.state; expect(batch.records).toEqual([]); }
+    expect(Object.values(state)[0].initialOwnership).toBeTruthy();
+    expect(Object.values(state)[0].backfill).toBeUndefined();
+    expect(Object.values(state)[0].committedOffset).toBe(0);
+    await c.acknowledge(state);
+    expect(fs.readdirSync(path.join(p.root, 'state/qoder-transcripts', agentId, 'sources'))).not.toEqual([]);
+  });
+
+  it.each(['last-prompt', 'oversized'])('migrates an already consumed legacy EOF line without LF (%s)', async tail => {
+    const p = setup(agentId); const c = p.create();
+    fs.writeFileSync(p.file, jsonl(turn(0).slice(0, 2)) + (tail === 'last-prompt'
+      ? JSON.stringify(turn(0)[2]) : 'x'.repeat(256 * 1024)));
+    const cursor = path.join(p.root, 'state/hooks', agentId + '-line-records'); fs.mkdirSync(cursor, { recursive: true });
+    fs.writeFileSync(path.join(cursor, crypto.createHash('sha256').update('synthetic-session').digest('hex') + '.json'),
+      JSON.stringify({ session_id: 'synthetic-session', transcript_path: p.file, last_line_count: 3 }));
+    p.wake(); let state = {};
+    for (let i = 0; i < 8; i++) {
+      const batch = await c.collect(state); state = batch.state;
+      expect(batch.records).toEqual([]); expect(batch.metrics.bytesRead).toBeLessThan(128 * 1024);
+    }
+    expect(Object.values(state)[0].migration).toBeUndefined();
+    expect(Object.values(state)[0].committedOffset).toBe(fs.statSync(p.file).size);
+    expect(Object.values(state)[0].pendingLine).toBeUndefined();
+    fs.appendFileSync(p.file, '\n' + jsonl(turn(1))); p.wake();
+    const events = [];
+    for (let i = 0; i < 8; i++) { const batch = await c.collect(state); state = batch.state; events.push(...batch.records); }
+    expect(events.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(JSON.stringify(events)).toContain('answer-1'); expect(JSON.stringify(events)).not.toContain('answer-0');
+  });
+
+  it('keeps ordinary partial native rows uncommitted when there is no legacy cursor', async () => {
+    const p = setup(agentId); const c = p.create();
+    fs.writeFileSync(p.file, jsonl(turn(0).slice(0, 1))); p.wake('UserPromptSubmit');
+    let batch = await c.collect(), state = batch.state;
+    const body = JSON.stringify(turn(0)[1]); const middle = Math.floor(body.length / 2);
+    fs.appendFileSync(p.file, body.slice(0, middle)); p.wake();
+    for (let i = 0; i < 4; i++) { batch = await c.collect(state); state = batch.state; expect(batch.records).toEqual([]); }
+    expect(Object.values(state)[0].committedOffset).toBe(0);
+    fs.appendFileSync(p.file, body.slice(middle) + '\n' + jsonl(turn(0).slice(2))); p.wake();
+    batch = await c.collect(state);
+    expect(batch.records.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
+    expect((await c.collect(batch.state)).records).toEqual([]);
+  });
+
   it('does not replay an identical historical prompt while the owned next user is not persisted', async () => {
     const p = setup(agentId, { resolveInitialPrompt: ownership([{ requestId: 'owned-request-0', at: Date.parse(stamp(0)) }, { requestId: 'owned-request-1', at: Date.parse(stamp(1)) }]) });
     fs.writeFileSync(p.file, jsonl(turn(0, 'same prompt'))); p.wake('UserPromptSubmit', { request_set_id: 'owned-request-1' });

@@ -334,9 +334,9 @@ StateStore 保存。只有 `extra.qoderTranscripts` 对应版本实际写盘成�
 时间，避免 PID 复用造成永久等待。真实活跃的旧 worker 仍受保护，长时间/无法确认
 的持有者会记录诊断；身份探测有预算并缓存结果。
 
-原生 transcript 恢复会保留原始坏字节，最多记录 32 个隔离范围。已换行坏记录可推进物理游标；超限半行只持久化扫描位置和小型 witness，继续有界寻找换行。迁移只计物理换行，不解析旧 JSON。后续合法 Turn 继续采集；受损或超预算轮次中保留的有效事件以 `agent.transcript_incomplete=true` 透传 JSONL 和 OTLP，不伪造完成或承诺任意大记录无损。
+原生 transcript 恢复会保留原始坏字节，最多记录 32 个隔离范围。已换行坏记录可推进物理游标；超限半行只持久化扫描位置和小型 witness，继续有界寻找换行。旧游标迁移只计物理行，不解析旧 JSON，并兼容旧版已计入游标的无末尾换行尾行；普通采集仍不提交未完成半行。后续合法 Turn 继续采集；受损或超预算轮次中保留的有效事件以 `agent.transcript_incomplete=true` 透传 JSONL 和 OTLP，不伪造完成或承诺任意大记录无损。
 
-首条迟到 prompt 通过真实 Hook 的 `request_set_id` 与同 session 的 SQLite 用户请求顺序关联，每次只读取 256 条元数据。transcript UUID 属于另一命名空间；时间仅校验顺序配对，不靠时间接近或相同文本选择归属。证据不足保留待定范围，实时游标独立前进；证据到达后只回补该范围，避免重放已交付 Turn。每周期一次的归属查询预算在来源间公平轮转。
+首条迟到 prompt 通过真实 Hook 的 `request_set_id` 与同 session 的 SQLite 用户请求顺序关联，每次只读取 256 条元数据。transcript UUID 属于另一命名空间；时间仅校验顺序配对，不靠时间接近或相同文本选择归属。归属扫描遇到完整坏行时只推进物理偏移、不消耗数据库用户序号；必须配对完整的元数据页及最终库存，才能回补，避免坏行遮住用户请求后误归属。证据不足保留待定范围，实时游标独立前进；证据到达后只回补该范围，避免重放已交付 Turn。每周期一次的归属查询预算在来源间公平轮转，每次最多探测四个数据库，跨周期继续覆盖其他候选，不永久截掉后续 profile 或 JetBrains 库。小型搜索游标随来源 checkpoint 保存；已确认的库优先查询，仍检查 session/request 与库文件代次。
 
 Qoder/CN 的 `.sh`/`.ps1` 要求无需实验开关即可加载 SQLite 的 Node（22.13+、23.4+ 或更新版本，依据 [Node 官方说明](https://nodejs.org/download/release/v24.20.0/docs/api/sqlite.html)），拒绝旧 pin 后选择托管运行时，并保持 Hook 输出协议。旧锁 PID 探测遇到 `EPERM` 仍进行有界出生时间核验；无法确认的活跃 owner 保留保护和诊断，不能按年龄强抢。
 

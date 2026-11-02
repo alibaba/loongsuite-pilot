@@ -485,8 +485,9 @@ export class QoderTranscriptCollector {
     return bytesRead;
   }
 
-  async *lines(file, start, end, { allowFinal = false, rebuild = false, countOnly = false,
+  async *lines(file, start, end, { allowFinal = false, rebuild = false, countOnly = false, legacyCountFinal = false,
     checkpoint, skipRanges = [] } = {}) {
+    const countFinal = countOnly && legacyCountFinal;
     const handle = await this.open(file);
     const tailKey = rebuild ? file + '#rebuild' : file;
     let position = start, lineStart = start, pending = [], pendingBytes = 0, replay = false, lastBuffer, oversized = false;
@@ -505,7 +506,7 @@ export class QoderTranscriptCollector {
           position = tail.position; pendingBytes = position - start; replay = pendingBytes > 0;
           oversized = tail.oversized === true || pendingBytes > this.maxTurnBytes;
           lastBuffer = witness;
-          if (position === end && (!allowFinal || tail.finalTried || oversized)) return;
+          if (position === end && !countFinal && (!allowFinal || tail.finalTried || oversized)) return;
         } else tail = null;
       } else tail = null;
       if (!tail) { this.tailScans.delete(tailKey); if (checkpoint) delete checkpoint.pendingLine; }
@@ -564,6 +565,14 @@ export class QoderTranscriptCollector {
           lineStart = lineEnd; pending = []; pendingBytes = 0; replay = false; oversized = false; cursor = stop + 1;
         }
       }
+      // The old cursor already includes its final physical line, with or
+      // without LF. Count bytes only for that migration; this is not evidence
+      // that an ordinary native partial row is ready to parse or deliver.
+      if (countFinal && position === end && pendingBytes) {
+        this.tailScans.delete(tailKey); if (checkpoint) delete checkpoint.pendingLine;
+        yield { row: null, start: lineStart, end, bytes: end - lineStart };
+        return;
+      }
       if (pendingBytes) {
         if (this.tailScans.size >= MAX_TAIL_SCANS) this.tailScans.delete(this.tailScans.keys().next().value);
         tail = { start: lineStart, position, size: stat.size, ino: stat.ino, dev: stat.dev,
@@ -587,7 +596,7 @@ export class QoderTranscriptCollector {
     if (this.promptInspectionBudget <= 0 || (this.promptChosenKey && this.promptChosenKey !== source.key)) return false;
     this.promptInspectionBudget--;
     this.rememberPromptInspection(source.key);
-    const proof = await this.resolveInitialPrompt?.(source, pending.requestSetId, pending.dbCursor);
+    const proof = await this.resolveInitialPrompt?.(source, pending.requestSetId, pending.dbCursor, pending.dbSearch ??= {});
     if (!proof || !Array.isArray(proof.rows) || proof.rows.length > 256) {
       this.report(source.key, 'initial-prompt-owner-unavailable'); return false;
     }
@@ -598,7 +607,14 @@ export class QoderTranscriptCollector {
     }
     let index = 0;
     for await (const line of this.lines(source.transcriptPath, pending.offset, stat.size, { checkpoint: pending })) {
-      if (line.quarantine) { this.report(source.key, 'initial-prompt-owner-damaged'); return false; }
+      if (line.quarantine) {
+        this.quarantine(source, pending, line, line.quarantine);
+        pending.offset = line.end;
+        // A complete bad row advances physical scanning, not the DB/user
+        // ordinal. A hidden user leaves unmatched inventory below and cannot
+        // establish ownership. Backfill reuses normal quarantine accounting.
+        continue;
+      }
       if (isRealUserPrompt(line.row)) {
         const row = proof.rows[index];
         const at = Date.parse(line.row.timestamp);
@@ -842,7 +858,9 @@ export class QoderTranscriptCollector {
       if (!checkpoint[property]) continue;
       const migration = checkpoint[property];
       if (migration.target > migration.seen) {
-        for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, { countOnly: true, checkpoint })) {
+        for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, {
+          countOnly: true, legacyCountFinal: property === 'migration', checkpoint,
+        })) {
           checkpoint.offset = line.end;
           migration.seen++;
           if (migration.seen >= migration.target) break;
