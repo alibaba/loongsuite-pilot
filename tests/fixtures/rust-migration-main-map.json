@@ -14652,6 +14652,1764 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/validate-trace.test.mjs",
+      "coverage": "partial",
+      "rust": [],
+      "source_hash": "4ba60a5cd929d81c5b6fa66306aabefaec906c0e3b1c08cfbda3aff0a452cbae",
+      "note": "Main f84 adds9 delegated topology/execution/rule-generator declarations beyond these8 unchanged cases; those9 are explicitly pending and this supplemental file is partial. Each original8 declaration is indexed with all2 extension parameters and12 required-field parameters retained. Existing real native CLI and semantic tests cover model/runtime Skill matching; pinned source hash remains exact c1fddd81. Original diagnostic substrings and known GenericPart image/compaction names were missing in native implementation: one actual original-contract assertion failed before the minimal diagnostic compatibility repair. Arbitrary untrusted type values remain redacted, and all default Cargo tests run without Node. Native and actual platform execution recorded separately.",
+      "cases": [
+        {
+          "source": {
+            "id": "L41:C3",
+            "title": "extension TOOL with Skill attributes does not require an LLM output tool_call",
+            "suites": [
+              "semantic.tool_matches_llm_output runtime Skill handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "extension TOOL with Skill attributes does not require an LLM output tool_call; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/semantics.rs",
+                "test": "tests::runtime_skill_is_exempt_but_cannot_satisfy_model_tool_call"
+              },
+              {
+                "file": "xtask/tests/trace_validate.rs",
+                "test": "native_trace_runtime_skills_and_observed_content_keep_compatibility"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "ordinary and model-triggered tools still require matching LLM output",
+            "suites": [
+              "semantic.tool_matches_llm_output runtime Skill handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ordinary and model-triggered tools still require matching LLM output; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/semantics.rs",
+                "test": "tests::ordinary_and_model_skills_require_id_or_name_match"
+              },
+              {
+                "file": "xtask/tests/trace_validate.rs",
+                "test": "native_trace_runtime_skills_and_observed_content_keep_compatibility"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "extension without Skill attributes is not exempted",
+            "suites": [
+              "semantic.tool_matches_llm_output runtime Skill handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "extension without Skill attributes is not exempted; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/semantics.rs",
+                "test": "tests::ordinary_and_model_skills_require_id_or_name_match"
+              },
+              {
+                "file": "xtask/tests/trace_validate.rs",
+                "test": "native_trace_runtime_skills_and_observed_content_keep_compatibility"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L275:C3",
+            "title": "vendored schema matches the pinned LoongSuite source",
+            "suites": [
+              "gen_ai.input.messages schema validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "vendored schema matches the pinned LoongSuite source; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/messages.rs",
+                "test": "tests::pinned_input_schema_accepts_standard_parts_and_nullable_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L288:C3",
+            "title": "accepts all standard part types and optional nullable fields",
+            "suites": [
+              "gen_ai.input.messages schema validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "accepts all standard part types and optional nullable fields; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/messages.rs",
+                "test": "tests::pinned_input_schema_accepts_standard_parts_and_nullable_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L315:C3",
+            "title": "rejects WorkBuddy tool result field in place of response",
+            "suites": [
+              "gen_ai.input.messages schema validation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "rejects WorkBuddy tool result field in place of response; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/messages.rs",
+                "test": "tests::history_input_schema_preserves_each_required_field_and_known_extension_diagnostic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L333:C3",
+            "title": "allows GenericPart extension %s with a compatibility warning",
+            "suites": [
+              "gen_ai.input.messages schema validation"
+            ],
+            "parameters": [
+              "test.each(['image', 'compaction'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "allows GenericPart extension %s with a compatibility warning; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/messages.rs",
+                "test": "tests::history_input_schema_preserves_each_required_field_and_known_extension_diagnostic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L350:C3",
+            "title": "rejects missing required %s",
+            "suites": [
+              "gen_ai.input.messages schema validation"
+            ],
+            "parameters": [
+              "test.each([\n    ['message role', [{ role: 123, parts: [] }], 'missing required string \"role\"'],\n    ['message parts', [{ role: 'user' }], 'missing required array \"parts\"'],\n    ['part type', [{ role: 'user', parts: [{}] }], 'missing required string \"type\"'],\n    ['text content', [{ role: 'user', parts: [{ type: 'text' }] }], 'TextPart missing required \"content\"'],\n    ['tool call name', [{ role: 'assistant', parts: [{ type: 'tool_call' }] }], 'ToolCallRequestPart missing required \"name\"'],\n    ['server tool call', [{ role: 'assistant', parts: [{ type: 'server_tool_call', name: 'web_search' }] }], 'ServerToolCallPart missing required \"server_tool_call\"'],\n    ['server tool response', [{ role: 'assistant', parts: [{ type: 'server_tool_call_response' }] }], 'ServerToolCallResponsePart missing required \"server_tool_call_response\"'],\n    ['blob modality', [{ role: 'user', parts: [{ type: 'blob', content: '' }] }], 'BlobPart missing required \"modality\"'],\n    ['blob content', [{ role: 'user', parts: [{ type: 'blob', modality: 'image' }] }], 'BlobPart missing required \"content\"'],\n    ['file id', [{ role: 'user', parts: [{ type: 'file', modality: 'document' }] }], 'FilePart missing required \"file_id\"'],\n    ['URI', [{ role: 'user', parts: [{ type: 'uri', modality: 'image' }] }], 'UriPart missing required \"uri\"'],\n    ['reasoning content', [{ role: 'assistant', parts: [{ type: 'reasoning' }] }], 'ReasoningPart missing required \"content\"'],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "rejects missing required %s; original pinned schema, exact status/required-field diagnostic, or actual two-way tool matching contract preserved.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/trace_validate/messages.rs",
+                "test": "tests::history_input_schema_preserves_each_required_field_and_known_extension_diagnostic"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+      "source_hash": "5419237166d8b99a52ac1b1776cad085def2e5f971d234a645225c4354162b8f",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Claude Agent宿主BUN_OPTIONS preload仍由原生HookWatchdog部署，保留真实JS资产测试；不是Collector逻辑或Node生成脚本退役。当前f84文件未改，global与FetchSession每个原断言均真实执行，44baseline声明→146展开；main46声明→149展开含不可改写/不可扩展receiver与子类。独立可选npm脚本不进入默认Cargo。LinuxNode22.22.3/Vitest1.6.1/glibc2.34/network-none实际149全PASS，Windows/macOS与真实Bun另待平台验收，不将FakeBun fixture冒充真实Bun。",
+      "cases": [
+        {
+          "source": {
+            "id": "L262:C3",
+            "title": "captures system_instructions in spec format (text → content, filters billing header)",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：captures system_instructions in spec format (text → content, filters billing header)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > captures system_instructions in spec format (text → content, filters billing header)",
+              "claude-code-fetch-intercept preload (fetch-session) > captures system_instructions in spec format (text → content, filters billing header)"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L295:C3",
+            "title": "captures TTFT as integer nanoseconds for text_delta",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：captures TTFT as integer nanoseconds for text_delta",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > captures TTFT as integer nanoseconds for text_delta",
+              "claude-code-fetch-intercept preload (fetch-session) > captures TTFT as integer nanoseconds for text_delta"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L310:C3",
+            "title": "TTFT also captures on %s",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['thinking_delta', 'input_json_delta'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：TTFT also captures on %s",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > TTFT also captures on thinking_delta",
+              "claude-code-fetch-intercept preload (global) > TTFT also captures on input_json_delta",
+              "claude-code-fetch-intercept preload (fetch-session) > TTFT also captures on thinking_delta",
+              "claude-code-fetch-intercept preload (fetch-session) > TTFT also captures on input_json_delta"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L321:C3",
+            "title": "filename = response_id and record.response_id matches",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：filename = response_id and record.response_id matches",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > filename = response_id and record.response_id matches",
+              "claude-code-fetch-intercept preload (fetch-session) > filename = response_id and record.response_id matches"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L334:C3",
+            "title": "non-/v1/messages requests are not intercepted",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：non-/v1/messages requests are not intercepted",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > non-/v1/messages requests are not intercepted",
+              "claude-code-fetch-intercept preload (fetch-session) > non-/v1/messages requests are not intercepted"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "requests missing session header are passed through (no intercept file)",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：requests missing session header are passed through (no intercept file)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > requests missing session header are passed through (no intercept file)",
+              "claude-code-fetch-intercept preload (fetch-session) > requests missing session header are passed through (no intercept file)"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L355:C3",
+            "title": "stream without content_block_delta still emits at message_stop (ttft_ns = null)",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：stream without content_block_delta still emits at message_stop (ttft_ns = null)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > stream without content_block_delta still emits at message_stop (ttft_ns = null)",
+              "claude-code-fetch-intercept preload (fetch-session) > stream without content_block_delta still emits at message_stop (ttft_ns = null)"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L367:C3",
+            "title": "malformed JSON body does not crash the host fetch",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：malformed JSON body does not crash the host fetch",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > malformed JSON body does not crash the host fetch",
+              "claude-code-fetch-intercept preload (fetch-session) > malformed JSON body does not crash the host fetch"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L381:C3",
+            "title": "records every retryable HTTP failure without storing the request body",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：records every retryable HTTP failure without storing the request body",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > records every retryable HTTP failure without storing the request body",
+              "claude-code-fetch-intercept preload (fetch-session) > records every retryable HTTP failure without storing the request body"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L409:C3",
+            "title": "records a network-error attempt and rethrows to the host",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：records a network-error attempt and rethrows to the host",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > records a network-error attempt and rethrows to the host",
+              "claude-code-fetch-intercept preload (fetch-session) > records a network-error attempt and rethrows to the host"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L426:C3",
+            "title": "an aborted 200 SSE stream still records an attempt via cancel()",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：an aborted 200 SSE stream still records an attempt via cancel()",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > an aborted 200 SSE stream still records an attempt via cancel()",
+              "claude-code-fetch-intercept preload (fetch-session) > an aborted 200 SSE stream still records an attempt via cancel()"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L455:C3",
+            "title": "an abort AFTER the first content delta is recorded as aborted, not success",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：an abort AFTER the first content delta is recorded as aborted, not success",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > an abort AFTER the first content delta is recorded as aborted, not success",
+              "claude-code-fetch-intercept preload (fetch-session) > an abort AFTER the first content delta is recorded as aborted, not success"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L498:C3",
+            "title": "records SSE error %s without persisting error content",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['before message_start', 'before delta', 'after delta'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：records SSE error %s without persisting error content",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > records SSE error before message_start without persisting error content",
+              "claude-code-fetch-intercept preload (global) > records SSE error before delta without persisting error content",
+              "claude-code-fetch-intercept preload (global) > records SSE error after delta without persisting error content",
+              "claude-code-fetch-intercept preload (fetch-session) > records SSE error before message_start without persisting error content",
+              "claude-code-fetch-intercept preload (fetch-session) > records SSE error before delta without persisting error content",
+              "claude-code-fetch-intercept preload (fetch-session) > records SSE error after delta without persisting error content"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L524:C3",
+            "title": "maps %s SSE error types to a bounded safe label",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([\n    ['unknown', 'private-error-type'],\n    ['oversized', `overloaded_error${'private'.repeat(1000)}`],\n    ['missing', undefined],\n    ['non-string', { message: 'private-error-detail' }],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：maps %s SSE error types to a bounded safe label",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > maps unknown SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (global) > maps oversized SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (global) > maps missing SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (global) > maps non-string SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (fetch-session) > maps unknown SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (fetch-session) > maps oversized SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (fetch-session) > maps missing SSE error types to a bounded safe label",
+              "claude-code-fetch-intercept preload (fetch-session) > maps non-string SSE error types to a bounded safe label"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L543:C3",
+            "title": "malformed SSE error data is still a failure",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：malformed SSE error data is still a failure",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > malformed SSE error data is still a failure",
+              "claude-code-fetch-intercept preload (fetch-session) > malformed SSE error data is still a failure"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L554:C3",
+            "title": "SSE EOF %s without message_stop is incomplete",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['empty', 'before delta', 'after delta'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：SSE EOF %s without message_stop is incomplete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > SSE EOF empty without message_stop is incomplete",
+              "claude-code-fetch-intercept preload (global) > SSE EOF before delta without message_stop is incomplete",
+              "claude-code-fetch-intercept preload (global) > SSE EOF after delta without message_stop is incomplete",
+              "claude-code-fetch-intercept preload (fetch-session) > SSE EOF empty without message_stop is incomplete",
+              "claude-code-fetch-intercept preload (fetch-session) > SSE EOF before delta without message_stop is incomplete",
+              "claude-code-fetch-intercept preload (fetch-session) > SSE EOF after delta without message_stop is incomplete"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L571:C3",
+            "title": "non-SSE EOF remains success without a protocol terminal",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：non-SSE EOF remains success without a protocol terminal",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > non-SSE EOF remains success without a protocol terminal",
+              "claude-code-fetch-intercept preload (fetch-session) > non-SSE EOF remains success without a protocol terminal"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L583:C3",
+            "title": "message_stop finalizes before EOF and stays success after %s",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['cancel', 'cancel rejection', 'read error'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：message_stop finalizes before EOF and stays success after %s",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > message_stop finalizes before EOF and stays success after cancel",
+              "claude-code-fetch-intercept preload (global) > message_stop finalizes before EOF and stays success after cancel rejection",
+              "claude-code-fetch-intercept preload (global) > message_stop finalizes before EOF and stays success after read error",
+              "claude-code-fetch-intercept preload (fetch-session) > message_stop finalizes before EOF and stays success after cancel",
+              "claude-code-fetch-intercept preload (fetch-session) > message_stop finalizes before EOF and stays success after cancel rejection",
+              "claude-code-fetch-intercept preload (fetch-session) > message_stop finalizes before EOF and stays success after read error"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L607:C3",
+            "title": "message_stop without a delta finalizes before EOF",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：message_stop without a delta finalizes before EOF",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > message_stop without a delta finalizes before EOF",
+              "claude-code-fetch-intercept preload (fetch-session) > message_stop without a delta finalizes before EOF"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L625:C3",
+            "title": "transport error before terminal writes one failure (delta=%s)",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([false, true])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：transport error before terminal writes one failure (delta=%s)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > transport error before terminal writes one failure (delta=false)",
+              "claude-code-fetch-intercept preload (global) > transport error before terminal writes one failure (delta=true)",
+              "claude-code-fetch-intercept preload (fetch-session) > transport error before terminal writes one failure (delta=false)",
+              "claude-code-fetch-intercept preload (fetch-session) > transport error before terminal writes one failure (delta=true)"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L649:C3",
+            "title": "cancel rejection propagates and records one aborted attempt (delta=%s)",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([false, true])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：cancel rejection propagates and records one aborted attempt (delta=%s)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > cancel rejection propagates and records one aborted attempt (delta=false)",
+              "claude-code-fetch-intercept preload (global) > cancel rejection propagates and records one aborted attempt (delta=true)",
+              "claude-code-fetch-intercept preload (fetch-session) > cancel rejection propagates and records one aborted attempt (delta=false)",
+              "claude-code-fetch-intercept preload (fetch-session) > cancel rejection propagates and records one aborted attempt (delta=true)"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L679:C3",
+            "title": "passes %s headers untouched despite trace env vars",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['object', 'tuple-array'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：passes %s headers untouched despite trace env vars",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > passes object headers untouched despite trace env vars",
+              "claude-code-fetch-intercept preload (global) > passes tuple-array headers untouched despite trace env vars",
+              "claude-code-fetch-intercept preload (fetch-session) > passes object headers untouched despite trace env vars",
+              "claude-code-fetch-intercept preload (fetch-session) > passes tuple-array headers untouched despite trace env vars"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L697:C3",
+            "title": "preserves caller trace headers in %s headers",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['object', 'tuple-array'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：preserves caller trace headers in %s headers",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > preserves caller trace headers in object headers",
+              "claude-code-fetch-intercept preload (global) > preserves caller trace headers in tuple-array headers",
+              "claude-code-fetch-intercept preload (fetch-session) > preserves caller trace headers in object headers",
+              "claude-code-fetch-intercept preload (fetch-session) > preserves caller trace headers in tuple-array headers"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L713:C3",
+            "title": "does not inject trace headers when the session id is missing",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：does not inject trace headers when the session id is missing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > does not inject trace headers when the session id is missing",
+              "claude-code-fetch-intercept preload (fetch-session) > does not inject trace headers when the session id is missing"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L757:C5",
+            "title": "forwards the inherited trace but substitutes this attempt's span id",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：forwards the inherited trace but substitutes this attempt's span id",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > forwards the inherited trace but substitutes this attempt's span id",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > forwards the inherited trace but substitutes this attempt's span id"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L771:C5",
+            "title": "forwards traceparent alone when no tracestate is inherited",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：forwards traceparent alone when no tracestate is inherited",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > forwards traceparent alone when no tracestate is inherited",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > forwards traceparent alone when no tracestate is inherited"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L784:C5",
+            "title": "normalizes an uppercase-hex traceparent to the lowercase spec form",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：normalizes an uppercase-hex traceparent to the lowercase spec form",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > normalizes an uppercase-hex traceparent to the lowercase spec form",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > normalizes an uppercase-hex traceparent to the lowercase spec form"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L795:C5",
+            "title": "rejects an invalid traceparent (%s) and injects nothing",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([\n      ['garbage', 'not-a-traceparent'],\n      ['all-zero trace-id', '00-00000000000000000000000000000000-00f067aa0ba902b7-01'],\n      ['all-zero parent-id', '00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01'],\n      ['forbidden version ff', 'ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],\n      ['unknown future version', '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'],\n      ['missing trace-flags', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7'],\n      ['trailing field on version 00', '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra'],\n      ['short trace-id', '00-4bf92f3577b34da6-00f067aa0ba902b7-01'],\n      ['non-hex trace-id', '00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01'],\n      ['empty', ''],\n    ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：rejects an invalid traceparent (%s) and injects nothing",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (garbage) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (all-zero trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (all-zero parent-id) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (forbidden version ff) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (unknown future version) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (missing trace-flags) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (trailing field on version 00) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (short trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (non-hex trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > rejects an invalid traceparent (empty) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (garbage) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (all-zero trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (all-zero parent-id) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (forbidden version ff) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (unknown future version) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (missing trace-flags) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (trailing field on version 00) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (short trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (non-hex trace-id) and injects nothing",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > rejects an invalid traceparent (empty) and injects nothing"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L822:C5",
+            "title": "drops an invalid tracestate (%s) but still forwards traceparent",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([\n      ['over the 512-byte budget', `a=${'x'.repeat(520)}`],\n      ['more than 32 list-members', Array.from({ length: 33 }, (_, i) => `k${i}=v`).join(',')],\n      ['containing a control character', 'congo=t61r\\nckgMzE'],\n      ['blank', '   '],\n    ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：drops an invalid tracestate (%s) but still forwards traceparent",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > drops an invalid tracestate (over the 512-byte budget) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > drops an invalid tracestate (more than 32 list-members) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > drops an invalid tracestate (containing a control character) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > drops an invalid tracestate (blank) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > drops an invalid tracestate (over the 512-byte budget) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > drops an invalid tracestate (more than 32 list-members) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > drops an invalid tracestate (containing a control character) but still forwards traceparent",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > drops an invalid tracestate (blank) but still forwards traceparent"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L840:C5",
+            "title": "never overwrites a traceparent the caller already set",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：never overwrites a traceparent the caller already set",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > never overwrites a traceparent the caller already set",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > never overwrites a traceparent the caller already set"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L858:C5",
+            "title": "injects without dropping existing headers when the carrier is %s",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each(['object', 'Headers', 'entries'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：injects without dropping existing headers when the carrier is %s",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is object",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is Headers",
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is entries",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is object",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is Headers",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > injects without dropping existing headers when the carrier is entries"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L877:C5",
+            "title": "leaves method and body intact when input is a Request object",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：leaves method and body intact when input is a Request object",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > leaves method and body intact when input is a Request object",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > leaves method and body intact when input is a Request object"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L897:C5",
+            "title": "hands the gateway a real Headers carrier, not a flattened object",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：hands the gateway a real Headers carrier, not a flattened object",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > hands the gateway a real Headers carrier, not a flattened object",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > hands the gateway a real Headers carrier, not a flattened object"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L908:C5",
+            "title": "does not inject on non-/v1/messages URLs",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：does not inject on non-/v1/messages URLs",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > does not inject on non-/v1/messages URLs",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > does not inject on non-/v1/messages URLs"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L919:C5",
+            "title": "injects the upstream parent verbatim when there is no session id",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：injects the upstream parent verbatim when there is no session id",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > injects the upstream parent verbatim when there is no session id",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > injects the upstream parent verbatim when there is no session id"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L935:C5",
+            "title": "leaves the request untouched when no trace context is inherited",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：leaves the request untouched when no trace context is inherited",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > leaves the request untouched when no trace context is inherited",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > leaves the request untouched when no trace context is inherited"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L959:C7",
+            "title": "forwards nothing while the switch is off",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding",
+              "opt-in switch"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：forwards nothing while the switch is off",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > opt-in switch > forwards nothing while the switch is off",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > opt-in switch > forwards nothing while the switch is off"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L976:C7",
+            "title": "needs propagateToLlm too, not just upstreamLink.enabled",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding",
+              "opt-in switch"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：needs propagateToLlm too, not just upstreamLink.enabled",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > opt-in switch > needs propagateToLlm too, not just upstreamLink.enabled",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > opt-in switch > needs propagateToLlm too, not just upstreamLink.enabled"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L987:C7",
+            "title": "reads both halves from config.json when no env override is set",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding",
+              "opt-in switch"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：reads both halves from config.json when no env override is set",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > opt-in switch > reads both halves from config.json when no env override is set",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > opt-in switch > reads both halves from config.json when no env override is set"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L999:C7",
+            "title": "honours a config.json that enables linking but not LLM forwarding",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding",
+              "opt-in switch"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：honours a config.json that enables linking but not LLM forwarding",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > opt-in switch > honours a config.json that enables linking but not LLM forwarding",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > opt-in switch > honours a config.json that enables linking but not LLM forwarding"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1011:C7",
+            "title": "an env override of 0 beats a config.json that enables forwarding",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)",
+              "W3C trace-context forwarding",
+              "opt-in switch"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：an env override of 0 beats a config.json that enables forwarding",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > W3C trace-context forwarding > opt-in switch > an env override of 0 beats a config.json that enables forwarding",
+              "claude-code-fetch-intercept preload (fetch-session) > W3C trace-context forwarding > opt-in switch > an env override of 0 beats a config.json that enables forwarding"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1037:C3",
+            "title": "%s-terminated message_stop is success, not incomplete",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])",
+              "test.each([\n    ['CRLF', '\\r\\n'],\n    ['CR', '\\r'],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：%s-terminated message_stop is success, not incomplete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > CRLF-terminated message_stop is success, not incomplete",
+              "claude-code-fetch-intercept preload (global) > CR-terminated message_stop is success, not incomplete",
+              "claude-code-fetch-intercept preload (fetch-session) > CRLF-terminated message_stop is success, not incomplete",
+              "claude-code-fetch-intercept preload (fetch-session) > CR-terminated message_stop is success, not incomplete"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1053:C3",
+            "title": "a CRLF boundary split across chunk reads still parses to success",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：a CRLF boundary split across chunk reads still parses to success",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > a CRLF boundary split across chunk reads still parses to success",
+              "claude-code-fetch-intercept preload (fetch-session) > a CRLF boundary split across chunk reads still parses to success"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1069:C3",
+            "title": "mixed LF and CRLF framing in one stream parses to success",
+            "suites": [
+              "claude-code-fetch-intercept preload (%s)"
+            ],
+            "parameters": [
+              "describe.each(['global', 'fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：mixed LF and CRLF framing in one stream parses to success",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "claude-code-fetch-intercept preload (global) > mixed LF and CRLF framing in one stream parses to success",
+              "claude-code-fetch-intercept preload (fetch-session) > mixed LF and CRLF framing in one stream parses to success"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1088:C3",
+            "title": "keeps %s usable when instrumentation is unavailable",
+            "suites": [
+              "optional native fetch instrumentation"
+            ],
+            "parameters": [
+              "test.each(['locked-fetch-session', 'nonextensible-fetch-session'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：keeps %s usable when instrumentation is unavailable",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "optional native fetch instrumentation > keeps locked-fetch-session usable when instrumentation is unavailable",
+              "optional native fetch instrumentation > keeps nonextensible-fetch-session usable when instrumentation is unavailable"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        },
+        {
+          "source": {
+            "id": "L1100:C3",
+            "title": "preserves subclass construction and the native instance receiver",
+            "suites": [
+              "optional native fetch instrumentation"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原Agent宿主preload断言完整保留、实际离线子进程执行；所有参数展开精确记录：preserves subclass construction and the native instance receiver",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retained",
+            "file": "tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+            "names": [
+              "optional native fetch instrumentation > preserves subclass construction and the native instance receiver"
+            ],
+            "resources": [
+              "assets/hooks/claude-code-fetch-intercept.mjs"
+            ],
+            "npm_script": "test:host:claude-fetch"
+          }
+        }
+      ]
     }
   ]
 }
