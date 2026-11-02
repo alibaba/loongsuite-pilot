@@ -12666,6 +12666,609 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/upstream-context.test.mjs",
+      "source_hash": "906b2e84aeb54feb799208dafafd838071e88c4276e47d16bde16d1700103843",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84完整子集：17基线对应声明+新增5；不重复抬高baseline。源有效性与实际执行分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "writes a session-level record from a valid TRACEPARENT",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实helper+TempDir，session/ID/TP三字段与恰好1条JSONL、env.lock实际文件均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l31_writes_valid_traceparent_and_exclusive_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "writes only once per session (O_CREAT|O_EXCL lock)",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同Env/session调用3次，实际JSONL恰好1条，生产create_new锁未mock。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l40_records_only_once_for_the_same_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "does nothing when TRACEPARENT is absent",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际Env移除TRACEPARENT后，关联JSONL和env.lock都不存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l48_absent_traceparent_creates_no_file_or_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "rejects malformed / all-zero traceparent",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原garbage/xyz/全零traceID/全零spanID四值均真实调用，无关联文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l54_rejects_malformed_and_both_all_zero_identifiers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "is fail-open on bad input (no throw)",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空session与缺显式dataDir均真实调用无panic；Rust API以Env提供dataDir，缺失时HOME回退仍为TempDir，不读取用户HOME；另NUL目录真实IO失败保持fail-open。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l62_bad_input_and_failed_io_remain_fail_open"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/correlation-store.test.ts",
+      "source_hash": "bd9783a6e3a1d321536cd52c5417fdaa80f118b027adbc063c6452b3532ebe46",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84完整子集：17基线对应声明+新增5；不重复抬高baseline。源有效性与实际执行分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L37:C3",
+            "title": "resolves by exact content hash",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实store test核对SHA内容命中TP1、仅一次；包含prefix fallback真实TP2命中。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/correlation_store.rs",
+                "test": "exact_hash_is_consumed_once_and_prefix_is_the_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L43:C3",
+            "title": "resolves by prefix when collected text was rewritten (e.g. @file appended)",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实store record prefix=rewrite、collected=rewrite me，实际prefix fallback精确指定TP；没有仅按标题映射。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/correlation_store.rs",
+                "test": "exact_hash_is_consumed_once_and_prefix_is_the_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "consume-once: duplicate prompts get distinct records in order",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原OK/HELLO/OK三记录，依次TP1/TP2/TP_SESS/None，实际顺序和consume-once精确检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l50_duplicate_prompts_consume_distinct_records_in_source_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "does not reuse a consumed turn after collector restart and append",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原匿名resolveTurn路径，真实首消费TP1→文件append同prompt新TP2→全新store消费TP2→又全新store返回None；不以owned native-turn回放测试替代匿名消费合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "main_anonymous_consumption_survives_restart_and_append_without_reusing_old_context"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "persists prefix consumption and shares claims between existing collectors",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两个store均预加载unknown，prefix a/b依次取TP1/TP2，fresh第三store prefix c=None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "main_prefix_consumption_is_shared_between_preloaded_collectors_and_restarts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C3",
+            "title": "restores a replayed native turn to its own context without consuming the next prompt",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实native-owner marker：其他turn不可取已claim上下文，多次fresh store及prune后原owner精确回放原TP；重复prompt/append回归同时核对下一owner仍取独立下一TP。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_context.rs",
+                "test": "durable_claims_replay_only_their_owner_and_preserve_node_marker_compatibility"
+              },
+              {
+                "file": "tests/upstream_context.rs",
+                "test": "repeated_prompts_consume_distinct_contexts_and_append_reloads_without_a_clock_tick"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "keeps turn claims private without modifying adapter records",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原private prompt真实消费，恰好一个done，文件名/内容均不含prompt；Unix0600；原adapter JSONL字节完全不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "main_private_claims_never_rewrite_adapter_records_or_contain_prompt_text"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "resolveSessionFirst returns once then null",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实session记录两次resolve，精确TP_SESS再None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l59_session_context_resolves_once_then_none"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "persists session consumption across collector restarts",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两个全新store模拟restart，首TP_SESS后None，session-context.done实际存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l66_session_consumption_survives_a_fresh_collector"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "returns null for unknown session / no match",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原known记录，unknown session和unknown text两次None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l76_unknown_sessions_and_unmatched_text_return_none"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C3",
+            "title": "ignores malformed lines without throwing",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实not-json/valid/缺必要字段三行，valid仍精确TP1，无panic。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l83_malformed_lines_do_not_hide_a_later_valid_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L134:C3",
+            "title": "exact contentHash takes precedence over a prefix match",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原analyze/analyze this两记录，完整hash先TP2，随后analyze xyz仍取TP1，防止前缀抢占/误消费。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l89_exact_hash_precedes_a_prefix_and_keeps_the_prefix_available"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L143:C3",
+            "title": "hasSession reflects file presence",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原有SID实际file=true、ses_missing=false。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l98_has_session_reports_actual_file_presence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "pruneIdle evicts sessions not accessed since the cutoff",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留消费TP1、过去cutoff prune0、已消费None、未来cutoff prune1四个断言；ef最后重用TP1已被f84同文件L154-159明确替换为None（disk claim不能随内存cache eviction消失）。native按冻结main最终合同检查None，不恢复旧复用缺陷。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l105_idle_eviction_preserves_the_main_durable_consumption_contract"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/acp-correlate-retention-service.test.ts",
+      "source_hash": "b4ffa5da8ee5cba47a2ab36d94eb8affa1872d649637e139056c56f28238130d",
+      "coverage": "complete",
+      "rust": [],
+      "note": "f84完整子集：17基线对应声明+新增5；不重复抬高baseline。源有效性与实际执行分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L28:C3",
+            "title": "deletes files older than ttlMs, keeps fresh ones",
+            "suites": [
+              "AcpCorrelateRetentionService"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原48h旧jsonl+env.lock、1min新文件、24hTTL真实mtime，精确2/0，仅旧两文件删除。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "retention_source_l28_removes_old_jsonl_and_env_lock_but_keeps_fresh"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "no-ops when the directory is absent",
+            "suites": [
+              "AcpCorrelateRetentionService"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实缺目录、原1000msTTL，精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "retention_source_l49_absent_directory_returns_zero_counts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "retains old consumption claims while their append-only source remains active",
+            "suites": [
+              "AcpCorrelateRetentionService"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实mtime：旧turn/session claims在source新鲜时保留，orphan删除结果1/0；source变旧后结果3/0且目录清空。原24h可配置TTL在baseline原48h/24h实际回归另验，此项使用1h旧/1minTTL相同相对合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_context.rs",
+                "test": "retention_keeps_old_claims_until_their_source_is_stale_or_missing"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

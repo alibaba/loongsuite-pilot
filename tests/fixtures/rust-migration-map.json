@@ -2946,9 +2946,9 @@
     },
     {
       "legacy": "tests/unit/core/workspace-policy.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "逐项核对历史断言，原生22项专项在Linux all-features通过；平台标签是覆盖目标，非Windows/macOS实跑证明。Workspace 第 7 项等待隐私 JSON 拒绝修复，第 8 项缺精确 stderr 警告捕获，保持 partial。",
+      "note": "逐项核对历史断言，原生22项专项在Linux all-features通过；平台标签是覆盖目标，非Windows/macOS实跑证明。Workspace 第 7 项等待隐私 JSON 拒绝修复，第 8 项缺精确 stderr 警告捕获，保持 partial。 2026-11-02 partial closure: exact original assertions audited; source ef/f84 byte-identical. New real stderr capture and actual count-domain compiler evidence, no production behavior changes. Linux Rust1.99.1/glibc2.34 executed; Windows/macOS pending actual execution.",
       "source_hash": "1f372152204eadd6f45df00f2bfeeb9c10bd25aef94ccdcb3f6f091fc236c0f2",
       "cases": [
         {
@@ -3116,8 +3116,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "相对/空列表原生断言已备；坏 JSON 配置仍有生产差异，独立失败回归草案待集中修复",
+          "coverage": "complete",
+          "behavior": "Actual configuration assembly rejects scalar/null/nonstring/relative exclusion values and preserves absent/empty lists; original four malformed-rule assertions already covered after earlier production fix. Focused real native config and policy tests actually passed; stale partial note removed.",
           "platforms": [
             "linux",
             "macos",
@@ -3144,8 +3144,8 @@
             "suites": [],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "保留进程内拒绝，标记写失败后重试恢复且不丢公开事件；警告精确 stderr 捕获仍缺",
+          "coverage": "complete",
+          "behavior": "Actual filesystem file blocks marker directory creation; private remains blocked, public survives. env_clear subprocess captures real stderr exactlyonce without synthetic root path; remove blocker/expire private retry deadline, public still passes and a fresh policy sees durable private marker.",
           "platforms": [
             "linux",
             "macos",
@@ -3157,6 +3157,10 @@
               {
                 "file": "src/pipeline/workspace_policy.rs",
                 "test": "migration_contract_tests::marker_failures_keep_private_sessions_blocked_and_retry_without_dropping_public_events"
+              },
+              {
+                "file": "src/pipeline/workspace_policy.rs",
+                "test": "marker_stderr_history_contract::real_marker_failure_warns_once_without_paths_and_recovers_while_public_events_survive"
               }
             ]
           }
@@ -28574,7 +28578,7 @@
     },
     {
       "legacy": "tests/unit/inputs/input-runtime-metrics.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "source_hash": "5513a5d7a6a0122eeb5bca86b3fdf315649fd5c2774c91cde1b87f1557f56410",
       "rust": [],
       "cases": [
@@ -28613,19 +28617,24 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "全部可表达的时长异常及零计数断言已迁移；Rust计数字段为u64，不能向当前API传入旧JS的NaN/负数计数。保留partial，未把类型不匹配自动退役。",
+          "coverage": "complete",
+          "behavior": "Native floating durations -1/NaN/+Infinity/-Infinity produce exact original zero delta/readCalls1 and fixed scalar/no-payload state. JS dynamic invalid count coercion is replaced by unsigned typed observation domain: real rustdoc negative tests reject original NaN/+Infinity read/backlog and negative/NaN/Infinity batch fields with E0308/E0600, plus a positive complete zero-delta run. Production callers supply integer read lengths, not arbitrary JSON counts.",
           "platforms": [
             "linux",
             "macos",
             "windows"
           ],
           "target": {
-            "kind": "rust",
-            "tests": [
+            "kind": "retired",
+            "reason": "Only the former JavaScript Number counter-coercion mechanism is superseded: Native collector counts are required u64 and all original invalid counter expressions are compile-time rejected (actual E0308/E0600 negative+positive compiler evidence). Runtime floating-duration normalization, readCalls1/zero fields and no payload retention are retained and actually asserted; no unused dynamic adapter was added to manufacture coverage.",
+            "replacement": [
               {
                 "file": "tests/metrics_legacy_contracts.rs",
                 "test": "input_runtime_rejects_nonfinite_duration_effects_and_has_no_payload_storage"
+              },
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "input_runtime_state_stays_bounded_for_one_hundred_thousand_records"
               }
             ]
           }
@@ -28657,7 +28666,7 @@
           }
         }
       ],
-      "note": "2/3完整断言草案；1/3无效计数动态输入合同保留partial，时长NaN/Inf/负数已测试，固定状态用needs_drop=false及100000真实观察验证不保留可变payload容器。 Linux glibc2.34全库1609项和独立metrics integration12项已实际通过；平台适用列表不表示Windows/macOS已实跑。"
+      "note": "2/3完整断言草案；1/3无效计数动态输入合同保留partial，时长NaN/Inf/负数已测试，固定状态用needs_drop=false及100000真实观察验证不保留可变payload容器。 Linux glibc2.34全库1609项和独立metrics integration12项已实际通过；平台适用列表不表示Windows/macOS已实跑。 2026-11-02 partial closure: exact original assertions audited; source ef/f84 byte-identical. New real stderr capture and actual count-domain compiler evidence, no production behavior changes. Linux Rust1.99.1/glibc2.34 executed; Windows/macOS pending actual execution."
     },
     {
       "legacy": "tests/unit/status-bar/runtime-writer.test.ts",
@@ -37456,7 +37465,7 @@
     },
     {
       "legacy": "tests/unit/flushers/otlp-trace-flusher/runtime-observability.test.ts",
-      "coverage": "partial",
+      "coverage": "complete",
       "source_hash": "5c8c28911094a001896a755632497ef74d3e74f8a2f4951b5d8c7fbc040bb780",
       "cases": [
         {
@@ -37468,8 +37477,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "原older/a20与larger/b40+60保留2buffer/3record/120bytes、largest100bytes/2record/100ms、oldest200ms；注入Instant仅改变观测时点。返回scalar快照不泄漏private body且修改owned snapshot不改变实时counter。独立integration binary对3个128KiB真实payload只在同步snapshot调用开启线程本地allocator，分配<16KiB，从实际行为约束不复制/序列化payload。JS process.memoryUsage spy无Rust同名API；当前snapshot源码仅读取buffer标量和ID，不采样进程内存，不能把平台列表当执行证明。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "原older/a20与larger/b40+60保留2buffer/3record/120bytes、largest100bytes/2record/100ms、oldest200ms；注入Instant仅改变观测时点。返回scalar快照不泄漏private body且修改owned snapshot不改变实时counter。独立integration binary对3个128KiB真实payload只在同步snapshot调用开启线程本地allocator，分配<16KiB，从实际行为约束不复制/序列化payload。JS process.memoryUsage spy无Rust同名API；当前snapshot源码仅读取buffer标量和ID，不采样进程内存，不能把平台列表当执行证明。",
           "platforms": [
             "linux",
             "macos",
@@ -37498,8 +37507,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "f84e388 main同题将该计费fixture明确改为claude-code；承接main真实同batch first123与next64*10 => removed1/123、pending1/64/640、flush removed2/763、重复flush完全不变。保留原baseline Codex65record负控：pending2/65/763、removed0/converter0，不为旧SignalB抢占回退；另承接main Codex12/34 pending2/46负控并显式turn.end只移除first。此为逐fixture supersession，不退役整case。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "f84e388 main同题将该计费fixture明确改为claude-code；承接main真实同batch first123与next64*10 => removed1/123、pending1/64/640、flush removed2/763、重复flush完全不变。保留原baseline Codex65record负控：pending2/65/763、removed0/converter0，不为旧SignalB抢占回退；另承接main Codex12/34 pending2/46负控并显式turn.end只移除first。此为逐fixture supersession，不退役整case。",
           "platforms": [
             "linux",
             "macos",
@@ -37524,8 +37533,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "精确保留旧长度不匹配bytes[100]、NaN、-1、0序列；5pending/0bytes/4unmeasured，flush removed_unmeasured4。未测量状态不阻止所有5条被真实buffer接纳与清除。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "精确保留旧长度不匹配bytes[100]、NaN、-1、0序列；5pending/0bytes/4unmeasured，flush removed_unmeasured4。未测量状态不阻止所有5条被真实buffer接纳与清除。",
           "platforms": [
             "linux",
             "macos",
@@ -37550,8 +37559,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "f84e388 main同题改为claude-code；持有真实service转换锁，用private finish_buffer生命周期边界启动旧12byte buffer转换；转换尚未settle且converter0时，真实removed12已可见，next34真实pending1；解锁完成并flush pending0、removed2/46。Rust send.await自身提供转换背压，旧JS fire-and-forget send后即可观察下一buffer不是相同API时序；该语言差异明确保留，mapping维持partial供root审查，不伪造原send调用顺序完全一致。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "真实旧12byte buffer在public send触发的同session successor到达时移除，真实converter锁仍阻塞时removed1/12可见、converter0、public send未完成且next未接纳；解锁await返回后next34为唯一pending，flush后removed2/46、两条真实业务记录全保留且重复flush不重复计费。f84将该SignalB fixture从Codex明确改成Claude，Codex不抢占负控仍保留。JS fire-and-forget可在send返回前后观察next这一API观测点由Rust显式await背压替代，不宣称返回时点相同；保留原先private lifecycle回归并新增公共API证明。",
           "platforms": [
             "linux",
             "macos",
@@ -37563,6 +37572,10 @@
               {
                 "file": "src/flushers/otlp_trace_flusher.rs",
                 "test": "legacy_runtime_contracts::removal_accounting_is_visible_before_the_blocked_conversion_settles"
+              },
+              {
+                "file": "src/flushers/otlp_trace_flusher.rs",
+                "test": "legacy_runtime_contracts::public_send_observes_removal_before_conversion_and_preserves_backpressure"
               }
             ]
           }
@@ -37576,8 +37589,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "原70个Codex不同session各1byte，保留当前有意修复hard64：pending64/removed6，并断言真实buffers64；baseline和f84 main仍写旧65/5，逐子断言明确更正off-by-one，不退役case。flush实际Capture converter收到合计70原business records，累计removed70/bytes70，多次空flush完全不变，fresh7仍removed70/pending7。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "原70个Codex不同session各1byte，保留当前有意修复hard64：pending64/removed6，并断言真实buffers64；baseline和f84 main仍写旧65/5，逐子断言明确更正off-by-one，不退役case。flush实际Capture converter收到合计70原business records，累计removed70/bytes70，多次空flush完全不变，fresh7仍removed70/pending7。",
           "platforms": [
             "linux",
             "macos",
@@ -37602,8 +37615,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "原70个不同agent维度各1byte，诊断snapshot限制64，真实buffer硬限64（原baseline与main旧65需按已授权off-by-one修正）；flush真实buffer0、诊断仍64，实际Capture converter接收全部70条business records，诊断限维不删除业务记录。 草案仅rustfmt/apply-check；待中央Cargo实际运行，platforms仅适用范围。",
+          "coverage": "complete",
+          "behavior": "原70个不同agent维度各1byte，诊断snapshot限制64，真实buffer硬限64（原baseline与main旧65需按已授权off-by-one修正）；flush真实buffer0、诊断仍64，实际Capture converter接收全部70条business records，诊断限维不删除业务记录。",
           "platforms": [
             "linux",
             "macos",
@@ -37621,7 +37634,7 @@
         }
       ],
       "rust": [],
-      "note": "冻结baseline逐声明映射；main仅用于解释已变fixture，不新增baseline分母。hard64/6为已授权修正旧65/5，保持Codex无SignalB抢占。真实Rust API背压与JS fire-and-forget时序差异明确列出，不能只按测试名升级complete。 2026-10-31 Linux glibc2.34/Rust1.99.1全workspace1971项通过，额外root-sticky普通ignored入口已显式单跑通过。严格Clippy与完整普通Unix EACCES/同轮继续/summary已通过。Windows目标代码未以Linux代验。runtime-observability背压及64/6差异保持逐subassert说明与partial，未因执行通过自动消除语义差异。"
+      "note": "All six immutable declarations audited at the native public API/lifecycle boundary. Historical memoryUsage spy is replaced by the actual scoped allocation regression; hard64/6 retains the previously authorized eviction correction and all70 business rows. f84 explicitly replaces Codex SignalB fixtures with Claude; original Codex nonpreemption remains a negative control. Rust async send awaits real converter backpressure: the JS fire-and-forget next-buffer observation point is explicitly replaced, not reported as identical call timing. Actual public-send blocked-converter proof confirms removal12 before settling, then successor34 and final46 without a second state or lost record. Linux focused10 passed, earlier whole-workspace3199/0/5 includes existing six plus allocation regression; new public proof executes separately before final batch validation."
     },
     {
       "legacy": "tests/unit/flushers/otlp-trace-flusher/runtime-stage-outcome.test.ts",
@@ -42254,10 +42267,10 @@
     },
     {
       "legacy": "tests/unit/hooks/cursor/inject-skill-records.test.mjs",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
       "source_hash": "ea31c437ef0a7e32e6d51390e7700cfdfee2e95bb0af42ee93cbee1221154137",
-      "note": "固定ef8953逐声明49+25+24；基于7854e0448f225ad2e24c33c76d1dec000b533c1d+已交verified95隔离树。Rust1.99.1/glibc2.34/network-none：strict Clippy通过，全workspace2011pass/0fail，2项既有doc忽略。所有target函数核对实际通过日志；Windows/macOS未执行。 L274旧JS局部alias与正式输出差异明确保留partial；L699仅退役Node动态import语言机制，以真实native启动无Hook副作用替代。",
+      "note": "All24 original declarations mapped. L274 JS local-reference identity is explicitly distinguished from formal exported telemetry: actual frozen f84 module executed under a synthetic HOME proves local secondRequest preserves id:null while records contains a replacement sanitized object omitting that key. Native owned formal records match the latter, with all reasoning/tool fields and one skill exchange preserved. Evidence /tmp/pilot-runtime-observability-partial-20261102/cursor-f84-alias-proof.json; no production data/network.",
       "cases": [
         {
           "source": {
@@ -42528,8 +42541,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "should reuse the prior assistant when the source tool call id is null；真实native注入/归一化/Span转换，不依赖JS对象引用身份；Linux隔离targeted已执行，最终完整报告记录结果，Windows/macOS未代验。 显式旧测试缺陷/迁移差异，保留partial：旧JS的secondRequest局部引用仍指向records[index]=applyPolicy(...)替换前的对象，故其golden保留id:null；正式records会经同一sanitizeObject递归去掉null键。Rust owned records按正式输出断言：一条既有assistant、reasoning与原tool-call其余字段不变、skill-call仅追加一次、两条独立tool-response；不能声称复现旧局部引用id:null断言。原source别名断言需审定，未静默升级complete。",
+          "coverage": "complete",
+          "behavior": "实际f84旧模块导出函数复验：局部secondRequest别名仍保留null id，但正式records已替换为sanitize后的对象并去掉该键，两种上下文均1 assistant/2 tool。Rust owned records保留正式输出：reasoning及原工具其余字段不变，skill只追加一次、两条独立response。退役JS对象局部alias身份这一不可移植观测点，不退役业务用例或保留旧测试局部引用为正式输出。",
           "platforms": [
             "linux",
             "macos",
@@ -74103,6 +74116,693 @@
               {
                 "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
                 "test": "source_l473_literal_work_hook_contract"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-work-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "ce1c1d9e60c18ebfc2ba4eeb566bb074faa8ffec28548d1acaad632e5d31b9c9",
+      "note": "ef8953/f84 identical8 declarations; actual SDKplain-text legacyfolder layout, knownperfileoffset0, publicconstructor+HostedInput. Explicitsourcefield assertions kept, not directapply_event mirror. Native lackedtool.call/summarykind-model/total1290: red4pass4fail→8green. This mapping establishes original8 metadata-log contracts, not fullCNsessiontrace capability or delayedDelta lifecycle; those are independent next sourcefile9. Existingidentity3 kept. Linuxactual; Win/macpendingCI;0retire.",
+      "cases": [
+        {
+          "source": {
+            "id": "L30:C3",
+            "title": "has correct identity and collection method",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual per-client constructor qoder-work-log/Work/SessionFilePolling",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l30_actual_sdk_input_identity_and_session_file_method"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L37:C3",
+            "title": "emits one metadata-only llm.response and one tool.call per turn (no content reconstructed)",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual legacy SDK layout emits exactlyone metadata-onlyresponse and Readcall, exact1234/56/1290/session/msg/modelUnknown/tier/cwd/finishReason/eventKind/toolCount; no reconstructed outputmessages or argumentdelta",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l37_sdk_metadata_response_and_tool_call_do_not_reconstruct_unordered_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C3",
+            "title": "skips system_init and message_start lines (no entries before message_delta)",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual init and barestart produce0entries",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l87_init_and_unfinished_message_start_emit_no_entries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "emits a result summary entry on result event",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual result only givesoneother/result event with duration1500 and turns1",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l106_sdk_result_summary_retains_event_kind_duration_and_turn_count"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L133:C3",
+            "title": "does not re-emit on subsequent collect when no new lines appended",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual persisted owned0 fileoffset consumesfirstturn; reconstructed input sameStateStore unchangedfile emits0",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l133_persisted_per_file_cursor_does_not_reemit_unchanged_sdk_log"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L160:C3",
+            "title": "snapshots the most recent set_model_policy.chat.model onto each turn",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual two turns snapshot respective chat qwork-ultimate/qwork-auto; trailing resultsummary latestqwork-auto",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l160_each_turn_snapshots_latest_chat_policy_and_summary_uses_latest_policy"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L207:C3",
+            "title": "routes parallel sessions to chat/scene model slots based on subscription tier",
+            "suites": [
+              "QoderWorkLogInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual parallelPremium/Standard samefile sessions each responseandresult choosechat ultimate vs scene auto",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l207_parallel_premium_and_standard_sessions_use_distinct_chat_scene_slots"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C5",
+            "title": "has CN id and agentType",
+            "suites": [
+              "QoderWorkLogInput",
+              "QoderWork CN variant (parameterized)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual CN constructor qoder-work-cn-log and WorkCNenum",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work-log/sdk_history_migration_contract_tests.rs",
+                "test": "source_l282_cn_sdk_input_has_distinct_id_and_agent"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/upstream-context.test.mjs",
+      "source_hash": "906b2e84aeb54feb799208dafafd838071e88c4276e47d16bde16d1700103843",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐源断言核对，使用TempDir/独立Env/真实生产helper与持久claim。pruneIdle唯一末断言按f84明确新增持久claim合同更新，具体依据写在该声明，不把整文件退役。执行证据独立receipt，platforms不等于Native全平台已执行。",
+      "cases": [
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "writes a session-level record from a valid TRACEPARENT",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实helper+TempDir，session/ID/TP三字段与恰好1条JSONL、env.lock实际文件均检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l31_writes_valid_traceparent_and_exclusive_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C3",
+            "title": "writes only once per session (O_CREAT|O_EXCL lock)",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同Env/session调用3次，实际JSONL恰好1条，生产create_new锁未mock。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l40_records_only_once_for_the_same_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C3",
+            "title": "does nothing when TRACEPARENT is absent",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际Env移除TRACEPARENT后，关联JSONL和env.lock都不存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l48_absent_traceparent_creates_no_file_or_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L54:C3",
+            "title": "rejects malformed / all-zero traceparent",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原garbage/xyz/全零traceID/全零spanID四值均真实调用，无关联文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l54_rejects_malformed_and_both_all_zero_identifiers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L62:C3",
+            "title": "is fail-open on bad input (no throw)",
+            "suites": [
+              "upstream-context.mjs (方案1 env hook helper)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "空session与缺显式dataDir均真实调用无panic；Rust API以Env提供dataDir，缺失时HOME回退仍为TempDir，不读取用户HOME；另NUL目录真实IO失败保持fail-open。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/upstream_context_history_tests.rs",
+                "test": "env_l62_bad_input_and_failed_io_remain_fail_open"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/correlation-store.test.ts",
+      "source_hash": "05eb759a27d92b5a2c253693e6a1d2b5966dd7660afb05ae683b05b3a9af64e4",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐源断言核对，使用TempDir/独立Env/真实生产helper与持久claim。pruneIdle唯一末断言按f84明确新增持久claim合同更新，具体依据写在该声明，不把整文件退役。执行证据独立receipt，platforms不等于Native全平台已执行。",
+      "cases": [
+        {
+          "source": {
+            "id": "L37:C3",
+            "title": "resolves by exact content hash",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实store test核对SHA内容命中TP1、仅一次；包含prefix fallback真实TP2命中。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/correlation_store.rs",
+                "test": "exact_hash_is_consumed_once_and_prefix_is_the_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L43:C3",
+            "title": "resolves by prefix when collected text was rewritten (e.g. @file appended)",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "现有真实store record prefix=rewrite、collected=rewrite me，实际prefix fallback精确指定TP；没有仅按标题映射。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/upstream_link/correlation_store.rs",
+                "test": "exact_hash_is_consumed_once_and_prefix_is_the_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "consume-once: duplicate prompts get distinct records in order",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原OK/HELLO/OK三记录，依次TP1/TP2/TP_SESS/None，实际顺序和consume-once精确检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l50_duplicate_prompts_consume_distinct_records_in_source_order"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "resolveSessionFirst returns once then null",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实session记录两次resolve，精确TP_SESS再None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l59_session_context_resolves_once_then_none"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L66:C3",
+            "title": "persists session consumption across collector restarts",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两个全新store模拟restart，首TP_SESS后None，session-context.done实际存在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l66_session_consumption_survives_a_fresh_collector"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L76:C3",
+            "title": "returns null for unknown session / no match",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原known记录，unknown session和unknown text两次None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l76_unknown_sessions_and_unmatched_text_return_none"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "ignores malformed lines without throwing",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实not-json/valid/缺必要字段三行，valid仍精确TP1，无panic。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l83_malformed_lines_do_not_hide_a_later_valid_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "exact contentHash takes precedence over a prefix match",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原analyze/analyze this两记录，完整hash先TP2，随后analyze xyz仍取TP1，防止前缀抢占/误消费。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l89_exact_hash_precedes_a_prefix_and_keeps_the_prefix_available"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "hasSession reflects file presence",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原有SID实际file=true、ses_missing=false。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l98_has_session_reports_actual_file_presence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "pruneIdle evicts sessions not accessed since the cutoff",
+            "suites": [
+              "CorrelationStore"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留消费TP1、过去cutoff prune0、已消费None、未来cutoff prune1四个断言；ef最后重用TP1已被f84同文件L154-159明确替换为None（disk claim不能随内存cache eviction消失）。native按冻结main最终合同检查None，不恢复旧复用缺陷。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "store_l105_idle_eviction_preserves_the_main_durable_consumption_contract"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/upstream-link/acp-correlate-retention-service.test.ts",
+      "source_hash": "f2d7c77a11a1a6b1202eb645ba63445a8d5ce53a3334e46ecb704858b11b8a38",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐源断言核对，使用TempDir/独立Env/真实生产helper与持久claim。pruneIdle唯一末断言按f84明确新增持久claim合同更新，具体依据写在该声明，不把整文件退役。执行证据独立receipt，platforms不等于Native全平台已执行。",
+      "cases": [
+        {
+          "source": {
+            "id": "L28:C3",
+            "title": "deletes files older than ttlMs, keeps fresh ones",
+            "suites": [
+              "AcpCorrelateRetentionService"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原48h旧jsonl+env.lock、1min新文件、24hTTL真实mtime，精确2/0，仅旧两文件删除。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "retention_source_l28_removes_old_jsonl_and_env_lock_but_keeps_fresh"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "no-ops when the directory is absent",
+            "suites": [
+              "AcpCorrelateRetentionService"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实缺目录、原1000msTTL，精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/upstream_link_store_history.rs",
+                "test": "retention_source_l49_absent_directory_returns_zero_counts"
               }
             ]
           }

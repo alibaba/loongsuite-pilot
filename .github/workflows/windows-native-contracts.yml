@@ -91,6 +91,7 @@ jobs:
           failures=0
           for filter in \
             inputs::base::tests \
+            inputs::base::runtime_metrics:: \
             inputs::codex_transcript:: \
             inputs::doubao_work:: \
             inputs::qoder_work_trace:: \
@@ -113,6 +114,8 @@ jobs:
             hook_process::cursor_assemble:: \
             hook_process::claude_code:: \
             core::orchestrator:: \
+            core::upstream_link:: \
+            pipeline::workspace_policy:: \
             core::log_retention_service:: \
             core::hook_watchdog:: \
             deployment::runtime_retirement:: \
