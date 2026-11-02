@@ -96,7 +96,7 @@ export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
 }
 
 /**
- * Multi-source merge input for qoder/qoder-cli.
+ * Multi-source merge input for qoder/qoder-cli/qoder-app.
  * Reads hook JSONL (content+structure), session segments (CLI tokens),
  * and SQLite (IDE tokens), merges by variant, outputs enriched events
  * that serve both event logs (SLS) and trace conversion (ARMS).
@@ -460,7 +460,7 @@ export class QoderTraceInput extends BaseInput {
   private inferTurnVariant(entries: AgentActivityEntry[]): 'qoder-cli' | 'qoder' | 'qoder-idea' {
     for (const entry of entries) {
       const agentType = entry['gen_ai.agent.type'] as string;
-      if (agentType === ClientType.QoderCli || agentType === 'qoder-cli') return 'qoder-cli';
+      if (agentType === ClientType.QoderCli || agentType === ClientType.QoderApp) return 'qoder-cli';
       if (agentType === ClientType.QoderIdea || agentType === 'qoder-idea') return 'qoder-idea';
       if (agentType === ClientType.Qoder || agentType === 'qoder') return 'qoder';
     }

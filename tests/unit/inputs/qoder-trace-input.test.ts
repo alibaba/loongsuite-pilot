@@ -1458,7 +1458,7 @@ describe('QoderTraceInput token-enricher', () => {
 });
 
 describe('QoderTraceInput conditional segment reads', () => {
-  it('reads segment only after primary enrichment leaves a critical gap', async () => {
+  it.each(['qoder-cli', 'qoder-app'])('reads CLI segments for %s only after primary enrichment leaves a critical gap', async agentType => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-trace-segment-gate-'));
     try {
       const logFileName = `qoder-${getTodayDateString()}.jsonl`;
@@ -1481,6 +1481,7 @@ describe('QoderTraceInput conditional segment reads', () => {
           time_unix_nano: '1780000001000000000',
         }),
       ];
+      completeTurn.forEach(entry => { entry['gen_ai.agent.type'] = agentType; });
       await fs.writeFile(logFile, completeTurn.map(entry => JSON.stringify(entry)).join('\n') + '\n');
 
       const stateStore = new MockStateStore();
@@ -1566,10 +1567,13 @@ describe('QoderTraceInput conditional segment reads', () => {
       ];
       await fs.appendFile(
         logFile,
-        [...missingTurn, ...secondMissingTurn].map(entry => JSON.stringify(entry)).join('\n') + '\n',
+        [...missingTurn, ...secondMissingTurn].map(entry => JSON.stringify({
+          ...entry, 'gen_ai.agent.type': agentType,
+        })).join('\n') + '\n',
       );
 
       const second = await (input as any).collect() as AgentActivityEntry[];
+      expect(second.every(entry => entry['gen_ai.agent.type'] === agentType)).toBe(true);
       expect(input.segmentReadCount).toBe(1);
       expect(input.expectedRequestIds).toEqual([
         'missing-request-id',

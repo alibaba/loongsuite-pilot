@@ -208,6 +208,17 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it.each(['qoder', 'qoder-cli', 'qoder-app'])('exports %s as a distinct Qoder framework', agentType => {
+    const records = [{ 'gen_ai.agent.type': agentType }] as unknown as AgentActivityEntry[];
+    const identity = (flusher as any).resolveAgentResourceIdentity(agentType, records);
+    const resource = (flusher as any).buildResource(agentType, 'test-pilot', {}, identity);
+    expect(resource.attributes).toMatchObject({
+      'gen_ai.agent.type': agentType,
+      'gen_ai.agent.system': 'qoder',
+      'gen_ai.framework': agentType,
+    });
+  });
+
   it('uses an explicit PI system and framework for a registered custom Agent resource', () => {
     const records = [{
       'gen_ai.agent.system': 'pi',

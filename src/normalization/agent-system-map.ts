@@ -3,6 +3,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'codex': 'codex',
   'codex-session': 'codex',
   'qoder': 'qoder',
+  'qoder-app': 'qoder',
   'qoder-idea': 'qoder',
   'qoder-work': 'qoder',
   'qoder-work-cn': 'qoder',

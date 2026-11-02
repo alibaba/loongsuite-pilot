@@ -91,6 +91,8 @@ describe('international Qoder Desktop account metadata', () => {
   it('uses the public Desktop account instead of the standalone CLI account', () => {
     writeStatus(); installFakeCli(); writeTurn(); run();
     expectIdentity('desktop-user', 'desktop@example.com');
+    expect(history().every(record => record['gen_ai.agent.type'] === 'qoder-app'
+      && record['gen_ai.framework'] === 'qoder-app')).toBe(true);
     expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
@@ -174,5 +176,7 @@ describe('international Qoder Desktop account metadata', () => {
     fs.appendFileSync(transcript, JSON.stringify({ type: 'last-prompt', sessionId: 'desktop-session', lastPrompt: 'hello a' }) + '\n');
     await vi.waitFor(() => expect(history().length).toBeGreaterThan(0), { timeout: 10_000, interval: 50 });
     expectIdentity('desktop-user', 'desktop@example.com');
+    expect(history().every(record => record['gen_ai.agent.type'] === 'qoder-app'
+      && record['gen_ai.framework'] === 'qoder-app')).toBe(true);
   });
 });
