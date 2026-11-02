@@ -11770,6 +11770,902 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/core/log-retention-service.test.ts",
+      "source_hash": "18f1c6725774c4d68820e5bda58abe7fbe02d3af81519ffdc3deae6531eb85a1",
+      "coverage": "complete",
+      "rust": [],
+      "note": "完整f84 33源声明；其中24为baseline同业务声明的新AST位置，新增9单独标记。baseline仍24，不重复计数。Native平台适用性与Linux实际执行分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L74:C5",
+            "title": "reclaims oversized active and closed files today across output/debug/failed while keeping source state",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实六份3GiB+1当日active/closed跨output/debug/failed全部回收、source-index.sqlite字节保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l74_reclaims_six_giant_mirrors_but_keeps_the_source_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C5",
+            "title": "reclaims today's closed failed segments under the existing budget and preserves a normal active file",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原OTLP限额+1当日closed删除，active实际JSON字节保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l90_reclaims_today_closed_failed_segment_but_keeps_active"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C5",
+            "title": "applies output pressure to debug segments without rescanning hook histories",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原output上限+1debug closed回收，active字节保留；pressure不扫描100天history，普通cleanup随后删除history。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l101_debug_pressure_does_not_rescan_hook_history"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L116:C5",
+            "title": "does not traverse a managed directory symlink during emergency cleanup",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实managed目录symlink指向外部3GiB+1文件，cleanup0/0且外部逻辑大小保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l116_never_traverses_a_managed_directory_symlink"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C5",
+            "title": "rechecks an oversized active path under the append lock before deleting it",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实collect_output_dated扫描巨型文件后，在实际append锁持有时启动reclaim_oversized_files；重写为新JSON后才放锁，cleanup必须等待、返回0/0、精确保留新字节。此项直接验收生产scan→reclaim阶段，其他新增项验证完整service入口；未声称这一锁回归自己包含整个service扫描入口。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l125_rechecks_a_real_scanned_oversized_path_under_the_append_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C5",
+            "title": "deletes files older than retention and keeps recent ones",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实三份history日期10/3/0天，仅删除10天，recent/today仍在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l72_deletes_only_expired_history_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C5",
+            "title": "cleans multiple categories with different retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同一5天日期，history7/error7保留、debug3删除，结果1/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l97_applies_each_category_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L205:C5",
+            "title": "never deletes today's files even with 0-day retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实today文件在historyDays0仍保留且0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l125_protects_today_with_zero_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L220:C5",
+            "title": "cleans output directory",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实output10天删除/today保留，精确1/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l140_cleans_output_and_keeps_today"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L235:C5",
+            "title": "deletes oversized output files earlier than normal output retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "512MiB+1旧3天删除，1024字节同日与512MiB+1昨日保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l155_applies_early_large_file_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L256:C5",
+            "title": "deletes oldest output files when total output size exceeds the hard limit",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2GiB/5大小六文件/原六日期，精确仅最旧删除，五份余者保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l176_deletes_oldest_output_under_hard_limit_pressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L284:C5",
+            "title": "cleans sls-failed-logs directory",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实40天/2天SLS文件，30天保留期仅删除旧文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l204_cleans_expired_sls_failed_logs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L297:C5",
+            "title": "reclaims closed output segments under pressure while preserving active files today",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原两个output上限/2+另一active1024，精确仅closed删除、两份当日active保留且目录精确2项。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l297_output_pressure_preserves_all_today_active_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L310:C5",
+            "title": "includes undated closed segments in capacity cleanup without following symlinks",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原undated closed-all上限+active1024，closed回收；外部同大小file及symlink保留，不把symlink target计容量。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l310_capacity_includes_undated_closed_segments_without_following_symlinks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L324:C5",
+            "title": "enforces the SLS failure total limit while preserving the active segment",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实SLS三段总量上限，0000删除、0001和active0002保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l217_preserves_active_sls_segment_under_total_pressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C5",
+            "title": "cleans expired OTLP daily files and leaves recent legacy files protected",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实expired OTLP删除；today和legacy文件精确字节recent/legacy保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l237_keeps_recent_and_legacy_otlp_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C5",
+            "title": "cleans expired metric daily and legacy files without touching unknown or state files",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实utimes设置10天legacy mtime；删除dated+legacy共2，state/unknown/datestamped unknown字节均保留；暴露Rust旧文件硬设today缺口后修复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l256_removes_only_managed_metric_daily_and_legacy_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L393:C5",
+            "title": "cleans the Hook latency mirror like the other metric streams",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实10天hook latency metric删除、昨日recent字节精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l393_hook_latency_mirror_follows_metric_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L409:C5",
+            "title": "reduces metric_alarm pressure while preserving both today and yesterday",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原metric total/3+1三文件，精确仅2天旧文件删除，昨日/today保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l286_metric_pressure_preserves_today_and_yesterday"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L429:C5",
+            "title": "keeps OTLP today and yesterday even when they alone exceed the soft limit",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原OTLP total/2+1两个保护日文件即使超预算也保留，精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l306_otlp_protected_days_can_exceed_soft_limit"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L446:C5",
+            "title": "protects today and yesterday from age cleanup even with a shorter retention value",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "metricDays0精确仅2天旧文件删除，保护昨日/today。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l323_protected_days_survive_zero_metric_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L465:C5",
+            "title": "skips metric state, unknown, hidden, symlink, and directory entries",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实state/unknown/hidden/symlink/directory全保留且0/0，外部target字节不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l342_skips_state_unknown_hidden_symlink_and_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L494:C5",
+            "title": "skips unrecognized subdirectories",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "100天unknown-stuff子目录实际不删除。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l371_skips_unknown_subdirectories"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L508:C5",
+            "title": "ignores files without a date pattern",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "三份无日期state/hidden/README全部保留、精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l385_ignores_undated_state_and_readme_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L524:C5",
+            "title": "continues after individual file deletion errors",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "精确errors==2、deleted0。Unix真实readonly目录，root执行时只隔离child降UID避免权限旁路；Windows临时文件readonly产生真实unlink错误；保留两个文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l401_continues_after_two_real_unlink_errors"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L546:C5",
+            "title": "handles non-existent logs directory gracefully",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不存在logs真实调用返回0/0，无崩溃。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l423_missing_logs_is_a_noop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L558:C5",
+            "title": "checks local mirror pressure every minute and cancels both schedules on stop",
+            "suites": [
+              "LogRetentionService",
+              "start/stop lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留源假时钟方式，实际FS而非spy：生产30s首次全清理，60s pressure回收debug closed而不重扫history；stop后advance6h文件仍在且三任务取消。生产预算未缩短，keepalive防止FS异步时虚拟时钟自动前进。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "main_l558_pressure_ticks_each_minute_and_stop_cancels_both_schedules"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L575:C5",
+            "title": "stop clears timers without error",
+            "suites": [
+              "LogRetentionService",
+              "start/stop lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start后stop，中止并清空startup/periodic/pressure三个任务句柄。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l435_stop_cancels_all_started_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L582:C5",
+            "title": "does not start when disabled",
+            "suites": [
+              "LogRetentionService",
+              "start/stop lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "disabled真实start不调度，stop幂等、三个句柄均空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l442_disabled_never_schedules_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L591:C3",
+            "title": "extracts date from standard JSONL filenames",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原三个JSONL/log文件名与三日期逐对相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l451_extracts_standard_jsonl_and_log_dates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L597:C3",
+            "title": "returns null for filenames without date pattern",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原四份无日期文件名均None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l457_undated_names_have_no_date"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L604:C3",
+            "title": "returns null for malformed dates",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原月13/0、日32、年1999逐条None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l464_rejects_malformed_and_out_of_range_dates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L611:C3",
+            "title": "handles edge case dates",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2020-01-01与2099-12-31边界精确相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l471_preserves_edge_dates"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

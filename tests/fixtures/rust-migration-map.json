@@ -71751,6 +71751,2363 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/core/log-retention-service.test.ts",
+      "source_hash": "ff134c83186538ca221cffbf08ae2241f4bff34f54a2002bdf88f27171c72b1d",
+      "coverage": "complete",
+      "rust": [],
+      "note": "24个baseline声明实际断言迁移；f84新增9另列main supplement，不抬高baseline。源的大文件逻辑阈值原值保留，Windows测试专用FSCTL_SET_SPARSE避免物理分配18GiB，未降低生产预算。Linux实际执行；Windows/macOS可用性和运行证据分开。",
+      "cases": [
+        {
+          "source": {
+            "id": "L72:C5",
+            "title": "deletes files older than retention and keeps recent ones",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实三份history日期10/3/0天，仅删除10天，recent/today仍在。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l72_deletes_only_expired_history_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L97:C5",
+            "title": "cleans multiple categories with different retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同一5天日期，history7/error7保留、debug3删除，结果1/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l97_applies_each_category_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L125:C5",
+            "title": "never deletes today's files even with 0-day retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实today文件在historyDays0仍保留且0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l125_protects_today_with_zero_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L140:C5",
+            "title": "cleans output directory",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实output10天删除/today保留，精确1/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l140_cleans_output_and_keeps_today"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C5",
+            "title": "deletes oversized output files earlier than normal output retention",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "512MiB+1旧3天删除，1024字节同日与512MiB+1昨日保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l155_applies_early_large_file_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L176:C5",
+            "title": "deletes oldest output files when total output size exceeds the hard limit",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2GiB/5大小六文件/原六日期，精确仅最旧删除，五份余者保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l176_deletes_oldest_output_under_hard_limit_pressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L204:C5",
+            "title": "cleans sls-failed-logs directory",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实40天/2天SLS文件，30天保留期仅删除旧文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l204_cleans_expired_sls_failed_logs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L217:C5",
+            "title": "enforces the SLS failure total limit while preserving the active segment",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实SLS三段总量上限，0000删除、0001和active0002保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l217_preserves_active_sls_segment_under_total_pressure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L237:C5",
+            "title": "cleans expired OTLP daily files and leaves recent legacy files protected",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实expired OTLP删除；today和legacy文件精确字节recent/legacy保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l237_keeps_recent_and_legacy_otlp_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L256:C5",
+            "title": "cleans expired metric daily and legacy files without touching unknown or state files",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实utimes设置10天legacy mtime；删除dated+legacy共2，state/unknown/datestamped unknown字节均保留；暴露Rust旧文件硬设today缺口后修复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l256_removes_only_managed_metric_daily_and_legacy_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L286:C5",
+            "title": "reduces metric_alarm pressure while preserving both today and yesterday",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原metric total/3+1三文件，精确仅2天旧文件删除，昨日/today保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l286_metric_pressure_preserves_today_and_yesterday"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L306:C5",
+            "title": "keeps OTLP today and yesterday even when they alone exceed the soft limit",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原OTLP total/2+1两个保护日文件即使超预算也保留，精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l306_otlp_protected_days_can_exceed_soft_limit"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L323:C5",
+            "title": "protects today and yesterday from age cleanup even with a shorter retention value",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "metricDays0精确仅2天旧文件删除，保护昨日/today。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l323_protected_days_survive_zero_metric_retention"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L342:C5",
+            "title": "skips metric state, unknown, hidden, symlink, and directory entries",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实state/unknown/hidden/symlink/directory全保留且0/0，外部target字节不变。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l342_skips_state_unknown_hidden_symlink_and_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L371:C5",
+            "title": "skips unrecognized subdirectories",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "100天unknown-stuff子目录实际不删除。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l371_skips_unknown_subdirectories"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L385:C5",
+            "title": "ignores files without a date pattern",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "三份无日期state/hidden/README全部保留、精确0/0。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l385_ignores_undated_state_and_readme_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L401:C5",
+            "title": "continues after individual file deletion errors",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "精确errors==2、deleted0。Unix真实readonly目录，root执行时只隔离child降UID避免权限旁路；Windows临时文件readonly产生真实unlink错误；保留两个文件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l401_continues_after_two_real_unlink_errors"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L423:C5",
+            "title": "handles non-existent logs directory gracefully",
+            "suites": [
+              "LogRetentionService",
+              "runCleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不存在logs真实调用返回0/0，无崩溃。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l423_missing_logs_is_a_noop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L435:C5",
+            "title": "stop clears timers without error",
+            "suites": [
+              "LogRetentionService",
+              "start/stop lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实start后stop，中止并清空startup/periodic/pressure三个任务句柄。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l435_stop_cancels_all_started_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L442:C5",
+            "title": "does not start when disabled",
+            "suites": [
+              "LogRetentionService",
+              "start/stop lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "disabled真实start不调度，stop幂等、三个句柄均空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l442_disabled_never_schedules_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L451:C3",
+            "title": "extracts date from standard JSONL filenames",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原三个JSONL/log文件名与三日期逐对相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l451_extracts_standard_jsonl_and_log_dates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L457:C3",
+            "title": "returns null for filenames without date pattern",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原四份无日期文件名均None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l457_undated_names_have_no_date"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L464:C3",
+            "title": "returns null for malformed dates",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原月13/0、日32、年1999逐条None。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l464_rejects_malformed_and_out_of_range_dates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L471:C3",
+            "title": "handles edge case dates",
+            "suites": [
+              "extractDate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原2020-01-01与2099-12-31边界精确相等。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "history_l471_preserves_edge_dates"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/updater/updater-metrics.test.ts",
+      "source_hash": "c6f5c1449ab656dd29a278fe8b3378772e055f55cfd5531b511553a12aaf2eee",
+      "coverage": "complete",
+      "rust": [],
+      "note": "18精确声明；f84逐字相同。原Metrics内部timer由Rust Updater::maintain统一拥有，生产默认30s真实队列/JSONL回归验证，stop归属随updater任务结束。告警默认send_alarm及真实入口private telemetry初始化补线，开源仍不向网发送；proprietary额外测试只操作synthetic child env及127.0.0.1。platforms是适用性，实际执行证据单列receipt。",
+      "cases": [
+        {
+          "source": {
+            "id": "L73:C5",
+            "title": "writes updater event to a daily pilot-updater-events file after flush",
+            "suites": [
+              "UpdaterMetrics",
+              "writeEvent"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实daily JSONL，stop flush后started event_type、version1.0.0、非空ip、numeric time逐字段精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_events_preserve_started_version_ip_time_user_and_both_extra_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C5",
+            "title": "includes extra fields when provided",
+            "suites": [
+              "UpdaterMetrics",
+              "writeEvent"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实JSONL current_version1.0.0与latest_version1.0.1两个字段均精确检查。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_events_preserve_started_version_ip_time_user_and_both_extra_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C5",
+            "title": "includes user_id in events",
+            "suites": [
+              "UpdaterMetrics",
+              "writeEvent"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实JSONL user_id=user-123精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_events_preserve_started_version_ip_time_user_and_both_extra_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C5",
+            "title": "includes error info for failure events",
+            "suites": [
+              "UpdaterMetrics",
+              "writeEvent"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实JSONL error=download timeout与consecutive_failures=3精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "writes_events_and_alarms_without_status_rows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C5",
+            "title": "writes alarm entry to a daily pilot-alarms file after flush",
+            "suites": [
+              "UpdaterMetrics",
+              "writeAlarm"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实daily pilot-alarms，type/level/message/count/user_id/ver六字段精确保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_default_alarm_sender_receives_the_exact_queued_alarm_on_flush"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L152:C5",
+            "title": "emits USER_ID_FORMAT_ALARM when userId has braces",
+            "suites": [
+              "UpdaterMetrics",
+              "userId format alarm"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实braced user格式告警，level1且消息含原braces ID。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "emits_braced_user_id_alarm_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L166:C5",
+            "title": "does not emit USER_ID_FORMAT_ALARM when userId is plain",
+            "suites": [
+              "UpdaterMetrics",
+              "userId format alarm"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "plain123456真实flush无USER_ID_FORMAT_ALARM。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "emits_braced_user_id_alarm_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L178:C5",
+            "title": "emits USER_ID_FORMAT_ALARM only once per lifetime",
+            "suites": [
+              "UpdaterMetrics",
+              "userId format alarm"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "重复flush唯一一次格式告警；额外真实生产30s ticker回归亦证明重复生命周期flush不重发。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "emits_braced_user_id_alarm_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L198:C5",
+            "title": "flushes queued events on 30s ticker",
+            "suites": [
+              "UpdaterMetrics",
+              "flush cadence"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "源vi假时钟承接为Tokio虚拟时钟，实际Updater::maintain生产30s ticker：前29999ms无JSONL、到30000ms精确一条updater_started。Rust由Updater拥有调度，Metrics.start仅初始化；真实入口将两者接线，未声称Metrics单独start会生成timer。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_timer_history_tests.rs",
+                "test": "original_metrics_flush_contract_uses_the_actual_thirty_second_ticker"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L214:C5",
+            "title": "coalesces multiple writes within one flush window",
+            "suites": [
+              "UpdaterMetrics",
+              "flush cadence"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "同flush窗口两个排队event+一个alarm，stop后真实JSONL精确2条+1条。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "writes_events_and_alarms_without_status_rows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L228:C5",
+            "title": "does NOT send events as status rows (collector folds them into the heartbeat)",
+            "suites": [
+              "UpdaterMetrics",
+              "sendAlarm / sendStatus integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实默认构造事件flush只落本地JSONL；internal::sender thread-local记录为空，既无status也无alarm。不开真实网络。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_events_preserve_started_version_ip_time_user_and_both_extra_versions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L242:C5",
+            "title": "calls sendAlarm for queued alarms on flush",
+            "suites": [
+              "UpdaterMetrics",
+              "sendAlarm / sendStatus integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "生产默认alarm_sender=None真正调用internal::sender，stop flush前记录空，后精确1条pilot_alarm、kind=alarm、无__topic__内部字段；另proprietary真实run-updater子进程仅向loopback送格式告警证明生产入口初始化及默认通道实际接通。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_default_alarm_sender_receives_the_exact_queued_alarm_on_flush"
+              },
+              {
+                "file": "tests/updater_metrics_entry.rs",
+                "test": "real_updater_entry_initializes_private_telemetry_for_its_default_alarm_sender"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L257:C5",
+            "title": "suppresses SERVICE_NOT_RUNNING_ALARM during startup grace",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "start即check但3min startup grace内真实local alarm为空。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "suppresses_service_alarm_during_grace_then_requires_two_misses"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L267:C5",
+            "title": "requires two consecutive misses after startup grace before alarming",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "按源fakeclock推进4min及再1min、两次显式miss检查后，精确一条SERVICE_NOT_RUNNING_ALARM并保留liveness reason；不把最终一条计数冒充单独验证中间时刻。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "suppresses_service_alarm_during_grace_then_requires_two_misses"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C5",
+            "title": "enriches SERVICE_NOT_RUNNING_ALARM with the startup-crash cause when a breadcrumb exists",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实last-startup-crash.json，SERVICE_NOT_RUNNING_ALARM精确一条，消息包含原liveness reason、cause=native_module_missing、version9.9.9。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "enriches_not_running_alarm_from_startup_crash"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C5",
+            "title": "does not alarm when collector PID changes but command identity is found",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实metrics流程注入running PID456/process-scan且pidFileState=stale/原pid123消息，两次分钟检查均无本地或发送告警。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics_history_tests.rs",
+                "test": "history_stale_pid_file_with_live_command_identity_never_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L327:C5",
+            "title": "resets collector failures after process identity recovery",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "连续miss后发现匹配command identity恢复，下一检查仍健康，failures清零且无告警。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "resets_failures_when_process_identity_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C5",
+            "title": "respects service alarm cooldown for persistent misses",
+            "suites": [
+              "UpdaterMetrics",
+              "collector health check"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "两miss产生一条后又一分钟persistent miss仍精确一条，保留既有1h cooldown预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_metrics.rs",
+                "test": "suppresses_service_alarm_during_grace_then_requires_two_misses"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/always-capture-message-content.test.ts",
+      "source_hash": "db8ca75b85be6fe0a23908b4d37786a9023f7413812cf3f70987b6d3e85ea15c",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Source ef/f84逐字相同。按原it.each7参数实际独立子进程验收；真实Manager/Multi/JSONL/Trace converter，SLS/HTTP使用原source同类可控event sink而非声称真实网络验收。Linux实际通过，Windows/macOS待实际；production0。",
+      "cases": [
+        {
+          "source": {
+            "id": "L81:C3",
+            "title": "exports complete content despite inherited SDK capture mode %s",
+            "suites": [
+              "always-on message content through the real Trace converter"
+            ],
+            "parameters": [
+              "it.each([undefined, '', 'NO_CONTENT', 'EVENT_ONLY', 'SPAN_ONLY', 'SPAN_AND_EVENT', 'invalid'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual native Trace converter in seven env_clear child processes for absent/empty/NO_CONTENT/EVENT_ONLY/SPAN_ONLY/SPAN_AND_EVENT/invalid capture env, legacy capturefalse. Exact semconv env opt-in and LLM four content fields, TOOL arguments/result, tokens5/3 retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/always_capture_content_history.rs",
+                "test": "l81_all_seven_inherited_capture_modes_export_complete_real_trace_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L107:C3",
+            "title": "keeps ordinary content while masking secrets across every destination despite legacy false",
+            "suites": [
+              "always-on message content through the real Trace converter"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual InputManager mask -> MultiFlusher -> on-disk JSONL + controlled event contract sinks for SLS/HTTP (same seam as historical MockFlusher) + actual native OTLP Trace conversion/export capture. Four events in each event destination, ordinary-content retained, original API key absent with APIKEY_MASKED; exactlyone LLM andone TOOL.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/always_capture_content_history.rs",
+                "test": "l107_actual_manager_fanout_masks_secrets_but_keeps_content_in_jsonl_events_and_native_spans"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/ide-snapshot-flow.test.ts",
+      "coverage": "complete",
+      "source_hash": "0bc2bed09ffca157b08fe1e9dcccbe9784278d43191eb10ed4346eb7249f7df7",
+      "rust": [],
+      "note": "固定ef/f84逐字相同。真实QoderInput/StateStore/SnapshotStore文件和生命周期，非自制IdeBody或mock事件。Linux Rust1.99.1/glibc2.34实跑；Windows/macOS待实际。production0。",
+      "cases": [
+        {
+          "source": {
+            "id": "L25:C3",
+            "title": "should perform complete scan → dedup → normalize → snapshot persist flow",
+            "suites": [
+              "IDE snapshot integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderInput scans original User/History entries.json shape, emits nonempty Qoder events satisfying every original external schema field, writes nonempty real snapshot, recreated actual input/SnapshotStore emits no duplicates.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/ide_snapshot_flow_history.rs",
+                "test": "l25_real_qoder_history_scan_normalize_snapshot_flush_and_recreated_input_dedup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C3",
+            "title": "should integrate with ai_tracker JSONL source",
+            "suites": [
+              "IDE snapshot integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderInput scans original ai_tracker JSONL shape, emits qoder-ai-tracker event, positive byte checkpoint then new StateStore disk load verifies exactcomplete file length.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/ide_snapshot_flow_history.rs",
+                "test": "l86_real_qoder_ai_tracker_jsonl_is_collected_and_offset_is_durable"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/hook-jsonl-flow.test.ts",
+      "source_hash": "6a0967eb3ddd7347e0c29ab747bc28bfcd3e29cd8451c9f6a1fcc28e68547160",
+      "coverage": "complete",
+      "rust": [],
+      "note": "固定ef8953/f84逐字相同。9声明由8真实native组合承接；旧Node helper复制机制替换为实际pilot-bin绑定的Rust薄入口，不退役业务断言。3条原transcript golden由TS AST纯literal提取，不导入执行旧JS。5个Bash wrapper合同仅Unix适用，Windows原生PS入口另套合同不冒充本轮验证；可移植3input测试在Windows/macOS仍待实跑。无生产改动、未修改Qoderstdout；实测正常Stop仍{}。",
+      "cases": [
+        {
+          "source": {
+            "id": "L76:C3",
+            "title": "should perform complete read → normalize → offset persist flow",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderTrace input baselines empty real file, reads canonical call/result pair, checks event/agent/session/tool/status and external schema required fields, full byte offset+lastFile saved; same Store reread yields0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l76_l161_real_qoder_hook_read_normalize_schema_persist_no_replay_and_incremental_appends"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L161:C3",
+            "title": "should handle incremental appends correctly",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual canonical appended waves collected by new QoderTrace objects same Store: exact single event, expected tool name and second event id retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l76_l161_real_qoder_hook_read_normalize_schema_persist_no_replay_and_incremental_appends"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C3",
+            "title": "should consume transcript rows forwarded by qoder-loongsuite-pilot-hook without agent argument",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound current qoder shell with no agent argument -> native processor -> real JSONL -> actual QoderTraceInput; stdout exactly{}, legacy raw keys absent, exact worker Resource object/name preserved and synthetic token absent.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l211_bound_qoder_shell_default_agent_native_processor_real_input_preserves_worker_resource"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L344:C3",
+            "title": "keeps delayed IDE assistant text and tool_use in the same LLM step",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "AST-extracted original15-record delayed IDE transcript -> bound native shell; exact native username/email precedence without user.uid;3requests/3responses, equal step sets, Write/Bash on first/second respective LLM steps.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l344_bound_qoder_shell_retains_delayed_ide_tool_step_and_native_user_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L514:C3",
+            "title": "QoderTraceInput missing checkpoint: baselines existing history and reads later appends",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual three preexisting Qoder turns including original user prompts/latest labels baseline0, offsetexactEOF; later new request/response appended and both exactIDs emitted.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l514_missing_qoder_checkpoint_baselines_all_three_historical_turns_then_reads_new_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L656:C3",
+            "title": "KiroCliLogInput cold start: only reports last turn when state is empty",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Kiro input fresh Store/real daily6records retains only exactlast kiro-latest pair, savescomplete offset+lastFile; recreated input emits0.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l656_real_kiro_cold_start_keeps_only_last_turn_and_advances_complete_byte_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L713:C3",
+            "title": "should split multi-turn transcript into separate turns with correct user inputs",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "AST-extracted original3+4 record waves through two actual bound shell invocations and native transcript cursor; exactlytwo distinct human turn IDs and exact hello/Chinese prompt arrays.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l713_bound_qoder_shell_real_transcript_cursor_preserves_two_distinct_human_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L856:C3",
+            "title": "should keep fail-open behavior for invalid json payload",
+            "suites": [
+              "Cursor hook script integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound Cursor shell malformedstdin returns0 and stdout{}, writesnohistory, exactlyone parse/invalid_json diagnostic with positive inputbytes and exact64lowerhex SHA256 syntax.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l856_bound_cursor_shell_bad_json_failopens_with_hashed_parse_diagnostic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L874:C3",
+            "title": "should keep fail-open behavior when log path is not writable",
+            "suites": [
+              "Cursor hook script integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound Cursor shell points at real ordinary-file data path and retains success/stdout{} fail-open protocol.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l874_bound_cursor_shell_unwritable_data_path_retains_json_failopen_protocol"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/segment-token-reader-transient-read.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "d83aa57ee8538155a31addbc7106559a187870d2f3a2fd3cfce9fb268bb26ea7",
+      "note": "ef8953/f84 identical12; actual temporary native files with task-local controlled io::Error at IO boundaries, actual append after snapshot and actual short-readprefix.9pass3fail red→12pass green. Old Nodefs.open spycount maps body-acquisition attempts: native separately opens metadata handles to bind dev/ino/size to actual opened source; metadataopens are explicitlyasserted2 where body1, never claimedOSopen1. Node same-array identity is native cached-allocation identity+equal returnedcontent (public Vec remainsowned clone).No case retired or assertions silently weakened. Linux actual; Win/mac actual pending CI.25ms/one retry/session50/idle60s unchanged.",
+      "cases": [
+        {
+          "source": {
+            "id": "L179:C3",
+            "title": "does not retry an open failure inside one lookup and recovers on the next lookup",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native open boundary returns transient ResourceBusy once; plain lookup returnsempty/bodyattempt1; next lookup realfile recoversreqA",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l179_plain_transient_open_fails_once_and_recovers_next_lookup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "retries once when an expected request id is missing after a transient read failure",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual expectedreqA missing after transient open: exactlyone25ms retry, bodyattempt2 and realreqA recovered",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l190_missing_expected_id_retries_one_transient_open_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L200:C3",
+            "title": "does not retry a stable read failure even when an expected request id is missing",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual stable PermissionDenied prevents expected-ID retry, bodyattempt1 and empty",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l200_stable_permission_failure_does_not_retry_for_missing_expected"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L209:C3",
+            "title": "rechecks a readable session once when the expected request has not appeared yet",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual readable reqOther remains output despite expectedreqA missing: root scans2, bodyacquisitions1/no duplicatebodyread; twofreshmetadatahandles separatelycounted for native same-handle identity (native stat equivalent)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l209_readable_missing_id_rechecks_root_without_rereading_unchanged_body"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L219:C3",
+            "title": "picks up an expected completion appended after the first snapshot read",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual first-snapshot request-start read appends completion to realfile afterward; single expected-ID recheck sees newEOF and returnsreqA; root2/body2",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l219_expected_completion_appended_after_first_snapshot_is_read_on_one_recheck"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L230:C3",
+            "title": "does not retry a read failure inside one lookup and leaves its offset unchanged",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual injected firstnative read error givesempty/readattempt1, doesnotconsumeoffset; next realfile lookup recoversreqA",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l230_plain_read_failure_keeps_offset_for_next_lookup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L243:C3",
+            "title": "commits a complete prefix before a later read failure",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual firstread containscomplete reqA prefix, secondread fails; reqA returned and committed, nextlookup reads onlyremainingreqB and retainedA/B",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l243_complete_prefix_survives_a_later_actual_read_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L260:C3",
+            "title": "returns immediately on a root listing failure and tries again next time",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual root listing failure returns afteroneRootAttempt; nextlookup realFS returnsreqA",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l260_root_listing_failure_returns_once_then_next_lookup_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L271:C3",
+            "title": "retains previously parsed data while the sessions root is temporarily unavailable",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual cached reqA survives rootResourceBusy; returnedownedVeccontentstable and underlying native parsed-data allocation pointer unchanged (Rust-owned return clone is explicit)",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l271_root_failure_preserves_existing_cached_allocation_and_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "does not retry a segment-directory failure inside one lookup",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual segment-directory failure givesoneDirectoryAttempt/noinline plain retry; nextlookup recoversreqA",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l282_segment_directory_failure_is_one_attempt_and_recovers_next_lookup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L293:C3",
+            "title": "does not retry a stat failure inside one lookup",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual native metadata/stat boundary failure givesoneStatAttempt/noinline plain retry; nextlookup recoversreqA",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l293_stat_failure_is_one_attempt_and_recovers_next_lookup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L304:C3",
+            "title": "treats an absent sessions root as an immediate empty result",
+            "suites": [
+              "readSegmentTokensForSession best-effort failure handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual nonexistent root plus expectedreqA givesempty withoneRootAttempt/no25ms retry",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-trace/segment_transient_migration_contract_tests.rs",
+                "test": "source_l304_absent_root_returns_empty_without_expected_id_retry"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/qoder-work-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "bc54ee0b597d222028b8f0ad9d4e7ae9c538a9022b99a98d2873dd56e23f16a5",
+      "note": "ef8953/f84 identical19 declarations. Literal source records through actual per-client input constructor, file-backed current-day JSONL and HostedInput; no directtransform mirror. Parameterized CN remains exact two cases. Source absence/version/tool/message assertions kept individually. Test-only; Linux19 actual, Win/mac pending CI;0retire.",
+      "cases": [
+        {
+          "source": {
+            "id": "L37:C5",
+            "title": "should process PostToolUse events",
+            "suites": [
+              "QoderWorkInput",
+              "PostToolUse event filtering"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"gen_ai.agent.type\":\"qoder-work\",\"agent.file_path\":\"/src/app.ts\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l37_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L60:C5",
+            "title": "should process PostToolUse wrapped in data envelope",
+            "suites": [
+              "QoderWorkInput",
+              "PostToolUse event filtering"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.action_type\":\"create\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l60_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C5",
+            "title": "should skip non-PostToolUse events",
+            "suites": [
+              "QoderWorkInput",
+              "PostToolUse event filtering"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; 0entries for filtered records",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l85_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C5",
+            "title": "should classify as Create when loongsuite_pilot_pre_file_exists = false",
+            "suites": [
+              "QoderWorkInput",
+              "Create vs Edit classification"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.action_type\":\"create\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l105_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L127:C5",
+            "title": "should classify as Edit when loongsuite_pilot_pre_file_exists = true",
+            "suites": [
+              "QoderWorkInput",
+              "Create vs Edit classification"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.action_type\":\"edit\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l127_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L151:C5",
+            "title": "should skip events that have no file_path",
+            "suites": [
+              "QoderWorkInput",
+              "records without file_path"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; 0entries for filtered records",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l151_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L185:C5",
+            "title": "prefers canonical qoder-work hook records when present",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.id\":\"canonical-work-1\",\"event.name\":\"llm.response\",\"user.id\":\"u-work\",\"gen_ai.agent.type\":\"qoder-work\",\"gen_ai.session.id\":\"sess-work\",\"gen_ai.output.messages\":[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"hello work\"}]}],\"workspace.path\":\"/workspace/qoder-work\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l185_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L219:C5",
+            "title": "drops legacy agent.* noise fields for transcript rows",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"gen_ai.agent.type\":\"qoder-work\",\"agent._ctype\":\"text\",\"agent._ctext\":\"hello qoder work\",\"agent.cwd\":\"/tmp/ws\",\"agent.parent_uuid\":\"p-1\",\"agent.user_type\":\"external\",\"agent.row_type\":\"user\"}; absent agent.type,agent.role,agent.content,agent.model,agent.stop_reason,agent.file_path,agent.action_type",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l219_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L255:C5",
+            "title": "maps user text into llm.request with gen_ai.input.messages_delta",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.name\":\"llm.request\",\"gen_ai.input.messages_delta\":[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"你好\"}]}]}; absent gen_ai.output.messages",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l255_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L270:C5",
+            "title": "maps assistant text into llm.response with gen_ai.output.messages and finish_reasons",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.name\":\"llm.response\",\"gen_ai.response.id\":\"msg-42\",\"gen_ai.response.finish_reasons\":[\"end_turn\"],\"gen_ai.output.messages\":[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"我是 QoderWork\"}],\"finish_reason\":\"end_turn\"}]}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l270_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L295:C5",
+            "title": "maps assistant thinking into reasoning part",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.name\":\"llm.response\",\"gen_ai.output.messages\":[{\"role\":\"assistant\",\"parts\":[{\"type\":\"reasoning\",\"content\":\"用户在问名字…\"}]}]}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l295_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L312:C5",
+            "title": "maps tool_use content into tool.call with gen_ai.tool.*",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.name\":\"tool.call\",\"gen_ai.tool.name\":\"Bash\",\"gen_ai.tool.call.id\":\"toolu_01\",\"gen_ai.tool.call.arguments\":{\"command\":\"ls\"}}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l312_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L334:C5",
+            "title": "maps tool_result content into tool.result with gen_ai.tool.call.result",
+            "suites": [
+              "QoderWorkInput",
+              "transcript rows"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"event.name\":\"tool.result\",\"gen_ai.tool.call.id\":\"toolu_01\",\"gen_ai.tool.call.result\":\"file1\\nfile2\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l334_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L356:C5",
+            "title": "should extract content from tool_input.content",
+            "suites": [
+              "QoderWorkInput",
+              "content extraction (PostToolUse)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.content\":\"const x = 42;\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l356_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L377:C5",
+            "title": "should fall back to tool_input.new_string for content",
+            "suites": [
+              "QoderWorkInput",
+              "content extraction (PostToolUse)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.content\":\"replaced text\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l377_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L418:C5",
+            "title": "should have CN id and agentType",
+            "suites": [
+              "QoderWorkInput",
+              "QoderWork CN variant (parameterized)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual CN constructor qoder-work-cn-hook id and exact QoderWorkCN agent enum",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l418_cn_constructor_identity_is_distinct"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L423:C5",
+            "title": "should emit entries with qoder-work-cn agent type",
+            "suites": [
+              "QoderWorkInput",
+              "QoderWork CN variant (parameterized)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual CN HostedInput reads literal source JSONL; exact1entry; exact fields {\"gen_ai.agent.type\":\"qoder-work-cn\"}",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l423_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L447:C5",
+            "title": "should preserve agent.qoderwork.version in output and track it for getAgentVersion",
+            "suites": [
+              "QoderWorkInput",
+              "version field stripping"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {\"agent.qoderwork.version\":\"1.2.3\"}; absent version; native agent_version=1.2.3",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l447_literal_work_hook_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L473:C5",
+            "title": "should strip version field from PostToolUse output entries",
+            "suites": [
+              "QoderWorkInput",
+              "version field stripping"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput reads literal source JSONL; exact1entry; exact fields {}; absent agent.version,version",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/qoder-work/hook_history_migration_contract_tests.rs",
+                "test": "source_l473_literal_work_hook_contract"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }
