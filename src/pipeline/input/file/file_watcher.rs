@@ -1,6 +1,6 @@
-//! Directory watches. On Linux this uses `inotify` via libc (already linked by
-//! libstd). A watch that cannot be created is logged and skipped, matching the
-//! TypeScript fallback to polling.
+//! Directory hints use inotify when available and a bounded, non-recursive
+//! snapshot drain for unsupported or failed native directory watches. The file
+//! pipeline keeps its existing polling cadence; no fallback worker is spawned.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int as RawFd};
@@ -11,6 +11,10 @@ use std::thread::JoinHandle;
 use crate::utils::create_logger;
 use serde_json::{json, Map, Value};
 
+#[path = "file_watcher_polling.rs"]
+mod polling;
+use polling::PollingFallback;
+
 fn logger() -> crate::utils::BoundLogger {
     create_logger("FileWatcher")
 }
@@ -20,9 +24,13 @@ struct WatchState {
     dirty_set: HashSet<String>,
     dirs: Vec<String>,
     stop: bool,
+    polling: Option<PollingFallback>,
 }
 
+type BackendInitializer = Arc<dyn Fn() -> RawFd + Send + Sync>;
+
 pub struct FileWatcher {
+    initialize_backend: BackendInitializer,
     state: Arc<Mutex<WatchState>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     fd: Mutex<Option<RawFd>>,
@@ -30,12 +38,18 @@ pub struct FileWatcher {
 
 impl FileWatcher {
     pub fn new() -> Self {
+        Self::with_backend(Arc::new(|| unsafe { sys_inotify_init1(0x80000 | 0x800) }))
+    }
+
+    fn with_backend(initialize_backend: BackendInitializer) -> Self {
         Self {
+            initialize_backend,
             state: Arc::new(Mutex::new(WatchState {
                 dirty: Vec::new(),
                 dirty_set: HashSet::new(),
                 dirs: Vec::new(),
                 stop: false,
+                polling: None,
             })),
             thread: Mutex::new(None),
             fd: Mutex::new(None),
@@ -77,6 +91,7 @@ impl FileWatcher {
 
     pub fn dirty_files(&self) -> Vec<String> {
         let mut state = self.state.lock().unwrap();
+        collect_polling_changes(&mut state);
         let files = std::mem::take(&mut state.dirty);
         state.dirty_set.clear();
         files
@@ -96,29 +111,53 @@ impl FileWatcher {
     pub fn close(&self) {
         self.state.lock().unwrap().stop = true;
         self.state.lock().unwrap().dirs.clear();
+        self.state.lock().unwrap().polling = None;
         self.state.lock().unwrap().dirty.clear();
         self.state.lock().unwrap().dirty_set.clear();
         let fd = self.fd.lock().unwrap().take();
-        if let Some(fd) = fd {
-            unsafe { sys_close(fd) };
-        }
         let thread = self.thread.lock().unwrap().take();
         if let Some(thread) = thread {
             let _ = thread.join();
         }
-        self.state.lock().unwrap().stop = false;
+        if let Some(fd) = fd {
+            unsafe { sys_close(fd) };
+        }
+        // An in-flight native callback may have queued a final hint while the
+        // join waited. No callback can run after join, so clear once more here.
+        let mut state = self.state.lock().unwrap();
+        state.dirty.clear();
+        state.dirty_set.clear();
+        state.stop = false;
+    }
+
+    fn activate_polling(&self, dirs: &[String]) {
+        let mut state = self.state.lock().unwrap();
+        if dirs.is_empty() {
+            state.polling = None;
+            return;
+        }
+        if let Some(polling) = &mut state.polling {
+            polling.sync_dirs(dirs);
+        } else {
+            state.polling = Some(PollingFallback::new(dirs));
+        }
+        // Prime with the same finite work budget as later drains. Existing
+        // cursors survive rewatch so pending changes are not discarded.
+        collect_polling_changes(&mut state);
     }
 
     fn restart_thread(&self) {
         let fd = self.fd.lock().unwrap().take();
-        if let Some(fd) = fd {
-            unsafe { sys_close(fd) };
-        }
         let thread = self.thread.lock().unwrap().take();
         if let Some(thread) = thread {
             self.state.lock().unwrap().stop = true;
             let _ = thread.join();
             self.state.lock().unwrap().stop = false;
+        }
+        // The non-blocking reader polls for at most 100ms. Keep its descriptor
+        // alive through join so another thread cannot recycle it underneath read.
+        if let Some(fd) = fd {
+            unsafe { sys_close(fd) };
         }
         let dirs = self.state.lock().unwrap().dirs.clone();
         if dirs.is_empty() {
@@ -126,19 +165,24 @@ impl FileWatcher {
         }
         // IN_CLOEXEC | IN_NONBLOCK. A blocking read cannot be interrupted by close()
         // from the thread that joins this loop, so the watch thread polls.
-        let fd = unsafe { sys_inotify_init1(0x80000 | 0x800) };
+        let fd = (self.initialize_backend)();
         if fd < 0 {
             logger().warn(
                 "failed to create fs.watch, degrading to polling",
                 Some(&meta(&[("error", json!("inotify_init"))])),
             );
+            self.activate_polling(&dirs);
             return;
         }
         let mut wd_to_dir = HashMap::new();
+        let mut polling_dirs = Vec::new();
         for dir in &dirs {
             let c_dir = match std::ffi::CString::new(dir.as_str()) {
                 Ok(value) => value,
-                Err(_) => continue,
+                Err(_) => {
+                    polling_dirs.push(dir.clone());
+                    continue;
+                }
             };
             let wd = unsafe { sys_inotify_add_watch(fd, c_dir.as_ptr(), 0x0000_00ff) };
             if wd >= 0 {
@@ -151,12 +195,27 @@ impl FileWatcher {
                         ("error", json!("inotify_add_watch")),
                     ])),
                 );
+                polling_dirs.push(dir.clone());
             }
         }
+        self.activate_polling(&polling_dirs);
         *self.fd.lock().unwrap() = Some(fd);
         let state = Arc::clone(&self.state);
         let thread = std::thread::spawn(move || read_loop(fd, wd_to_dir, state));
         *self.thread.lock().unwrap() = Some(thread);
+    }
+}
+
+fn collect_polling_changes(state: &mut WatchState) {
+    let dirty = state
+        .polling
+        .as_mut()
+        .map(PollingFallback::poll)
+        .unwrap_or_default();
+    for path in dirty {
+        if state.dirty_set.insert(path.clone()) {
+            state.dirty.push(path);
+        }
     }
 }
 
@@ -415,3 +474,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "file_watcher_history_tests.rs"]
+mod history_tests;

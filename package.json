@@ -38,7 +38,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:host:shortcut": "vitest run tests/unit/scripts/dashboard-shortcut.test.mjs",
+    "test:host:openclaw": "vitest run tests/unit/hooks/openclaw/first-token.test.mjs tests/unit/hooks/openclaw/runtime-version.test.mjs tests/unit/hooks/openclaw/legacy-utils.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
     "test:host:claude-fetch": "vitest run tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+    "test:host:mimo": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/mimo-code/plugin-replay.test.mjs tests/unit/hooks/mimo-code/resource-context.test.mjs",
+    "test:host:pi": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/pi-coding-agent-extension.test.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "bash scripts/e2e/run-e2e.sh",
@@ -53,7 +56,8 @@
     "postinstall": "node scripts/postinstall.js",
     "test:host:hermes": "vitest run tests/unit/hooks/hermes-agent-plugin.test.mjs tests/unit/hooks/hermes-agent-realtime.test.mjs tests/unit/hooks/hermes-agent-ttft.test.mjs tests/unit/hooks/hermes-subagent.test.mjs tests/unit/hooks/hermes-delayed-input.test.mjs",
     "test:host:opencode": "vitest run tests/unit/hooks/opencode-plugin-cwd.test.mjs tests/unit/hooks/opencode-plugin-session.test.mjs tests/unit/hooks/opencode-plugin-tokens.test.mjs tests/unit/hooks/opencode-plugin-v2.test.mjs",
-    "test:host:jsonl-builder": "vitest run tests/host/jsonl-validation-builder.test.mjs"
+    "test:host:jsonl-builder": "vitest run tests/host/jsonl-validation-builder.test.mjs",
+    "test:host:trace-rules": "vitest run tests/host/trace-rule-generator.test.mjs"
   },
   "dependencies": {
     "@alicloud/log": "^1.2.6",

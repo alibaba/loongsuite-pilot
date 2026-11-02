@@ -282,10 +282,9 @@ fn cli_path_and_watch_paths_follow_the_platform() {
     let home = crate::utils::resolve_home("~");
     let paths = WukongInput::get_watch_paths();
     assert_eq!(paths.len(), 1);
-    assert!(
-        paths[0].ends_with("/.real/daemon.sock"),
-        "watch path {}",
-        paths[0]
+    assert_eq!(
+        Path::new(&paths[0]),
+        Path::new(&home).join(".real").join("daemon.sock")
     );
     assert!(
         paths[0].starts_with(home.trim_end_matches('/')),
@@ -1016,9 +1015,24 @@ async fn generates_trace_id_and_span_id() {
     let trace = resp["trace_id"].as_str().unwrap_or("");
     let span = resp["span_id"].as_str().unwrap_or("");
     let parent = resp["parent_span_id"].as_str().unwrap_or("");
-    assert!(trace.len() == 32 && trace.chars().all(|ch| ch.is_ascii_hexdigit()));
-    assert!(span.len() == 16 && span.chars().all(|ch| ch.is_ascii_hexdigit()));
-    assert!(parent.len() == 16 && parent.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert!(
+        trace.len() == 32
+            && trace
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    );
+    assert!(
+        span.len() == 16
+            && span
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    );
+    assert!(
+        parent.len() == 16
+            && parent
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    );
 }
 
 #[tokio::test]
@@ -1316,6 +1330,7 @@ async fn prunes_seen_counts_after_stale_threshold() {
     assert!(stale(&extra, "stale-sess").is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn collects_through_a_real_cli_script() {
     let dir = tempfile::tempdir().expect("temp");
@@ -1363,6 +1378,7 @@ async fn collects_through_a_real_cli_script() {
     );
 }
 
+#[cfg(unix)]
 fn write_cli(dir: &Path, body: &str) {
     let path = dir.join("wukong-cli");
     std::fs::write(&path, body).unwrap();
@@ -1377,39 +1393,44 @@ fn write_cli(dir: &Path, body: &str) {
 
 #[tokio::test]
 async fn check_availability_is_false_when_socket_is_missing() {
-    if !crate::utils::isolated_env_test() {
-        return;
-    }
     let home = tempfile::tempdir().expect("home");
-    let _home = EnvVarGuard::set("HOME", &home.path().to_string_lossy());
-    assert!(!WukongInput::check_availability().await);
+    let runner = super::scripted(|_| panic!("missing socket must not invoke CLI"));
+    assert!(
+        !super::check_availability_at(
+            &home.path().join(".real").join("daemon.sock"),
+            runner.as_ref()
+        )
+        .await
+    );
 }
 
 #[tokio::test]
 async fn check_availability_is_false_when_status_fails() {
-    if !crate::utils::isolated_env_test() {
-        return;
-    }
     let home = tempfile::tempdir().expect("home");
-    let bin = tempfile::tempdir().expect("bin");
-    std::fs::create_dir_all(home.path().join(".real")).unwrap();
-    std::fs::write(home.path().join(".real/daemon.sock"), b"").unwrap();
-    write_cli(
-        bin.path(),
-        "#!/bin/sh\necho connection refused >&2\nexit 1\n",
-    );
-    let path = format!(
-        "{}:{}",
-        bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let _home = EnvVarGuard::set("HOME", &home.path().to_string_lossy());
-    let _path = EnvVarGuard::set("PATH", &path);
-    assert!(!WukongInput::check_availability().await);
+    let sock = home.path().join("daemon.sock");
+    std::fs::write(&sock, b"").unwrap();
+    let runner = super::scripted(|args| {
+        assert_eq!(args, ["service", "status"]);
+        Err("connection refused".into())
+    });
+    assert!(!super::check_availability_at(&sock, runner.as_ref()).await);
 }
 
 #[tokio::test]
 async fn check_availability_is_true_when_service_is_running() {
+    let home = tempfile::tempdir().expect("home");
+    let sock = home.path().join("daemon.sock");
+    std::fs::write(&sock, b"").unwrap();
+    let runner = super::scripted(|args| {
+        assert_eq!(args, ["service", "status"]);
+        out("Service is running")
+    });
+    assert!(super::check_availability_at(&sock, runner.as_ref()).await);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn public_availability_resolves_default_socket_and_invokes_real_cli() {
     if !crate::utils::isolated_env_test() {
         return;
     }
@@ -1417,7 +1438,6 @@ async fn check_availability_is_true_when_service_is_running() {
     let bin = tempfile::tempdir().expect("bin");
     std::fs::create_dir_all(home.path().join(".real")).unwrap();
     std::fs::write(home.path().join(".real/daemon.sock"), b"").unwrap();
-    write_cli(bin.path(), "#!/bin/sh\necho 'Service is running'\n");
     let path = format!(
         "{}:{}",
         bin.path().display(),
@@ -1425,5 +1445,14 @@ async fn check_availability_is_true_when_service_is_running() {
     );
     let _home = EnvVarGuard::set("HOME", &home.path().to_string_lossy());
     let _path = EnvVarGuard::set("PATH", &path);
+    write_cli(
+        bin.path(),
+        "#!/bin/sh\n[ \"$1\" = service ] && [ \"$2\" = status ] || exit 7\necho 'Service is running'\n",
+    );
     assert!(WukongInput::check_availability().await);
+    write_cli(
+        bin.path(),
+        "#!/bin/sh\necho connection refused >&2\nexit 1\n",
+    );
+    assert!(!WukongInput::check_availability().await);
 }

@@ -91,7 +91,18 @@ async fn lookup_timeout_reaps_real_native_child() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&locator, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    // Windows searches the loaded application's directory before PATH. Keep
+    // both parent harness and fake where.exe in this isolated directory so the
+    // real production lookup cannot resolve System32/where.exe instead.
+    #[cfg(windows)]
+    let contract_binary = {
+        let path = bin.join("pilot-lookup-contract.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        path
+    };
+    #[cfg(not(windows))]
+    let contract_binary = std::env::current_exe().unwrap();
+    let mut command = tokio::process::Command::new(contract_binary);
     command
         .args(["--exact", CONTRACT, "--nocapture"])
         .env_clear()
@@ -102,7 +113,7 @@ async fn lookup_timeout_reaps_real_native_child() {
         .env("TEMP", root.path())
         .env("TMP", root.path())
         .env("TMPDIR", root.path())
-        .current_dir(root.path())
+        .current_dir(&bin)
         .kill_on_drop(true);
     for key in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
         if let Some(value) = std::env::var_os(key) {

@@ -381,3 +381,7 @@ fn now_ms() -> i64 {
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "ide_history_migration_contract_tests.rs"]
+mod ide_history_migration_contract_tests;

@@ -173,6 +173,11 @@ impl InputBody for QoderCnTraceBody {
                 None => no_session.extend(indexes.iter().copied()),
             }
         }
+        // Enrichment matches session responses and expected request IDs in source
+        // order. HashMap iteration of turn groups must not permute that order.
+        for indexes in by_session.values_mut() {
+            indexes.sort_unstable();
+        }
         let mut intercept = None;
         for (session, indexes) in &by_session {
             let slice: Vec<AgentActivityEntry> =
@@ -180,6 +185,8 @@ impl InputBody for QoderCnTraceBody {
             let mut slice = slice;
             if has_client_request_id(&slice) {
                 let expected = collect_cli_expected_request_ids(&slice);
+                #[cfg(test)]
+                cn_history_migration_contract_tests::observe_expected(&expected);
                 let segments =
                     read_segment_tokens_for_session(session, &expected, QODER_CN_SEGMENTS_ROOT)
                         .await;
@@ -556,3 +563,7 @@ async fn read_today(log_dir: &str, rt: &InputRuntime) -> anyhow::Result<Vec<Agen
     }
     Ok(filter_bootstrap_history_turns(entries))
 }
+
+#[cfg(test)]
+#[path = "cn_history_migration_contract_tests.rs"]
+mod cn_history_migration_contract_tests;

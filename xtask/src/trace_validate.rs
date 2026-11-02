@@ -2,6 +2,9 @@
 mod messages;
 mod semantics;
 
+#[cfg(test)]
+mod delegated_history_tests;
+
 use anyhow::{ensure, Context, Result};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};

@@ -242,19 +242,23 @@ impl WukongInput {
 
     pub async fn check_availability() -> bool {
         let sock = Path::new(&resolve_home("~")).join(DAEMON_SOCK_REL);
-        if tokio::fs::metadata(&sock).await.is_err() {
-            return false;
-        }
         let runner = ProcessRunner {
             cli_path: Self::get_cli_path(),
         };
-        match runner
-            .exec(&["service".into(), "status".into()], &CancelToken::new())
-            .await
-        {
-            Ok(output) => output.stdout.to_ascii_lowercase().contains("running"),
-            Err(_) => false,
-        }
+        check_availability_at(&sock, &runner).await
+    }
+}
+
+async fn check_availability_at(sock: &Path, runner: &dyn CliRunner) -> bool {
+    if tokio::fs::metadata(sock).await.is_err() {
+        return false;
+    }
+    match runner
+        .exec(&["service".into(), "status".into()], &CancelToken::new())
+        .await
+    {
+        Ok(output) => output.stdout.to_ascii_lowercase().contains("running"),
+        Err(_) => false,
     }
 }
 

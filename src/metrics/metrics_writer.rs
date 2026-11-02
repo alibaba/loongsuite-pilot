@@ -70,6 +70,7 @@ struct WriterInner {
 pub struct MetricsWriter {
     logs_dir: PathBuf,
     hook_spool: Arc<Mutex<super::HookMetricsSpool>>,
+    cycle_gate: Arc<tokio::sync::Mutex<()>>,
     inner: Arc<Mutex<WriterInner>>,
     sampler: Arc<DiskUsageSampler>,
     get_snapshot: Arc<dyn Fn() -> Result<DataflowSnapshot, String> + Send + Sync>,
@@ -166,6 +167,7 @@ impl MetricsWriter {
         ));
         Self {
             logs_dir: Path::new(&opts.data_dir).join("logs").join("metric_alarm"),
+            cycle_gate: Arc::new(tokio::sync::Mutex::new(())),
             hook_spool: Arc::new(Mutex::new(super::HookMetricsSpool::new(Path::new(
                 &opts.data_dir,
             )))),
@@ -231,6 +233,7 @@ impl MetricsWriter {
         Arc::new(Shared {
             logs_dir: self.logs_dir.clone(),
             hook_spool: Arc::clone(&self.hook_spool),
+            cycle_gate: Arc::clone(&self.cycle_gate),
             inner: Arc::clone(&self.inner),
             sampler: Arc::clone(&self.sampler),
             get_snapshot: Arc::clone(&self.get_snapshot),
@@ -273,6 +276,7 @@ impl MetricsWriter {
 struct Shared {
     logs_dir: PathBuf,
     hook_spool: Arc<Mutex<super::HookMetricsSpool>>,
+    cycle_gate: Arc<tokio::sync::Mutex<()>>,
     inner: Arc<Mutex<WriterInner>>,
     sampler: Arc<DiskUsageSampler>,
     get_snapshot: Arc<dyn Fn() -> Result<DataflowSnapshot, String> + Send + Sync>,
@@ -280,8 +284,13 @@ struct Shared {
 }
 
 impl Shared {
-    async fn write_dataflow(&self) {
-        if let Err(err) = self.collect_and_write().await {
+    async fn write_dataflow(self: &Arc<Self>) {
+        // Aborting a scheduling timer must not cancel a cycle already writing
+        // native files. The final shutdown cycle waits for this owned operation.
+        let writer = Arc::clone(self);
+        let result = tokio::spawn(async move { writer.collect_and_write().await }).await;
+        let result = result.unwrap_or_else(|error| Err(format!("metrics cycle failed: {error}")));
+        if let Err(err) = result {
             let mut meta = Map::new();
             meta.insert("error".into(), Value::String(err));
             create_logger("MetricsWriter").warn("dataflow metrics snapshot failed", Some(&meta));
@@ -289,6 +298,7 @@ impl Shared {
     }
 
     async fn collect_and_write(&self) -> Result<(), String> {
+        let _cycle = self.cycle_gate.lock().await;
         let snapshot = (self.get_snapshot)()?;
         // 两类指标均尝试写出，但任一失败必须反馈给上层诊断。
         let l1 = self.write_l1(Some(&snapshot)).await;
@@ -814,7 +824,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
 
-    fn snapshot() -> DataflowSnapshot {
+    pub(super) fn snapshot() -> DataflowSnapshot {
         let mut inputs = IndexMap::new();
         inputs.insert(
             "test-input".into(),
@@ -1419,3 +1429,11 @@ mod tests {
 #[cfg(test)]
 #[path = "metrics_writer_migration_tests.rs"]
 mod migration_contract_tests;
+
+#[cfg(test)]
+#[path = "disk_monitor_history_contract_tests.rs"]
+mod disk_monitor_history_contract_tests;
+
+#[cfg(test)]
+#[path = "metrics_writer_history_contract_tests.rs"]
+mod writer_history_contract_tests;

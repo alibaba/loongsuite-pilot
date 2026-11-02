@@ -5,3 +5,6 @@
 # Hermes replay fixtures pin exact producer/input bytes on every checkout.
 assets/plugins/hermes-agent/loongsuite-pilot/__init__.py text eol=lf
 tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl text eol=lf
+
+# Preserve the exact pinned upstream schema bytes on Windows checkouts.
+tests/schemas/gen-ai-input-messages.json text eol=lf

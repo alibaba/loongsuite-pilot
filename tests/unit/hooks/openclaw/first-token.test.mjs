@@ -112,7 +112,7 @@ describe('OpenClaw first effective output observer', () => {
     ['responses', 'openai-responses', { type: 'response.created', response: { id: 'r' } }, { type: 'response.output_text.delta', delta: 'answer' }],
     ['responses', 'openai-responses', { type: 'response.created', response: { id: 'r' } }, { type: 'response.reasoning_summary_text.delta', delta: 'think' }],
     ['responses', 'openai-responses', { type: 'response.created', response: { id: 'r' } }, { type: 'response.output_item.added', item: { type: 'function_call', name: 'read' } }],
-  ])('handles %s native event %j', async (endpoint, api, start, output) => {
+  ])('handles %s native event %j (%#)', async (endpoint, api, start, output) => {
     const h = harness(); const s = await h.request(endpoint); const read = s.wrapped.text();
     await s.send(105, block(start)); await s.send(130, block(output)); s.close(); await read;
     expect(h.observer.take(api, 'r')).toBe(30_000_000);

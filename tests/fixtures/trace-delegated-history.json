@@ -1,0 +1,2682 @@
+{
+  "schema": 1,
+  "revision": "f84e3881958b39c5c7cbe8a035f50ccd80a25783",
+  "sourceHash": "4ba60a5cd929d81c5b6fa66306aabefaec906c0e3b1c08cfbda3aff0a452cbae",
+  "base": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000001",
+      "name": "ENTRY",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "ENTRY",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate"
+              }
+            ]
+          }
+        ],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000002",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.usage.input_tokens": 3
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000003",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000004",
+      "parentSpanId": "0000000000000003",
+      "name": "LLM",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "10",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.usage.input_tokens": 1,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "call-1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000005",
+      "parentSpanId": "0000000000000003",
+      "name": "TOOL",
+      "startTimeUnixNano": "10",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "call-1",
+        "gen_ai.tool.call.arguments": "{}"
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000006",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000007",
+      "parentSpanId": "0000000000000006",
+      "name": "LLM",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000b",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000c",
+      "parentSpanId": "000000000000000b",
+      "name": "STEP",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000d",
+      "parentSpanId": "000000000000000c",
+      "name": "LLM",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 20
+      }
+    }
+  ],
+  "nested_invalid_original": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000001",
+      "name": "ENTRY",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "ENTRY",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate"
+              }
+            ]
+          }
+        ],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000002",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.usage.input_tokens": 3
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000003",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000004",
+      "parentSpanId": "0000000000000003",
+      "name": "LLM",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "10",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.usage.input_tokens": 1,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "call-1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000005",
+      "parentSpanId": "0000000000000003",
+      "name": "TOOL",
+      "startTimeUnixNano": "10",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "call-1",
+        "gen_ai.tool.call.arguments": "{}"
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000006",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000007",
+      "parentSpanId": "0000000000000006",
+      "name": "LLM",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "30",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "nested"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000b",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000c",
+      "parentSpanId": "000000000000000b",
+      "name": "STEP",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000d",
+      "parentSpanId": "000000000000000c",
+      "name": "LLM",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000e",
+      "parentSpanId": "0000000000000009",
+      "name": "TOOL",
+      "startTimeUnixNano": "20",
+      "endTimeUnixNano": "30",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "nested",
+        "gen_ai.tool.call.arguments": "{}"
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000f",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "40",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000010",
+      "parentSpanId": "000000000000000f",
+      "name": "LLM",
+      "startTimeUnixNano": "40",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [],
+        "gen_ai.usage.input_tokens": 0
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000011",
+      "parentSpanId": "000000000000000e",
+      "name": "AGENT",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.agent.parent.invocation.id": "invocation-grandchild-turn",
+        "gen_ai.usage.input_tokens": 40
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000012",
+      "parentSpanId": "0000000000000011",
+      "name": "STEP",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000013",
+      "parentSpanId": "0000000000000012",
+      "name": "LLM",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "grandchild result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 40
+      }
+    }
+  ],
+  "nested_repaired": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000001",
+      "name": "ENTRY",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "ENTRY",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate"
+              }
+            ]
+          }
+        ],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ]
+      },
+      "_kind": "ENTRY"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000002",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.usage.input_tokens": 3
+      },
+      "_kind": "AGENT"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000003",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 1
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000004",
+      "parentSpanId": "0000000000000003",
+      "name": "LLM",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "10",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.usage.input_tokens": 1,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "call-1"
+              }
+            ]
+          }
+        ]
+      },
+      "_kind": "LLM"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000005",
+      "parentSpanId": "0000000000000003",
+      "name": "TOOL",
+      "startTimeUnixNano": "10",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "call-1",
+        "gen_ai.tool.call.arguments": "{}"
+      },
+      "_kind": "TOOL"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000006",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 2
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000007",
+      "parentSpanId": "0000000000000006",
+      "name": "LLM",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 2
+      },
+      "_kind": "LLM"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      },
+      "_kind": "AGENT"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "30",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "30",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "nested"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      },
+      "_kind": "LLM"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000b",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+        "gen_ai.usage.input_tokens": 20
+      },
+      "_kind": "AGENT"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000c",
+      "parentSpanId": "000000000000000b",
+      "name": "STEP",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000d",
+      "parentSpanId": "000000000000000c",
+      "name": "LLM",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 20
+      },
+      "_kind": "LLM"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000e",
+      "parentSpanId": "0000000000000009",
+      "name": "TOOL",
+      "startTimeUnixNano": "20",
+      "endTimeUnixNano": "30",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "nested",
+        "gen_ai.tool.call.arguments": "{}"
+      },
+      "_kind": "TOOL"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000f",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "40",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 2
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000010",
+      "parentSpanId": "000000000000000f",
+      "name": "LLM",
+      "startTimeUnixNano": "40",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [],
+        "gen_ai.usage.input_tokens": 0
+      },
+      "_kind": "LLM"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000011",
+      "parentSpanId": "000000000000000e",
+      "name": "AGENT",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.agent.parent.invocation.id": "invocation-grandchild-turn",
+        "gen_ai.usage.input_tokens": 40
+      },
+      "_kind": "AGENT"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000012",
+      "parentSpanId": "0000000000000011",
+      "name": "STEP",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.react.round": 1
+      },
+      "_kind": "STEP"
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000013",
+      "parentSpanId": "0000000000000012",
+      "name": "LLM",
+      "startTimeUnixNano": "22",
+      "endTimeUnixNano": "250",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "grandchild",
+        "gen_ai.turn.id": "grandchild-turn",
+        "gen_ai.agent.name": "grandchild",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "grandchild result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 40
+      },
+      "_kind": "LLM"
+    }
+  ],
+  "external_valid": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    }
+  ],
+  "external_missing_context": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    }
+  ],
+  "external_zero": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000000",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    }
+  ],
+  "corrupt": {
+    "gen_ai.session.id": {
+      "spans": [
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000001",
+          "name": "ENTRY",
+          "startTimeUnixNano": "1",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "ENTRY",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "delegate"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "parent result"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000002",
+          "parentSpanId": "0000000000000001",
+          "name": "AGENT",
+          "startTimeUnixNano": "1",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.usage.input_tokens": 3
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000003",
+          "parentSpanId": "0000000000000002",
+          "name": "STEP",
+          "startTimeUnixNano": "2",
+          "endTimeUnixNano": "20",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000004",
+          "parentSpanId": "0000000000000003",
+          "name": "LLM",
+          "startTimeUnixNano": "2",
+          "endTimeUnixNano": "10",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [],
+            "gen_ai.usage.input_tokens": 1,
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "tool_call",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "name": "spawn_agent",
+                    "id": "call-1"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000005",
+          "parentSpanId": "0000000000000003",
+          "name": "TOOL",
+          "startTimeUnixNano": "10",
+          "endTimeUnixNano": "20",
+          "attributes": {
+            "gen_ai.span.kind": "TOOL",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.tool.name": "spawn_agent",
+            "gen_ai.tool.call.id": "call-1",
+            "gen_ai.tool.call.arguments": "{}"
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000006",
+          "parentSpanId": "0000000000000002",
+          "name": "STEP",
+          "startTimeUnixNano": "30",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.react.round": 2
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000007",
+          "parentSpanId": "0000000000000006",
+          "name": "LLM",
+          "startTimeUnixNano": "30",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "parent result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 2
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000008",
+          "parentSpanId": "0000000000000005",
+          "name": "AGENT",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-1",
+            "gen_ai.agent.name": "child",
+            "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+            "gen_ai.usage.input_tokens": 10
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000009",
+          "parentSpanId": "0000000000000008",
+          "name": "STEP",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-1",
+            "gen_ai.agent.name": "child",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000a",
+          "parentSpanId": "0000000000000009",
+          "name": "LLM",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "wrong-identity",
+            "gen_ai.turn.id": "child-turn-1",
+            "gen_ai.agent.name": "child",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "child result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 10
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000b",
+          "parentSpanId": "0000000000000005",
+          "name": "AGENT",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+            "gen_ai.usage.input_tokens": 20
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000c",
+          "parentSpanId": "000000000000000b",
+          "name": "STEP",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000d",
+          "parentSpanId": "000000000000000c",
+          "name": "LLM",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "child result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 20
+          }
+        }
+      ],
+      "agentId": "0000000000000008"
+    },
+    "gen_ai.turn.id": {
+      "spans": [
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000001",
+          "name": "ENTRY",
+          "startTimeUnixNano": "1",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "ENTRY",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [
+              {
+                "role": "user",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "delegate"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "parent result"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000002",
+          "parentSpanId": "0000000000000001",
+          "name": "AGENT",
+          "startTimeUnixNano": "1",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.usage.input_tokens": 3
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000003",
+          "parentSpanId": "0000000000000002",
+          "name": "STEP",
+          "startTimeUnixNano": "2",
+          "endTimeUnixNano": "20",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000004",
+          "parentSpanId": "0000000000000003",
+          "name": "LLM",
+          "startTimeUnixNano": "2",
+          "endTimeUnixNano": "10",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [],
+            "gen_ai.usage.input_tokens": 1,
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "tool_call",
+                "parts": [
+                  {
+                    "type": "tool_call",
+                    "name": "spawn_agent",
+                    "id": "call-1"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000005",
+          "parentSpanId": "0000000000000003",
+          "name": "TOOL",
+          "startTimeUnixNano": "10",
+          "endTimeUnixNano": "20",
+          "attributes": {
+            "gen_ai.span.kind": "TOOL",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.tool.name": "spawn_agent",
+            "gen_ai.tool.call.id": "call-1",
+            "gen_ai.tool.call.arguments": "{}"
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000006",
+          "parentSpanId": "0000000000000002",
+          "name": "STEP",
+          "startTimeUnixNano": "30",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.react.round": 2
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000007",
+          "parentSpanId": "0000000000000006",
+          "name": "LLM",
+          "startTimeUnixNano": "30",
+          "endTimeUnixNano": "100",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "parent",
+            "gen_ai.turn.id": "parent-turn",
+            "gen_ai.agent.name": "parent",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "parent result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 2
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000008",
+          "parentSpanId": "0000000000000005",
+          "name": "AGENT",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-1",
+            "gen_ai.agent.name": "child",
+            "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+            "gen_ai.usage.input_tokens": 10
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "0000000000000009",
+          "parentSpanId": "0000000000000008",
+          "name": "STEP",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-1",
+            "gen_ai.agent.name": "child",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000a",
+          "parentSpanId": "0000000000000009",
+          "name": "LLM",
+          "startTimeUnixNano": "15",
+          "endTimeUnixNano": "150",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "wrong-identity",
+            "gen_ai.agent.name": "child",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "child result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 10
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000b",
+          "parentSpanId": "0000000000000005",
+          "name": "AGENT",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "AGENT",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+            "gen_ai.usage.input_tokens": 20
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000c",
+          "parentSpanId": "000000000000000b",
+          "name": "STEP",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "STEP",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.react.round": 1
+          }
+        },
+        {
+          "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "spanId": "000000000000000d",
+          "parentSpanId": "000000000000000c",
+          "name": "LLM",
+          "startTimeUnixNano": "25",
+          "endTimeUnixNano": "200",
+          "attributes": {
+            "gen_ai.span.kind": "LLM",
+            "gen_ai.session.id": "child",
+            "gen_ai.turn.id": "child-turn-2",
+            "gen_ai.agent.name": "child",
+            "gen_ai.input.messages": [],
+            "gen_ai.output.messages": [
+              {
+                "role": "assistant",
+                "finish_reason": "stop",
+                "parts": [
+                  {
+                    "type": "text",
+                    "content": "child result"
+                  }
+                ]
+              }
+            ],
+            "gen_ai.usage.input_tokens": 20
+          }
+        }
+      ],
+      "agentId": "0000000000000008"
+    }
+  },
+  "invalid_execution": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000001",
+      "name": "ENTRY",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "ENTRY",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate"
+              }
+            ]
+          }
+        ],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000002",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.usage.input_tokens": 3
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000003",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000004",
+      "parentSpanId": "0000000000000003",
+      "name": "LLM",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "10",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.usage.input_tokens": 1,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "call-1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000005",
+      "parentSpanId": "0000000000000003",
+      "name": "TOOL",
+      "startTimeUnixNano": "10",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "call-1",
+        "gen_ai.tool.call.arguments": "{}"
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000006",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000007",
+      "parentSpanId": "0000000000000006",
+      "name": "LLM",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "unexpected"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 999
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000b",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000c",
+      "parentSpanId": "000000000000000b",
+      "name": "STEP",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000d",
+      "parentSpanId": "000000000000000c",
+      "name": "LLM",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000e",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "20",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000f",
+      "parentSpanId": "000000000000000e",
+      "name": "LLM",
+      "startTimeUnixNano": "20",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": []
+      }
+    }
+  ],
+  "invalid_containment": {
+    "spans": [
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000001",
+        "name": "ENTRY",
+        "startTimeUnixNano": "1",
+        "endTimeUnixNano": "100",
+        "attributes": {
+          "gen_ai.span.kind": "ENTRY",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "delegate"
+                }
+              ]
+            }
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "finish_reason": "stop",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "parent result"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000002",
+        "parentSpanId": "0000000000000001",
+        "name": "AGENT",
+        "startTimeUnixNano": "1",
+        "endTimeUnixNano": "100",
+        "attributes": {
+          "gen_ai.span.kind": "AGENT",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.usage.input_tokens": 3
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000003",
+        "parentSpanId": "0000000000000002",
+        "name": "STEP",
+        "startTimeUnixNano": "2",
+        "endTimeUnixNano": "20",
+        "attributes": {
+          "gen_ai.span.kind": "STEP",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.react.round": 1
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000004",
+        "parentSpanId": "0000000000000003",
+        "name": "LLM",
+        "startTimeUnixNano": "2",
+        "endTimeUnixNano": "10",
+        "attributes": {
+          "gen_ai.span.kind": "LLM",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.input.messages": [],
+          "gen_ai.usage.input_tokens": 1,
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "finish_reason": "tool_call",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "name": "spawn_agent",
+                  "id": "call-1"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000005",
+        "parentSpanId": "0000000000000003",
+        "name": "TOOL",
+        "startTimeUnixNano": "10",
+        "endTimeUnixNano": "20",
+        "attributes": {
+          "gen_ai.span.kind": "TOOL",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.tool.name": "spawn_agent",
+          "gen_ai.tool.call.id": "call-1",
+          "gen_ai.tool.call.arguments": "{}"
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000006",
+        "parentSpanId": "0000000000000002",
+        "name": "STEP",
+        "startTimeUnixNano": "30",
+        "endTimeUnixNano": "100",
+        "attributes": {
+          "gen_ai.span.kind": "STEP",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.react.round": 2
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000007",
+        "parentSpanId": "0000000000000006",
+        "name": "LLM",
+        "startTimeUnixNano": "30",
+        "endTimeUnixNano": "100",
+        "attributes": {
+          "gen_ai.span.kind": "LLM",
+          "gen_ai.session.id": "parent",
+          "gen_ai.turn.id": "parent-turn",
+          "gen_ai.agent.name": "parent",
+          "gen_ai.input.messages": [],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "finish_reason": "stop",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "parent result"
+                }
+              ]
+            }
+          ],
+          "gen_ai.usage.input_tokens": 2
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000008",
+        "parentSpanId": "0000000000000005",
+        "name": "AGENT",
+        "startTimeUnixNano": "5",
+        "endTimeUnixNano": "150",
+        "attributes": {
+          "gen_ai.span.kind": "AGENT",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-1",
+          "gen_ai.agent.name": "child",
+          "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+          "gen_ai.usage.input_tokens": 10
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "0000000000000009",
+        "parentSpanId": "0000000000000008",
+        "name": "STEP",
+        "startTimeUnixNano": "15",
+        "endTimeUnixNano": "150",
+        "attributes": {
+          "gen_ai.span.kind": "STEP",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-1",
+          "gen_ai.agent.name": "child",
+          "gen_ai.react.round": 1
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "000000000000000a",
+        "parentSpanId": "0000000000000009",
+        "name": "LLM",
+        "startTimeUnixNano": "15",
+        "endTimeUnixNano": "151",
+        "attributes": {
+          "gen_ai.span.kind": "LLM",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-1",
+          "gen_ai.agent.name": "child",
+          "gen_ai.input.messages": [],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "finish_reason": "stop",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "child result"
+                }
+              ]
+            }
+          ],
+          "gen_ai.usage.input_tokens": 10
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "000000000000000b",
+        "parentSpanId": "0000000000000005",
+        "name": "AGENT",
+        "startTimeUnixNano": "25",
+        "endTimeUnixNano": "200",
+        "attributes": {
+          "gen_ai.span.kind": "AGENT",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-2",
+          "gen_ai.agent.name": "child",
+          "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+          "gen_ai.usage.input_tokens": 20
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "000000000000000c",
+        "parentSpanId": "000000000000000b",
+        "name": "STEP",
+        "startTimeUnixNano": "25",
+        "endTimeUnixNano": "200",
+        "attributes": {
+          "gen_ai.span.kind": "STEP",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-2",
+          "gen_ai.agent.name": "child",
+          "gen_ai.react.round": 1
+        }
+      },
+      {
+        "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spanId": "000000000000000d",
+        "parentSpanId": "000000000000000c",
+        "name": "LLM",
+        "startTimeUnixNano": "25",
+        "endTimeUnixNano": "200",
+        "attributes": {
+          "gen_ai.span.kind": "LLM",
+          "gen_ai.session.id": "child",
+          "gen_ai.turn.id": "child-turn-2",
+          "gen_ai.agent.name": "child",
+          "gen_ai.input.messages": [],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "finish_reason": "stop",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "child result"
+                }
+              ]
+            }
+          ],
+          "gen_ai.usage.input_tokens": 20
+        }
+      }
+    ],
+    "expected": [
+      "000000000000000a",
+      "0000000000000008"
+    ]
+  },
+  "invalid_structure": [
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000001",
+      "name": "ENTRY",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "ENTRY",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate"
+              }
+            ]
+          }
+        ],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000002",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.usage.input_tokens": 3
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000003",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000004",
+      "parentSpanId": "0000000000000003",
+      "name": "LLM",
+      "startTimeUnixNano": "2",
+      "endTimeUnixNano": "10",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.usage.input_tokens": 1,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "tool_call",
+            "parts": [
+              {
+                "type": "tool_call",
+                "name": "spawn_agent",
+                "id": "call-1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000005",
+      "parentSpanId": "0000000000000003",
+      "name": "TOOL",
+      "startTimeUnixNano": "10",
+      "endTimeUnixNano": "20",
+      "attributes": {
+        "gen_ai.span.kind": "TOOL",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.tool.name": "spawn_agent",
+        "gen_ai.tool.call.id": "call-1",
+        "gen_ai.tool.call.arguments": "{}"
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000006",
+      "parentSpanId": "0000000000000002",
+      "name": "STEP",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.react.round": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000007",
+      "parentSpanId": "0000000000000006",
+      "name": "LLM",
+      "startTimeUnixNano": "30",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "parent result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 2
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000008",
+      "parentSpanId": "0000000000000003",
+      "name": "AGENT",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-1",
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "0000000000000009",
+      "parentSpanId": "0000000000000008",
+      "name": "STEP",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000a",
+      "parentSpanId": "0000000000000009",
+      "name": "LLM",
+      "startTimeUnixNano": "15",
+      "endTimeUnixNano": "150",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-1",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 10
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000b",
+      "parentSpanId": "0000000000000005",
+      "name": "AGENT",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.agent.parent.invocation.id": "invocation-child-turn-2",
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000c",
+      "parentSpanId": "000000000000000b",
+      "name": "STEP",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "STEP",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.react.round": 1
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000d",
+      "parentSpanId": "000000000000000c",
+      "name": "LLM",
+      "startTimeUnixNano": "25",
+      "endTimeUnixNano": "200",
+      "attributes": {
+        "gen_ai.span.kind": "LLM",
+        "gen_ai.session.id": "child",
+        "gen_ai.turn.id": "child-turn-2",
+        "gen_ai.agent.name": "child",
+        "gen_ai.input.messages": [],
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "finish_reason": "stop",
+            "parts": [
+              {
+                "type": "text",
+                "content": "child result"
+              }
+            ]
+          }
+        ],
+        "gen_ai.usage.input_tokens": 20
+      }
+    },
+    {
+      "traceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "spanId": "000000000000000e",
+      "parentSpanId": "0000000000000001",
+      "name": "AGENT",
+      "startTimeUnixNano": "1",
+      "endTimeUnixNano": "100",
+      "attributes": {
+        "gen_ai.span.kind": "AGENT",
+        "gen_ai.session.id": "parent",
+        "gen_ai.turn.id": "parent-turn",
+        "gen_ai.agent.name": "parent"
+      }
+    }
+  ]
+}

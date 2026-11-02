@@ -342,13 +342,12 @@ mod migration_contract_tests {
     #[cfg(windows)]
     fn link_directory(target: &Path, alias: &Path) {
         use std::io::{Read, Seek, SeekFrom};
-        use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
-        // cmd built-ins do not use CommandLineToArgvW quoting, nor accept the
-        // verbatim namespace returned by canonicalize. Both paths are private
-        // fixture paths; retain quoting even when the runner home has spaces.
-        fn cmd_path(path: &Path) -> String {
+        // Pass fixture paths as process environment values, never through cmd
+        // or PowerShell source interpolation. New-Item supports real junctions
+        // without the cmd built-in's second command-line quoting grammar.
+        fn junction_path(path: &Path) -> String {
             let raw = path.to_str().expect("fixture UTF-8 path");
             if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
                 format!(r"\\{unc}")
@@ -358,17 +357,15 @@ mod migration_contract_tests {
         }
         let command_path =
             std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
-                .join("System32/cmd.exe");
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let mut stdout = tempfile::tempfile().unwrap();
         let mut stderr = tempfile::tempfile().unwrap();
         let mut command = Command::new(command_path);
         command
-            .args(["/D", "/V:OFF", "/S", "/C"])
-            .raw_arg(format!(
-                "\"mklink /J \"{}\" \"{}\"\"",
-                cmd_path(alias),
-                cmd_path(target)
-            ))
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:PILOT_JUNCTION_LINK -Target $env:PILOT_JUNCTION_TARGET | Out-Null"])
+            .env("PILOT_JUNCTION_LINK", junction_path(alias))
+            .env("PILOT_JUNCTION_TARGET", junction_path(target))
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout.try_clone().unwrap()))
             .stderr(Stdio::from(stderr.try_clone().unwrap()));

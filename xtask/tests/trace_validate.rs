@@ -690,7 +690,9 @@ fn native_trace_latest_filter_unicode_and_atomic_output_preserve_sources() {
     let debug = root.path().join(".loongsuite-pilot/logs/otlp-debug");
     fs::create_dir_all(&debug).unwrap();
     fs::write(debug.join("old.jsonl"), "invalid").unwrap();
-    File::open(debug.join("old.jsonl"))
+    fs::OpenOptions::new()
+        .write(true)
+        .open(debug.join("old.jsonl"))
         .unwrap()
         .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
         .unwrap();

@@ -182,7 +182,28 @@ fn convert_group(
         .unwrap_or(records.len());
     // DSH keeps injected plugin context on LLM requests. Its explicit
     // top-level user events alone define the ENTRY/AGENT human input.
-    let top_input = if is_dsh {
+    let pi_turn_input: Vec<_> = if first.agent_type == "pi-coding-agent"
+        || first.get("gen_ai.framework").and_then(Value::as_str) == Some("pi-coding-agent")
+    {
+        records
+            .iter()
+            .copied()
+            .filter(|record| {
+                record.event_name == Some(AgentEventName::Other)
+                    && record.step_id.is_none()
+                    && (record.input_messages.is_some() || record.input_messages_delta.is_some())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let top_input = if !pi_turn_input.is_empty() {
+        // Pi emits one explicit turn-level user input independently of the
+        // rolling full LLM context. Registered PI SDK identities use the same
+        // protocol. Only this declaration defines ENTRY/AGENT input; LLM leaves
+        // below still materialize their complete original context.
+        materialize_input(&pi_turn_input)
+    } else if is_dsh {
         let human_records: Vec<_> = records
             .iter()
             .copied()
