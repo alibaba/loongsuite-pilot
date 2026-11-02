@@ -475,7 +475,7 @@ pub struct JsonlFlusherConfig {
     pub enabled: bool,
     pub output_dir: String,
     pub rotate_daily: bool,
-    pub max_file_size_mb: u64,
+    pub max_file_size_mb: serde_json::Number,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -214,7 +214,7 @@ impl Harness {
             enabled: true,
             output_dir: root.join("output").to_string_lossy().into_owned(),
             rotate_daily: false,
-            max_file_size_mb: 100,
+            max_file_size_mb: 100.into(),
         }));
         bounded(jsonl.start()).await.unwrap();
         bounded(trace.start()).await.unwrap();

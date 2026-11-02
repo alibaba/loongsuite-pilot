@@ -144,7 +144,7 @@ async fn actual_factory_cases(home: &Path) {
                 enabled: true,
                 output_dir: output.to_string_lossy().into_owned(),
                 rotate_daily: false,
-                max_file_size_mb: 1,
+                max_file_size_mb: 1.into(),
             }));
             jsonl.start().await.unwrap();
             orchestrator.inputs.set_flusher(jsonl.clone());

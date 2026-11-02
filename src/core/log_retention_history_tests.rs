@@ -16,7 +16,9 @@ fn config() -> LogRetentionConfig {
     }
 }
 fn date(days: i64) -> String {
-    local_date_string(Local::now() - ChronoDuration::days(days))
+    (Local::now().date_naive() - ChronoDuration::days(days))
+        .format("%Y-%m-%d")
+        .to_string()
 }
 struct Fixture(tempfile::TempDir);
 impl Fixture {
@@ -820,4 +822,20 @@ async fn main_l558_pressure_ticks_each_minute_and_stop_cancels_both_schedules() 
     assert!(service.interval.lock().unwrap().is_none());
     assert!(service.pressure.lock().unwrap().is_none());
     keep_clock_fixed.abort();
+}
+
+#[test]
+fn calendar_retention_preserves_distinct_days_across_dst_boundaries() {
+    use chrono::NaiveDate;
+    for (today, yesterday, two_days_ago) in [
+        ("2026-11-01", "2026-10-31", "2026-10-30"),
+        ("2026-11-02", "2026-11-01", "2026-10-31"),
+        ("2026-03-08", "2026-03-07", "2026-03-06"),
+        ("2024-03-01", "2024-02-29", "2024-02-28"),
+    ] {
+        let date = NaiveDate::parse_from_str(today, "%Y-%m-%d").unwrap();
+        assert_eq!(calendar_date_cutoff(date, 0), today);
+        assert_eq!(calendar_date_cutoff(date, 1), yesterday);
+        assert_eq!(calendar_date_cutoff(date, 2), two_days_ago);
+    }
 }

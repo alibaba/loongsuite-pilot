@@ -521,3 +521,7 @@ mod migration_dispatch_contracts {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "multi_flusher_main_tests.rs"]
+mod main_tests;

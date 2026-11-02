@@ -42,6 +42,15 @@ impl JsonlFlusher {
             .to_string()
     }
 
+    fn max_file_bytes(&self) -> u64 {
+        self.config
+            .max_file_size_mb
+            .as_f64()
+            .filter(|mb| mb.is_finite() && *mb > 0.0)
+            .map(|mb| ((mb * 1024.0 * 1024.0).floor() as u64).max(1))
+            .unwrap_or(DEFAULT_JSONL_SEGMENT_BYTES)
+    }
+
     fn agent_type_of(entry: &AgentActivityEntry) -> String {
         if !entry.agent_type.is_empty() {
             return entry.agent_type.clone();
@@ -80,12 +89,7 @@ impl BaseFlusher for JsonlFlusher {
         );
         let line =
             serde_json::to_string(&Value::Object(projected)).unwrap_or_else(|_| "{}".to_string());
-        let limit = self
-            .config
-            .max_file_size_mb
-            .checked_mul(1024 * 1024)
-            .filter(|limit| *limit > 0)
-            .unwrap_or(DEFAULT_JSONL_SEGMENT_BYTES);
+        let limit = self.max_file_bytes();
         append_segmented_jsonl(Path::new(&path), &line, limit, false)
             .await
             .map_err(|error| FlushError::new(error.to_string()))
@@ -125,12 +129,7 @@ impl BaseFlusher for JsonlFlusher {
             body.insert(key.clone(), value.clone());
         }
         let line = serde_json::to_string(&Value::Object(body)).unwrap_or_else(|_| "{}".to_string());
-        let limit = self
-            .config
-            .max_file_size_mb
-            .checked_mul(1024 * 1024)
-            .filter(|limit| *limit > 0)
-            .unwrap_or(DEFAULT_JSONL_SEGMENT_BYTES);
+        let limit = self.max_file_bytes();
         append_segmented_jsonl(Path::new(&path), &line, limit, false)
             .await
             .map_err(|error| FlushError::new(error.to_string()))
@@ -149,7 +148,7 @@ mod tests {
             enabled: true,
             output_dir: dir.to_string(),
             rotate_daily,
-            max_file_size_mb: 100,
+            max_file_size_mb: 100.into(),
         }
     }
 
@@ -280,7 +279,7 @@ mod migration_lifecycle_contracts {
                 enabled: true,
                 output_dir: missing.to_string_lossy().into_owned(),
                 rotate_daily: true,
-                max_file_size_mb: 100,
+                max_file_size_mb: 100.into(),
             },
             Arc::new(|| "2026-04-27".to_owned()),
         );
@@ -310,3 +309,7 @@ mod migration_lifecycle_contracts {
         assert_eq!(std::fs::read_dir(missing).unwrap().count(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "jsonl_rotation_main_tests.rs"]
+mod rotation_main_tests;

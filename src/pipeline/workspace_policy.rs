@@ -376,7 +376,9 @@ mod migration_contract_tests {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);
             }
-            if started.elapsed() >= Duration::from_secs(5) {
+            // Cold PowerShell startup on ARM runners can exceed five seconds.
+            // This bounds fixture creation; collector command budgets are unchanged.
+            if started.elapsed() >= Duration::from_secs(30) {
                 break None;
             }
             std::thread::sleep(Duration::from_millis(10));

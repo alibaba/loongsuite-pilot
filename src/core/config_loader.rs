@@ -937,8 +937,11 @@ fn build_jsonl_config(
                 .unwrap_or_else(|| format!("{data_dir}/logs/output")),
         ),
         rotate_daily: json_bool(jsonl.and_then(|value| value.get("rotateDaily"))).unwrap_or(true),
-        max_file_size_mb: json_u64(jsonl.and_then(|value| value.get("maxFileSizeMb")))
-            .unwrap_or(100),
+        max_file_size_mb: jsonl
+            .and_then(|value| value.get("maxFileSizeMb"))
+            .and_then(Value::as_number)
+            .cloned()
+            .unwrap_or_else(|| 100.into()),
     }
 }
 

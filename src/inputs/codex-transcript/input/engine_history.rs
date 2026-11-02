@@ -460,6 +460,7 @@ async fn recovery_watermark_is_actual_file_size_so_same_inode_shrink_reloads_own
                 end_offset: turn.len() as i64,
                 terminal: true,
                 inferred: None,
+                next_turn_started_at_ms: None,
             },
             None,
         )
@@ -5251,3 +5252,6 @@ async fn ordinary_home_and_canonical_transcript_marker_collect_real_isolated_roo
 }
 
 include!("workspace_privacy_history.rs");
+
+#[path = "engine_main346_history.rs"]
+mod main346_contracts;

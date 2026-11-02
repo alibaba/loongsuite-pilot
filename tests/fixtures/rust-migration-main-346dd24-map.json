@@ -77,6 +77,88 @@
               }
             ]
           }
+        },
+        {
+          "source": {
+            "id": "L430:C3",
+            "title": "closes an already emitted turn at the next start without duplicating its responses",
+            "suites": [
+              "CodexTranscriptInput"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实已发两response的旧turn遇新start，原response保持2、exact2个terminal，旧interrupted在精确1782280861000000000ns；最终EOF/activeNone，所有event IDs唯一。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/input/engine_main346_history.rs",
+                "test": "l430_next_turn_closes_already_emitted_previous_responses_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L453:C3",
+            "title": "recovers an unfinished step before replacing a turn with an oversized %s",
+            "suites": [
+              "CodexTranscriptInput"
+            ],
+            "parameters": [
+              "it.each(['task_complete', 'turn_aborted'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实129MiB task_complete和turn_aborted两原参数，后者持久化StateStore重启，下一turn分别以turn_context/task_started开始；旧ordinary tool step恰1response/1toolresult/1interrupted terminal，新turn3responses；EOF/activeNone/pendingNone且ID不重复。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/input/engine_main346_history.rs",
+                "test": "l453_quarantined_complete_and_aborted_terminals_preserve_unfinished_tool_step_across_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L488:C3",
+            "title": "finishes %s across a quarantined terminal without retaining the previous turn",
+            "suites": [
+              "CodexTranscriptInput"
+            ],
+            "parameters": [
+              "it.each(['baseline', 'fork-tail'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "真实baseline与fork-tail两原参数穿过129MiB quarantinedterminal，前者startup baselining到EOF，后者有限扫描候选序列化/重启式恢复后清fork与active；不发历史事件。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/codex-transcript/input/engine_main346_history.rs",
+                "test": "l488_startup_and_fork_baselines_cross_quarantine_without_retaining_an_old_turn"
+              }
+            ]
+          }
         }
       ]
     }

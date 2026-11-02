@@ -366,6 +366,16 @@ fn l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations() {
     let mut c = MetricsCollector::from_options(options(root.path(), &clock));
     let s = pipeline();
     let rows = c.collect_l2(&s).unwrap();
+    let shape = serde_json::to_value(&rows).unwrap();
+    assert_eq!(
+        shape
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["agents", "flushers", "hooks", "inputs"])
+    );
     let l1 = serde_json::to_value(c.collect_l1(&DataflowSnapshot::default())).unwrap();
     assert!(rows.hooks.is_empty());
     assert_eq!(rows.agents.len(), 2);

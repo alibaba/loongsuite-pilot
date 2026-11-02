@@ -73,25 +73,24 @@ fn has_glob(path: &str) -> bool {
 }
 
 async fn glob_has_match(pattern: &str) -> bool {
-    let sep = std::path::MAIN_SEPARATOR;
-    let raw_segments: Vec<&str> = pattern.split(sep).collect();
+    // Preserve drive/UNC/verbatim prefixes as the traversal root. The '?' in
+    // Windows' verbatim prefix is not a wildcard directory segment.
+    use std::path::{Component, PathBuf};
+    let mut root = PathBuf::new();
     let mut segments = Vec::new();
-    for (index, segment) in raw_segments.into_iter().enumerate() {
-        if index == 0 || !segment.is_empty() {
-            segments.push(segment.to_string());
+    for part in Path::new(pattern).components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir if segments.is_empty() => {
+                root.push(part.as_os_str());
+            }
+            Component::CurDir => {}
+            _ => segments.push(part.as_os_str().to_string_lossy().into_owned()),
         }
     }
-    if segments.is_empty() {
-        return false;
+    if root.as_os_str().is_empty() {
+        root.push(".");
     }
-    let absolute = pattern.starts_with(sep);
-    let root = if absolute {
-        sep.to_string()
-    } else {
-        segments[0].clone()
-    };
-    let start = if absolute { 0 } else { 1 };
-    walk(&root, &segments, start).await
+    walk(&root.to_string_lossy(), &segments, 0).await
 }
 
 async fn walk(current: &str, segments: &[String], index: usize) -> bool {

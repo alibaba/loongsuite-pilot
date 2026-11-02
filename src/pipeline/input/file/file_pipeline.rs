@@ -526,13 +526,16 @@ mod tests {
         std::fs::create_dir_all(&log_dir).unwrap();
         std::fs::create_dir_all(state_dir).unwrap();
         let log_file = log_dir.join("privacy.log");
+        let private_workspace = root.join("private-project");
         std::fs::write(&log_file, [
             serde_json::json!({"session_id": "blocked", "content": "early secret"}).to_string(),
-            serde_json::json!({"session_id": "blocked", "cwd": "/private-project", "content": "secret"}).to_string(),
+            serde_json::json!({"session_id": "blocked", "cwd": private_workspace, "content": "secret"}).to_string(),
             serde_json::json!({"session_id": "unknown", "content": "allowed"}).to_string(),
             "plain unknown workspace".into(),
         ].join("\n") + "\n").unwrap();
-        let policy = WorkspacePolicy::new(&["/private-project".into()], None).unwrap();
+        let policy =
+            WorkspacePolicy::new(&[private_workspace.to_string_lossy().into_owned()], None)
+                .unwrap();
         let sink = Arc::new(RecordingSink::default());
         let pipeline = FilePipelineHandle::new(FilePipelineOptions {
             workspace_policy: Some(Arc::new(std::sync::Mutex::new(policy))),

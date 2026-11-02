@@ -255,7 +255,7 @@ pub struct HookFlowMetrics {
     pub max_duration_ms: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct L2Metrics {
     pub agents: Vec<AgentFlowMetrics>,
     pub inputs: Vec<InputFlowMetrics>,

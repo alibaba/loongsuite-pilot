@@ -18336,6 +18336,2185 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/flushers/jsonl-rotation.test.ts",
+      "source_hash": "c642d53494c7b2f38ddc7945a3a4f80d65338cfda8d8eb179e490d47978bb6e6",
+      "coverage": "complete",
+      "rust": [],
+      "note": "ef无此文件；main新增8声明。公开JsonlFlusher配置原小数MiB正是1024B：Rust原u64拒收真实红灯，改Number并按f84有限正数/floor/min1/默认100MiB计算，保留Eq。8个真实最终文件合同全部通过，3GiB+1保持原阈值；Win仅测试稀疏属性避免物理分配。",
+      "cases": [
+        {
+          "source": {
+            "id": "L26:C1",
+            "title": "serializes concurrent writes and preserves UTF-8 records across size-based rotation",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：serializes concurrent writes and preserves UTF-8 records across size-based rotation；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l26_concurrent_writes_preserve_all_utf8_records_under_the_original_1024_byte_limit"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L38:C1",
+            "title": "resumes existing files without overwriting closed segments after reconstruction",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：resumes existing files without overwriting closed segments after reconstruction；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l38_reconstruction_does_not_overwrite_a_closed_segment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C1",
+            "title": "rotates legacy oversized files without splitting or truncating a single large event",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：rotates legacy oversized files without splitting or truncating a single large event；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l50_one_oversized_event_remains_whole_when_the_following_event_rotates_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L60:C1",
+            "title": "applies the same rotation to raw topics and rotateDaily=false output",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：applies the same rotation to raw topics and rotateDaily=false output；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l60_raw_topics_and_non_daily_output_share_the_original_rotation_contract"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C1",
+            "title": "reports filesystem failure and allows a later write to recover",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：reports filesystem failure and allows a later write to recover；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l70_filesystem_error_is_visible_and_a_later_write_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L80:C1",
+            "title": "does not reuse a segment name after retention removes previously closed files",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：does not reuse a segment name after retention removes previously closed files；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l80_retention_removal_never_reuses_a_closed_segment_name"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L92:C1",
+            "title": "serializes two writer instances sharing the same active file",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：serializes two writer instances sharing the same active file；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l92_two_writer_instances_serialize_twenty_four_shared_active_file_writes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L103:C1",
+            "title": "reclaims a sparse legacy file over 3 GiB before the next append without archiving it",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原f84实际断言完整保留：reclaims a sparse legacy file over 3 GiB before the next append without archiving it；JsonlFlusher真实配置与最终磁盘JSONL，原1024B阈值，不用helper-only/放大阈值替代；Linux独立真实执行，Windows/macOS待Native。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/jsonl_rotation_main_tests.rs",
+                "test": "source_l103_sparse_legacy_file_over_three_gib_is_reclaimed_without_archive"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/flushers/multi-flusher.test.ts",
+      "source_hash": "eac5531a7d43e3bd9618f532b433edb62dce7a72a1293439621997f9ba3e47ca",
+      "coverage": "complete",
+      "rust": [],
+      "note": "main12=baseline10+新增2。复用真实已有fanout/byte测量/故障隔离与生命周期断言，仅新2补future取消作用域和源4参数组合typed错误all-settle。源metadata/hash/AST参数表达式精确保留；无生产行为改动。",
+      "cases": [
+        {
+          "source": {
+            "id": "L24:C5",
+            "title": "forwards existing byte measurements unchanged and reads optional snapshots",
+            "suites": [
+              "MultiFlusher",
+              "sendBatch — parallel dispatch and fault isolation (T022)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "concurrent_batch_dispatch_preserves_each_entry_and_existing_byte_measurement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L32:C5",
+            "title": "forwards an input cancellation signal to every destination",
+            "suites": [
+              "MultiFlusher",
+              "sendBatch — parallel dispatch and fault isolation (T022)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "源AbortSignal作用域适配为Rust输入拥有的future取消；两真实spawn目的future均进入后abort父sendBatch，JoinSet取消全部子future，RAII Drop实际逐个发生、各调用1/未settle；不伪称Rust存在同一JS signal参数或abort-listener introspection。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher_main_tests.rs",
+                "test": "main_l32_input_future_cancellation_reaches_every_inflight_destination"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L40:C5",
+            "title": "dispatches to all child flushers in parallel",
+            "suites": [
+              "MultiFlusher",
+              "sendBatch — parallel dispatch and fault isolation (T022)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "concurrent_batch_dispatch_preserves_each_entry_and_existing_byte_measurement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L50:C5",
+            "title": "isolates failure — one fails, others still succeed",
+            "suites": [
+              "MultiFlusher",
+              "sendBatch — parallel dispatch and fault isolation (T022)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C5",
+            "title": "does not throw when one child fails",
+            "suites": [
+              "MultiFlusher",
+              "sendBatch — parallel dispatch and fault isolation (T022)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L65:C5",
+            "title": "dispatches single entry to all flushers",
+            "suites": [
+              "MultiFlusher",
+              "send — single entry dispatch"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "propagates %s %s after all outputs settle",
+            "suites": [
+              "MultiFlusher"
+            ],
+            "parameters": [
+              "it.each([\n    ['send', 'CodexTurnJournalError'], ['sendBatch', 'CodexTurnJournalError'],\n    ['send', 'CodexOutputDurabilityError'], ['sendBatch', 'CodexOutputDurabilityError'],\n  ] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "源it.each四个send/sendBatch×journal/outputDurability组合原样实际循环，typed FlushError kind/message保留、preservesCheckpoint；另一输出实际gate未释放时父不能完成，释放后健康输出settled且各调用1。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher_main_tests.rs",
+                "test": "main_l74_all_four_durable_errors_preserve_type_and_message_after_every_child_settles"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C5",
+            "title": "forwards sendRaw to all child flushers",
+            "suites": [
+              "MultiFlusher",
+              "sendRaw forwarding (T023)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C5",
+            "title": "isolates sendRaw failure",
+            "suites": [
+              "MultiFlusher",
+              "sendRaw forwarding (T023)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L103:C5",
+            "title": "shuts down all child flushers",
+            "suites": [
+              "MultiFlusher",
+              "shutdown (T024)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C5",
+            "title": "isolates shutdown failure",
+            "suites": [
+              "MultiFlusher",
+              "shutdown (T024)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C5",
+            "title": "flushes all child flushers",
+            "suites": [
+              "MultiFlusher",
+              "flush"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际MultiFlusher+受控sink记录完整entries/bytes/raw，双child barrier证明并发；分别让first/second普通错误，继续fan-out并精确检查调用次数。未改变Codex durability错误传播合同。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/flushers/multi_flusher.rs",
+                "test": "either_ordinary_child_failure_preserves_all_dispatch_and_lifecycle_calls"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/metrics/metrics-collector.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "4d02cfa26c8954470ecb9355ec4bff7242dc1d107d2518dc5ce88dc0c168ddb3",
+      "note": "Frozenf84 whole60:49native+11carriedexistingbaselineNode-specific retirementdecisions,0newretirements. Actualmain delta2Hookcases+L1structuralabsence+L2hookskey assertstrengthening. AllreferencednativeAPI suitesre-runLinux; actualWin/macpending. v2healthisread-onlymanifest/image/arch/resourcehash,notdirectoryexistenceorNodecandidatehealing;13Node-relateddecisions(11retired+2nativeprotections)listedindividually.",
+      "cases": [
+        {
+          "source": {
+            "id": "L105:C5",
+            "title": "returns all required fields with correct types",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns all required fields with correct types。原生公共API assertions已在本批target实际重跑。 冻结main强化的flusher_runner/updater_event结构不存在，由serde Value.get(None)直接承接，不以null或type安全代替。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_wire_identity_dimensions_and_schema_do_not_leak_raw_input_totals"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L181:C5",
+            "title": "counts installed agents, and an agent stays installed while idle",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：counts installed agents, and an agent stays installed while idle。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "installed_idle_agents_stay_counted_and_only_flushers_can_emit_without_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L197:C5",
+            "title": "reports zero rates on the first sample (seeds baseline)",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports zero rates on the first sample (seeds baseline)。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_rates_drain_each_axis_and_keep_zero_first_rate_and_stable_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C5",
+            "title": "calculates per-second rates from deltas after the first sample",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：calculates per-second rates from deltas after the first sample。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_rates_drain_each_axis_and_keep_zero_first_rate_and_stable_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L234:C5",
+            "title": "drains flow values on report, so an idle window reads zero",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：drains flow values on report, so an idle window reads zero。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_rates_drain_each_axis_and_keep_zero_first_rate_and_stable_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L262:C5",
+            "title": "clamps at zero when a counter goes backwards",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：clamps at zero when a counter goes backwards。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_rates_drain_each_axis_and_keep_zero_first_rate_and_stable_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L271:C5",
+            "title": "start_time remains constant across calls",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：start_time remains constant across calls。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_rates_drain_each_axis_and_keep_zero_first_rate_and_stable_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L277:C5",
+            "title": "ip field is a valid IPv4 address",
+            "suites": [
+              "MetricsCollector",
+              "collectL1"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：ip field is a valid IPv4 address。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l1_wire_identity_dimensions_and_schema_do_not_leak_raw_input_totals"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L333:C5",
+            "title": "emits only detail rows — no instance-total row",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：emits only detail rows — no instance-total row。原生公共API assertions已在本批target实际重跑。 冻结main变化另有真实Serialize输出恰4键agents/flushers/hooks/inputs断言，hooks为空仍保留。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L354:C5",
+            "title": "repeats the full identity on every row",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：repeats the full identity on every row。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L376:C5",
+            "title": "reports one complete row per Input without dynamic identifiers",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports one complete row per Input without dynamic identifiers。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L405:C5",
+            "title": "rolls ingress up by owning agent, one row each",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：rolls ingress up by owning agent, one row each。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L430:C5",
+            "title": "reports one flusher row per destination, with its own identity",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports one flusher row per destination, with its own identity。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_wire_rows_preserve_identity_agent_rollup_input_detail_and_destinations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L461:C5",
+            "title": "keeps two logstores on one endpoint apart",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：keeps two logstores on one endpoint apart。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_windows_keep_destination_identity_count_new_inputs_and_retain_stopped_traffic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L476:C5",
+            "title": "drains ingress and egress on report",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：drains ingress and egress on report。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_windows_keep_destination_identity_count_new_inputs_and_retain_stopped_traffic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L496:C5",
+            "title": "reports only the increment in the following window",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports only the increment in the following window。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_windows_keep_destination_identity_count_new_inputs_and_retain_stopped_traffic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L519:C5",
+            "title": "counts an input registered mid-run in full, having no baseline yet",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：counts an input registered mid-run in full, having no baseline yet。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_windows_keep_destination_identity_count_new_inputs_and_retain_stopped_traffic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L532:C5",
+            "title": "keeps a silent running agent but drops one that is not installed",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：keeps a silent running agent but drops one that is not installed。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "installed_idle_agents_stay_counted_and_only_flushers_can_emit_without_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L556:C5",
+            "title": "keeps traffic an uninstalled agent collected before it stopped",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：keeps traffic an uninstalled agent collected before it stopped。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "l2_windows_keep_destination_identity_count_new_inputs_and_retain_stopped_traffic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L572:C5",
+            "title": "returns null when there are no inputs and no flushers",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns null when there are no inputs and no flushers。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "installed_idle_agents_stay_counted_and_only_flushers_can_emit_without_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L576:C5",
+            "title": "still reports when only flushers are present",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：still reports when only flushers are present。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "installed_idle_agents_stay_counted_and_only_flushers_can_emit_without_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L586:C5",
+            "title": "reports one hook row per agent and event, sharing the cycle identity",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actualpublic collect_l2_with_hook_timings literalstop3/150.6/90.4 andsessionstart1/42/42→2Hookrows; exactstop151/90/type/codex/userfields,Hook/agent/flusher window_ms equal andsameinstance_id.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "latest_main_hook_rows_round_durations_and_share_window_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L608:C5",
+            "title": "reports hook rows on their own and skips entries without calls",
+            "suites": [
+              "MetricsCollector",
+              "collectL2"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ActualemptySnapshot+stop1/sessionstart0 producesonlystopHook andzeroagent/input/flusher;all-zeroHookcycle returnsNone,matchingnull.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "latest_main_hook_only_rows_filter_zero_calls_including_the_all_zero_cycle"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L623:C5",
+            "title": "reports zero CPU on first sample to avoid startup inflation",
+            "suites": [
+              "MetricsCollector",
+              "calcCpuPercent (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports zero CPU on first sample to avoid startup inflation。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_collector.rs",
+                "test": "computes_cpu_from_injected_deltas"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L628:C5",
+            "title": "reports non-negative CPU on second sample",
+            "suites": [
+              "MetricsCollector",
+              "calcCpuPercent (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports non-negative CPU on second sample。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_collector.rs",
+                "test": "computes_cpu_from_injected_deltas"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L635:C5",
+            "title": "computes per-process CPU percentage from cpuUsage deltas",
+            "suites": [
+              "MetricsCollector",
+              "calcCpuPercent (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：computes per-process CPU percentage from cpuUsage deltas。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/metrics/metrics_collector.rs",
+                "test": "computes_cpu_from_injected_deltas"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L662:C5",
+            "title": "reads launchd from init-type file",
+            "suites": [
+              "MetricsCollector",
+              "init_type"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reads launchd from init-type file。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L668:C5",
+            "title": "reads nohup from init-type file",
+            "suites": [
+              "MetricsCollector",
+              "init_type"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reads nohup from init-type file。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L674:C5",
+            "title": "defaults to unknown when init-type file does not exist",
+            "suites": [
+              "MetricsCollector",
+              "init_type"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：defaults to unknown when init-type file does not exist。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L678:C5",
+            "title": "defaults to unknown when init-type file is empty",
+            "suites": [
+              "MetricsCollector",
+              "init_type"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：defaults to unknown when init-type file is empty。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L686:C5",
+            "title": "reports updater_pid_alive=true during grace period even if updater liveness is down",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports updater_pid_alive=true during grace period even if updater liveness is down。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L699:C5",
+            "title": "reports updater_pid_alive=false after grace period when updater identity is absent",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports updater_pid_alive=false after grace period when updater identity is absent。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L713:C5",
+            "title": "reports updater_pid_alive=true when stale PID is recovered by process identity scan",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：reports updater_pid_alive=true when stale PID is recovered by process identity scan。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L733:C5",
+            "title": "increments consecutive failures and resets on identity match",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：increments consecutive failures and resets on identity match。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L755:C5",
+            "title": "never probes the updater pid when auto-update is disabled",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：never probes the updater pid when auto-update is disabled。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L774:C5",
+            "title": "probes the updater pid when the flag is omitted, since a host install has one",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：probes the updater pid when the flag is omitted, since a host install has one。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "updater_grace_identity_recovery_and_disabled_install_are_not_false_alarms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L787:C5",
+            "title": "reports current_version_valid=true when current points to existing version dir",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "将旧目录夹具转换为有效原生发行包：目标格式/架构、runtime-manifest及全资源SHA256均真实验证；current有效/缺失目录、previous有效/损坏、仅非隐藏版本目录计数均从真实collect_l1观察，目录裸存在不再冒充有效Rust发行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L794:C5",
+            "title": "reports current_version_valid=false when current points to non-existent dir",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "将旧目录夹具转换为有效原生发行包：目标格式/架构、runtime-manifest及全资源SHA256均真实验证；current有效/缺失目录、previous有效/损坏、仅非隐藏版本目录计数均从真实collect_l1观察，目录裸存在不再冒充有效Rust发行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L800:C5",
+            "title": "reports node_bin_valid=true when node-bin points to executable",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "node_bin_valid=true只描述旧Node运行前置条件；原生包无Node前置条件，兼容旧字段明确为not-applicable，有效运行状态改由runtime_bin_valid、current_version_valid承担。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。node_bin_valid=true只描述旧Node运行前置条件；原生包无Node前置条件，兼容旧字段明确为not-applicable，有效运行状态改由runtime_bin_valid、current_version_valid承担。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L806:C5",
+            "title": "self-heals node-bin when path is invalid but process.execPath is available",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "用process.execPath修复node-bin会重新引入宿主Node依赖。原生健康检查只读；缺失/损坏原生镜像通过清单诊断，由原生安装/更新事务修复，不允许采样改变当前运行入口。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。用process.execPath修复node-bin会重新引入宿主Node依赖。原生健康检查只读；缺失/损坏原生镜像通过清单诊断，由原生安装/更新事务修复，不允许采样改变当前运行入口。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L815:C5",
+            "title": "reports rollback_available based on previous file validity",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "将旧目录夹具转换为有效原生发行包：目标格式/架构、runtime-manifest及全资源SHA256均真实验证；current有效/缺失目录、previous有效/损坏、仅非隐藏版本目录计数均从真实collect_l1观察，目录裸存在不再冒充有效Rust发行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L825:C5",
+            "title": "reports correct version_count excluding dotfiles",
+            "suites": [
+              "MetricsCollector",
+              "infra health (via collectL1)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "将旧目录夹具转换为有效原生发行包：目标格式/架构、runtime-manifest及全资源SHA256均真实验证；current有效/缺失目录、previous有效/损坏、仅非隐藏版本目录计数均从真实collect_l1观察，目录裸存在不再冒充有效Rust发行包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L835:C5",
+            "title": "returns empty string when no agents configured",
+            "suites": [
+              "MetricsCollector",
+              "capture_message_disabled_agents"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns empty string when no agents configured。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L840:C5",
+            "title": "stays empty when legacy captureMessageContent=false is configured",
+            "suites": [
+              "MetricsCollector",
+              "capture_message_disabled_agents"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：stays empty when legacy captureMessageContent=false is configured。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L854:C5",
+            "title": "stays empty when legacy captureMessageContent=true is configured",
+            "suites": [
+              "MetricsCollector",
+              "capture_message_disabled_agents"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：stays empty when legacy captureMessageContent=true is configured。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L868:C5",
+            "title": "returns empty string when no SLS endpoints",
+            "suites": [
+              "MetricsCollector",
+              "projects"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns empty string when no SLS endpoints。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L873:C5",
+            "title": "joins unique projects with space in sorted order",
+            "suites": [
+              "MetricsCollector",
+              "projects"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：joins unique projects with space in sorted order。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L889:C5",
+            "title": "returns empty string when not configured",
+            "suites": [
+              "MetricsCollector",
+              "cms_workspace"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns empty string when not configured。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L894:C5",
+            "title": "returns the configured workspace verbatim",
+            "suites": [
+              "MetricsCollector",
+              "cms_workspace"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "逐声明核对断言：returns the configured workspace verbatim。原生公共API assertions已在本批target实际重跑。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/metrics_legacy_contracts.rs",
+                "test": "metric_metadata_keeps_init_defaults_legacy_capture_empty_and_project_deduplication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L905:C5",
+            "title": "does not modify node-bin file when path is already valid",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "有效node-bin不被改动的保护仍适用；新测试给出可执行合成pin及失效pin，三次采样均不改变pin、不执行候选。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L914:C5",
+            "title": "heals node-bin using process.execPath and is idempotent",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "旧幂等自愈依赖Node路径候选选择；原生机制为幂等只读校验，重复采样输出稳定且不会重写任何pin。旧自愈行为不适用，保留原生重复检查保护。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。旧幂等自愈依赖Node路径候选选择；原生机制为幂等只读校验，重复采样输出稳定且不会重写任何pin。旧自愈行为不适用，保留原生重复检查保护。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L928:C5",
+            "title": "prefers the managed runtime node over process.execPath when healing a broken pin",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原生运行二进制以启动时exec_path及所属清单为准，current独立校验；不会将管理目录中Node或任意process.execPath替换成自身运行入口。缺失current时running binary仍可独立有效。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。原生运行二进制以启动时exec_path及所属清单为准，current独立校验；不会将管理目录中Node或任意process.execPath替换成自身运行入口。缺失current时running binary仍可独立有效。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L943:C5",
+            "title": "picks the newest runtime version when multiple managed nodes exist",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "挑选最大Node版本不能修复Rust包；合成v16/v24/v99候选均被忽略，真正激活的原生发行包而非目录最大版本决定健康。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。挑选最大Node版本不能修复Rust包；合成v16/v24/v99候选均被忽略，真正激活的原生发行包而非目录最大版本决定健康。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L965:C5",
+            "title": "supports the official win zip layout (node.exe at the runtime dir root)",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "官方Node ZIP根node.exe布局属于旧宿主运行时供应方式。原生Windows包使用清单声明的bin/loongsuite-pilot.exe和PE/CPU校验，不消费Node ZIP；跨目标静态格式测试另见native_binary::all_eight_formats_accept_only_matching_os_and_architecture。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。官方Node ZIP根node.exe布局属于旧宿主运行时供应方式。原生Windows包使用清单声明的bin/loongsuite-pilot.exe和PE/CPU校验，不消费Node ZIP；跨目标静态格式测试另见native_binary::all_eight_formats_accept_only_matching_os_and_architecture。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L985:C5",
+            "title": "prefers bin/node.exe over the official root layout on win",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "bin/node.exe与根node.exe的优先级已无选择意义；原生发行清单唯一binary相对路径决定要校验的镜像，布局不能靠候选扫描猜测。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。bin/node.exe与根node.exe的优先级已无选择意义；原生发行清单唯一binary相对路径决定要校验的镜像，布局不能靠候选扫描猜测。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1006:C5",
+            "title": "reports diagnostic when self-heal fails (no usable node found)",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不存在可用Node的诊断已被原生运行镜像/清单/资源摘要诊断取代；损坏资源时runtime_bin_valid=false并保留摘要不匹配原因，不能靠宿主Node掩盖损坏包。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。不存在可用Node的诊断已被原生运行镜像/清单/资源摘要诊断取代；损坏资源时runtime_bin_valid=false并保留摘要不匹配原因，不能靠宿主Node掩盖损坏包。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1032:C5",
+            "title": "diagnostic distinguishes exists-but-not-executable from missing",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "缺失与不可执行的区分仍有实际作用。新增Unix回归分别检查不存在与0644文件并断言不同诊断及没有执行权限；Windows对应可执行性应使用原生PE格式检验，而不是POSIX X_OK。 新增全平台实际缺失镜像/现存但格式非法镜像诊断区分；该用例在Windows明确使用PE可执行性语义，不借POSIX权限位代替。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_health_distinguishes_absent_and_nonexecutable_binaries_without_execution"
+              },
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_health_distinguishes_absent_from_present_invalid_format_without_execution"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1060:C5",
+            "title": "skips an executable candidate whose Node major version is below 18",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Node<18拒绝门禁只服务旧JS入口；Rust安装物的门禁为目标原生格式/架构、发行runtime=rust和完整资源摘要。不能将Node major错误重命名为Rust compiler版本错误。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。Node<18拒绝门禁只服务旧JS入口；Rust安装物的门禁为目标原生格式/架构、发行runtime=rust和完整资源摘要。不能将Node major错误重命名为Rust compiler版本错误。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1087:C5",
+            "title": "accepts an executable candidate whose Node major version is >= 18",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Node>=18也不能令缺失Rust发行包变健康；有效原生发行包不需要任何Node，旧Node主版本不再是放行条件。已有portable_native_package_does_not_require_node_or_pointer给出无Node便携包验证。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。Node>=18也不能令缺失Rust发行包变健康；有效原生发行包不需要任何Node，旧Node主版本不再是放行条件。已有portable_native_package_does_not_require_node_or_pointer给出无Node便携包验证。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_current_previous_and_count_use_valid_releases_not_just_directory_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1114:C5",
+            "title": "skips a candidate whose --version execution fails",
+            "suites": [
+              "MetricsCollector",
+              "node-bin self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "原生健康采样不执行候选--version；版本与格式从受摘要保护的资源和静态镜像读取。候选Node执行失败/挂起不应成为原生采样路径。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Rust原生迁移不再供应或自愈Node运行时。原生健康采样不执行候选--version；版本与格式从受摘要保护的资源和静态镜像读取。候选Node执行失败/挂起不应成为原生采样路径。",
+            "replacement": [
+              {
+                "file": "tests/native_runtime_health_contracts.rs",
+                "test": "native_read_only_health_does_not_probe_or_repair_any_node_candidate"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

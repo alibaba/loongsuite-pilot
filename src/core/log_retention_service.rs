@@ -400,7 +400,13 @@ fn category_of(name: &str) -> Option<Category> {
 }
 
 fn date_cutoff(days: u32) -> String {
-    local_date_string(Local::now() - ChronoDuration::days(days as i64))
+    calendar_date_cutoff(Local::now().date_naive(), days)
+}
+
+fn calendar_date_cutoff(date: chrono::NaiveDate, days: u32) -> String {
+    (date - ChronoDuration::days(i64::from(days)))
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 fn local_date_string(date: chrono::DateTime<Local>) -> String {

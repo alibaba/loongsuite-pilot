@@ -99,6 +99,14 @@ struct RecoveryBoundary {
     end_offset: i64,
     terminal: bool,
     inferred: Option<CodexTerminalStatus>,
+    next_turn_started_at_ms: Option<f64>,
+}
+
+#[derive(Default)]
+struct ScannedBoundary {
+    terminal_turn_id: Option<String>,
+    terminal_end: Option<i64>,
+    next_turn_started_at_ms: Option<f64>,
 }
 
 struct PendingRecovery {
@@ -535,16 +543,14 @@ impl<'a> CodexTranscriptEngine<'a> {
             let scan_end = stat
                 .size
                 .min(scan_start + (MAX_SCAN_BYTES_PER_FILE_CYCLE - scanned_bytes));
-            let mut terminal_turn_id: Option<String> = None;
-            let mut terminal_end: Option<i64> = None;
+            let mut scanned_boundary = ScannedBoundary::default();
             let mut scan = scan_json_lines(file_path, scan_start, scan_end, Some(rt), |line| {
                 process_scanned_line(
                     &mut checkpoint,
                     file_path,
                     stat.size,
                     &line,
-                    &mut terminal_turn_id,
-                    &mut terminal_end,
+                    &mut scanned_boundary,
                     self,
                 )
             })
@@ -556,8 +562,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         file_path,
                         stat.size,
                         &line,
-                        &mut terminal_turn_id,
-                        &mut terminal_end,
+                        &mut scanned_boundary,
                         self,
                     );
                     false
@@ -568,24 +573,30 @@ impl<'a> CodexTranscriptEngine<'a> {
                 break;
             }
             changed = true;
+            let ScannedBoundary {
+                terminal_turn_id,
+                terminal_end,
+                next_turn_started_at_ms,
+            } = scanned_boundary;
+            let deferred_turn_start = next_turn_started_at_ms.is_some();
             let next_scan_offset = terminal_end.unwrap_or(scan.next_offset);
             scan::observe_batch(
                 rt,
                 CommittedInputBatch {
                     bytes: (next_scan_offset - scan_start).max(0) as u64,
-                    records: scan.records,
-                    parse_success_records: scan.parse_success_records,
+                    records: scan.records.saturating_sub(u64::from(deferred_turn_start)),
+                    parse_success_records: scan
+                        .parse_success_records
+                        .saturating_sub(u64::from(deferred_turn_start)),
                     parse_failed_records: scan.parse_failed_records,
                     max_record_bytes: scan.max_record_bytes,
                 },
             );
             scanned_bytes += next_scan_offset - scan_start;
             let mut blocked = false;
-            if checkpoint
-                .active_turn
-                .as_ref()
-                .is_some_and(|active| next_scan_offset > active.start_offset)
-            {
+            if checkpoint.active_turn.as_ref().is_some_and(|active| {
+                terminal_turn_id.is_some() || next_scan_offset > active.start_offset
+            }) {
                 if is_direct_subagent
                     && terminal_turn_id.is_some()
                     && should_skip_copied_parent_turn(
@@ -611,7 +622,9 @@ impl<'a> CodexTranscriptEngine<'a> {
                         RecoveryBoundary {
                             end_offset: next_scan_offset,
                             terminal: terminal_turn_id.is_some(),
-                            inferred: None,
+                            inferred: next_turn_started_at_ms
+                                .map(|_| CodexTerminalStatus::Interrupted),
+                            next_turn_started_at_ms,
                         },
                         None,
                     )
@@ -660,6 +673,10 @@ impl<'a> CodexTranscriptEngine<'a> {
                         checkpoint.active_turn = None;
                         checkpoint.pending_terminal = None;
                         processed_terminals += 1;
+                    } else {
+                        // A deferred start may have zero byte progress. Let the
+                        // existing pending recovery resolve before scanning it again.
+                        blocked = true;
                     }
                 }
             }
@@ -684,8 +701,7 @@ fn process_scanned_line(
     file_path: &str,
     file_size: i64,
     line: &JsonLine,
-    terminal_turn_id: &mut Option<String>,
-    terminal_end: &mut Option<i64>,
+    boundary: &mut ScannedBoundary,
     engine: &CodexTranscriptEngine<'_>,
 ) -> bool {
     let Some(payload) = line.record.get("payload").and_then(Value::as_object) else {
@@ -711,11 +727,19 @@ fn process_scanned_line(
         return true;
     }
     if let Some(turn_id) = turn_id_for_start(&line.record, payload) {
-        if checkpoint
+        if let Some(active) = checkpoint
             .active_turn
             .as_ref()
-            .is_none_or(|active| active.turn_id != turn_id)
+            .filter(|active| active.turn_id != turn_id)
         {
+            // This start belongs to the next turn. Recover the old turn before
+            // replacing its retained ordinary steps, then revisit this same line.
+            boundary.terminal_turn_id = Some(active.turn_id.clone());
+            boundary.terminal_end = Some(line.start_offset);
+            boundary.next_turn_started_at_ms = Some(utils::timestamp_ms(&line.record, now_ms()));
+            return false;
+        }
+        if checkpoint.active_turn.is_none() {
             if checkpoint.first_owned_turn_id.is_none() {
                 checkpoint.first_owned_turn_id = Some(turn_id.clone());
             }
@@ -737,8 +761,8 @@ fn process_scanned_line(
             .as_ref()
             .is_some_and(|active| active.turn_id == terminal)
         {
-            *terminal_turn_id = Some(terminal);
-            *terminal_end = Some(line.end_offset);
+            boundary.terminal_turn_id = Some(terminal);
+            boundary.terminal_end = Some(line.end_offset);
             return false;
         }
     }
@@ -828,6 +852,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     end_offset: pending.terminal_end_offset,
                     terminal: true,
                     inferred: None,
+                    next_turn_started_at_ms: None,
                 },
                 None,
             )
@@ -880,6 +905,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             end_offset,
             terminal,
             inferred,
+            next_turn_started_at_ms,
         } = boundary;
         let Some(active) = checkpoint.active_turn.clone() else {
             return Ok(empty_unparseable(end_offset));
@@ -916,7 +942,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 }
             }
         }
-        let sources: Vec<CodexTranscriptSourceRecord> = records
+        let mut sources: Vec<CodexTranscriptSourceRecord> = records
             .items
             .iter()
             .map(|line| CodexTranscriptSourceRecord {
@@ -951,6 +977,18 @@ impl<'a> CodexTranscriptEngine<'a> {
             None
         };
         let blob_to_uri = blob.as_ref().map(blob_as_dyn);
+        if let Some(next_start) = next_turn_started_at_ms {
+            // Recovery-only evidence of interruption. It is not a source record,
+            // is never persisted/counted, and carries no next-turn input.
+            let timestamp = chrono::DateTime::from_timestamp_millis(next_start as i64)
+                .unwrap_or_else(chrono::Utc::now)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            sources.push(CodexTranscriptSourceRecord {
+                start_offset: end_offset,
+                end_offset,
+                record: json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"turn_aborted","turn_id":active.turn_id}}).as_object().expect("recovery terminal").clone(),
+            });
+        }
         let extraction = extract_codex_partial_turn_with_boundaries(
             &sources,
             meta.as_ref(),
@@ -968,6 +1006,9 @@ impl<'a> CodexTranscriptEngine<'a> {
                 upload_mode: include.then_some(upload_mode),
             },
         );
+        if next_turn_started_at_ms.is_some() {
+            sources.pop();
+        }
         let Some(mut extraction) = extraction else {
             return Ok(Recovery {
                 kind: RecoveryKind::Unparseable,
@@ -2924,6 +2965,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     end_offset: pending.terminal_end_offset,
                     terminal: true,
                     inferred: None,
+                    next_turn_started_at_ms: None,
                 },
                 None,
             )
@@ -2963,6 +3005,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                     end_offset: captured.terminal_end_offset,
                     terminal: true,
                     inferred: None,
+                    next_turn_started_at_ms: None,
                 },
                 None,
             )

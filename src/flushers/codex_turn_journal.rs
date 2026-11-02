@@ -819,7 +819,7 @@ mod tests {
             enabled: true,
             output_dir: root.path().join("output").to_string_lossy().into_owned(),
             rotate_daily: false,
-            max_file_size_mb: 100,
+            max_file_size_mb: 100.into(),
         }));
         jsonl.start().await.unwrap();
         // Restore must finish before taking the journal lock; otherwise this

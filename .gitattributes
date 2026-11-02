@@ -8,3 +8,6 @@ tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl text eol=lf
 
 # Preserve the exact pinned upstream schema bytes on Windows checkouts.
 tests/schemas/gen-ai-input-messages.json text eol=lf
+
+# Native replay fixtures pin the real Agent-host plugin bytes.
+assets/plugins/**/*.mjs text eol=lf

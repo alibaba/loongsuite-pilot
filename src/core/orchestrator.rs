@@ -1694,7 +1694,7 @@ impl Orchestrator {
                 enabled: true,
                 output_dir: self.data_dir_join("logs/output"),
                 rotate_daily: true,
-                max_file_size_mb: 100,
+                max_file_size_mb: 100.into(),
             }));
             let _ = fallback.start().await;
             flushers.push(fallback);
@@ -4192,7 +4192,7 @@ mod tests {
                         .to_string_lossy()
                         .into_owned(),
                     rotate_daily: true,
-                    max_file_size_mb: 10,
+                    max_file_size_mb: 10.into(),
                 });
             }
             let mut agents = serde_json::Map::new();
