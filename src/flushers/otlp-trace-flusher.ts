@@ -20,7 +20,7 @@ import { convertCodexTurn } from './codex-turn-converter.js';
 import { convertQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
-import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 
@@ -105,6 +105,9 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// Payload budgets apply while turns wait for a native terminal, not conversion.
+const MAX_CODEX_TURN_RESIDENT_BYTES = 8 * 1024 * 1024;
+const MAX_CODEX_RESIDENT_BYTES = 32 * 1024 * 1024;
 // Bound diagnostics even if input supplies arbitrary agent names.
 const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
@@ -121,6 +124,11 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  journalKey?: string;
+  spillable?: boolean;
+  spilledRecords?: number;
+  spilledEventIds?: Set<string>;
+  residentBytes?: number;
   // Copilot source event IDs are stable across legacy replays. This index
   // intentionally leaves other producers' update semantics unchanged.
   recordIndex: Map<string, number>;
@@ -585,6 +593,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private flushedTurnKeys = new Set<string>();
   private readonly convertLocks = new Map<string, Promise<void>>();
   private journalRestore?: Promise<void>;
+  private codexFlushTail: Promise<void> = Promise.resolve();
 
   // 批量调用计数：大于 0 时 send() 中 Signal A（finish_reason=stop）只标记
   // completed，不立即 flush；最后一个批量调用完成 append 后统一 flush。
@@ -672,6 +681,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agent_type: agentType,
         pending_buffers: 0,
         pending_records: 0,
+        ...(agentType === 'codex' && this.codexJournal ? {
+          resident_records: 0, resident_payload_bytes: 0,
+          spilled_buffers: 0, spilled_records: 0,
+        } : {}),
         pending_logical_bytes: 0,
         pending_unmeasured_records: 0,
         largest_buffer_logical_bytes: 0,
@@ -687,13 +700,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (!row) continue;
       const age = Math.max(0, Math.round(now - buf.openedAtMs));
       row.pending_buffers++;
-      row.pending_records += buf.records.length;
+      if (row.resident_records !== undefined) {
+        row.resident_records += buf.records.length;
+        row.resident_payload_bytes! += buf.residentBytes ?? 0;
+        row.spilled_buffers! += buf.spilledRecords ? 1 : 0;
+        row.spilled_records! += buf.spilledRecords ?? 0;
+      }
+      row.pending_records += buf.records.length + (buf.spilledRecords ?? 0);
       row.pending_logical_bytes += buf.logicalBytes;
       row.pending_unmeasured_records += buf.unmeasuredRecords;
       row.oldest_buffer_age_ms = Math.max(row.oldest_buffer_age_ms, age);
       if (row.pending_buffers === 1 || buf.logicalBytes > row.largest_buffer_logical_bytes) {
         row.largest_buffer_logical_bytes = buf.logicalBytes;
-        row.largest_buffer_records = buf.records.length;
+        row.largest_buffer_records = buf.records.length + (buf.spilledRecords ?? 0);
         row.largest_buffer_age_ms = age;
         row.largest_buffer_turn_id = buf.keySource === 'turn_id' ? buf.keyValue : undefined;
         row.largest_buffer_session_id = buf.sessionId;
@@ -819,6 +838,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
+    const durable = !!this.codexJournal && isJournaledCodexEntry(entry);
+    const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
+    if (durable) {
+      buf.journalKey ??= codexTurnJournalGroupKey(entry);
+      buf.spillable ??= buf.records.length === 0;
+      // Restored records must use the same normalized logical size as new ones.
+      logicalBytes ??= residentSize;
+    } else {
+      // Malformed/unpersistable continuations must never be discarded by spill.
+      if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
+      buf.spillable = false;
+    }
     // Copilot-only duplicate merge: preserve known fields on partial replay.
     // Other agents retain the main branch's append/update behavior.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
@@ -831,15 +862,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.recordIndex.set(eventId, buf.records.length);
         buf.records.push(entry);
       }
+    } else if (buf.spilledRecords && durable) {
+      buf.spilledEventIds!.add(entry['event.id']);
+      buf.spilledRecords++;
     } else {
       buf.records.push(entry);
     }
+    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentSize;
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
     } else {
       buf.unmeasuredRecords++;
     }
+
+    this.spillCodexPayloads();
 
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
@@ -915,7 +952,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   override async start(): Promise<void> {
     if (!this.codexJournal) return;
-    this.journalRestore ??= this.replayCodexJournal(this.codexJournal.load()).catch(cause => {
+    this.journalRestore ??= this.replayCodexJournal(this.codexJournal.loadBatches()).catch(cause => {
       const error = new Error('Codex pending trace could not be restored', { cause });
       error.name = 'CodexTurnJournalError';
       throw error;
@@ -923,20 +960,77 @@ export class OtlpTraceFlusher extends BaseFlusher {
     await this.journalRestore;
   }
 
-  private async replayCodexJournal(groups: AsyncIterable<AgentActivityEntry[]>): Promise<void> {
-    for await (const group of groups) {
-      const prepared = this.prepareCodexReplay ? this.prepareCodexReplay(group) : group;
-      if (prepared.length === 0) {
-        await this.codexJournal!.remove(group);
-        continue;
+  private async replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> {
+    let holding = false;
+    let accepted = false;
+    try {
+      for await (const batch of groups) {
+        if (this.prepareCodexReplay) {
+          // Workspace evidence may appear late in a turn. Prime policy for the
+          // whole group before accepting any earlier, metadata-poor records.
+          this.prepareCodexReplay(batch.entries);
+          if (!batch.last) continue;
+          this.batchDepth++; holding = true; accepted = false;
+          for await (const prepared of this.preparedJournalBatches(batch.key, false)) {
+            accepted ||= prepared.length > 0;
+            await this.appendBatch(prepared);
+          }
+          if (!accepted) await this.codexJournal!.remove(batch.key);
+          this.batchDepth--; holding = false;
+          await this.finishBatch();
+          continue;
+        }
+        if (!holding) { this.batchDepth++; holding = true; accepted = false; }
+        const prepared = batch.entries;
+        accepted ||= prepared.length > 0;
+        await this.appendBatch(prepared);
+        if (batch.last) {
+          if (!accepted) await this.codexJournal!.remove(batch.key);
+          this.batchDepth--; holding = false;
+          await this.finishBatch();
+        }
       }
-      // Replay has already been persisted. Use the internal append path, so
-      // public calls can always await start() without recursion or bypasses.
-      this.batchDepth++;
-      try { await this.appendBatch(prepared); }
-      finally { this.batchDepth--; }
-      await this.finishBatch();
+    } finally { if (holding) this.batchDepth--; }
+  }
+
+  /** Release only payloads whose durable journal already owns every event. */
+  private spillCodexPayloads(): void {
+    const candidates = [...this.turnBuffers.values()].filter(buf =>
+      buf.agentType === 'codex' && buf.spillable && !buf.spilledRecords);
+    let resident = candidates.reduce((sum, buf) => sum + (buf.residentBytes ?? 0), 0);
+    for (const buf of candidates.sort((a, b) => (b.residentBytes ?? 0) - (a.residentBytes ?? 0))) {
+      if ((buf.residentBytes ?? 0) <= MAX_CODEX_TURN_RESIDENT_BYTES && resident <= MAX_CODEX_RESIDENT_BYTES) continue;
+      resident -= buf.residentBytes ?? 0;
+      buf.spilledRecords = buf.records.length;
+      buf.spilledEventIds = new Set(buf.records.map(entry => entry['event.id']));
+      buf.records = [];
+      buf.residentBytes = 0;
+      buf.recordIndex.clear();
     }
+  }
+
+  private async *preparedJournalBatches(key: string, preflight = true): AsyncGenerator<AgentActivityEntry[]> {
+    if (preflight && this.prepareCodexReplay) {
+      for await (const batch of this.codexJournal!.loadBatches(key)) this.prepareCodexReplay(batch.entries);
+    }
+    for await (const batch of this.codexJournal!.loadBatches(key)) {
+      yield this.prepareCodexReplay ? this.prepareCodexReplay(batch.entries) : batch.entries;
+    }
+  }
+
+  private async rehydrateCodexTurn(buf: TurnBuffer): Promise<void> {
+    if (!buf.spilledRecords) return;
+    const restored: AgentActivityEntry[] = [];
+    for await (const entries of this.preparedJournalBatches(buf.journalKey!)) {
+      // A batch journals its whole suffix before appending. Do not pull a
+      // future suffix forward while materializing an unpersistable event.
+      restored.push(...entries.filter(entry => buf.spilledEventIds!.has(entry['event.id'])));
+    }
+    if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
+    buf.records = restored;
+    buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
+    buf.spilledRecords = 0;
+    buf.spilledEventIds = undefined;
   }
 
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
@@ -953,7 +1047,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           this.flushedTurnKeys.add(key);
           continue;
         }
-        await this.replayCodexJournal(this.codexJournal.load(codexTurnJournalGroupKey(entry)));
+        await this.replayCodexJournal(this.codexJournal.loadBatches(codexTurnJournalGroupKey(entry)));
       }
       await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
     } catch (cause) {
@@ -1145,7 +1239,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     );
   }
 
-  private async flushSingleTurn(buf: TurnBuffer): Promise<void> {
+  private flushSingleTurn(buf: TurnBuffer): Promise<void> {
+    if (buf.agentType !== 'codex' || !this.codexJournal) return this.flushSingleTurnReady(buf);
+    // Rehydrate/convert one durable turn at a time. Otherwise a terminal burst
+    // could materialize every large spooled turn before converter locks run.
+    const next = this.codexFlushTail.then(() => this.flushSingleTurnReady(buf));
+    this.codexFlushTail = next.catch(() => {});
+    return next;
+  }
+
+  private async flushSingleTurnReady(buf: TurnBuffer): Promise<void> {
+    await this.rehydrateCodexTurn(buf);
     // Backfill gen_ai.turn.id if needed (D4)
     if (buf.keySource !== 'turn_id') {
       for (const record of buf.records) {
