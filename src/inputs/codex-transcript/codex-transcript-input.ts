@@ -42,6 +42,7 @@ import {
   type CodexPendingSubagentTurn,
   type CodexForkBootstrap,
   type CodexPendingTerminalTurn,
+  type CodexDeferredTerminalTurn,
   type CodexTranscriptInputContext,
   type CodexTranscriptCheckpoint,
   type CodexTranscriptMeta,
@@ -65,6 +66,10 @@ const MAX_PERSISTED_INPUT_CONTEXT_BYTES = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE = 100;
 const MAX_SCAN_BYTES_PER_FILE_CYCLE = 16 * 1024 * 1024;
 const MAX_CACHED_INCOMPLETE_TAILS = 2048;
+const MAX_OWNER_OFFSET_PROBES = 2048;
+const MAX_DEFERRED_TERMINALS = 4;
+const RECOVERY_RETRY_MIN_MS = 1_000;
+const RECOVERY_RETRY_MAX_MS = 60_000;
 // Dynamic roots come from user-local Hook markers. Keep discovery bounded so
 // stale task homes cannot turn every polling cycle into an unbounded walk.
 const MAX_WAKEUP_MARKERS_FOR_DISCOVERY = 256;
@@ -215,6 +220,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
+  private readonly ownerOffsetProbes = new Map<string, { version: string; offset: number | null }>();
   private wakeupWatcher: FSWatcher | null = null;
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -336,6 +342,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupWatcher = null;
     this.multimodalUriCache.clear();
     this.incompleteTails.clear();
+    this.ownerOffsetProbes.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
   }
@@ -547,12 +554,11 @@ export class CodexTranscriptInput extends BaseInput {
     if (rolloutCaughtUp(checkpoint, stat)) return 0;
 
     if (checkpoint.ownerSessionMetaOffset === null) {
-      checkpoint.ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-        filePath,
-        stat.size,
-        runtime,
-      );
-      checkpointChanged = true;
+      const offset = await this.findOwnerOffset(filePath, stat);
+      if (offset !== null) {
+        checkpoint.ownerSessionMetaOffset = offset;
+        checkpointChanged = true;
+      }
     }
     const ownerMetaCacheAccess: TranscriptMetaCacheAccess = (
       checkpoint.scanOffset < stat.size
@@ -628,9 +634,12 @@ export class CodexTranscriptInput extends BaseInput {
 
     let scannedBytes = 0;
 
-    const hadPendingTerminal = checkpoint.pendingTerminal !== null;
-    const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint);
-    checkpointChanged ||= hadPendingTerminal;
+    const deferredResult = await this.recoverDeferredTerminals(filePath, checkpoint, stat);
+    checkpointChanged ||= deferredResult.changed;
+    emittedCount += deferredResult.emittedCount;
+    const priorPending = checkpoint.pendingTerminal;
+    const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint, stat);
+    checkpointChanged ||= checkpoint.pendingTerminal !== priorPending;
     emittedCount += pendingResult.emittedCount;
     processedTerminalCount += pendingResult.processedTerminalCount;
     if (pendingResult.blocked) {
@@ -803,14 +812,18 @@ export class CodexTranscriptInput extends BaseInput {
                 nextScanOffset,
                 recovered.diagnostics.sourceRecordCount,
               );
+              this.noteTerminalFailure(checkpoint.pendingTerminal, stat);
               this.logger.warn('terminal Codex turn could not be parsed; retaining it for the next scan', {
                 transcriptPath: filePath,
                 turnId: terminalTurnId,
                 range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: nextScanOffset },
                 retryCount: checkpoint.pendingTerminal.retryCount,
                 sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+                deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
+                deferredLimit: MAX_DEFERRED_TERMINALS,
               });
-              blocked = true;
+              blocked = !this.deferPendingTerminal(checkpoint);
+              if (!blocked) processedTerminalCount++;
             } else if (!checkpoint.pendingFusion) {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
@@ -899,12 +912,17 @@ export class CodexTranscriptInput extends BaseInput {
   private async recoverPendingTerminal(
     filePath: string,
     checkpoint: CodexTranscriptCheckpoint,
+    stat: fsSync.Stats,
   ): Promise<PendingRecoveryResult> {
     const pending = checkpoint.pendingTerminal;
     if (!pending) return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     if (checkpoint.activeTurn?.turnId !== pending.turnId) {
       checkpoint.pendingTerminal = null;
       return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
+    }
+    if (!this.terminalRetryReady(pending, stat)) {
+      const deferred = this.deferPendingTerminal(checkpoint);
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: Number(deferred) };
     }
     const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
     if (recovered.kind === 'unparseable') {
@@ -916,6 +934,7 @@ export class CodexTranscriptInput extends BaseInput {
         lastAttemptAtMs: now,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
       };
+      this.noteTerminalFailure(checkpoint.pendingTerminal, stat);
       this.logger.warn('pending Codex terminal turn still could not be parsed; will retry', {
         transcriptPath: filePath,
         turnId: pending.turnId,
@@ -923,14 +942,71 @@ export class CodexTranscriptInput extends BaseInput {
         retryCount: checkpoint.pendingTerminal.retryCount,
         firstPendingAtMs: checkpoint.pendingTerminal.firstPendingAtMs,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+        deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
+        deferredLimit: MAX_DEFERRED_TERMINALS,
       });
-      return { blocked: true, emittedCount: 0, processedTerminalCount: 0 };
+      const deferred = this.deferPendingTerminal(checkpoint);
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: Number(deferred) };
     }
 
     const emittedCount = this.emitEntryBatches(recovered.entries);
     checkpoint.activeTurn = null;
     checkpoint.pendingTerminal = null;
     return { blocked: false, emittedCount, processedTerminalCount: 1 };
+  }
+
+  private terminalRetryReady(pending: CodexPendingTerminalTurn, stat: fsSync.Stats): boolean {
+    return !pending.failure || (pending.failure.sourceVersion !== sourceVersion(stat)
+      && Date.now() >= pending.failure.retryAtMs);
+  }
+
+  private noteTerminalFailure(pending: CodexPendingTerminalTurn, stat: fsSync.Stats): void {
+    const delayMs = Math.min(RECOVERY_RETRY_MAX_MS,
+      Math.max(RECOVERY_RETRY_MIN_MS, (pending.failure?.delayMs ?? RECOVERY_RETRY_MIN_MS / 2) * 2));
+    pending.failure = { sourceVersion: sourceVersion(stat), delayMs, retryAtMs: Date.now() + delayMs };
+  }
+
+  private deferPendingTerminal(checkpoint: CodexTranscriptCheckpoint): boolean {
+    if (!checkpoint.activeTurn || !checkpoint.pendingTerminal) return false;
+    const deferred = checkpoint.deferredTerminals ?? [];
+    if (deferred.length >= MAX_DEFERRED_TERMINALS) return false;
+    deferred.push({ activeTurn: checkpoint.activeTurn, pendingTerminal: checkpoint.pendingTerminal });
+    checkpoint.deferredTerminals = deferred;
+    checkpoint.scanOffset = Math.max(checkpoint.scanOffset, checkpoint.pendingTerminal.terminalEndOffset);
+    checkpoint.activeTurn = null;
+    checkpoint.pendingTerminal = null;
+    return true;
+  }
+
+  private async recoverDeferredTerminals(
+    filePath: string, checkpoint: CodexTranscriptCheckpoint, stat: fsSync.Stats,
+  ): Promise<{ changed: boolean; emittedCount: number }> {
+    const deferred = checkpoint.deferredTerminals;
+    if (!deferred?.length) return { changed: false, emittedCount: 0 };
+    for (let i = 0; i < deferred.length; i++) {
+      const item = deferred[i]!;
+      if (!this.terminalRetryReady(item.pendingTerminal, stat)) continue;
+      const recovery = { ...checkpoint, activeTurn: item.activeTurn, pendingTerminal: item.pendingTerminal };
+      const result = await this.recoverTurnSegment(filePath, recovery, item.pendingTerminal.terminalEndOffset, true);
+      if (result.kind === 'unparseable') {
+        item.pendingTerminal.retryCount = (item.pendingTerminal.retryCount ?? 0) + 1;
+        item.pendingTerminal.lastAttemptAtMs = Date.now();
+        item.pendingTerminal.sourceRecordCount = result.diagnostics.sourceRecordCount;
+        this.noteTerminalFailure(item.pendingTerminal, stat);
+        this.logger.warn('deferred Codex terminal remains unparseable; retaining recovery range', {
+          transcriptPath: filePath,
+          turnId: item.activeTurn.turnId,
+          retryCount: item.pendingTerminal.retryCount,
+          retryDelayMs: item.pendingTerminal.failure!.delayMs,
+        });
+      } else {
+        deferred.splice(i, 1);
+      }
+      // At most one deferred range is materialized per file/cycle. Do not let
+      // several failed histories accumulate simultaneous parsed body arrays.
+      return { changed: true, emittedCount: this.emitEntryBatches(result.entries) };
+    }
+    return { changed: false, emittedCount: 0 };
   }
 
   private async recoverTurnSegment(
@@ -1296,16 +1372,8 @@ export class CodexTranscriptInput extends BaseInput {
       }
       const checkpoint = this.readCheckpoint(this.stateKey(filePath));
       const ownerOffset = checkpoint?.inode === stat.ino
-        ? checkpoint.ownerSessionMetaOffset ?? await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          )
-        : await findOwnerSessionMetaOffset(
-            filePath,
-            stat.size,
-            this.getInputRuntimeAccumulator(),
-          );
+        ? checkpoint.ownerSessionMetaOffset ?? await this.findOwnerOffset(filePath, stat)
+        : await this.findOwnerOffset(filePath, stat);
       if (ownerOffset === null) continue;
       const meta = await this.loadTranscriptOwnerMeta(
         filePath,
@@ -1318,6 +1386,22 @@ export class CodexTranscriptInput extends BaseInput {
       if (!meta) continue;
       this.publishTranscriptOwnerMeta(filePath, meta);
     }
+  }
+
+  private async findOwnerOffset(filePath: string, stat: fsSync.Stats): Promise<number | null> {
+    const version = sourceVersion(stat);
+    const previous = this.ownerOffsetProbes.get(filePath);
+    if (previous?.version === version) return previous.offset;
+    const offset = await findOwnerSessionMetaOffset(filePath, stat.size, this.getInputRuntimeAccumulator());
+    // Never cache absence observed while a writer was changing the file.
+    const after = await fs.stat(filePath);
+    if (!sameFileVersion(stat, after)) return null;
+    this.ownerOffsetProbes.delete(filePath);
+    this.ownerOffsetProbes.set(filePath, { version, offset });
+    if (this.ownerOffsetProbes.size > MAX_OWNER_OFFSET_PROBES) {
+      this.ownerOffsetProbes.delete(this.ownerOffsetProbes.keys().next().value!);
+    }
+    return offset;
   }
 
   private async loadTranscriptOwnerMeta(
@@ -1989,11 +2073,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const runtime = this.getInputRuntimeAccumulator();
     const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size, runtime);
-    const ownerSessionMetaOffset = await findOwnerSessionMetaOffset(
-      filePath,
-      scanOffset,
-      runtime,
-    );
+    const ownerSessionMetaOffset = await this.findOwnerOffset(filePath, stat);
     this.saveCheckpoint(key, {
       inode: stat.ino,
       scanOffset,
@@ -2291,19 +2371,17 @@ export class CodexTranscriptInput extends BaseInput {
     const value = asRecord(raw);
     if (!value || typeof value.inode !== 'number' || typeof value.scanOffset !== 'number') return null;
     const activeTurn = parseActiveTranscriptTurn(value.activeTurn);
-    const pending = asRecord(value.pendingTerminal);
-    let pendingTerminal = pending
-      && typeof pending.turnId === 'string'
-      && typeof pending.terminalEndOffset === 'number'
-      ? {
-          turnId: pending.turnId,
-          terminalEndOffset: pending.terminalEndOffset,
-          ...(typeof pending.retryCount === 'number' ? { retryCount: pending.retryCount } : {}),
-          ...(typeof pending.firstPendingAtMs === 'number' ? { firstPendingAtMs: pending.firstPendingAtMs } : {}),
-          ...(typeof pending.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: pending.lastAttemptAtMs } : {}),
-          ...(typeof pending.sourceRecordCount === 'number' ? { sourceRecordCount: pending.sourceRecordCount } : {}),
-        }
-      : null;
+    let pendingTerminal = parsePendingTerminal(value.pendingTerminal);
+    const deferredTerminals: CodexDeferredTerminalTurn[] = [];
+    if (Array.isArray(value.deferredTerminals)) for (const raw of value.deferredTerminals) {
+      const item = asRecord(raw);
+      const active = parseActiveTranscriptTurn(item?.activeTurn);
+      const pending = parsePendingTerminal(item?.pendingTerminal);
+      if (active && pending && active.turnId === pending.turnId
+        && pending.terminalEndOffset >= active.startOffset) {
+        deferredTerminals.push({ activeTurn: active, pendingTerminal: pending });
+      }
+    }
     const fusion = asRecord(value.pendingFusion);
     const fusionChildren = parsePendingFusionChildren(fusion?.children);
     const pendingFusion: CodexPendingFusionTurn | null = fusion
@@ -2396,6 +2474,7 @@ export class CodexTranscriptInput extends BaseInput {
       scanOffset: value.scanOffset,
       activeTurn,
       pendingTerminal,
+      ...(deferredTerminals.length ? { deferredTerminals } : {}),
       pendingFusion,
       pendingSubagent,
       // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
@@ -2572,6 +2651,7 @@ function rolloutCaughtUp(
     && checkpoint.ownerSessionMetaOffset !== null
     && checkpoint.activeTurn === null
     && checkpoint.pendingTerminal === null
+    && !checkpoint.deferredTerminals?.length
     && checkpoint.pendingFusion === null
     && checkpoint.pendingSubagent === null
     && checkpoint.forkBootstrap === undefined;
@@ -2966,6 +3046,32 @@ async function scanJsonLinesThroughQuarantine(
 function sameFileVersion(a: fsSync.Stats, b: fsSync.Stats): boolean {
   return a.ino === b.ino && a.dev === b.dev && a.size === b.size
     && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+}
+
+function sourceVersion(stat: fsSync.Stats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+}
+
+function parsePendingTerminal(raw: unknown): CodexPendingTerminalTurn | null {
+  const value = asRecord(raw);
+  if (!value || typeof value.turnId !== 'string' || typeof value.terminalEndOffset !== 'number') return null;
+  const failure = asRecord(value.failure);
+  const validFailure = failure && typeof failure.sourceVersion === 'string'
+    && typeof failure.retryAtMs === 'number' && Number.isFinite(failure.retryAtMs)
+    && typeof failure.delayMs === 'number' && Number.isFinite(failure.delayMs)
+    && failure.delayMs >= RECOVERY_RETRY_MIN_MS && failure.delayMs <= RECOVERY_RETRY_MAX_MS;
+  return {
+    turnId: value.turnId, terminalEndOffset: value.terminalEndOffset,
+    ...(typeof value.retryCount === 'number' ? { retryCount: value.retryCount } : {}),
+    ...(typeof value.firstPendingAtMs === 'number' ? { firstPendingAtMs: value.firstPendingAtMs } : {}),
+    ...(typeof value.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: value.lastAttemptAtMs } : {}),
+    ...(typeof value.sourceRecordCount === 'number' ? { sourceRecordCount: value.sourceRecordCount } : {}),
+    ...(validFailure ? { failure: {
+      sourceVersion: failure.sourceVersion as string,
+      retryAtMs: failure.retryAtMs as number,
+      delayMs: failure.delayMs as number,
+    } } : {}),
+  };
 }
 
 async function findOwnerSessionMetaOffset(

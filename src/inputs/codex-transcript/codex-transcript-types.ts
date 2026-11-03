@@ -95,6 +95,18 @@ export interface CodexPendingTerminalTurn {
   firstPendingAtMs?: number;
   lastAttemptAtMs?: number;
   sourceRecordCount?: number;
+  /** A failed version is retried only after a source change and bounded backoff. */
+  failure?: {
+    sourceVersion: string;
+    retryAtMs: number;
+    delayMs: number;
+  };
+}
+
+/** Failed ranges retain their semantic context without retaining parsed bodies. */
+export interface CodexDeferredTerminalTurn {
+  activeTurn: CodexActiveTranscriptTurn;
+  pendingTerminal: CodexPendingTerminalTurn;
 }
 
 interface CodexForkBootstrapBase {
@@ -126,6 +138,7 @@ export interface CodexTranscriptCheckpoint {
   scanOffset: number;
   activeTurn: CodexActiveTranscriptTurn | null;
   pendingTerminal: CodexPendingTerminalTurn | null;
+  deferredTerminals?: CodexDeferredTerminalTurn[];
   /** Legacy terminal barriers; new collection writes null. */
   pendingFusion: CodexPendingFusionTurn | null;
   pendingSubagent: CodexPendingSubagentTurn | null;
