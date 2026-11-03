@@ -220,7 +220,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
-  private readonly ownerOffsetProbes = new Map<string, { version: string; offset: number | null }>();
+  private readonly ownerOffsetProbes = new Map<string, { version: string; endOffset: number; offset: number | null }>();
   private wakeupWatcher: FSWatcher | null = null;
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -807,22 +807,27 @@ export class CodexTranscriptInput extends BaseInput {
 
           if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
             if (recovered.kind === 'unparseable') {
-              checkpoint.pendingTerminal = newPendingTerminal(
+              const pending = newPendingTerminal(
                 terminalTurnId,
                 nextScanOffset,
                 recovered.diagnostics.sourceRecordCount,
               );
-              this.noteTerminalFailure(checkpoint.pendingTerminal, stat);
-              this.logger.warn('terminal Codex turn could not be parsed; retaining it for the next scan', {
+              checkpoint.pendingTerminal = pending;
+              this.noteTerminalFailure(pending, stat);
+              const startOffset = checkpoint.activeTurn.startOffset;
+              const deferred = this.deferPendingTerminal(checkpoint);
+              this.logger.warn('terminal Codex turn could not be parsed; retained until source changes and backoff expires', {
                 transcriptPath: filePath,
                 turnId: terminalTurnId,
-                range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: nextScanOffset },
-                retryCount: checkpoint.pendingTerminal.retryCount,
+                range: { startOffset, endOffset: nextScanOffset },
+                retryCount: pending.retryCount,
                 sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+                deferred,
+                retryDelayMs: pending.failure!.delayMs,
                 deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
                 deferredLimit: MAX_DEFERRED_TERMINALS,
               });
-              blocked = !this.deferPendingTerminal(checkpoint);
+              blocked = !deferred;
               if (!blocked) processedTerminalCount++;
             } else if (!checkpoint.pendingFusion) {
               checkpoint.activeTurn = null;
@@ -935,17 +940,21 @@ export class CodexTranscriptInput extends BaseInput {
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
       };
       this.noteTerminalFailure(checkpoint.pendingTerminal, stat);
-      this.logger.warn('pending Codex terminal turn still could not be parsed; will retry', {
+      const failedPending = checkpoint.pendingTerminal;
+      const startOffset = checkpoint.activeTurn.startOffset;
+      const deferred = this.deferPendingTerminal(checkpoint);
+      this.logger.warn('pending Codex terminal turn could not be parsed; retained until source changes and backoff expires', {
         transcriptPath: filePath,
         turnId: pending.turnId,
-        range: { startOffset: checkpoint.activeTurn.startOffset, endOffset: pending.terminalEndOffset },
-        retryCount: checkpoint.pendingTerminal.retryCount,
-        firstPendingAtMs: checkpoint.pendingTerminal.firstPendingAtMs,
+        range: { startOffset, endOffset: pending.terminalEndOffset },
+        retryCount: failedPending.retryCount,
+        firstPendingAtMs: failedPending.firstPendingAtMs,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
+        deferred,
+        retryDelayMs: failedPending.failure!.delayMs,
         deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
         deferredLimit: MAX_DEFERRED_TERMINALS,
       });
-      const deferred = this.deferPendingTerminal(checkpoint);
       return { blocked: !deferred, emittedCount: 0, processedTerminalCount: Number(deferred) };
     }
 
@@ -1388,16 +1397,25 @@ export class CodexTranscriptInput extends BaseInput {
     }
   }
 
-  private async findOwnerOffset(filePath: string, stat: fsSync.Stats): Promise<number | null> {
+  private async findOwnerOffset(
+    filePath: string,
+    stat: fsSync.Stats,
+    endOffset = stat.size,
+  ): Promise<number | null> {
     const version = sourceVersion(stat);
     const previous = this.ownerOffsetProbes.get(filePath);
-    if (previous?.version === version) return previous.offset;
-    const offset = await findOwnerSessionMetaOffset(filePath, stat.size, this.getInputRuntimeAccumulator());
-    // Never cache absence observed while a writer was changing the file.
-    const after = await fs.stat(filePath);
-    if (!sameFileVersion(stat, after)) return null;
+    // A shorter search cannot establish absence in the rest of the file, and
+    // an owner found by a longer search may lie outside the requested prefix.
+    if (previous?.version === version && previous.endOffset === endOffset) return previous.offset;
+    const offset = await findOwnerSessionMetaOffset(filePath, endOffset, this.getInputRuntimeAccumulator());
+    // Never cache a result observed while a writer changed or removed the file.
+    try {
+      if (!sameFileVersion(stat, await fs.stat(filePath))) return null;
+    } catch {
+      return null;
+    }
     this.ownerOffsetProbes.delete(filePath);
-    this.ownerOffsetProbes.set(filePath, { version, offset });
+    this.ownerOffsetProbes.set(filePath, { version, endOffset, offset });
     if (this.ownerOffsetProbes.size > MAX_OWNER_OFFSET_PROBES) {
       this.ownerOffsetProbes.delete(this.ownerOffsetProbes.keys().next().value!);
     }
@@ -2073,7 +2091,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     const runtime = this.getInputRuntimeAccumulator();
     const scanOffset = await lastCompleteJsonlOffset(filePath, stat.size, runtime);
-    const ownerSessionMetaOffset = await this.findOwnerOffset(filePath, stat);
+    const ownerSessionMetaOffset = await this.findOwnerOffset(filePath, stat, scanOffset);
     this.saveCheckpoint(key, {
       inode: stat.ino,
       scanOffset,

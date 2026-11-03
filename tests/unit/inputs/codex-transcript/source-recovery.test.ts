@@ -103,6 +103,51 @@ it('does not memoize a negative probe when a writer changes the file during its 
   expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).not.toBeNull();
 });
 
+it('does not reread an incomplete tail after finding the fork baseline boundary', async () => {
+  const f = await fixture();
+  const prefix = diagnostic();
+  await fs.writeFile(f.file, prefix + '{"unfinished":"' + 'x'.repeat(3 * 1024 * 1024));
+  const stat = await fs.stat(f.file);
+  const cycle = await measure(f, () => f.probe.parkForkBaseline(f.file, key(f)));
+  expect(checkpoint(f).scanOffset).toBe(Buffer.byteLength(prefix));
+  expect(checkpoint(f).ownerSessionMetaOffset).toBeNull();
+  // The backwards boundary search reads the tail once; the owner probe reads only the prefix.
+  expect(cycle.rawReadBytes).toBeLessThanOrEqual(stat.size + Buffer.byteLength(prefix) + 1);
+});
+
+it.each(['limited-first', 'full-first'])('does not share owner-probe results across scan boundaries (%s)', async order => {
+  const f = await fixture();
+  const prefix = diagnostic();
+  await fs.writeFile(f.file, prefix + meta());
+  const stat = await fs.stat(f.file);
+  const boundary = Buffer.byteLength(prefix);
+  if (order === 'full-first') expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(boundary);
+  expect(await f.probe.findOwnerOffset(f.file, stat, boundary)).toBeNull();
+  expect((await measure(f, () => f.probe.findOwnerOffset(f.file, stat, boundary))).rawReadBytes).toBe(0);
+  expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(boundary);
+});
+
+it('keeps indexing healthy files when a probed file disappears before the final stat', async () => {
+  const f = await fixture();
+  await fs.writeFile(f.file, diagnostic());
+  const healthy = path.join(f.root, 'sessions', 'rollout-healthy.jsonl');
+  await fs.writeFile(healthy, meta());
+  const runtime = new InputRuntimeAccumulator();
+  f.probe.activeRuntimeAccumulator = runtime;
+  const observe = runtime.observeRead.bind(runtime);
+  let removed = false;
+  vi.spyOn(runtime, 'observeRead').mockImplementation((...args) => {
+    observe(...args);
+    if (!removed) { removed = true; fsSync.unlinkSync(f.file); }
+  });
+  await expect(f.probe.indexDiscoveredTranscriptOwners([
+    { filePath: f.file }, { filePath: healthy },
+  ])).resolves.toBeUndefined();
+  expect(removed).toBe(true);
+  expect(f.probe.ownerOffsetProbes.has(f.file)).toBe(false);
+  expect(f.probe.transcriptMetaByPath.has(healthy)).toBe(true);
+});
+
 it('bounds probe metadata and clears it on stop', async () => {
   const f = await fixture(); await fs.writeFile(f.file, diagnostic());
   for (let i = 0; i < 2048; i++) f.probe.ownerOffsetProbes.set(`old-${i}`, { version: 'old', offset: null });
@@ -205,6 +250,7 @@ it('backs off repeated failures on changing files and caps the retry delay', asy
 
 it('retains all failed ranges and the blocking cursor when the deferred capacity is full', async () => {
   const f = await pendingFixture(1024); const cp = checkpoint(f); const stat = await fs.stat(f.file);
+  const warn = vi.spyOn(f.probe.logger, 'warn');
   cp.deferredTerminals = Array.from({ length: 4 }, (_, index) => ({
     activeTurn: { ...cp.activeTurn!, turnId: `deferred-${index}` },
     pendingTerminal: { turnId: `deferred-${index}`, terminalEndOffset: f.end,
@@ -216,6 +262,10 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
   expect(checkpoint(f).pendingTerminal?.turnId).toBe('old');
   expect(checkpoint(f).scanOffset).toBe(f.end);
   expect(responses(f, 'later')).toHaveLength(0);
+  expect(warn).toHaveBeenCalledWith(
+    'pending Codex terminal turn could not be parsed; retained until source changes and backoff expires',
+    expect.objectContaining({ deferred: false, deferredRanges: 4, deferredLimit: 4, retryDelayMs: 1000 }),
+  );
   const update = vi.spyOn(f.state, 'update');
   expect((await processFile(f)).rawReadBytes).toBe(0);
   expect(update).not.toHaveBeenCalled();

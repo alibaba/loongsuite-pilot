@@ -3786,12 +3786,16 @@ describe('CodexTranscriptInput', () => {
       sourceRecordCount: 1,
     });
     expect(warn).toHaveBeenCalledWith(
-      'pending Codex terminal turn still could not be parsed; will retry',
+      'pending Codex terminal turn could not be parsed; retained until source changes and backoff expires',
       expect.objectContaining({
         transcriptPath: transcript,
         turnId: pendingTurnId,
         retryCount: 1,
         sourceRecordCount: 1,
+        deferred: true,
+        deferredRanges: 1,
+        deferredLimit: 4,
+        retryDelayMs: 1000,
       }),
     );
   });
