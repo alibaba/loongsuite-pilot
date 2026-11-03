@@ -268,6 +268,7 @@ it('backs off repeated failures on changing files and caps the retry delay', asy
 it('retains all failed ranges and the blocking cursor when the deferred capacity is full', async () => {
   const f = await pendingFixture(1024); const cp = checkpoint(f); const stat = await fs.stat(f.file);
   const warn = vi.spyOn(f.probe.logger, 'warn');
+  const pendingRecovery = vi.spyOn(f.probe, 'recoverPendingTerminal');
   cp.deferredTerminals = Array.from({ length: 4 }, (_, index) => ({
     activeTurn: { ...cp.activeTurn!, turnId: `deferred-${index}` },
     pendingTerminal: { turnId: `deferred-${index}`, terminalEndOffset: f.end,
@@ -275,6 +276,7 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
   }));
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   await processFile(f); await f.state.save();
+  expect(await pendingRecovery.mock.results[0]!.value).toMatchObject({ blocked: true, processedTerminalCount: 1 });
   expect(checkpoint(f).deferredTerminals).toHaveLength(4);
   expect(checkpoint(f).pendingTerminal?.turnId).toBe('old');
   expect(checkpoint(f).scanOffset).toBe(f.end);
@@ -395,7 +397,7 @@ it('rejects an overflowing JSON offset after loading a persisted checkpoint', as
   expect(responses(f, 'later')).toHaveLength(1);
 });
 
-it.each(['processed', 'unparseable'])('counts a %s deferred recovery towards the file terminal budget', async mode => {
+it.each(['processed', 'unparseable', 'gated-pending'])('uses the terminal budget for %s recovery', async mode => {
   const f = await fixture();
   const initial = mode === 'processed' ? completed('deferred')
     : meta() + row('event_msg', { type: 'task_started', turn_id: 'deferred' }) + diagnostic();
@@ -408,11 +410,22 @@ it.each(['processed', 'unparseable'])('counts a %s deferred recovery towards the
     deferredTerminals: [{ activeTurn: { turnId: 'deferred', startOffset: 0, startedAtMs: Date.parse('2026-01-01T00:00:01Z') },
       pendingTerminal: { turnId: 'deferred', terminalEndOffset: boundary } }],
   } } });
+  if (mode === 'gated-pending') {
+    const cp = checkpoint(f);
+    const retained = cp.deferredTerminals![0]!;
+    cp.activeTurn = retained.activeTurn;
+    cp.pendingTerminal = retained.pendingTerminal;
+    cp.pendingTerminal.failure = { sourceVersion: [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':'),
+      retryAtMs: Date.now() + 1000_000, delayMs: 1000 };
+    cp.deferredTerminals = [];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+  }
   await processFile(f);
   expect(responses(f, 'turn-98')).toHaveLength(1);
-  expect(responses(f, 'turn-99')).toHaveLength(0);
-  expect(f.entries.filter(e => e['event.name'] === 'llm.response')).toHaveLength(mode === 'processed' ? 100 : 99);
-  expect(checkpoint(f).scanOffset).toBeLessThan(stat.size);
+  expect(responses(f, 'turn-99')).toHaveLength(mode === 'gated-pending' ? 1 : 0);
+  expect(f.entries.filter(e => e['event.name'] === 'llm.response')).toHaveLength(mode === 'unparseable' ? 99 : 100);
+  if (mode === 'gated-pending') expect(checkpoint(f).scanOffset).toBe(stat.size);
+  else expect(checkpoint(f).scanOffset).toBeLessThan(stat.size);
   await processFile(f);
   expect(responses(f, 'turn-99')).toHaveLength(1);
   expect(responses(f, 'turn-98')).toHaveLength(1);
@@ -426,9 +439,13 @@ it('initially probes a deferred range without failure metadata once and persists
   cp.activeTurn = null; cp.pendingTerminal = null; cp.scanOffset = (await fs.stat(f.file)).size;
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   const recover = vi.spyOn(f.probe, 'recoverTurnSegment');
+  const firstFailureAt = clock;
   await processFile(f);
   expect(recover).toHaveBeenCalledTimes(1);
   expect(checkpoint(f).deferredTerminals![0]!.pendingTerminal.failure).toBeDefined();
+  expect(checkpoint(f).deferredTerminals![0]!.pendingTerminal).toMatchObject({
+    firstPendingAtMs: firstFailureAt, lastAttemptAtMs: firstFailureAt,
+  });
   clock += 3600_000;
   for (let i = 0; i < 3; i++) expect((await processFile(f)).rawReadBytes).toBe(0);
   expect(recover).toHaveBeenCalledTimes(1);
@@ -438,6 +455,14 @@ it('initially probes a deferred range without failure metadata once and persists
   await processFile(restarted);
   expect(restartedRecover).not.toHaveBeenCalled();
   expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal.retryCount).toBe(1);
+  await fs.appendFile(f.file, diagnostic());
+  await processFile(restarted);
+  expect(restartedRecover).toHaveBeenCalledTimes(1);
+  expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal).toMatchObject({
+    firstPendingAtMs: firstFailureAt, lastAttemptAtMs: clock, retryCount: 2,
+  });
+  await f.state.save(); await f.state.load();
+  expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal.firstPendingAtMs).toBe(firstFailureAt);
 });
 
 it.each(['missing-active', 'mismatched-turn', 'reversed-range', 'legacy-reversed-range'])(

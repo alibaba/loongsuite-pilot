@@ -912,7 +912,7 @@ export class CodexTranscriptInput extends BaseInput {
                 deferredLimit: MAX_DEFERRED_TERMINALS,
               });
               blocked = !deferred;
-              if (!blocked) processedTerminalCount++;
+              processedTerminalCount++;
             } else if (!checkpoint.pendingFusion) {
               checkpoint.activeTurn = null;
               checkpoint.pendingTerminal = null;
@@ -1011,7 +1011,7 @@ export class CodexTranscriptInput extends BaseInput {
     }
     if (!this.terminalRetryReady(pending, stat)) {
       const deferred = this.deferPendingTerminal(checkpoint);
-      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: Number(deferred) };
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: 0 };
     }
     const recovered = await this.recoverTurnSegment(filePath, checkpoint, pending.terminalEndOffset, true);
     if (recovered.kind === 'unparseable') {
@@ -1039,7 +1039,7 @@ export class CodexTranscriptInput extends BaseInput {
         deferredRanges: checkpoint.deferredTerminals?.length ?? 0,
         deferredLimit: MAX_DEFERRED_TERMINALS,
       });
-      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: Number(deferred) };
+      return { blocked: !deferred, emittedCount: 0, processedTerminalCount: 1 };
     }
 
     const emittedCount = this.emitEntryBatches(recovered.entries);
@@ -1084,8 +1084,10 @@ export class CodexTranscriptInput extends BaseInput {
       const recovery = { ...checkpoint, activeTurn: item.activeTurn, pendingTerminal: item.pendingTerminal };
       const result = await this.recoverTurnSegment(filePath, recovery, item.pendingTerminal.terminalEndOffset, true);
       if (result.kind === 'unparseable') {
+        const now = Date.now();
         item.pendingTerminal.retryCount = Math.min(Number.MAX_SAFE_INTEGER, (item.pendingTerminal.retryCount ?? 0) + 1);
-        item.pendingTerminal.lastAttemptAtMs = Date.now();
+        item.pendingTerminal.firstPendingAtMs ??= now;
+        item.pendingTerminal.lastAttemptAtMs = now;
         item.pendingTerminal.sourceRecordCount = result.diagnostics.sourceRecordCount;
         this.noteTerminalFailure(item.pendingTerminal, stat);
         this.logger.warn('deferred Codex terminal remains unparseable; retaining recovery range', {
