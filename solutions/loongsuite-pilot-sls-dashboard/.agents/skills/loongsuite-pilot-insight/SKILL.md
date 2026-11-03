@@ -16,7 +16,7 @@ description: 基于 LoongSuite Pilot 采集的 AI Agent 事件生成事件洞察
 | [schema.md](schema.md) | 先读 Data Source Bindings 和 Source Composition，再按任务读取所需 Source 和查询构件；组织关联读 dept_roster，枚举展示读“枚举展示与交互” |
 | [value-labels.md](value-labels.md) | 生成枚举标签时查对应字段及父子分类表；普通 Token 报表无需读取 |
 | `sls-dashboard-builder` | 构建图表 JSON、预览或发布时，读取其入口及必要参考 |
-| [交互事件与下钻报表](../sls-dashboard-builder/references/drill-down-events.md) | 制作总览与明细联动、日志下钻或业务页面链接时读取；场景 spec 写明点击入口、目标资源、变量映射和时间范围 |
+| [交互事件与下钻报表](../sls-dashboard-builder/references/drill-down-events.md) | 制作总览与明细联动、日志下钻或业务页面链接时读取；先按查看环境选择纯 SLS 原生事件或 AgentLoop URL，场景 spec 写明点击入口、目标资源、变量映射和时间范围 |
 
 ## Boundaries
 
