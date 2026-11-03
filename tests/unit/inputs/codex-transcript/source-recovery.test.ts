@@ -286,6 +286,47 @@ it('attempts at most one eligible deferred range per file cycle', async () => {
   recover.mockClear(); await processFile(f); expect(recover).toHaveBeenCalledTimes(1);
 });
 
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid terminal end offset %s without blocking later collection', async offset => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f);
+    cp.pendingTerminal!.terminalEndOffset = offset;
+    cp.deferredTerminals = [{ activeTurn: { ...cp.activeTurn! }, pendingTerminal: { ...cp.pendingTerminal! } }];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.pendingTerminal).toBeNull();
+    expect(parsed.deferredTerminals ?? []).toEqual([]);
+    // Keep the valid active context so ordinary scanning can close this turn
+    // and collect the subsequent healthy turn using real source boundaries.
+    expect(parsed.activeTurn).toMatchObject({ turnId: 'old' });
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it('rejects an overflowing JSON offset after loading a persisted checkpoint', async () => {
+  const f = await pendingFixture(1024);
+  await f.state.save();
+  const statePath = path.join(f.root, 'state.json');
+  const text = await fs.readFile(statePath, 'utf8');
+  expect(text).toMatch(/"terminalEndOffset"\s*:\s*\d+/);
+  // Valid JSON numbers may overflow JavaScript's finite numeric range.
+  await fs.writeFile(statePath, text.replace(/("terminalEndOffset"\s*:\s*)\d+/, (_, prefix) => prefix + '1e309'));
+  await f.state.load();
+  expect(checkpoint(f).pendingTerminal!.terminalEndOffset).toBe(Infinity);
+  expect(f.probe.readCheckpoint(key(f)).pendingTerminal).toBeNull();
+  await processFile(f);
+  expect(responses(f, 'later')).toHaveLength(1);
+});
+
+it('accepts zero as a valid terminal boundary', async () => {
+  const f = await pendingFixture(1024);
+  const cp = checkpoint(f);
+  cp.pendingTerminal!.terminalEndOffset = 0;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  expect(f.probe.readCheckpoint(key(f)).pendingTerminal?.terminalEndOffset).toBe(0);
+});
+
 it('recovers a valid legacy terminal directly without creating a deferred range', async () => {
   const f = await fixture(); const text = completed('normal'); await fs.writeFile(f.file, text);
   const stat = await fs.stat(f.file);

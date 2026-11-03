@@ -1013,7 +1013,8 @@ export class CodexTranscriptInput extends BaseInput {
       }
       // At most one deferred range is materialized per file/cycle. Do not let
       // several failed histories accumulate simultaneous parsed body arrays.
-      return { changed: true, emittedCount: this.emitEntryBatches(result.entries) };
+      return { changed: true, emittedCount: result.kind === 'unparseable'
+        ? 0 : this.emitEntryBatches(result.entries) };
     }
     return { changed: false, emittedCount: 0 };
   }
@@ -3072,7 +3073,8 @@ function sourceVersion(stat: fsSync.Stats): string {
 
 function parsePendingTerminal(raw: unknown): CodexPendingTerminalTurn | null {
   const value = asRecord(raw);
-  if (!value || typeof value.turnId !== 'string' || typeof value.terminalEndOffset !== 'number') return null;
+  if (!value || typeof value.turnId !== 'string' || typeof value.terminalEndOffset !== 'number'
+    || !Number.isSafeInteger(value.terminalEndOffset) || value.terminalEndOffset < 0) return null;
   const failure = asRecord(value.failure);
   const validFailure = failure && typeof failure.sourceVersion === 'string'
     && typeof failure.retryAtMs === 'number' && Number.isFinite(failure.retryAtMs)
