@@ -298,6 +298,7 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
   const f = await pendingFixture(1024); const cp = checkpoint(f); const stat = await fs.stat(f.file);
   const warn = vi.spyOn(f.probe.logger, 'warn');
   const pendingRecovery = vi.spyOn(f.probe, 'recoverPendingTerminal');
+  const recover = vi.spyOn(f.probe, 'recoverTurnSegment');
   cp.deferredTerminals = Array.from({ length: 4 }, (_, index) => ({
     activeTurn: { ...cp.activeTurn!, turnId: `deferred-${index}` },
     pendingTerminal: { turnId: `deferred-${index}`, terminalEndOffset: f.end,
@@ -323,7 +324,10 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
       deferredRanges: 4, deferredLimit: 4 }),
   );
   const update = vi.spyOn(f.state, 'update');
+  recover.mockClear();
   expect((await processFile(f)).rawReadBytes).toBe(0);
+  expect(await pendingRecovery.mock.results[1]!.value).toMatchObject({ blocked: true, processedTerminalCount: 0 });
+  expect(recover).not.toHaveBeenCalled();
   expect(update).not.toHaveBeenCalled();
   const healthy = path.join(f.root, 'sessions', 'rollout-healthy.jsonl');
   await fs.writeFile(healthy, completed('healthy'));
@@ -626,6 +630,61 @@ function legacyRecoveryState(cp: CodexTranscriptCheckpoint, end: number) {
     terminalEndOffset: end, activeTurn: { ...cp.activeTurn! } };
   cp.forkBootstrap = { state: 'live-pending', searchOffset: 0 };
 }
+
+it.each(['fusion', 'captured-subagent'])(
+  'rejects legacy %s boundaries beyond the saved cursor without blocking later work', async kind => {
+    const f = await pendingFixture(1024);
+    for (const end of [f.end + 1, Number.MAX_SAFE_INTEGER]) {
+      const cp = checkpoint(f);
+      legacyRecoveryState(cp, end);
+      cp.pendingTerminal = null; cp.forkBootstrap = undefined;
+      if (kind === 'fusion') cp.pendingSubagent = null;
+      else cp.pendingFusion = null;
+      f.state.update(key(f), { extra: { codexTranscript: cp } });
+      await f.state.save(); await f.state.load();
+      const parsed = f.probe.readCheckpoint(key(f));
+      expect(parsed.pendingFusion).toBeNull();
+      expect(parsed.pendingSubagent).toBeNull();
+      expect(parsed.pendingTerminal).toBeNull();
+      expect(parsed.activeTurn).toMatchObject({ turnId: 'old' });
+    }
+    const releaseParent = vi.spyOn(f.probe, 'releaseParentFusionIndependently');
+    const releaseChild = vi.spyOn(f.probe, 'releaseCapturedSubagentIndependently');
+    await processFile(f);
+    expect(releaseParent).not.toHaveBeenCalled();
+    expect(releaseChild).not.toHaveBeenCalled();
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each(['mismatched-turn', 'reversed-range'])(
+  'rejects legacy fusion inconsistent with its active context (%s)', async mode => {
+    const f = await pendingFixture(1024); const cp = checkpoint(f);
+    legacyRecoveryState(cp, f.end);
+    cp.pendingTerminal = null; cp.pendingSubagent = null; cp.forkBootstrap = undefined;
+    if (mode === 'mismatched-turn') cp.pendingFusion!.turnId = 'different-turn';
+    else cp.pendingFusion!.terminalEndOffset = 0;
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    expect(f.probe.readCheckpoint(key(f)).pendingFusion).toBeNull();
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each(['at', 'behind', 'without-active'])('retains valid legacy barriers (%s)', async location => {
+  const f = await pendingFixture(1024); const cp = checkpoint(f);
+  legacyRecoveryState(cp, f.end);
+  const startOffset = cp.activeTurn!.startOffset;
+  if (location === 'without-active') cp.activeTurn = null;
+  cp.pendingTerminal = null; cp.forkBootstrap = undefined;
+  cp.scanOffset = location === 'at' ? f.end : (await fs.stat(f.file)).size;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  await f.state.save(); await f.state.load();
+  const parsed = f.probe.readCheckpoint(key(f));
+  expect(parsed.pendingFusion).toMatchObject({ terminalEndOffset: f.end });
+  expect(parsed.pendingSubagent).toMatchObject({ terminalEndOffset: f.end,
+    activeTurn: { turnId: 'old', startOffset } });
+});
 
 it('parses legacy pending-subagent migration deterministically without manufacturing retry attempts', async () => {
   const f = await pendingFixture(1024); const cp = checkpoint(f);

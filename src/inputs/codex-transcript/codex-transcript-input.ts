@@ -1008,6 +1008,8 @@ export class CodexTranscriptInput extends BaseInput {
       return { blocked: false, emittedCount: 0, processedTerminalCount: 0 };
     }
     if (!this.terminalRetryReady(pending, stat)) {
+      // No conversion is attempted, so no terminal attempt budget is spent,
+      // even when full deferred capacity leaves this pending barrier blocked.
       const deferred = this.deferPendingTerminal(checkpoint);
       return { blocked: !deferred, emittedCount: 0, processedTerminalCount: 0 };
     }
@@ -2539,6 +2541,9 @@ export class CodexTranscriptInput extends BaseInput {
       && typeof fusion.parentThreadId === 'string'
       && typeof fusion.parentTraceId === 'string'
       && isNonNegativeSafeInteger(fusion.terminalEndOffset)
+      && fusion.terminalEndOffset <= value.scanOffset
+      && (!activeTurn || (fusion.turnId === activeTurn.turnId
+        && fusion.terminalEndOffset >= activeTurn.startOffset))
       && fusionChildren.length > 0
       ? {
           turnId: fusion.turnId,
@@ -2559,6 +2564,7 @@ export class CodexTranscriptInput extends BaseInput {
       && typeof subagent.parentToolCallId === 'string'
       && (confidence === 'explicit_id' || confidence === 'agent_path')
       && isNonNegativeSafeInteger(subagent.terminalEndOffset)
+      && subagent.terminalEndOffset <= value.scanOffset
       && capturedActiveTurn
       && capturedActiveTurn.turnId === subagent.turnId
       && subagent.terminalEndOffset >= capturedActiveTurn.startOffset
