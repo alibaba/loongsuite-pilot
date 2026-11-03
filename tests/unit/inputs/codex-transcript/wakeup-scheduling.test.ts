@@ -114,3 +114,15 @@ it('does not dirty persisted EOF forks, but still saves new ownership evidence',
   expect(update).toHaveBeenCalled();
   expect((state.get(key).extra?.codexTranscript as any).forkBootstrap.initialTurnId).toBe('owned');
 });
+
+it('does not create empty delegation state on startup, but persists clearing real state', async () => {
+  const { state, probe } = await fixture();
+  const update = vi.spyOn(state, 'update');
+  probe.saveDelegationState(); await state.save();
+  expect(update).not.toHaveBeenCalled();
+  probe.deliveredInvocations.add('delivered'); probe.saveDelegationState();
+  expect(update).toHaveBeenCalledTimes(1);
+  probe.deliveredInvocations.clear(); probe.saveDelegationState();
+  expect(update).toHaveBeenCalledTimes(2);
+  expect(state.get('codex-transcript').extra?.codexResultInvocations).toEqual([]);
+});

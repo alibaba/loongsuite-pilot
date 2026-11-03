@@ -2528,9 +2528,13 @@ export class CodexTranscriptInput extends BaseInput {
     const delegations = this.subagentLinker.serialize();
     const invocations = [...this.deliveredInvocations].slice(-MAX_LINK_DESCRIPTORS);
     const pending = [...this.pendingAgentResults.values()];
-    const same = (before: unknown, after: unknown[]) => Array.isArray(before)
-      && before.length === after.length && after.every((value, index) => before[index] === value);
-    if (extra.codexDelegations === delegations
+    const same = (before: unknown, after: unknown[]) => (before === undefined && after.length === 0)
+      || (Array.isArray(before) && before.length === after.length
+        && after.every((value, index) => before[index] === value));
+    const emptyDelegations = delegations.spawns.length === 0 && delegations.children.length === 0
+      && delegations.bindings.length === 0 && !delegations.completedWorkResults?.length
+      && !delegations.workTerminals?.length;
+    if ((extra.codexDelegations === delegations || (extra.codexDelegations === undefined && emptyDelegations))
       && same(extra.codexResultInvocations, invocations)
       && same(extra.codexPendingAgentResults, pending)) return;
     this.stateStore.update(this.id, { extra: { ...extra,
