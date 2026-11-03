@@ -5527,3 +5527,7 @@ mod skill_config_history_contracts {
 #[cfg(test)]
 #[path = "../normalization/cursor_agent_event_history_tests.rs"]
 mod cursor_agent_event_history_tests;
+
+#[cfg(test)]
+#[path = "cursor_react_history_contract_tests.rs"]
+mod cursor_react_history_contract_tests;

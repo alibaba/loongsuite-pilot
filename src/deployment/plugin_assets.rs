@@ -194,8 +194,15 @@ impl PluginAssets {
             // 此包装文件由 Rust registry 生成，不能拿静态插件覆盖它。
             resource_file(data, &format!("plugins/{relative}"))?;
         } else {
+            // The exact pre-directory OpenCode entry is still an official,
+            // verified member of the same bundle. All companion/manifest and
+            // source/destination checks below remain mandatory.
+            let legacy_opencode_entry = def.id == "opencode"
+                && entry == "opencode"
+                && relative == "opencode/plugin.mjs"
+                && files.contains(&"opencode/plugin.mjs");
             ensure!(
-                relative == entry,
+                relative == entry || legacy_opencode_entry,
                 "托管插件入口与资源声明不匹配：{}",
                 def.id
             );

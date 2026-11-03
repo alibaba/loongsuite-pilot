@@ -510,7 +510,7 @@ async fn source_l343_concurrent_calls_share_one_actual_collection_and_io_observa
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn cli_identity_real_native_status_cache_and_context_negative_controls() {
+async fn cli_identity_real_native_hook_status_cache_and_context_negative_controls() {
     use std::os::unix::fs::PermissionsExt;
     let mut f = Fixture::new("qoder").await;
     let home = f.root.join("synthetic-home");
@@ -519,39 +519,74 @@ async fn cli_identity_real_native_status_cache_and_context_negative_controls() {
     std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
     std::fs::create_dir_all(&cli).unwrap();
     std::fs::write(&auth, b"synthetic metadata only").unwrap();
-    std::fs::write(cli.join("version.txt"), "1.0.0\n").unwrap();
     let exe = cli.join("qodercli-1.0.0");
-    std::fs::write(&exe,b"#!/bin/sh\nprintf x >> \"$QODER_TEST_MARKER\"\nprintf '%s' '{\"logged_in\":true,\"username\":\"fixture-cli-user\",\"email\":\"fixture-cli@example.invalid\"}'\n").unwrap();
+    std::fs::write(
+        &exe,
+        br##"#!/bin/sh
+printf x >> "$QODER_TEST_MARKER"
+printf '%s' '{"logged_in":true,"username":"fixture-cli-user","email":"fixture-cli@example.invalid"}'
+"##,
+    )
+    .unwrap();
     std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
     let marker = f.root.join("status-called");
-    let env = std::collections::HashMap::from([
+    let mut env = std::collections::HashMap::from([
         ("HOME".into(), home.to_string_lossy().into_owned()),
         ("USERPROFILE".into(), home.to_string_lossy().into_owned()),
+        (
+            "LOONGSUITE_PILOT_DATA_DIR".into(),
+            f.root.to_string_lossy().into_owned(),
+        ),
         (
             "QODER_TEST_MARKER".into(),
             marker.to_string_lossy().into_owned(),
         ),
     ]);
-    f.source.inner.lock().await.identity_env = Some(env.clone());
     let cli_turn = |index| {
         let mut rows = turn(index, false);
         rows[1]["entrypoint"] = json!("cli");
         rows.push(json!({"type":"last-prompt"}));
         rows
     };
+    let publish = |file: &Path, env: &std::collections::HashMap<String, String>| {
+        let input = serde_json::to_vec(&json!({
+            "session_id":"session","transcript_path":file,"hook_event_name":"Stop",
+            "parent_business_info":{"product":"cli","version":"1.0.0"}
+        }))
+        .unwrap();
+        let args = vec![
+            "--wakeup-only".into(),
+            "--agent-id".into(),
+            "qoder".into(),
+            "--log-prefix".into(),
+            "qoder".into(),
+        ];
+        let mut out = Vec::new();
+        assert_eq!(
+            crate::hook_process::dispatch(
+                "qoder",
+                false,
+                &input,
+                &args,
+                env,
+                &mut out,
+                std::time::Instant::now()
+            ),
+            0
+        );
+        assert_eq!(out, b"{}\n");
+    };
     f.write(&cli_turn(0));
-    f.wake(
-        "Stop",
-        json!({"spanAttributes":{"gen_ai.turn.id":"explicit-external-turn"}}),
-    );
+    publish(&f.file, &env);
     let first = f.collect().await.records;
     assert!(!first.is_empty());
     assert!(first.iter().all(|r| r["user.name"] == "fixture-cli-user"
         && r["user.email"] == "fixture-cli@example.invalid"));
     assert_eq!(std::fs::read(&marker).unwrap(), b"x");
     f.append(&cli_turn(1));
-    f.wake("Stop", json!({}));
+    publish(&f.file, &env);
     let cached = f.collect().await.records;
+    assert!(!cached.is_empty());
     assert!(cached.iter().all(|r| r["user.name"] == "fixture-cli-user"));
     assert_eq!(std::fs::read(&marker).unwrap(), b"x");
     for extra in [
@@ -560,24 +595,24 @@ async fn cli_identity_real_native_status_cache_and_context_negative_controls() {
         json!({"userIdentity":{}}),
     ] {
         let mut negative = Fixture::new("qoder").await;
-        negative.source.inner.lock().await.identity_env = Some(env.clone());
         negative.write(&cli_turn(0));
         negative.wake("Stop", extra.clone());
         let records = negative.collect().await.records;
         assert!(!records.is_empty());
-        assert!(records.iter().all(|r| r.get("user.email").is_none()));
-        if extra
-            .get("userIdentity")
-            .is_some_and(|v| v.get("name").is_some())
-        {
-            assert!(records.iter().all(|r| r["user.name"] == "published-name"));
+        assert!(records.iter().all(|r| r["user.email"] == ""));
+        let name = if extra.pointer("/userIdentity/name").is_some() {
+            "published-name"
         } else {
-            assert!(records.iter().all(|r| r.get("user.name").is_none()));
-        }
+            ""
+        };
+        assert!(records.iter().all(|r| r["user.name"] == name));
         assert_eq!(std::fs::read(&marker).unwrap(), b"x");
     }
     let mut plain = Fixture::new("qoder").await;
-    plain.source.inner.lock().await.identity_env = Some(env);
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        plain.root.to_string_lossy().into_owned(),
+    );
     let mut rows = turn(0, false);
     rows.push(json!({"type":"last-prompt"}));
     plain.write(&rows);
@@ -587,7 +622,7 @@ async fn cli_identity_real_native_status_cache_and_context_negative_controls() {
         .await
         .records
         .iter()
-        .all(|r| r.get("user.name").is_none()));
+        .all(|r| r["user.name"] == ""));
     assert_eq!(std::fs::read(&marker).unwrap(), b"x");
 }
 
@@ -633,3 +668,6 @@ async fn real_publisher_and_fixture_share_the_exact_canonical_checkpoint_key() {
         assert!(f.collect().await.records.is_empty());
     }
 }
+
+#[path = "transcript_source_windows_history.rs"]
+mod native_windows_generation_contracts;

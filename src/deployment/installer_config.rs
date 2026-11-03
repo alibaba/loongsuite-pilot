@@ -449,8 +449,37 @@ fn merge_agents(config: &mut Map<String, Value>, options: &Options) -> Result<()
     Ok(())
 }
 
+// Render only fixed public enum values. Credentials, paths and unknown values
+// stay redacted even when an existing config contains malformed/user-defined data.
+fn safe_diff_value(field: &str, value: &Value) -> Option<String> {
+    let allowed: &[&str] = match field {
+        "mask.mode" | "interceptor.mode" => &["all", "custom", "none"],
+        "sls.mode" => &["ak", "apiKey", "webtracking"],
+        "mask.replacementMode" => &["placeholder", "preview"],
+        "multimodal.storage.type" => &["sls", "oss"],
+        "mask.types" | "interceptor.types" => {
+            let items = value.as_array()?;
+            let known = crate::types::SUPPORTED_MASK_TYPES;
+            if items.len() > known.len() {
+                return None;
+            }
+            let values = items
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            return values
+                .iter()
+                .all(|item| known.contains(item))
+                .then(|| values.join(","));
+        }
+        _ => return None,
+    };
+    let text = value.as_str()?;
+    allowed.contains(&text).then(|| text.to_owned())
+}
+
 pub(super) fn changed_fields(old: &Value, next: &Value) -> String {
-    // 仅输出固定字段名，不输出任何旧值、新值或用户提供的键名。
+    // Only known enum/type values may be displayed; all other values stay hidden.
     let fields = [
         "sls.endpoint",
         "sls.project",
@@ -470,6 +499,7 @@ pub(super) fn changed_fields(old: &Value, next: &Value) -> String {
         "interceptor.mode",
         "interceptor.types",
         "multimodal.storage",
+        "multimodal.storage.type",
         "agents",
         "userId",
         "collectLog",
@@ -483,7 +513,18 @@ pub(super) fn changed_fields(old: &Value, next: &Value) -> String {
             let pointer = format!("/{}", field.replace('.', "/"));
             old.pointer(&pointer).is_some() && old.pointer(&pointer) != next.pointer(&pointer)
         })
-        .map(|field| format!("{field}: 已变更（值不显示）"))
+        .map(|field| {
+            let pointer = format!("/{}", field.replace('.', "/"));
+            match (
+                old.pointer(&pointer)
+                    .and_then(|v| safe_diff_value(field, v)),
+                next.pointer(&pointer)
+                    .and_then(|v| safe_diff_value(field, v)),
+            ) {
+                (Some(before), Some(after)) => format!("{field}: {before} -> {after}"),
+                _ => format!("{field}: 已变更（值不显示）"),
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -653,3 +694,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "installer_config_history_tests.rs"]
+mod installer_config_history_tests;

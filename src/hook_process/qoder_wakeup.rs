@@ -315,6 +315,15 @@ fn publish_inner(
         use std::os::unix::fs::MetadataExt;
         record["inode"] = json!(meta.ino());
     }
+    #[cfg(windows)]
+    if stat.is_some() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Attribute-only handle: publication never asks for transcript body access.
+        let opened = std::fs::OpenOptions::new().access_mode(0x80).open(&path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&opened)?;
+        record["inode"] = json!(identity.ino);
+        record["observedSize"] = json!(identity.size);
+    }
     if let Some(value) = bounded_string(payload.get("request_set_id"), 512) {
         record["requestSetId"] = json!(value);
     }
@@ -580,5 +589,39 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(std::fs::read(foreign).unwrap(), b"preserve");
+    }
+}
+
+#[cfg(test)]
+mod native_file_identity_contracts {
+    use super::*;
+    #[test]
+    fn real_publication_records_the_opened_file_identity_and_its_size_on_every_platform() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("identity.jsonl");
+        std::fs::write(&file, b"{}\n").unwrap();
+        let metadata =
+            crate::utils::file_identity::identity_from_open(&std::fs::File::open(&file).unwrap())
+                .unwrap();
+        let empty = serde_json::Map::new();
+        assert!(publish_qoder_wakeup(
+            &serde_json::json!({"session_id":"fixture","transcript_path":file,"hook_event_name":"Stop"}),
+            root.path(),
+            "qoder",
+            None,
+            &empty,
+            &empty
+        ));
+        let sources = root.path().join("state/qoder-transcripts/qoder/sources");
+        let directory = std::fs::read_dir(sources)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let source: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("source.json")).unwrap()).unwrap();
+        assert_eq!(source["inode"].as_u64(), Some(metadata.ino));
+        assert_eq!(source["observedSize"].as_u64(), Some(metadata.size));
     }
 }

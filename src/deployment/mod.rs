@@ -116,3 +116,5 @@ pub use worker_manifest_supervisor::{
 };
 
 pub(crate) mod runtime_retirement;
+
+pub mod eager_injection;

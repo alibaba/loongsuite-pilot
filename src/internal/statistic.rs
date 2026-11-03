@@ -2,12 +2,14 @@
 //! `proprietary` feature is enabled. The default build does not post it.
 
 use crate::internal::webtracking_post::build_web_tracking_url;
-#[cfg(all(feature = "proprietary", not(test)))]
-use crate::internal::webtracking_post::post_web_tracking;
+#[cfg(feature = "proprietary")]
+use crate::internal::webtracking_post::post_web_tracking_result;
 #[cfg(any(feature = "proprietary", test))]
 use indexmap::IndexMap;
 #[cfg(any(feature = "proprietary", test))]
 use serde_json::{json, Map, Value};
+#[cfg(feature = "proprietary")]
+use std::sync::atomic::AtomicBool;
 #[cfg(any(feature = "proprietary", test))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,6 +61,24 @@ pub fn next_running_status_payload(data: &IndexMap<String, String>) -> Option<Va
 }
 
 #[cfg(all(feature = "proprietary", not(test)))]
+static RUNNING_STATUS_ACCEPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "proprietary")]
+async fn deliver_running_status(url: &str, body: &Value, accepted: &AtomicBool) -> bool {
+    let delivered = post_web_tracking_result(url, body, Some("running-status")).await;
+    if delivered && !accepted.swap(true, Ordering::Relaxed) {
+        // This confirms HTTP transport acceptance, not SLS indexing.
+        crate::utils::create_logger("RunningStatus").info(
+            "running-status endpoint accepted first batch",
+            Some(&crate::core::fields(
+                json!({ "topic": "pilot_running_status" }),
+            )),
+        );
+    }
+    delivered
+}
+
+#[cfg(all(feature = "proprietary", not(test)))]
 pub fn send_running_status(data: &IndexMap<String, String>) {
     let Some(body) = next_running_status_payload(data) else {
         return;
@@ -66,7 +86,7 @@ pub fn send_running_status(data: &IndexMap<String, String>) {
     let url = status_url();
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
-            post_web_tracking(&url, &body, Some("running-status")).await;
+            deliver_running_status(&url, &body, &RUNNING_STATUS_ACCEPTED).await;
         });
         return;
     }
@@ -75,7 +95,11 @@ pub fn send_running_status(data: &IndexMap<String, String>) {
             .enable_all()
             .build()
         {
-            runtime.block_on(post_web_tracking(&url, &body, Some("running-status")));
+            runtime.block_on(deliver_running_status(
+                &url,
+                &body,
+                &RUNNING_STATUS_ACCEPTED,
+            ));
         }
     });
 }
@@ -110,3 +134,7 @@ mod tests {
         reset_call_count();
     }
 }
+
+#[cfg(all(test, feature = "proprietary"))]
+#[path = "statistic_delivery_tests.rs"]
+mod delivery_tests;

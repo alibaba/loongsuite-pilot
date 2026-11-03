@@ -790,7 +790,11 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
-                        if meta.uid() != 0 {
+                        #[cfg(test)]
+                        let owner = history_contract_tests::owner_for_history(meta.uid());
+                        #[cfg(not(test))]
+                        let owner = meta.uid();
+                        if owner != 0 {
                             agents.push(failed(
                                 &def.id,
                                 "uid-mismatch",
@@ -1514,3 +1518,7 @@ mod tests {
         assert!(path.ends_with("hooks/loongsuite-pilot.json"));
     }
 }
+
+#[cfg(test)]
+#[path = "hook_install_service_history_contract_tests.rs"]
+mod history_contract_tests;

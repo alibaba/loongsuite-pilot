@@ -158,3 +158,81 @@ fn source_l154_public_cli_reports_disabled_and_missing_hook_without_creating_tar
     assert_eq!(report(&out)["status"], "failed");
     assert!(!missing.exists());
 }
+
+#[test]
+fn source_review_l111_native_wrapper_missing_binary_pointer_and_entry_have_parseable_json_and_stderr(
+) {
+    for failure in ["binary", "version", "entry"] {
+        let f = Fixture::new();
+        let scripts = f.root.join("scripts");
+        std::fs::create_dir(&scripts).unwrap();
+        let script = scripts.join("loongsuite-pilot.sh");
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/loongsuite-pilot.sh"),
+            &script,
+        )
+        .unwrap();
+        let cache = f.root.join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        if failure != "binary" {
+            std::fs::write(cache.join("current"), "1.2.3\n").unwrap();
+            if failure == "entry" {
+                let version = cache.join("versions/1.2.3");
+                std::fs::create_dir_all(&version).unwrap();
+                std::fs::write(
+                    version.join("runtime-manifest.json"),
+                    r#"{"schema":1,"runtime":"rust"}"#,
+                )
+                .unwrap();
+            }
+        }
+        for json in [true, false] {
+            let mut command = Command::new("/bin/bash");
+            command
+                .arg(&script)
+                .args(["inject", "--agents=claude-code"]);
+            if json {
+                command.arg("--json");
+            }
+            command
+                .env_clear()
+                .env("HOME", &f.root)
+                .env("USERPROFILE", &f.root)
+                .env("PATH", "/usr/bin:/bin")
+                .env("LOONGSUITE_PILOT_DATA_DIR", &f.data)
+                .env("LOONGSUITE_PILOT_CACHE_DIR", &cache)
+                .env("AGENT_DATA_COLLECTION_CONFIG", f.root.join("config.json"))
+                .current_dir(&f.root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let output = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(loongsuite_pilot::utils::candidate_process::output(
+                    &mut tokio::process::Command::from(command),
+                    Duration::from_secs(10),
+                    1024 * 1024,
+                ))
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{failure}/{json}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("loongsuite-pilot inject:"),
+                "{failure}/{json}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if json {
+                let result = report(&output);
+                assert_eq!(result["status"], "failed");
+                assert!(result["error"].as_str().is_some_and(|e| !e.is_empty()));
+            } else {
+                assert!(
+                    output.stdout.is_empty(),
+                    "{failure}: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            }
+        }
+    }
+}

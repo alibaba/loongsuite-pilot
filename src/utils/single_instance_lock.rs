@@ -382,6 +382,10 @@ fn alive_pid(pid: i64) -> bool {
 }
 
 fn write_own_lock(lock_path: &str, owner_id: &str) -> io::Result<()> {
+    #[cfg(all(test, unix))]
+    if let Some(error) = history_test_hooks::write_error(lock_path) {
+        return Err(error);
+    }
     let started_at = now_ms();
     let token = read_process_start_token(std::process::id());
     let file = LockFile {
@@ -834,3 +838,7 @@ mod tests {
         handle.release();
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "single_instance_lock_history_test_hooks.rs"]
+pub(crate) mod history_test_hooks;

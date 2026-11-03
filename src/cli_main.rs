@@ -52,6 +52,11 @@ pub async fn dispatch(argv: &[String]) -> anyhow::Result<i32> {
             parent_pid,
         ));
     }
+    // The startup path deliberately accepts unknown/older caller flags.
+    // Dispatch before strict Clap or config/telemetry initialization.
+    if argv.first().map(String::as_str) == Some("inject-hooks") {
+        return Ok(crate::deployment::eager_injection::run_cli(&argv[1..]).await);
+    }
     let parsed = match crate::cli::args::parse(argv) {
         Ok(parsed) => parsed,
         Err(err) => {

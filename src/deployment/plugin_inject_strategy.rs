@@ -66,6 +66,8 @@ impl PluginInjectStrategy {
             OpenClawResolveMode::Runtime,
         )
         .await;
+        #[cfg(test)]
+        let host = nested_history_contract_tests::host_for_history().or(host);
         if is_openclaw_host_bound(host.as_ref()) {
             self.last_openclaw_problem = None;
             return host;
@@ -148,7 +150,10 @@ impl PluginInjectStrategy {
     }
 
     fn normalize_spec(&self, spec: &str) -> String {
-        if cfg!(windows) {
+        let windows = cfg!(windows);
+        #[cfg(test)]
+        let windows = flat_history_contract_tests::windows_for_history(windows);
+        if windows {
             spec.replace('\\', "/")
         } else {
             spec.to_string()
@@ -305,7 +310,15 @@ impl PluginInjectStrategy {
                     // Keep the first owned position stable when other installs
                     // share the array; canonicalize object/tuple references.
                     if key == primary && !found {
-                        filtered.push(Value::String(resolved_spec.into()));
+                        // A matching scalar spelling already references the same
+                        // file (including mixed Windows separators). Preserve it
+                        // so a read-only health check remains healthy. Object and
+                        // tuple spellings still converge to a plain plugin spec.
+                        filtered.push(if entry.is_string() {
+                            entry.clone()
+                        } else {
+                            Value::String(resolved_spec.into())
+                        });
                         found = true;
                     }
                 } else if !self.flat_removal_matches(entry, resolved_spec, config) {
@@ -1816,3 +1829,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_inject_flat_history_contract_tests.rs"]
+mod flat_history_contract_tests;
+
+#[cfg(test)]
+#[path = "plugin_inject_nested_history_contract_tests.rs"]
+mod nested_history_contract_tests;

@@ -134,14 +134,16 @@ fn directory_alias(target: &Path, alias: &Path) {
     use std::io::{Read, Seek, SeekFrom};
     use std::process::{Command, Stdio};
     let shell = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        .join("System32/cmd.exe");
     let mut stdout = tempfile::tempfile().unwrap();
     let mut stderr = tempfile::tempfile().unwrap();
     let mut command = Command::new(shell);
-    command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-        "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:PILOT_QODER_ALIAS -Target $env:PILOT_QODER_TARGET | Out-Null"])
-        .env("PILOT_QODER_ALIAS", fixture_native_path(alias.to_path_buf()))
-        .env("PILOT_QODER_TARGET", fixture_native_path(target.to_path_buf()))
+    // cmd's built-in junction creation avoids PowerShell module/cold startup.
+    // Paths are normalized and passed as literal arguments in this temp fixture.
+    command
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(fixture_native_path(alias.to_path_buf()))
+        .arg(fixture_native_path(target.to_path_buf()))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().unwrap()))
         .stderr(Stdio::from(stderr.try_clone().unwrap()));

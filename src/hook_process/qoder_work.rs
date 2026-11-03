@@ -2209,6 +2209,26 @@ mod tests {
             record["agent.transcript.cursor_mode"] == "bootstrap"
                 && record["agent.transcript.cursor_reason"] == "missing-cursor"
         }));
+        assert_eq!(
+            bootstrap
+                .iter()
+                .map(|e| e["agent.transcript.cursor_batch_id"].as_str().unwrap())
+                .collect::<HashSet<_>>()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs::read_dir(dir.path().join("state/hooks/qoder-work-test-line-records"))
+                .unwrap()
+                .filter(|e| e
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "json"))
+                .count(),
+            1
+        );
         let cursor = cursor_file(dir.path(), "qoder-work-test");
         assert_eq!(cursor["session_id"], "sess-recovery");
         assert_eq!(
@@ -2305,3 +2325,7 @@ mod tests {
         assert!(stdout.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "qoder_work_pure_history_contract_tests.rs"]
+mod pure_history_contracts;

@@ -468,3 +468,44 @@ async fn agent_name_fallback_is_group_scoped_and_does_not_overwrite_explicit_lea
         .filter(|s| kind(s, "TOOL"))
         .all(|s| s.attributes.get("gen_ai.agent.name") == Some(&json!("explicit-tool-worker"))));
 }
+
+#[tokio::test]
+async fn orphan_tool_call_warning_uses_native_id_and_preserves_frozen_sdk_protocol() {
+    use loongsuite_pilot::flushers::{ConvertOptions, EventLogConverter, GenAiEventLogConverter};
+    use loongsuite_pilot::types::AgentEventName;
+    for (call, exec, shown) in [
+        (Some("call-2"), None, "call-2"),
+        (Some("native-call"), Some("exec-2"), "native-call"),
+        (None, Some("exec-only"), "?"),
+        (Some(""), Some("empty-native"), "?"),
+    ] {
+        let mut rows: Vec<AgentActivityEntry> = delegated_turn("qoder-work", "warning", 0, false)
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        let mut orphan = rows
+            .iter()
+            .find(|r| r.event_name == Some(AgentEventName::ToolCall))
+            .unwrap()
+            .clone();
+        orphan.event_id = "unmatched-tool-call".into();
+        orphan.tool_call_id = call.map(str::to_string);
+        orphan.tool_call_exec_id = exec.map(str::to_string);
+        orphan.time_unix_nano = "1700000000006000000".into();
+        rows.push(orphan);
+        let converted = GenAiEventLogConverter
+            .convert(&rows, &ConvertOptions::default())
+            .unwrap();
+        assert_eq!(
+            converted.warnings,
+            [format!(
+                "Orphan tool.call (tool.call.id={shown}): no matching tool.result in step"
+            )]
+        );
+        assert_eq!(
+            converted.spans.iter().filter(|s| kind(s, "TOOL")).count(),
+            1,
+            "must not fabricate the unmatched Tool span"
+        );
+    }
+}

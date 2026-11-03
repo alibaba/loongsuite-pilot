@@ -2525,6 +2525,7 @@ mod tests {
 
     fn stop_and_collect(harness: &Harness, payload: &Value) -> (i32, String) {
         let (code, stdout) = run_at(harness, &["stop"], payload);
+        assert_eq!(code, 0, "native stop must remain fail-open");
         let Some(cwd) = payload
             .get("cwd")
             .and_then(Value::as_str)
@@ -2536,7 +2537,12 @@ mod tests {
             return (code, stdout);
         };
         let pending = pending.to_string_lossy().into_owned();
-        run_at(harness, &["delayedCollect", &pending], &json!({}))
+        let result = run_at(harness, &["delayedCollect", &pending], &json!({}));
+        assert_eq!(
+            result.0, 0,
+            "native delayed collection must exit successfully"
+        );
+        result
     }
 
     fn read_records(root: &Path) -> Vec<Value> {
@@ -2755,6 +2761,13 @@ mod tests {
                 .filter(|part| part["type"] == "tool_call")
                 .count();
             assert!(parts > 0);
+            let first = message["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|part| part["type"] == "tool_call")
+                .unwrap();
+            assert!(first["name"].is_string());
         }
         let mut requests = named(&records, "llm.request");
         requests.sort_by_key(|record| nano_key_value(record));
@@ -2762,6 +2775,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(!delta.is_empty());
+        assert_eq!(delta[0]["parts"][0]["type"], "text");
         let content = delta[0]["parts"][0]["content"].as_str().unwrap();
         assert!(content.contains("sample.txt"));
         for request in requests.iter().skip(1) {
@@ -2838,6 +2852,7 @@ mod tests {
             &json!({ "hook_event_name": "stop", "cwd": CWD, "assistant_response": "done" }),
         );
         let first = read_records(&harness.root).len();
+        assert!(first > 0);
         let mut conv = conv_fixture();
         let new_id = format!("new-conv-{}", now_ms() as i64);
         conv["conversation_id"] = Value::String(new_id.clone());
@@ -3025,25 +3040,34 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(text.contains("k57j05345.sqa.eu95"));
+        assert!(responses.last().unwrap()["gen_ai.response.finish_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "stop"));
         let mut requests = named(&records, "llm.request");
         requests.sort_by_key(|record| nano_key_value(record));
         assert_eq!(
             requests[0]["gen_ai.input.messages_delta"][0]["role"],
             "user"
         );
-        assert!(requests[1]["gen_ai.input.messages_delta"]
+        let second_delta = requests[1]["gen_ai.input.messages_delta"]
             .as_array()
-            .unwrap()
-            .iter()
-            .all(|message| message["role"] == "tool"));
-        for result in named(&records, "tool.result") {
-            if result["kiro.time_source"] == "transcript_derived" {
-                let call = records.iter().find(|record| {
-                    record["event.name"] == "tool.call"
-                        && record["gen_ai.tool.call.id"] == result["gen_ai.tool.call.id"]
-                });
-                assert!(nano_key_value(result) > nano_key_value(call.unwrap()));
-            }
+            .unwrap();
+        assert!(!second_delta.is_empty());
+        assert!(second_delta.iter().all(|message| message["role"] == "tool"));
+        let derived = named(&records, "tool.result")
+            .into_iter()
+            .filter(|result| result["kiro.time_source"] == "transcript_derived")
+            .collect::<Vec<_>>();
+        assert!(!derived.is_empty());
+        for result in derived {
+            let call = records.iter().find(|record| {
+                record["event.name"] == "tool.call"
+                    && record["gen_ai.tool.call.id"] == result["gen_ai.tool.call.id"]
+                    && record["gen_ai.step.id"] == result["gen_ai.step.id"]
+            });
+            assert!(nano_key_value(result) > nano_key_value(call.unwrap()));
         }
     }
 
@@ -3174,6 +3198,7 @@ mod tests {
             .unwrap();
         assert_eq!(bash["tool.result.status"], "success");
         assert!(bash.get("error.type").is_none());
+        assert!(bash.get("error.message").is_none());
         let rendered = bash["gen_ai.tool.call.result"].as_str().unwrap();
         assert_ne!(rendered, "[object Object]");
         assert!(rendered.contains("exit_status"));
@@ -3363,6 +3388,16 @@ mod tests {
         );
         assert_eq!(parsed.model_id, "auto");
         assert_eq!(parsed.steps.len(), 3);
+        assert_eq!(parsed.credits.len(), 3);
+        for step in &parsed.steps {
+            assert!(!step.step_id.is_empty());
+            assert!(!step.response_id.is_empty());
+        }
+        for entry in conv_fixture()["history"].as_array().unwrap() {
+            for field in ["total_tokens", "output_tokens", "uncached_input_tokens"] {
+                assert_eq!(entry["request_metadata"].get(field), Some(&Value::Null));
+            }
+        }
         assert_eq!(
             parsed
                 .steps
@@ -3391,9 +3426,16 @@ mod tests {
             "tooluse_9ZXIR6XBjCnWiGGEZrHWGQ"
         );
         assert_eq!(parsed.steps[1].tools[0].name, "fs_write");
+        assert_eq!(
+            parsed.steps[1].tools[0].id,
+            "tooluse_MigrAULbTpGOiFQo4BFZ3d"
+        );
+        assert!(parsed.steps[2].tools.is_empty());
         assert!(parsed.steps[2].assistant_text.contains("hello kiro round3"));
+        assert!(parsed.steps[2].assistant_text.contains("round3-finished"));
         assert!(parsed.steps[0].user_prompt.contains("sample.txt"));
         assert!(parsed.steps[1].user_prompt.is_empty());
+        assert!(parsed.steps[2].user_prompt.is_empty());
         assert!(parsed.credits.iter().all(|credit| *credit > 0.0));
 
         let mut lower = conv_fixture();
@@ -3409,12 +3451,19 @@ mod tests {
             "纯字符串 prompt"
         );
 
+        lower["history"][0].as_object_mut().unwrap().remove("user");
+        assert!(parse_conversation_value(&lower).steps[0]
+            .user_prompt
+            .is_empty());
+
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("data.sqlite3");
         let updated = now_ms() as i64;
         insert_conversation(&db, CWD, CONV_ID, &conv_fixture(), updated);
         let hit = read_transcript_for_cwd(&db, CWD, 0.0).unwrap().unwrap();
+        assert_eq!(hit.conversation_id, CONV_ID);
         assert_eq!(hit.steps.len(), 3);
+        assert!(hit.updated_ms > 0.0);
         assert_eq!(hit.updated_ms as i64, updated);
         assert!(read_transcript_for_cwd(&db, "/no/such/cwd", 0.0)
             .unwrap()
@@ -3490,12 +3539,18 @@ mod tests {
             "838a0f1b-1cfd-4421-972a-8807a1b20eb5"
         );
         assert_eq!(parsed.model_id, "auto");
+        assert_eq!(parsed.steps[0].tools.len(), 2);
         assert_eq!(parsed.steps[0].tools[0].name, "fs_read");
         assert_eq!(
             parsed.steps[0].tools[0].id,
             "tooluse_qGfoBnoJaaIOUSzVkyVTwf"
         );
         assert_eq!(parsed.steps[0].tools[1].name, "execute_bash");
+        assert_eq!(
+            parsed.steps[0].tools[1].id,
+            "tooluse_NzHEPwReSjpoFDaMHj7hPW"
+        );
+        assert!(parsed.steps[1].assistant_text.contains("/usr/bin/bash"));
         assert!(parsed.steps[1]
             .assistant_text
             .contains("k57j05345.sqa.eu95"));
@@ -3505,17 +3560,33 @@ mod tests {
         assert!(parsed.steps[1].tool_use_results[0].contains("k57j05345.sqa.eu95"));
         assert!(parsed.steps[1].tool_use_results[1].contains("/usr/bin/bash"));
         assert!(parsed.steps[0].tool_use_results.is_empty());
+        assert!(parsed.steps[0].start_time_ms > 0.0);
         assert!(parsed.steps[0].start_time_ms < parsed.steps[0].end_time_ms);
         assert!(parsed.steps[1].start_time_ms >= parsed.steps[0].end_time_ms);
+        assert!(parsed.steps[1].end_time_ms > parsed.steps[1].start_time_ms);
+        assert_eq!(parsed.credits.len(), 2);
         assert!((parsed.credits[0] - 0.0426).abs() < 1e-3);
         assert!((parsed.credits[1] - 0.0223).abs() < 1e-3);
         assert_eq!(
             parsed.steps[0].step_id,
             "2b7e8bd9-3f63-4f6d-891c-44e5e3d42123"
         );
-        assert!(parsed.steps[0].tools[0].args.get("operations").is_some());
+        assert_eq!(
+            parsed.steps[1].step_id,
+            "cdd9d82f-d112-4a28-b92a-58abc327b282"
+        );
+        assert_eq!(
+            parsed.steps[0].tools[0].args["operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(parse_session_lines(&[], &sidecar).steps.is_empty());
-        assert_eq!(parse_session_lines(&lines, &json!({})).model_id, "auto");
+        let no_sidecar = parse_session_lines(&lines, &json!({}));
+        assert_eq!(no_sidecar.steps.len(), 2);
+        assert_eq!(no_sidecar.conversation_id, "");
+        assert_eq!(no_sidecar.model_id, "auto");
         let prompts: Vec<Value> = lines
             .iter()
             .filter(|line| line["kind"] == "Prompt")
@@ -3536,7 +3607,12 @@ mod tests {
         let mut env = Env::new();
         env.insert("HOME".into(), harness.home.to_string_lossy().into_owned());
         let updated = parse_iso_ms("2026-06-22T11:15:53.386817252Z").unwrap() as f64;
-        let hit = read_session_jsonl(&env, SESSION_CWD, updated + 1.0).unwrap();
+        let hit = read_session_jsonl(&env, SESSION_CWD, 0.0).unwrap();
+        for since in [0.0, updated, updated + 1.0] {
+            let again = read_session_jsonl(&env, SESSION_CWD, since).unwrap();
+            assert_eq!(again.steps.len(), 2);
+            assert_eq!(again.session_id, hit.session_id);
+        }
         assert_eq!(hit.steps.len(), 2);
         assert_eq!(hit.source, "session_jsonl");
         assert_eq!(hit.session_id, "838a0f1b-1cfd-4421-972a-8807a1b20eb5");
@@ -3568,10 +3644,10 @@ mod tests {
             PathBuf::from("/custom/path/kiro.db")
         );
         env.remove("KIRO_CLI_DB");
-        assert_eq!(
-            resolve_db_path_on(&env, "linux"),
-            PathBuf::from("/loses/data.sqlite3")
-        );
+        env.insert("KIRO_CLI_DATA_DIR".into(), "/data/here".into());
+        let data_path = resolve_db_path_on(&env, "linux");
+        assert_eq!(data_path, PathBuf::from("/data/here/data.sqlite3"));
+        assert_eq!(data_path.parent(), Some(Path::new("/data/here")));
         env.remove("KIRO_CLI_DATA_DIR");
         assert_eq!(
             resolve_db_path_on(&env, "linux"),
@@ -3634,5 +3710,34 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(stdout, "{}\n");
         assert!(!stdout.contains("timing_pending"));
+    }
+    #[test]
+    fn session_json_mcp_result_is_clean_text_in_the_following_step() {
+        let mut sidecar: Value = serde_json::from_str(SESSION_SIDECAR).unwrap();
+        let mut lines = parse_jsonl(SESSION_JSONL);
+        lines.extend([
+            json!({"kind":"Prompt","data":{"message_id":"p-json","content":[{"kind":"text","data":"list dir"}],"meta":{"timestamp":1782126960}}}),
+            json!({"kind":"AssistantMessage","data":{"message_id":"am-json","content":[{"kind":"toolUse","data":{"toolUseId":"tu-json","name":"list_directory","input":{"path":"/tmp"}}}]}}),
+            json!({"kind":"ToolResults","data":{"message_id":"tr-json","content":[{"kind":"toolResult","data":{"toolUseId":"tu-json","content":[{"kind":"json","data":{"content":[{"type":"text","text":"Allowed directories:\n/Users/tmp"}],"structuredContent":{"content":"Allowed directories"}}}],"status":"success"}}]}}),
+            json!({"kind":"AssistantMessage","data":{"message_id":"am-json2","content":[{"kind":"text","data":"done"}]}}),
+        ]);
+        sidecar["session_state"]["conversation_metadata"]["user_turn_metadatas"]
+            .as_array_mut().unwrap().push(json!({
+                "loop_id":{"agent_id":{"name":"kiro_default"},"rand":3},
+                "result":{"Ok":{"id":"am-json2","role":"assistant","content":[{"kind":"text","data":"done"}]}},
+                "message_ids":["p-json","am-json","tr-json","am-json2"],
+                "total_request_count":1,"turn_duration":{"secs":5,"nanos":0},
+                "end_timestamp":"2026-06-22T11:16:00.000000Z",
+                "metering_usage":[{"value":0.01,"unit":"credit","unitPlural":"credits"}],
+                "user_prompt_length":8
+            }));
+        let parsed = parse_session_lines(&lines, &sidecar);
+        let step = parsed
+            .steps
+            .iter()
+            .find(|s| s.tool_use_results.iter().any(|s| s.contains("Allowed")))
+            .expect("MCP result must reach the following native step");
+        assert!(step.tool_use_results[0].contains("Allowed directories:\n/Users/tmp"));
+        assert!(!step.tool_use_results[0].contains("\"content\""));
     }
 }

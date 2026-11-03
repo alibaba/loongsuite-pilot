@@ -568,7 +568,16 @@ fn pair_events<'a>(
         }
     }
     for pair in &pairs {
-        if pair.start.is_none() || pair.end.is_none() {
+        if pair.kind == "TOOL" && pair.end.is_none() {
+            let call_id = pair
+                .start
+                .and_then(|r| r.tool_call_id.as_deref())
+                .filter(|id| !id.is_empty())
+                .unwrap_or("?");
+            warnings.push(format!(
+                "Orphan tool.call (tool.call.id={call_id}): no matching tool.result in step"
+            ));
+        } else if pair.start.is_none() || pair.end.is_none() {
             warnings.push(format!("{} 事件对不完整：{}", pair.kind, pair.key));
         }
     }

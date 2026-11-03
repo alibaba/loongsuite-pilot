@@ -1,0 +1,73 @@
+{
+  "sourceTest": "tests/unit/hooks/cursor-react-assembler.test.ts",
+  "sourceHash": "4b371d7f5006e9e550df6d35525bbb71ea0f9df6888cc9c5e4fcdb3ece75c13f",
+  "inactiveDeclaration": "L1372:C3",
+  "futureCapability": "same conversation stopping-generation isolation, generation-scoped consumption cleanup",
+  "originalCodeStatus": "Explicit it.skip and requires stopGenerationId comment; API does not read stopGenerationId or return consumedGenerationIds; current/f84/ef production asset hash identical",
+  "legacyActualNegative": {
+    "testActuallyRun": true,
+    "failedCase": "isolates assembly to the stopping generation when two generations share a conversation",
+    "expected": "do the task (composer)",
+    "actual": "do the task (gpt)",
+    "log": "/apsara/workspace/pilot-doubao-acceptance-20261031-fd238ae28e/logs/cursor-two-existing-inactive-legacy-reference-20261103.log",
+    "combinedFocusedRun": {
+      "passed": 1,
+      "failed": 1,
+      "otherOriginalActiveCasesDisabledOnlyInPrivateReferenceDriver": 17
+    }
+  },
+  "notBlanketSkipRetirement": "The other skipped declaration L1483 actually passed on original production and is being migrated to Native with original timing guards. All17 original active declarations actual legacy PASS. No new product Rust ignore was added.",
+  "productionEvidence": {
+    "assets/hooks/cursor/react-assembler.mjs": {
+      "sha256": "c8961866795ecc48a8d30b19cc21e2922321503098c6a364c5997ef4be1eee6d",
+      "stopGenerationIdPresent": false,
+      "consumedGenerationIdsPresent": false,
+      "entryLines": [
+        {
+          "line": 29,
+          "text": "* @returns {{ records: object[], consumedConversationIds: Set<string> }}"
+        },
+        {
+          "line": 31,
+          "text": "export function assembleTurn(journalEvents, options = {}) {"
+        },
+        {
+          "line": 64,
+          "text": "return { records: [], consumedConversationIds: new Set() };"
+        }
+      ]
+    },
+    "assets/hooks/cursor-hook-processor.mjs": {
+      "sha256": "d5cfe2348e7b22c66a59b8d486a77a7f924dff558663378167da01f36c3889e2",
+      "stopGenerationIdPresent": false,
+      "consumedGenerationIdsPresent": false,
+      "entryLines": [
+        {
+          "line": 538,
+          "text": "{ runtimeConfig, stopConversationId: convId, variant }"
+        },
+        {
+          "line": 549,
+          "text": "const result = assembleTurn(allEvents, {"
+        },
+        {
+          "line": 552,
+          "text": "stopConversationId: convId,"
+        },
+        {
+          "line": 616,
+          "text": "const result = assembleTurn(allEvents, {"
+        },
+        {
+          "line": 619,
+          "text": "stopConversationId: convId,"
+        }
+      ]
+    }
+  },
+  "futureTodo": [
+    "Design explicit generation identity/cleanup boundary across hook journal and assembly before enabling this feature",
+    "Add actual mixed-generation positive/aborted cleanup and restart contracts when implemented"
+  ],
+  "humanApprovalClaim": false
+}

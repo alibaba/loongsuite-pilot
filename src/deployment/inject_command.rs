@@ -376,3 +376,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[path = "inject_command_history_contract_tests.rs"]
 mod history_contract_tests;
+
+#[cfg(all(test, unix))]
+#[path = "claude_inject_review_history_contract_tests.rs"]
+mod review_history_contract_tests;

@@ -1353,9 +1353,20 @@ mod tests {
     fn builds_qoder_work_and_qwen_work_entrypoints() {
         let def = &HookManager::build_qoder_work_hooks(Some("/opt/loongsuite-pilot"))[0];
         if cfg!(windows) {
-            assert!(def
-                .hook_command
-                .contains("qoderwork-loongsuite-pilot-hook.ps1"));
+            assert_eq!(
+                def.hook_command,
+                r#"powershell -NoProfile -ExecutionPolicy Bypass -File "/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.ps1""#
+            );
+            assert_eq!(
+                def.replace_hook_commands.as_deref(),
+                Some([
+                    r#"powershell -NoProfile -ExecutionPolicy Bypass -File "/opt/loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.ps1" qoder-work"#.to_string(),
+                    "/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh".to_string(),
+                    "/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.ps1".to_string(),
+                    "/opt/loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh qoder-work".to_string(),
+                    "/opt/loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.ps1 qoder-work".to_string(),
+                ].as_slice())
+            );
         } else {
             assert_eq!(
                 def.hook_command,
@@ -1432,6 +1443,13 @@ mod tests {
         assert_eq!(
             parsed["hooks"]["Stop"][0]["hooks"][0]["command"],
             "/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh"
+        );
+        assert_eq!(
+            parsed["hooks"]["Stop"],
+            serde_json::json!([{"matcher":"*","hooks":[{
+                "command":"/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh",
+                "type":"command"
+            }]}])
         );
 
         std::fs::write(
@@ -1579,6 +1597,8 @@ mod tests {
         assert!(updated.contains("/opt/qwen-loongsuite-pilot-hook.sh stop"));
         let parsed = parse_json_document(&updated, JsonSyntax::Jsonc).unwrap();
         assert_eq!(parsed["model"], "qwen-max");
+        assert_eq!(parsed["mcpServers"]["work"]["command"], "node");
+        assert_eq!(parsed["permissions"]["allow"], serde_json::json!(["read"]));
         assert_eq!(parsed["hooks"]["Stop"].as_array().unwrap().len(), 2);
         assert_eq!(
             std::fs::read_to_string(format!("{}.loongsuite-pilot.bak", settings.display()))
@@ -1639,3 +1659,7 @@ mod tests {
         assert!(manager(dir.path()).is_hook_installed(&def).await);
     }
 }
+
+#[cfg(test)]
+#[path = "hook_manager_history_contract_tests.rs"]
+mod history_contract_tests;

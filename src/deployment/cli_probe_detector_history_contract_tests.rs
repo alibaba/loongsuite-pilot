@@ -257,7 +257,10 @@ async fn native_isolated_probe_contract_child() {
         .await
         .unwrap();
         assert!(install.detected);
-        assert_eq!(PathBuf::from(install.openclaw_cli_path.unwrap()), entry);
+        assert_eq!(
+            std::fs::canonicalize(install.openclaw_cli_path.unwrap()).unwrap(),
+            std::fs::canonicalize(&entry).unwrap()
+        );
         assert!(
             install
                 .reason

@@ -49,19 +49,7 @@ fn make_sparse(_file: &std::fs::File) {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn DeviceIoControl(
-                device: *mut std::ffi::c_void,
-                control: u32,
-                input: *const std::ffi::c_void,
-                input_size: u32,
-                output: *mut std::ffi::c_void,
-                output_size: u32,
-                returned: *mut u32,
-                overlapped: *mut std::ffi::c_void,
-            ) -> i32;
-        }
+        use windows_sys::Win32::System::IO::DeviceIoControl;
         let mut returned = 0;
         // FSCTL_SET_SPARSE affects only this test's new tempfile. Logical byte
         // thresholds remain production values without allocating tens of GiB.

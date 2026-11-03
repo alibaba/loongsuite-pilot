@@ -346,7 +346,7 @@ async fn qodercn_bootstraps_bash_from_sh_or_posix_mode_without_losing_stdin_or_a
         payload.extend(
             serde_json::to_vec(
                 &json!({"session_id":"cn-through-sh","transcript_path":transcript,
-            "extra":{"user":{"name":"CN 用户"},"email":"cn@example.com"}}),
+            "extra":{"user":{"name":"CN 用户","email":"cn@example.com"},"email":"ignored-flat-identity@example.invalid"}}),
             )
             .unwrap(),
         );

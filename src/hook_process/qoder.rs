@@ -219,26 +219,7 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
     if !value.is_object() {
         return;
     }
-    let extra = value.get("extra").and_then(Value::as_object);
-    let desktop = value
-        .pointer("/parent_business_info/product")
-        .and_then(Value::as_str)
-        == Some("app");
-    let identity = extra
-        .and_then(|extra| {
-            if agent == "qoder-cn" {
-                extract_qoder_cn_user_identity(extra)
-            } else {
-                extract_user_identity(extra)
-            }
-        })
-        .or_else(|| {
-            if desktop {
-                read_qoder_app_user_identity(request.env, &agent)
-            } else {
-                None
-            }
-        });
+    let identity = resolve_qoder_hook_user_identity(request.env, &agent, &value);
     let identity = identity
         .as_ref()
         .and_then(|id| serde_json::from_str::<Value>(&identity_json(id)).ok());
@@ -258,6 +239,33 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
         {
             record_upstream_context_once(request.env, &agent, session);
         }
+    }
+}
+
+// Product metadata owns account selection. Transcript shape never selects an
+// account, and CLI auth/cache files are isolated by Qoder product flavor.
+fn resolve_qoder_hook_user_identity(
+    env: &Env,
+    agent: &str,
+    payload: &Value,
+) -> Option<UserIdentity> {
+    if !["qoder", "qoder-cn"].contains(&agent) {
+        return None;
+    }
+    match payload
+        .pointer("/parent_business_info/product")
+        .and_then(Value::as_str)
+    {
+        Some("cli") => payload
+            .pointer("/parent_business_info/version")
+            .and_then(Value::as_str)
+            .and_then(|version| resolve_qoder_product_cli_user_identity(env, agent, version))
+            .or_else(|| read_qoder_app_user_identity(env, agent)),
+        Some("app") => read_qoder_app_user_identity(env, agent),
+        _ => payload
+            .get("extra")
+            .and_then(Value::as_object)
+            .and_then(extract_user_identity),
     }
 }
 
@@ -713,8 +721,30 @@ pub fn build_collected_transcript_turn(
         true,
     )
     .into_iter()
-    .map(Value::Object)
+    .map(|mut record| {
+        // New collector-owned records always expose the account projection;
+        // compatibility inline output keeps its older optional-field behavior.
+        record.entry("user.name").or_insert(json!(""));
+        record.entry("user.email").or_insert(json!(""));
+        Value::Object(record)
+    })
     .collect()
+}
+
+/// Same configured-id/hostname policy used by Hook normalization. Account IDs
+/// from a transcript or status payload never become the collection identity.
+pub(crate) fn resolve_collected_qoder_user_id(data: &Path) -> String {
+    let mut env = Env::new();
+    env.insert(
+        "LOONGSUITE_PILOT_DATA_DIR".into(),
+        data.to_string_lossy().into_owned(),
+    );
+    for key in ["AGENT_DATA_COLLECTION_CONFIG", "LOONGSUITE_PILOT_USER_ID"] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.into(), value);
+        }
+    }
+    load_runtime_config(&env).user_id
 }
 
 pub fn qoder_is_real_user_prompt(row: &Value) -> bool {
@@ -743,7 +773,8 @@ pub fn qoder_legacy_retry_lock_path(data: &Path, transcript: &Path) -> PathBuf {
     ))
 }
 
-/// Collector-side CLI identity lookup: the thin Hook never runs a status child.
+/// Compatibility CLI identity lookup for native integrations. New Hook notices
+/// resolve the explicit product/version at publication; Source never guesses it.
 pub async fn resolve_qoder_collector_cli_identity(data: &Path) -> Option<Value> {
     resolve_qoder_collector_cli_identity_with_env(data, std::env::vars().collect()).await
 }
@@ -1112,14 +1143,11 @@ fn detach_command(command: &mut Command) {
 }
 
 fn identity_json(identity: &UserIdentity) -> String {
-    let mut map = Obj::new();
-    if let Some(name) = &identity.name {
-        map.insert("name".into(), Value::String(name.clone()));
-    }
-    if let Some(email) = &identity.email {
-        map.insert("email".into(), Value::String(email.clone()));
-    }
-    serde_json::to_string(&Value::Object(map)).unwrap_or_default()
+    serde_json::to_string(&json!({
+        "name": identity.name.as_deref().unwrap_or_default(),
+        "email": identity.email.as_deref().unwrap_or_default(),
+    }))
+    .unwrap_or_default()
 }
 
 fn positive_retry_delay(env: &Env) -> Option<i64> {
@@ -3358,16 +3386,51 @@ fn resolve_user_id(row: Option<&Value>, runtime_user: &str) -> String {
 }
 
 fn resolve_qoder_cli_user_identity(env: &Env) -> Option<UserIdentity> {
-    let auth_path = home_dir(env).join(".qoder").join(".auth").join("user");
-    let meta = fs::metadata(&auth_path).ok()?;
+    // Compatibility entry for already-installed inline wrappers.
+    let home = home_dir(env).join(".qoder");
+    resolve_cached_cli_user_identity(
+        env,
+        &home.join(".auth/user"),
+        &identity_cache_file(env),
+        cli_executable(&home),
+    )
+}
+
+fn resolve_qoder_product_cli_user_identity(
+    env: &Env,
+    agent: &str,
+    version: &str,
+) -> Option<UserIdentity> {
+    let (home, flavor, cache) = match agent {
+        "qoder" => (".qoder", "qodercli", "qoder-cli-user-identity.json"),
+        "qoder-cn" => (".qoder-cn", "qoderclicn", "qoder-cn-cli-user-identity.json"),
+        _ => return None,
+    };
+    let home = home_dir(env).join(home);
+    // The advertised product version must exist even for a cache hit.
+    let executable = cli_executable_for_version(&home, flavor, version.trim())?;
+    resolve_cached_cli_user_identity(
+        env,
+        &home.join(".auth/user"),
+        &data_dir(env).join("state/hooks").join(cache),
+        Some(executable),
+    )
+}
+
+fn resolve_cached_cli_user_identity(
+    env: &Env,
+    auth_path: &Path,
+    cache_path: &Path,
+    executable: Option<PathBuf>,
+) -> Option<UserIdentity> {
+    let meta = fs::metadata(auth_path).ok()?;
     if !meta.is_file() {
         return None;
     }
     let mtime_ms = mtime_ms(&meta)?;
     let size = meta.len();
     let auth_text = auth_path.to_string_lossy().into_owned();
-    let cache_path = identity_cache_file(env);
-    if let Some(cached) = read_json_object(&cache_path).and_then(|value| value.as_object().cloned())
+    if let Some(cached) = read_json_object(cache_path).and_then(|value| value.as_object().cloned())
     {
         let fingerprint_matches = json_i64(cached.get("schemaVersion")) == Some(1)
             && nonempty_str(cached.get("authPath")) == Some(auth_text.as_str())
@@ -3385,7 +3448,7 @@ fn resolve_qoder_cli_user_identity(env: &Env) -> Option<UserIdentity> {
             }
         }
     }
-    let executable = cli_executable(&home_dir(env).join(".qoder"))?;
+    let executable = executable?;
     let status = query_cli(env, &executable);
     let body = match &status {
         CliQuery::Ready(Some(identity)) => {
@@ -3411,7 +3474,7 @@ fn resolve_qoder_cli_user_identity(env: &Env) -> Option<UserIdentity> {
             "failedUntil": now_ms() + QODER_CLI_STATUS_FAILURE_TTL_MS as i64,
         }),
     };
-    write_identity_cache(&cache_path, &body);
+    write_identity_cache(cache_path, &body);
     match status {
         CliQuery::Ready(Some(identity)) if identity.logged_in => Some(UserIdentity {
             name: identity.name,
@@ -3424,13 +3487,18 @@ fn resolve_qoder_cli_user_identity(env: &Env) -> Option<UserIdentity> {
 fn cli_executable(qoder_home: &Path) -> Option<PathBuf> {
     let cli_dir = qoder_home.join("bin").join("qodercli");
     let version = fs::read_to_string(cli_dir.join("version.txt")).ok()?;
-    let version = version.trim();
+    cli_executable_for_version(qoder_home, "qodercli", version.trim())
+}
+
+fn cli_executable_for_version(home: &Path, flavor: &str, version: &str) -> Option<PathBuf> {
     if !valid_cli_version(version) {
         return None;
     }
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let name = format!("qodercli-{version}{suffix}");
-    let path = cli_dir.join(name);
+    let path = home
+        .join("bin")
+        .join(flavor)
+        .join(format!("{flavor}-{version}{suffix}"));
     let meta = fs::metadata(&path).ok()?;
     if !meta.is_file() {
         return None;
@@ -3511,9 +3579,29 @@ fn query_cli(env: &Env, executable: &Path) -> CliQuery {
     }
     match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
         Ok(Ok(buffer)) => {
-            let status = child.wait();
-            if !matches!(status, Ok(status) if status.success()) {
-                return CliQuery::Ready(None);
+            // stdout may close before a broken CLI exits. Keep process exit
+            // inside the same status deadline rather than blocking in wait().
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => break,
+                    Ok(Some(_)) => return CliQuery::Ready(None),
+                    Err(_) => {
+                        kill_child(&mut child);
+                        return CliQuery::Ready(None);
+                    }
+                    Ok(None) => {
+                        let Some(remaining) = deadline.checked_duration_since(Instant::now())
+                        else {
+                            kill_child(&mut child);
+                            return CliQuery::TimedOut;
+                        };
+                        if remaining.is_zero() {
+                            kill_child(&mut child);
+                            return CliQuery::TimedOut;
+                        }
+                        std::thread::sleep(remaining.min(Duration::from_millis(5)));
+                    }
+                }
             }
             let text = String::from_utf8_lossy(&buffer);
             CliQuery::Ready(parse_cli_status(text.trim()))
@@ -3540,7 +3628,7 @@ fn parse_cli_status(stdout: &str) -> Option<CliIdentity> {
         }),
         Some(Value::Bool(true)) => {
             let name = identity_text(obj.get("username"));
-            let email = identity_text(obj.get("email"));
+            let email = account_email(obj.get("email"));
             if name.is_none() && email.is_none() {
                 None
             } else {
@@ -3686,7 +3774,7 @@ fn extract_user_identity(extra: &Obj) -> Option<UserIdentity> {
 
 fn identity_from_fields(name: Option<&Value>, email: Option<&Value>) -> Option<UserIdentity> {
     let name = identity_text(name);
-    let email = identity_text(email);
+    let email = account_email(email);
     if name.is_none() && email.is_none() {
         None
     } else {
@@ -3695,8 +3783,10 @@ fn identity_from_fields(name: Option<&Value>, email: Option<&Value>) -> Option<U
 }
 
 fn identity_text(value: Option<&Value>) -> Option<String> {
-    let text = value?.as_str()?.trim();
-    if text.is_empty() || text.len() > MAX_USER_IDENTITY_VALUE_LENGTH {
+    let text = value?
+        .as_str()?
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+    if text.is_empty() || text.encode_utf16().count() > MAX_USER_IDENTITY_VALUE_LENGTH {
         None
     } else {
         Some(text.to_string())
@@ -5030,3 +5120,7 @@ mod qoder_agent_event_history_tests;
 #[cfg(test)]
 #[path = "shared_privacy_history_tests.rs"]
 mod shared_privacy_history_tests;
+
+#[cfg(test)]
+#[path = "qoder_main522_identity_contract_tests.rs"]
+mod main522_identity_contract_tests;

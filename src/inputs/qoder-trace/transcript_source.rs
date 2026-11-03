@@ -8,14 +8,16 @@ use super::transcript_scanner::{
 };
 use crate::hook_process::{
     build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
-    qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, with_qoder_wakeup_lock,
-    CollectedTranscriptTurnContext,
+    qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, resolve_collected_qoder_user_id,
+    with_qoder_wakeup_lock, CollectedTranscriptTurnContext,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fs::ReadDir;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -63,8 +65,9 @@ struct LineScan {
 struct DirectoryVersion {
     modified: u128,
     changed: (i64, i64),
+    inventory: Option<Vec<String>>,
 }
-fn directory_version(path: &Path) -> std::io::Result<DirectoryVersion> {
+fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<DirectoryVersion> {
     #[cfg(unix)]
     let (metadata, changed) = {
         use std::os::unix::fs::MetadataExt;
@@ -101,7 +104,31 @@ fn directory_version(path: &Path) -> std::io::Result<DirectoryVersion> {
         // directory generation when last-write timestamps happen to be equal.
         (metadata, (info.ChangeTime, 0))
     };
+    // NTFS directory timestamps are hints. New UUID notice filenames identify
+    // inventory changes even when filesystem timestamps coalesce or are restored.
+    let inventory = if inspect_inventory {
+        let mut names = Vec::new();
+        for (index, entry) in std::fs::read_dir(path)?.enumerate() {
+            if index >= MAX_CONTEXTS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "too-many-contexts",
+                ));
+            }
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && entry.file_name().to_string_lossy().ends_with(".json")
+            {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Some(names)
+    } else {
+        None
+    };
     Ok(DirectoryVersion {
+        inventory,
         modified: metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
@@ -140,11 +167,10 @@ struct Collector {
     prompt_inspections: IndexMap<String, u64>,
     inspection_sequence: u64,
     legacy_owners: IndexMap<PathBuf, (FileVersion, bool, i64)>,
-    cli_identity_pending: HashSet<String>,
-    #[cfg(test)]
-    identity_env: Option<std::collections::HashMap<String, String>>,
     #[cfg(test)]
     owner_pid_probe: Option<OwnerPidProbe>,
+    #[cfg(test)]
+    directory_inventory: bool,
     resolver: Arc<dyn QoderPromptOwnershipResolver>,
     last: Option<(Value, bool, Result<TranscriptBatch, String>)>,
     scan_bytes: usize,
@@ -175,15 +201,7 @@ fn flag(v: &Value, key: &str) -> bool {
 fn optional_number(v: &Value, key: &str) -> Option<u64> {
     v.get(key).and_then(Value::as_u64)
 }
-fn js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::String(s) => !s.is_empty(),
-        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0 && !n.is_nan()),
-        _ => true,
-    }
-}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -305,11 +323,10 @@ impl QoderTranscriptSource {
                 prompt_inspections: IndexMap::new(),
                 inspection_sequence: 0,
                 legacy_owners: IndexMap::new(),
-                cli_identity_pending: HashSet::new(),
-                #[cfg(test)]
-                identity_env: None,
                 #[cfg(test)]
                 owner_pid_probe: None,
+                #[cfg(test)]
+                directory_inventory: cfg!(windows),
                 resolver,
                 last: None,
                 scan_bytes: scanner::SCAN_BYTES,
@@ -403,7 +420,6 @@ impl Collector {
         self.owner_inspections.clear();
         self.prompt_inspections.clear();
         self.legacy_owners.clear();
-        self.cli_identity_pending.clear();
         self.discovery = None;
         self.pending.clear();
         self.last = None;
@@ -457,7 +473,11 @@ impl Collector {
     }
     fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Value, Vec<Value>)> {
         let events = dir.join("events");
-        let version = directory_version(&events)?;
+        #[cfg(not(test))]
+        let inspect_inventory = cfg!(windows);
+        #[cfg(test)]
+        let inspect_inventory = self.directory_inventory;
+        let version = directory_version(&events, inspect_inventory)?;
         // Preserve the upstream mtime + ctime cache generation contract.
         if let Some(m) = self.metadata.get(dir) {
             if m.version == version {
@@ -490,7 +510,13 @@ impl Collector {
                 .cmp(&number(b, "observedSize"))
                 .then_with(|| number(a, "observedAt").cmp(&number(b, "observedAt")))
         });
-        let bytes = serde_json::to_vec(&json!([source, contexts]))?.len();
+        let inventory_bytes = version.inventory.as_ref().map_or(0, |names| {
+            names
+                .iter()
+                .map(|name| name.len() + std::mem::size_of::<String>())
+                .sum::<usize>()
+        });
+        let bytes = serde_json::to_vec(&json!([source, contexts]))?.len() + inventory_bytes;
         if let Some(prior) = self.metadata.shift_remove(dir) {
             self.metadata_bytes -= prior.bytes;
         }
@@ -556,8 +582,13 @@ impl Collector {
                     continue;
                 }
                 let _ = with_qoder_wakeup_lock(&dir, 0, || {
-                    let current = scanner::version(&scanner::open_regular(&file)?)?;
-                    if current == version {
+                    // Revalidate the exact receipt and complete metadata payload
+                    // under the publication gate. An unchanged observation may
+                    // acquire different filesystem timestamps without new data.
+                    let (current, current_version) = snapshot(&file, MAX_NOTICES)?;
+                    if current == v
+                        && notice_version(&current, &current_version) == text(receipt, "version")
+                    {
                         std::fs::remove_file(&file)?;
                     }
                     Ok(())
@@ -577,7 +608,6 @@ impl Collector {
             metrics: ScanMetrics::default(),
         };
         self.sources()?;
-        self.cli_identity_pending.clear();
         self.owner_budget = 1;
         self.prompt_budget = 1;
         self.cycle_peak = self.cache_size;
@@ -741,24 +771,6 @@ impl Collector {
                     error.to_string()
                 };
                 self.report(&key, &reason);
-            }
-        }
-        if !self.cli_identity_pending.is_empty() && !stopped.load(Ordering::SeqCst) {
-            if let Some(identity) = self.resolve_cli_identity().await {
-                if !stopped.load(Ordering::SeqCst) {
-                    for record in &mut records {
-                        if self
-                            .cli_identity_pending
-                            .contains(text(record, "agent.transcript.cursor_batch_id"))
-                        {
-                            for (from, to) in [("name", "user.name"), ("email", "user.email")] {
-                                if let Some(value) = identity.get(from) {
-                                    record[to] = value.clone();
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
         let changed = next != *state;
@@ -1116,35 +1128,27 @@ impl Collector {
             .filter(|r| !qoder_is_control_user_row(r))
             .cloned()
             .collect::<Vec<_>>();
-        if self.agent_id == "qoder"
-            && !selected.get("userIdentity").is_some_and(js_truthy)
-            && !selected.get("desktop").is_some_and(js_truthy)
-            && filtered.iter().any(|r| {
-                ["user", "assistant"].contains(&text(r, "type"))
-                    && (text(r, "entrypoint") == "cli"
-                        || ["promptId", "permissionMode", "userType"]
-                            .iter()
-                            .any(|k| r.get(k).is_some_and(js_truthy)))
-            })
-        {
-            self.cli_identity_pending.insert(turn.clone());
-        }
+        let user_identity = selected
+            .get("userIdentity")
+            .filter(|identity| !identity.is_null())
+            .or_else(|| source.get("userIdentity"));
+        let runtime_user = resolve_collected_qoder_user_id(&self.data_dir);
         let mut records = build_collected_transcript_turn(
             &filtered,
             CollectedTranscriptTurnContext {
                 agent_id: &self.agent_id,
                 session_id: text(source, "sessionId"),
                 turn_id: &turn,
-                runtime_user: "",
+                runtime_user: &runtime_user,
                 cwd: selected
                     .get("cwd")
                     .and_then(Value::as_str)
                     .or_else(|| source.get("cwd").and_then(Value::as_str)),
-                user_name: selected
-                    .pointer("/userIdentity/name")
+                user_name: user_identity
+                    .and_then(|identity| identity.get("name"))
                     .and_then(Value::as_str),
-                user_email: selected
-                    .pointer("/userIdentity/email")
+                user_email: user_identity
+                    .and_then(|identity| identity.get("email"))
                     .and_then(Value::as_str),
                 agent_name: selected.get("agentName").and_then(Value::as_str),
                 span_attributes: span,
@@ -1704,17 +1708,7 @@ stopped,
             .shift_remove(Path::new(text(source, "transcriptPath")));
         Ok(true)
     }
-    async fn resolve_cli_identity(&self) -> Option<Value> {
-        #[cfg(test)]
-        if let Some(env) = self.identity_env.clone() {
-            return crate::hook_process::resolve_qoder_collector_cli_identity_with_env(
-                &self.data_dir,
-                env,
-            )
-            .await;
-        }
-        crate::hook_process::resolve_qoder_collector_cli_identity(&self.data_dir).await
-    }
+
     fn mark_inspection(&mut self, key: &str, prompt: bool) {
         self.inspection_sequence += 1;
         let map = if prompt {

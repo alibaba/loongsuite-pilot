@@ -118,6 +118,11 @@ pub(crate) fn command() -> Command {
                 .arg(flag("json")),
         )
         .subcommand(
+            Command::new("inject-hooks")
+                .about("在 Agent 启动前仅同步部署安全的 Hook/Plugin")
+                .arg(Arg::new("raw-args").num_args(0..).allow_hyphen_values(true)),
+        )
+        .subcommand(
             Command::new("inject")
                 .about("在指定 Claude Code 目录注入 Hook")
                 .arg(value("agents").required(true).value_parser(["claude-code"]))

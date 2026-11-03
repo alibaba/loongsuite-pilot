@@ -2611,3 +2611,6 @@ fn first_native_install_publishes_command_before_owned_legacy_cleanup_and_preser
 
 #[path = "native_contracts/cross_version_upgrade.rs"]
 mod cross_version_upgrade;
+
+#[path = "installer_history/config_bridge.rs"]
+mod installer_config_bridge_history;
