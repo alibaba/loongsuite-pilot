@@ -256,7 +256,9 @@ exit $LASTEXITCODE
             let bytes = fs::read(fixture.cache.join(format!("bin/{role}.vbs"))).unwrap();
             assert!(bytes.starts_with(&[0xff, 0xfe]));
             let words: Vec<_> = bytes[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|part| u16::from_le_bytes([part[0], part[1]]))
                 .collect();
             let source = String::from_utf16(&words).unwrap();
@@ -939,7 +941,12 @@ fn source_ps_l195_l234_actual_utc_epoch_and_every_script_stage_round_trip_native
                 .as_secs();
             assert!(
                 ts >= before && ts <= after,
-                "real epoch must match UTC seconds"
+                "real epoch must match UTC seconds: shell={} stage={} before={} ts={} after={}",
+                shell.display(),
+                stage,
+                before,
+                ts,
+                after
             );
         }
     }
@@ -983,6 +990,55 @@ if (-not $script:probeSeen -or -not $script:started) { throw 'restart was not ac
             .replace("__LOWER__", &target.to_lowercase());
             success(&fixture.invoke(&shell, &body, false));
             assert!(!failure.exists());
+        }
+    }
+}
+
+#[test]
+fn utc_epoch_uses_completed_seconds_at_fractional_boundaries_in_both_shells_and_clm() {
+    let cases = [
+        ("low", "2026-11-03T12:34:56.0000001Z", 1793709296_u64),
+        ("below-half", "2026-11-03T12:34:56.4999999Z", 1793709296),
+        ("even-half", "2026-11-03T12:34:56.5000000Z", 1793709296),
+        ("above-half", "2026-11-03T12:34:56.6000000Z", 1793709296),
+        ("last-tick", "2026-11-03T12:34:56.9999999Z", 1793709296),
+        ("odd-half", "2026-11-03T12:34:57.5000000Z", 1793709297),
+        ("next", "2026-11-03T12:34:58.0000000Z", 1793709298),
+    ];
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let mut body = String::from(
+                r#"
+function Get-Date {
+    param($Date)
+    if ($null -ne $Date) {
+        if ($Date -ne '1970-01-01 00:00:00') { throw 'unexpected epoch argument' }
+        return [datetime]'1970-01-01T00:00:00'
+    }
+    return [datetime]$script:controlledClock
+}
+"#,
+            );
+            for (id, timestamp, _) in cases {
+                body.push_str(&format!(
+                    r#"
+$script:controlledClock = '{timestamp}'
+@{{epoch=(Get-EpochSeconds)}} | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '{id}-epoch.json') -Encoding UTF8
+"#
+                ));
+            }
+            success(&fixture.invoke(&shell, &body, constrained));
+            for (id, timestamp, expected) in cases {
+                let result = ps_private_result(&fixture, &format!("{id}-epoch.json"));
+                assert_eq!(
+                    result["epoch"].as_u64(),
+                    Some(expected),
+                    "{} constrained={constrained} clock={timestamp}",
+                    shell.display()
+                );
+            }
         }
     }
 }
@@ -1186,6 +1242,806 @@ if ($script:deleted -ne $script:unc) { throw 'valid UNC record was rejected by a
                 ))
                 .unwrap();
             assert_eq!(state, json!({"cursor":{"label":"保留研发"}}));
+        }
+    }
+}
+
+fn ps_private_result(fixture: &Fixture, name: &str) -> Value {
+    serde_json::from_str(
+        fs::read_to_string(fixture.home.join(name))
+            .unwrap()
+            .trim_start_matches('\u{feff}'),
+    )
+    .unwrap()
+}
+
+#[test]
+fn source_reap_l47_l59_one_bulk_native_query_kills_only_verified_requested_roles() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for (filter, expected) in [
+                ("^collector$", vec!["100101"]),
+                ("^updater$", vec!["100102"]),
+                ("collector|updater", vec!["100101", "100102"]),
+                ("^foreign$", vec![]),
+            ] {
+                let fixture = Fixture::new();
+                let script = format!("$script:requested = '{filter}'\n")
+                    + r#"
+$script:queries = 0
+$script:stopped = @()
+$script:verified = @()
+function Get-CimInstance {
+    [CmdletBinding()] param($ClassName, $Filter)
+    if ($ClassName -ne 'Win32_Process' -or $Filter -ne "Name = 'loongsuite-pilot.exe'") { throw 'unbounded process enumeration' }
+    $script:queries += 1
+    return @(@{ProcessId=100101}, @{ProcessId=100102}, @{ProcessId=100103}, @{ProcessId=100104})
+}
+function Test-InstalledProcess {
+    param([string]$ProcessId, [string]$Role)
+    $script:verified += ($ProcessId + ':' + $Role)
+    return ($ProcessId -eq '100101' -and $Role -eq 'collector') -or ($ProcessId -eq '100102' -and $Role -eq 'updater')
+}
+function Stop-Process {
+    [CmdletBinding()] param($Id, [switch]$Force)
+    if (-not $Force) { throw 'orphan stop must be explicit force' }
+    $script:stopped += [string]$Id
+}
+Stop-OrphanProcesses -Match $script:requested
+if ($script:queries -ne 1) { throw 'expected exactly one bulk query' }
+@{queries=$script:queries;stopped=@($script:stopped);verified=@($script:verified)} |
+    ConvertTo-Json -Depth 4 -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'reap-result.json') -Encoding UTF8
+"#;
+                success(&fixture.invoke(&shell, &script, constrained));
+                let result = ps_private_result(&fixture, "reap-result.json");
+                assert_eq!(result["queries"], 1);
+                assert_eq!(result["stopped"], json!(expected));
+                let verified = result["verified"].as_array().unwrap();
+                if filter != "^foreign$" {
+                    assert!(verified
+                        .iter()
+                        .any(|v| v.as_str().unwrap().starts_with("100103:")));
+                    assert!(verified
+                        .iter()
+                        .any(|v| v.as_str().unwrap().starts_with("100104:")));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn source_reap_l71_l78_restart_and_registration_preserve_each_roles_scope() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            success(&fixture.invoke(&shell, r#"
+Ensure-Dirs
+$script:scopes = @()
+function Stop-OrphanProcesses { param($Match); $script:scopes += [string]$Match }
+function Get-CimInstance { throw 'caller must not inline an unscoped process scan' }
+function New-ScheduledTaskAction { return @{} }
+function New-ScheduledTaskTrigger { return @{} }
+function New-ScheduledTaskSettingsSet { return @{} }
+function Register-PilotTask { return $true }
+function schtasks.exe { $global:LASTEXITCODE = 0 }
+$binary = Resolve-PilotBinary
+if (-not (Install-CollectorTask $binary)) { throw 'collector registration failed' }
+if (-not (Install-UpdaterTask $binary)) { throw 'updater registration failed' }
+function Get-ScheduledTask { return $null }
+function Get-TaskQuery { return @{exists=$true;error=''} }
+function Get-TaskStartIntent { return @{should_start=$true;confirmed_missing=$false;exists_schtasks='yes'} }
+function Start-ScheduledTask { }
+function Stop-PidFile { }
+function Start-Sleep { }
+function Sync-BootstrapScripts { }
+function Get-InitType { return 'taskscheduler' }
+function Wait-ForCollectorHeartbeat { return $true }
+function Wait-ForUpdaterAlive { return $true }
+function Schedule-UpdaterRestart { throw 'deferred handoff must not run' }
+Cmd-RestartCollector -Options @('--defer-updater-restart')
+Cmd-RestartUpdater
+@{scopes=@($script:scopes)} | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'scope-result.json') -Encoding UTF8
+"#, constrained));
+            assert_eq!(
+                ps_private_result(&fixture, "scope-result.json")["scopes"],
+                json!(["^collector$", "^updater$", "^collector$", "^updater$"])
+            );
+        }
+    }
+}
+
+#[test]
+fn source_reap_l87_l95_pid_stop_rereads_successors_and_preserves_unverified_identity() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let original = b"1234567\r\n";
+            let successor = b"9876543\r\n";
+            fs::write(fixture.home.join("original.pid"), original).unwrap();
+            fs::write(fixture.home.join("successor.pid"), successor).unwrap();
+            success(&fixture.invoke(&shell, r#"
+function Test-InstalledProcess {
+    param([string]$ProcessId, [string]$Role)
+    if ($ProcessId -ne '1234567' -or $Role -ne $script:role) { throw 'incorrect pid role identity probe' }
+    $script:checks += 1
+    if ($script:scenario -eq 'unknown') { return $false }
+    if ($script:scenario -eq 'changed' -and $script:checks -ge 2) { return $false }
+    return -not $script:killed
+}
+function Stop-Process {
+    [CmdletBinding()] param($Id, [switch]$Force)
+    if ([string]$Id -ne '1234567') { throw 'stopped a successor or unrelated process' }
+    $script:stops += [string]$Id
+    $script:killed = $true
+    if ($script:scenario -eq 'successor') {
+        Copy-Item -LiteralPath (Join-Path $env:USERPROFILE 'successor.pid') -Destination $script:targetPidFile -Force
+    }
+}
+function Get-Process {
+    [CmdletBinding()] param($Id)
+    if ([string]$Id -ne '1234567') { throw 'unscoped wait' }
+    return $null
+}
+foreach ($roleName in @('collector', 'updater')) {
+    foreach ($caseName in @('same', 'successor', 'unknown', 'changed')) {
+        $script:role = $roleName
+        $script:scenario = $caseName
+        $script:checks = 0
+        $script:stops = @()
+        $script:killed = $false
+        $script:targetPidFile = Join-Path $DATA_DIR ($roleName + '-' + $caseName + '.pid')
+        if ($roleName -eq 'updater') { $UPDATER_PID_FILE = $script:targetPidFile }
+        else { $PID_FILE = $script:targetPidFile }
+        Copy-Item -LiteralPath (Join-Path $env:USERPROFILE 'original.pid') -Destination $script:targetPidFile -Force
+        Stop-PidFile $script:targetPidFile
+        @{role=$roleName;scenario=$caseName;checks=$script:checks;stops=@($script:stops)} |
+            ConvertTo-Json -Compress |
+            Set-Content -LiteralPath (Join-Path $env:USERPROFILE ($roleName + '-' + $caseName + '.json')) -Encoding UTF8
+    }
+}
+"#, constrained));
+            for role in ["collector", "updater"] {
+                for scenario in ["same", "successor", "unknown", "changed"] {
+                    let case = ps_private_result(&fixture, &format!("{role}-{scenario}.json"));
+                    assert_eq!(case["role"], role);
+                    assert_eq!(case["scenario"], scenario);
+                    let pid = fixture.data.join(format!("{role}-{scenario}.pid"));
+                    match scenario {
+                        "same" => {
+                            assert_eq!(case["stops"], json!(["1234567"]));
+                            assert!(!pid.exists());
+                        }
+                        "successor" => {
+                            assert_eq!(case["stops"], json!(["1234567"]));
+                            assert_eq!(fs::read(&pid).unwrap(), successor);
+                        }
+                        "unknown" => {
+                            assert_eq!(case["checks"], 1);
+                            assert_eq!(case["stops"], json!([]));
+                            assert_eq!(fs::read(&pid).unwrap(), original);
+                        }
+                        "changed" => {
+                            assert_eq!(case["checks"], 2);
+                            assert_eq!(case["stops"], json!([]));
+                            assert_eq!(fs::read(&pid).unwrap(), original);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn source_handoff_l20_l30_actual_start_and_missing_task_repair_never_stop_scan_or_delete() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for scenario in ["already", "existing", "missing"] {
+                let fixture = Fixture::new();
+                fs::write(fixture.data.join("init-type"), "taskscheduler").unwrap();
+                let body = format!("$script:scenario = '{scenario}'\n")
+                    + r#"
+$script:starts = 0
+$script:registrations = 0
+$script:waits = @()
+function Get-CollectorRuntime { if ($script:scenario -eq 'already') { return @{pid=1234567} }; return $null }
+function Test-PidRunning { return $false }
+function Stop-PidFile { throw 'start must not stop a pid' }
+function Stop-OrphanProcesses { throw 'start/missing-task recovery must not reap' }
+function Get-CimInstance { throw 'start must not scan processes' }
+function Stop-ScheduledTask { throw 'start must not stop tasks' }
+function Start-Job { throw 'start must not create a lifetime-bound job' }
+function schtasks.exe { throw 'missing-task recovery must not delete existing tasks' }
+function Sync-BootstrapScripts { }
+function Get-TaskQuery { return @{exists=($script:scenario -eq 'existing');error=''} }
+function Get-TaskStartIntent { return @{should_start=($script:scenario -eq 'existing');confirmed_missing=($script:scenario -eq 'missing')} }
+function New-ScheduledTaskAction { return @{} }
+function New-ScheduledTaskTrigger { return @{} }
+function New-ScheduledTaskSettingsSet { return @{} }
+function Register-PilotTask { $script:registrations += 1; return $true }
+function Start-ScheduledTask { $script:starts += 1 }
+function Wait-ForCollectorHeartbeat { param($Seconds); $script:waits += $Seconds; return $true }
+Cmd-StartCollector
+@{starts=$script:starts;registrations=$script:registrations;waits=@($script:waits);init=(Get-InitType)} |
+    ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'start-result.json') -Encoding UTF8
+"#;
+                success(&fixture.invoke(&shell, &body, constrained));
+                let result = ps_private_result(&fixture, "start-result.json");
+                assert_eq!(result["starts"], if scenario == "already" { 0 } else { 1 });
+                assert_eq!(
+                    result["registrations"],
+                    if scenario == "missing" { 1 } else { 0 }
+                );
+                assert_eq!(
+                    result["waits"],
+                    if scenario == "already" {
+                        json!([])
+                    } else {
+                        json!([20])
+                    }
+                );
+                assert_eq!(result["init"], "taskscheduler");
+                assert!(!fixture.home.join("invocations.jsonl").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn managed_init_type_with_wildcard_characters_is_read_literally_and_never_opens_background_gate() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for init in ["taskscheduler", "background", "unknown", ""] {
+                let fixture = Fixture::new();
+                fs::write(fixture.data.join("init-type"), init).unwrap();
+                success(&fixture.invoke(
+                    &shell,
+                    r#"
+$script:starts = 0
+$script:waits = @()
+function Get-CollectorRuntime { return $null }
+function Test-PidRunning { return $false }
+function Sync-BootstrapScripts { }
+function Get-TaskQuery { return @{exists=$false;error='private query unavailable'} }
+function Get-TaskStartIntent { return @{should_start=$false;confirmed_missing=$false} }
+function Install-CollectorTask { throw 'unconfirmed absence must not register' }
+function Stop-PidFile { throw 'read-only start must not stop' }
+function Stop-OrphanProcesses { throw 'read-only start must not scan' }
+function Start-BackgroundDaemon { $script:starts += 1 }
+function Wait-ForCollectorHeartbeat { param($Seconds); $script:waits += $Seconds; return $true }
+$type = Get-InitType
+$message = ''
+try { Cmd-StartCollector }
+catch { $message = [string]$_.Exception.Message }
+@{init=$type;starts=$script:starts;waits=@($script:waits);message=$message} |
+    ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'init-result.json') -Encoding UTF8
+"#,
+                    constrained,
+                ));
+                let result = ps_private_result(&fixture, "init-result.json");
+                assert_eq!(
+                    result["init"],
+                    if init.is_empty() { "unknown" } else { init }
+                );
+                if init == "taskscheduler" {
+                    assert_eq!(result["starts"], 0);
+                    assert_eq!(result["waits"], json!([]));
+                    assert!(result["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("托管 collector 无法启动"));
+                } else {
+                    assert_eq!(result["starts"], 1);
+                    assert_eq!(result["waits"], json!([10]));
+                    assert_eq!(result["message"], "");
+                }
+            }
+        }
+    }
+}
+
+// Resolve only the test's actual private child transport to a trusted system
+// PowerShell path. The real production launcher arguments and script run intact;
+// this callback can never register/stop a system task or run the actual Pilot.
+const PRIVATE_REAL_POWERSHELL_CHILD: &str = r#"
+function Start-Process {
+    [CmdletBinding()] param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle)
+    if ($FilePath -ne 'powershell.exe' -or $ArgumentList -match '-Command' -or $ArgumentList -notmatch '-File ') {
+        throw 'unexpected child transport'
+    }
+    if ($WorkingDirectory -ne $CACHE_DIR) { throw 'child escaped private cache root' }
+    $legacyShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Microsoft.PowerShell.Management\Start-Process -FilePath $legacyShell -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle $WindowStyle -PassThru | Out-Null
+}
+function Start-Job { throw 'a shell job must not replace an independent child' }
+"#;
+
+#[test]
+fn source_handoff_l37_actual_background_files_execute_native_roles_with_escaped_unicode_paths() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let body = PRIVATE_REAL_POWERSHELL_CHILD.to_owned()
+                + r#"
+Ensure-Dirs
+foreach ($role in @('collector', 'updater')) {
+    $env:PILOT_FIXTURE_LOG = Join-Path $env:USERPROFILE ($role + '.jsonl')
+    Start-BackgroundDaemon $role (Resolve-PilotBinary) (Join-Path $LOG_DIR ($role + '-out.log')) (Join-Path $LOG_DIR ($role + '-err.log'))
+}
+"#;
+            success(&fixture.invoke(&shell, &body, constrained));
+            let mut records = Vec::new();
+            for role in ["collector", "updater"] {
+                records.extend(wait_for_private_native_records(
+                    &fixture.home.join(format!("{role}.jsonl")),
+                    1,
+                    Duration::from_secs(15),
+                ));
+            }
+            let args = records
+                .iter()
+                .map(|v| v["args"].clone())
+                .collect::<Vec<_>>();
+            assert!(args.contains(&json!(["run"])));
+            assert!(args.contains(&json!(["run-updater"])));
+            for record in records {
+                assert_eq!(record["data"], fixture.data.to_str().unwrap());
+                assert_eq!(record["cache"], fixture.cache.to_str().unwrap());
+                assert_eq!(
+                    record["config"],
+                    fixture.home.join("显式配置.json").to_str().unwrap()
+                );
+            }
+            for role in ["collector", "updater"] {
+                let bytes =
+                    fs::read(fixture.cache.join(format!("bin/{role}-background.ps1"))).unwrap();
+                assert!(bytes.starts_with(&[0xff, 0xfe]));
+            }
+        }
+    }
+}
+
+#[test]
+fn source_handoff_l58_actual_ten_second_handoff_outlives_parent_and_invokes_only_private_cli() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let cli = fixture.home.join(".local/bin/loongsuite-pilot.cmd");
+            fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            // The command file is ASCII; its Unicode binary path is inherited
+            // through Windows' environment rather than redecoded in a codepage.
+            fs::write(
+                &cli,
+                b"@echo off\r\n\"%PILOT_HANDOFF_BINARY%\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            )
+            .unwrap();
+            let body = PRIVATE_REAL_POWERSHELL_CHILD.to_owned()
+                + r#"
+$env:PILOT_HANDOFF_BINARY = Resolve-PilotBinary
+$env:PATHEXT = '.EXE;.COM;.CMD'
+'scheduled' | Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'handoff-start-marker') -Encoding UTF8
+Schedule-UpdaterRestart
+"#;
+            success(&fixture.invoke(&shell, &body, constrained));
+            let scheduled = fs::metadata(fixture.home.join("handoff-start-marker"))
+                .unwrap()
+                .modified()
+                .unwrap();
+            let parent_exited = std::time::SystemTime::now();
+            let log = fixture.home.join("invocations.jsonl");
+            assert!(
+                !log.exists(),
+                "default 10s child delay must leave parent free to exit first"
+            );
+            let deadline = Instant::now() + Duration::from_secs(25);
+            let records = wait_for_private_native_records(
+                &log,
+                1,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            let written = fs::metadata(&log).unwrap().modified().unwrap();
+            assert!(
+                written >= parent_exited,
+                "handoff ran before its scheduling parent exited"
+            );
+            assert!(written.duration_since(scheduled).unwrap() >= Duration::from_secs(10));
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["args"], json!(["restart-updater"]));
+            assert_eq!(records[0]["data"], fixture.data.to_str().unwrap());
+            let bytes = fs::read(fixture.cache.join("bin/restart-updater-delayed.ps1")).unwrap();
+            assert!(bytes.starts_with(&[0xff, 0xfe]));
+        }
+    }
+}
+
+#[test]
+fn source_handoff_l51_actual_restart_defers_only_when_option_is_present() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for defer in [false, true] {
+                let fixture = Fixture::new();
+                let mut body = MOCK_SERVICES.to_owned()
+                    + r#"
+$script:scheduled = 0
+function Schedule-UpdaterRestart { $script:scheduled += 1 }
+function Get-TaskQuery { return @{exists=$true;error=''} }
+function Get-TaskStartIntent { return @{should_start=$true;confirmed_missing=$false} }
+function Wait-ForCollectorHeartbeat { return $true }
+"#;
+                body.push_str(if defer {
+                    "Cmd-RestartCollector -Options @('--defer-updater-restart')\n"
+                } else {
+                    "Cmd-RestartCollector\n"
+                });
+                body.push_str(
+                    r#"
+@{scheduled=$script:scheduled;started=$script:started} | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'defer-result.json') -Encoding UTF8
+"#,
+                );
+                success(&fixture.invoke(&shell, &body, constrained));
+                let result = ps_private_result(&fixture, "defer-result.json");
+                assert_eq!(result["scheduled"], if defer { 0 } else { 1 });
+                assert_eq!(result["started"], true);
+            }
+        }
+    }
+}
+
+#[test]
+fn source_handoff_l66_whole_file_dispatch_passes_lifecycle_command_and_options_to_boundary() {
+    const DISPATCH: &str = "switch ($Command.ToLower()) {";
+    const SPIES: &str = r#"
+function Write-PrivateDispatch { param($Name, [object[]]$Options = @())
+    if ($null -eq $Options) { $Options = @() }
+    @{command=$Name;options=@($Options)} | ConvertTo-Json -Compress |
+        Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'dispatch-result.json') -Encoding UTF8
+}
+function Cmd-StartCollector { Write-PrivateDispatch 'start-collector' @() }
+function Cmd-RestartCollector { param([string[]]$Options = @()); Write-PrivateDispatch 'restart-collector' $Options }
+function Schedule-UpdaterRestart { Write-PrivateDispatch 'schedule-updater-restart' @() }
+"#;
+    let source = include_str!("../../scripts/loongsuite-pilot.ps1");
+    assert_eq!(source.matches(DISPATCH).count(), 1);
+    let instrumented = source.replacen(DISPATCH, &format!("{SPIES}\n{DISPATCH}"), 1);
+    for shell in shells() {
+        for constrained in [false, true] {
+            for command in [
+                "start-collector",
+                "restart-collector",
+                "schedule-updater-restart",
+            ] {
+                let fixture = Fixture::new();
+                // Only the invoked lifecycle boundary is replaced; the whole
+                // file, real CLI argument setup and shipped dispatcher execute.
+                fs::write(&fixture.script, &instrumented).unwrap();
+                let options = if command == "restart-collector" {
+                    "--defer-updater-restart"
+                } else {
+                    ""
+                };
+                success(&fixture.invoke(
+                    &shell,
+                    &format!("& $env:PILOT_SCRIPT {command} {options}"),
+                    constrained,
+                ));
+                let result = ps_private_result(&fixture, "dispatch-result.json");
+                assert_eq!(result["command"], command);
+                assert_eq!(
+                    result["options"],
+                    if command == "restart-collector" {
+                        json!(["--defer-updater-restart"])
+                    } else {
+                        json!([])
+                    }
+                );
+                assert!(!fixture.home.join("invocations.jsonl").exists());
+            }
+        }
+    }
+}
+
+fn wait_for_private_native_records(path: &Path, count: usize, timeout: Duration) -> Vec<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            // The final newline is written after the JSON object. Do not parse a
+            // file just because an independent child has opened it for append.
+            if text.ends_with('\n') {
+                if let Ok(records) = text
+                    .lines()
+                    .map(serde_json::from_str)
+                    .collect::<Result<Vec<Value>, _>>()
+                {
+                    if records.len() == count {
+                        return records;
+                    }
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "private native child produced no complete record: {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn public_installer_function(name: &str) -> String {
+    let source = include_str!("../../deploy/installer-opensource.ps1");
+    let marker = format!("function {name} {{");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing public installer function {name}"));
+    let rest = &source[start..];
+    let end = rest.find("\nfunction ").map_or(rest.len(), |n| n + 1);
+    rest[..end].to_owned()
+}
+fn ps_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[test]
+fn source_nonascii_l145_l165_real_account_tags_and_both_task_consumers_preserve_utf16_identity() {
+    // Fixed compatibility vectors, including the surrogate pair used by the old
+    // UTF16 polynomial tag. No implementation of the tag algorithm in this test.
+    let cases = [
+        (
+            "ascii",
+            "Alice",
+            "CORP",
+            "LOCALHOST",
+            "CORP\\Alice",
+            "corp_alice",
+        ),
+        (
+            "zhang",
+            "张三",
+            "CORP",
+            "本机",
+            "CORP\\张三",
+            "corp___-150180830",
+        ),
+        (
+            "li",
+            "李四",
+            "CORP",
+            "本机",
+            "CORP\\李四",
+            "corp___-150248002",
+        ),
+        (
+            "workgroup",
+            "张三",
+            "WORKGROUP",
+            "本机",
+            "本机\\张三",
+            "_____-180156744",
+        ),
+        (
+            "empty-domain",
+            "张三",
+            "",
+            "本机",
+            "本机\\张三",
+            "_____-180156744",
+        ),
+        ("bare", "Alice", "", "", "Alice", "alice"),
+        (
+            "quote",
+            "O'Brien",
+            "DOMAIN",
+            "HOST",
+            "DOMAIN\\O'Brien",
+            "domain_o_brien",
+        ),
+        (
+            "surrogate",
+            "开发🚀",
+            "企业",
+            "设备",
+            "企业\\开发🚀",
+            "_______-4937914",
+        ),
+        ("empty-user", "", "CORP", "HOST", "", ""),
+    ];
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let mut body = public_installer_function("Get-PilotDeployTaskNames");
+            body.push_str(
+                r#"
+function whoami { throw 'native whoami stdout is not an identity source' }
+function whoami.exe { throw 'native whoami stdout is not an identity source' }
+"#,
+            );
+            for (id, user, domain, computer, _, _) in cases {
+                body.push_str(&format!(
+                    "$env:USERNAME = {}\n$env:USERDOMAIN = {}\n$env:COMPUTERNAME = {}\n. $env:PILOT_SCRIPT\n",
+                    ps_single_quote(user), ps_single_quote(domain), ps_single_quote(computer),
+                ));
+                body.push_str(&format!(r#"
+@{{account=(Get-PilotAccountName);tag=(Get-PilotUserTag);service=@($TASK_NAME_COLLECTOR,$TASK_NAME_UPDATER);installer=@(Get-PilotDeployTaskNames)}} |
+    ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '{id}-identity.json') -Encoding UTF8
+"#));
+            }
+            success(&fixture.invoke(&shell, &body, constrained));
+            for (id, _, _, _, account, tag) in cases {
+                let result = ps_private_result(&fixture, &format!("{id}-identity.json"));
+                assert_eq!(result["account"], account);
+                assert_eq!(result["tag"], tag);
+                let names = json!([
+                    format!("LoongsuitePilot-{tag}"),
+                    format!("LoongsuitePilotUpdater-{tag}")
+                ]);
+                assert_eq!(result["service"], names);
+                assert_eq!(result["installer"], names);
+            }
+            assert!(!fixture.home.join("invocations.jsonl").exists());
+        }
+    }
+}
+
+#[test]
+fn source_nonascii_l183_real_registration_uses_exact_account_for_logon_and_principal() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for (domain, account) in [("CORP", "CORP\\张三"), ("WORKGROUP", "本机\\张三")] {
+                let fixture = Fixture::new();
+                let mut body = format!(
+                    "$env:USERNAME='张三'\n$env:USERDOMAIN={}\n$env:COMPUTERNAME='本机'\n. $env:PILOT_SCRIPT\n",
+                    ps_single_quote(domain)
+                );
+                body.push_str(r#"
+Ensure-Dirs
+$script:triggerUsers=@()
+$script:principalUsers=@()
+$script:registered=@()
+function whoami { throw 'no codepage identity fallback' }
+function whoami.exe { throw 'no codepage identity fallback' }
+function Stop-OrphanProcesses { }
+function schtasks.exe { $global:LASTEXITCODE=0 }
+function Get-TaskExists { return $false }
+function New-ScheduledTaskAction { return @{} }
+function New-ScheduledTaskSettingsSet { return @{} }
+function New-ScheduledTaskTrigger {
+    param([switch]$AtLogOn,$User,[switch]$Once,$At,$RepetitionInterval)
+    if ($AtLogOn) { $script:triggerUsers += [string]$User }
+    return @{}
+}
+function New-ScheduledTaskPrincipal {
+    param($UserId,$LogonType,$RunLevel)
+    if ($LogonType -ne 'Interactive' -or $RunLevel -ne 'Limited') { throw 'principal contract changed' }
+    $script:principalUsers += [string]$UserId
+    return @{UserId=$UserId}
+}
+function Register-ScheduledTask {
+    [CmdletBinding()] param($TaskName,$TaskPath,$Action,$Trigger,$Settings,$Principal,$Description)
+    if ([string]$Principal.UserId -ne (Get-PilotAccountName)) { throw 'principal identity corrupted' }
+    $script:registered += [string]$TaskName
+}
+$binary=Resolve-PilotBinary
+if (-not (Install-CollectorTask $binary)) { throw 'collector registration failed' }
+if (-not (Install-UpdaterTask $binary)) { throw 'updater registration failed' }
+@{triggers=@($script:triggerUsers);principals=@($script:principalUsers);registered=@($script:registered);expected=@($TASK_NAME_COLLECTOR,$TASK_NAME_UPDATER)} |
+    ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'principal-result.json') -Encoding UTF8
+"#);
+                success(&fixture.invoke(&shell, &body, constrained));
+                let result = ps_private_result(&fixture, "principal-result.json");
+                assert_eq!(result["triggers"], json!([account, account]));
+                assert_eq!(result["principals"], json!([account, account]));
+                assert_eq!(result["registered"], result["expected"]);
+            }
+        }
+    }
+}
+
+fn native_bootstrap_zip(fixture: &Fixture, unsafe_entry: Option<&str>) -> PathBuf {
+    use std::io::Write;
+    let archive = fixture.home.join("native-input.zip");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, bytes) in [
+        ("native-v2/runtime-manifest.json", b"{}".to_vec()),
+        (
+            "native-v2/bin/loongsuite-pilot.exe",
+            fs::read(&fixture.binary).unwrap(),
+        ),
+        (
+            "native-v2/assets/归档 [边界]🚀.txt",
+            "保留\u{feff}内容 O'Brien".as_bytes().to_vec(),
+        ),
+    ] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(&bytes).unwrap();
+    }
+    if let Some(name) = unsafe_entry {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(b"must-not-overwrite").unwrap();
+    }
+    zip.finish().unwrap();
+    archive
+}
+
+fn native_bootstrap_body() -> String {
+    let mut body = public_installer_function("Download-AndExtract");
+    body.push_str(&public_installer_function("Select-NativePackageRoot"));
+    body.push_str(
+        r#"
+function Msg { param($Chinese,$English) }
+function Invoke-WebRequest { throw 'local archive test must not use network' }
+function Resolve-Node { throw 'native ZIP bootstrap must not resolve Node' }
+function Ensure-ManagedNode { throw 'native ZIP bootstrap must not install Node' }
+function Ensure-NodeModules { throw 'native ZIP bootstrap must not install node_modules' }
+function Get-PilotAsciiTempRoot { throw 'native ZIP bootstrap must preserve actual Unicode TEMP' }
+function tar.exe { throw 'native ZIP bootstrap must not route through ANSI tar.exe' }
+$PackageUrl=Join-Path $env:USERPROFILE 'native-input.zip'
+Download-AndExtract
+@{source=$script:INSTALL_SRC;temporary=$script:TMP_DIR} | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'archive-result.json') -Encoding UTF8
+"#,
+    );
+    body
+}
+
+#[test]
+fn source_nonascii_l233_l259_actual_native_zip_bootstrap_keeps_unicode_temp_and_resource_bytes() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            native_bootstrap_zip(&fixture, None);
+            success(&fixture.invoke(&shell, &native_bootstrap_body(), constrained));
+            let result = ps_private_result(&fixture, "archive-result.json");
+            let temporary = PathBuf::from(result["temporary"].as_str().unwrap());
+            let source = PathBuf::from(result["source"].as_str().unwrap());
+            assert_eq!(
+                fs::canonicalize(temporary.parent().unwrap()).unwrap(),
+                fs::canonicalize(&fixture.home).unwrap()
+            );
+            assert_eq!(
+                fs::canonicalize(&source).unwrap(),
+                fs::canonicalize(temporary.join("native-v2")).unwrap()
+            );
+            assert_eq!(
+                fs::read(source.join("bin/loongsuite-pilot.exe")).unwrap(),
+                fs::read(&fixture.binary).unwrap()
+            );
+            assert_eq!(
+                fs::read(source.join("assets/归档 [边界]🚀.txt")).unwrap(),
+                "保留\u{feff}内容 O'Brien".as_bytes()
+            );
+            assert!(!fixture.home.join("invocations.jsonl").exists());
+        }
+    }
+}
+
+#[test]
+fn actual_native_zip_bootstrap_never_extracts_traversal_outside_its_private_staging_root() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for entry in ["../outside-sentinel.txt", "..\\outside-sentinel.txt"] {
+                let fixture = Fixture::new();
+                let outside = fixture.home.join("outside-sentinel.txt");
+                fs::write(&outside, b"preserve-before-extraction").unwrap();
+                native_bootstrap_zip(&fixture, Some(entry));
+                let output = fixture.invoke(&shell, &native_bootstrap_body(), constrained);
+                assert!(
+                    !output.status.success(),
+                    "native bootstrap accepted an escaping archive entry"
+                );
+                assert_eq!(fs::read(&outside).unwrap(), b"preserve-before-extraction");
+                assert!(!fixture.home.join("archive-result.json").exists());
+                assert!(!fixture.home.join("invocations.jsonl").exists());
+            }
         }
     }
 }

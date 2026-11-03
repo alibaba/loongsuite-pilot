@@ -802,3 +802,6 @@ async fn failure_uninstall_diagnoses_before_runtime_removal_and_can_retry_remain
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0]["level"], "ERROR");
 }
+
+#[path = "runtime_uninstall_history_contract_tests.rs"]
+mod uninstall_history_contract_tests;

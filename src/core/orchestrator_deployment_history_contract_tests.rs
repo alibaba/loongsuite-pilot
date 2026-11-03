@@ -209,9 +209,9 @@ async fn dynamic_l72_l108_l121_loader_and_real_builder_expand_tilde_keep_order_a
     assert_eq!(
         multi.watch_paths(),
         &[
-            resolve_home("~/.agent"),
-            absolute,
-            resolve_home("~/.agent-alt")
+            resolve_home("~/.agent").replace('\\', "/"),
+            absolute.replace('\\', "/"),
+            resolve_home("~/.agent-alt").replace('\\', "/")
         ]
     );
     assert_eq!(multi.poll_interval_ms(), 300_000);

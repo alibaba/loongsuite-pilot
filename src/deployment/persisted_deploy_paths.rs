@@ -253,12 +253,14 @@ mod tests {
     #[test]
     fn hooks_parent_is_the_agent_home() {
         assert_eq!(
-            home_from_config_file("/workspace/.grok/hooks/loongsuite-pilot.json"),
-            node_resolve("/workspace/.grok")
+            std::path::PathBuf::from(home_from_config_file(
+                "/workspace/.grok/hooks/loongsuite-pilot.json"
+            )),
+            std::path::PathBuf::from("/workspace/.grok")
         );
         assert_eq!(
-            home_from_config_file("/tmp/pi-agent/settings.json"),
-            node_resolve("/tmp/pi-agent")
+            std::path::PathBuf::from(home_from_config_file("/tmp/pi-agent/settings.json")),
+            std::path::PathBuf::from("/tmp/pi-agent")
         );
     }
 
@@ -325,10 +327,17 @@ mod tests {
             assert_eq!(restored.detection.paths[0], home.to_string_lossy());
             let expected = installed.hook.unwrap();
             let actual = restored.hook.unwrap();
-            assert_eq!(actual.settings_path, expected.settings_path);
             assert_eq!(
-                actual.trust_toml.map(|trust| trust.config_path),
-                expected.trust_toml.map(|trust| trust.config_path)
+                std::path::Path::new(&actual.settings_path),
+                std::path::Path::new(&expected.settings_path)
+            );
+            assert_eq!(
+                actual
+                    .trust_toml
+                    .map(|trust| std::path::PathBuf::from(trust.config_path)),
+                expected
+                    .trust_toml
+                    .map(|trust| std::path::PathBuf::from(trust.config_path))
             );
             let override_home = dir.path().join("新用户");
             let explicit = super::super::hook_install_service::definition_at_install_home(
@@ -397,7 +406,7 @@ mod tests {
         let target = apply_persisted_deploy_targets(&def, Some(&record), None).unwrap();
         assert_eq!(
             target.plugin_inject.unwrap().config_paths,
-            vec![path.to_string_lossy()]
+            vec![node_resolve(path.to_str().unwrap())]
         );
         assert!(!path.exists());
         for invalid in ["", "relative/settings.json"] {
@@ -421,47 +430,26 @@ mod tests {
 
     #[test]
     fn overlays_persisted_grok_path_and_does_not_replace_backfill() {
-        let overlaid = apply_persisted_deploy_targets(
-            &hook_def("grok-build", "/root/.grok/hooks/loongsuite-pilot.json"),
-            Some(&DeployedAgentRecord {
-                deploy_mode: DeployMode::Hook,
-                deployed_at: "2026-01-01T00:00:00.000Z".into(),
-                source_hash: None,
-                last_remote_checked_at: None,
-                target_dir: None,
-                dsh_patch_path: None,
-                hook_settings_path: Some("/workspace/.grok/hooks/loongsuite-pilot.json".into()),
-                hook_settings_paths: None,
-                installed_by: None,
-                plugin_inject_config_path: None,
-            }),
-            None,
-        )
-        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let original = root
+            .path()
+            .join("workspace/.grok/hooks/loongsuite-pilot.json");
+        let current = root
+            .path()
+            .join("default/.grok/hooks/loongsuite-pilot.json");
+        let mut record: DeployedAgentRecord = serde_json::from_value(serde_json::json!({
+            "deployMode":"hook", "deployedAt":"2026-01-01T00:00:00.000Z", "hookSettingsPath":original
+        })).unwrap();
+        let def = hook_def("grok-build", current.to_str().unwrap());
+        let overlaid = apply_persisted_deploy_targets(&def, Some(&record), None).unwrap();
         assert_eq!(
             overlaid.hook.unwrap().settings_path,
-            node_resolve("/workspace/.grok/hooks/loongsuite-pilot.json")
+            node_resolve(original.to_str().unwrap())
         );
-        let mut record = DeployedAgentRecord {
-            deploy_mode: DeployMode::Hook,
-            deployed_at: "2026-01-01T00:00:00.000Z".into(),
-            source_hash: None,
-            last_remote_checked_at: None,
-            target_dir: None,
-            dsh_patch_path: None,
-            hook_settings_path: Some("/workspace/.grok/hooks/loongsuite-pilot.json".into()),
-            hook_settings_paths: None,
-            installed_by: None,
-            plugin_inject_config_path: None,
-        };
-        backfill_lifecycle_fields(
-            &mut record,
-            &hook_def("grok-build", "/root/.grok/hooks/loongsuite-pilot.json"),
-        );
-        assert_eq!(
-            record.hook_settings_path.as_deref(),
-            Some("/workspace/.grok/hooks/loongsuite-pilot.json")
-        );
+        let before = record.hook_settings_path.clone();
+        backfill_lifecycle_fields(&mut record, &def);
+        assert_eq!(record.hook_settings_path, before);
+        assert_eq!(record.hook_settings_path.as_deref(), original.to_str());
     }
 }
 

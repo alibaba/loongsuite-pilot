@@ -876,6 +876,11 @@ mod tests {
             }
         });
         within("input startup", manager.start_input("codex-transcript")).await;
+        // Startup is ready before its checkpoint IO; establish the empty
+        // source metadata baseline before testing new-prefix acceptance.
+        within("empty startup checkpoint", state.save())
+            .await
+            .unwrap();
         let before = tokio::fs::read(&state_path).await.unwrap();
         let held = journal.state.lock().await;
         let record = |time: &str, kind: &str, payload: serde_json::Value| {

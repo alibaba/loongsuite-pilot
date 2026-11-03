@@ -8,6 +8,7 @@ mod migration;
 mod package;
 mod release;
 mod swift;
+mod test_environment;
 mod trace_validate;
 mod validation_rules;
 
@@ -178,42 +179,8 @@ fn baseline(root: &Path, output: &Path, timeout: Duration, serial: bool) -> Resu
         let stdout = File::create(output.join(&log))?;
         let stderr = stdout.try_clone()?;
         let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-        command.current_dir(root).args(args).env_clear();
-        // 工具链和系统最小环境可继承；所有 Agent/输出凭据均不继承。
-        for key in [
-            "PATH",
-            "CARGO_HOME",
-            "RUSTUP_HOME",
-            "RUSTUP_TOOLCHAIN",
-            "RUSTUP_DIST_SERVER",
-            "RUSTUP_UPDATE_ROOT",
-            "CARGO_NET_OFFLINE",
-            "SystemRoot",
-            "WINDIR",
-            "COMSPEC",
-            "PATHEXT",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
-        for key in ["HOME", "USERPROFILE"] {
-            command.env(key, output.join("home"));
-        }
-        for key in [
-            "APPDATA",
-            "LOCALAPPDATA",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_CACHE_HOME",
-        ] {
-            let directory = output.join("home").join(key.to_lowercase());
-            fs::create_dir_all(&directory)?;
-            command.env(key, directory);
-        }
+        command.current_dir(root).args(args);
+        test_environment::prepare_isolated_environment(&mut command, &output.join("home"))?;
         command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
         let start = Instant::now();
         let mut child = command

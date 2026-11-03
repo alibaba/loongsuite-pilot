@@ -298,9 +298,10 @@ async fn actual_thirty_second_fallback_and_five_second_stability_retry_emit_once
     std::fs::write(&path, "").expect("baseline source");
     input.start().await.expect("real hosted start");
     assert!(input.running());
-    assert!(cycles.load(Ordering::SeqCst) > 0);
     close_real_watches(&input);
     input.inner.run_cycle().await;
+    // Metrics describe the completed cycle, not startup checkpoint readiness.
+    assert!(cycles.load(Ordering::SeqCst) > 0);
     let baseline_cycles = cycles.load(Ordering::SeqCst);
     let data = jsonl(&fixture_records(), false);
     std::fs::write(&path, &data).expect("new transcript");

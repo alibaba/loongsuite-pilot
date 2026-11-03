@@ -605,6 +605,15 @@ async fn disk_has_source_key(path: &Path, key: &str) -> bool {
 /// Remove just its synthetic disk key, retaining all other source values and
 /// the independent body-free ownership/floor sidecar byte-for-byte.
 async fn lose_synthetic_source_checkpoint(root: &Path, path: &Path, key: &str) {
+    // start() now signals collection readiness before checkpoint IO finishes.
+    // Establish the actual durable baseline before deleting only this key.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !disk_has_source_key(path, key).await {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("synthetic baseline checkpoint did not commit within one second");
     assert!(
         disk_has_source_key(path, key).await,
         "normal baseline/park checkpoint must be saved before fault injection"

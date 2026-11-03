@@ -1113,6 +1113,7 @@ async fn each_successful_empty_cycle_persists_the_actual_dirty_checkpoint() {
     let input = plain(script.clone(), store.clone(), Some(60_000));
     store.set_offset("first-cycle", 41.0);
     input.start().await.unwrap();
+    input.await_current_cycle_for_test().await;
     let path = dir.path().join("input-state.json");
     let first: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(first["first-cycle"]["lastOffset"], 41.0);
@@ -1429,6 +1430,7 @@ async fn session_delegates_each_record_and_filepath_then_resumes_only_new_bytes_
     let observed = rows.clone();
     next.on_entries(move |batch| observed.lock().unwrap().extend(batch.to_vec()));
     next.start().await.unwrap();
+    next.await_current_cycle_for_test().await;
     assert_eq!(entry_paths(&rows.lock().unwrap()), ["/second.ts"]);
     next.run_cycle().await;
     assert_eq!(next.body.inner().discoveries.load(Ordering::SeqCst), 2);
@@ -1558,6 +1560,7 @@ async fn session_adopts_legacy_unknown_identity_without_replaying_the_saved_pref
     let observed = rows.clone();
     input.on_entries(move |batch| observed.lock().unwrap().extend(batch.to_vec()));
     input.start().await.unwrap();
+    input.await_current_cycle_for_test().await;
     assert!(rows.lock().unwrap().is_empty());
     assert_eq!(store.get_offset(&key), first.len() as f64);
     assert_eq!(store.get(&key).extra().unwrap()["preserved"], "yes");

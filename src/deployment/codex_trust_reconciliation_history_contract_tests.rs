@@ -18,7 +18,9 @@ impl World {
     async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let hooks = root.join(".codex/hooks.json");
+        let hooks = PathBuf::from(node_resolve(
+            root.join(".codex/hooks.json").to_str().unwrap(),
+        ));
         let trust = root.join(".codex/config.toml");
         std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
         let def:AgentDefinition=serde_json::from_value(json!({"id":"codex","displayName":"Codex","deployMode":"hook",
@@ -44,7 +46,13 @@ impl World {
             compute_installed_hook_trust_hash(current, TrustPlatform::current()).unwrap();
         let retired_hash =
             compute_installed_hook_trust_hash(retired, TrustPlatform::current()).unwrap();
-        let q = |s: &str| toml::Value::String(s.into()).to_string();
+        let q = |s: &str| {
+            let quoted = toml::Value::String(s.into()).to_string();
+            let header = format!("[hooks.state.{quoted}]\nenabled = true\n");
+            let parsed: toml::Value = toml::from_str(&header).unwrap();
+            assert_eq!(parsed["hooks"]["state"][s]["enabled"].as_bool(), Some(true));
+            quoted
+        };
         let third_party="[\"hooks\".\"state\".\"third-party:stop:0:0\"]\nenabled = true\ntrusted_hash = \"sha256:OTHER\"\n".to_owned();
         let contents=format!("[hooks.state.{}]\ntrusted_hash = {}\n\n[\"hooks\".\"state\".{}]\ntrusted_hash = {}\n\n[hooks.state.{}]\ntrusted_hash = {}\n\n[\"hooks\".\"state\".{}]\nenabled = false\ntrusted_hash = {}\n\n{}",q(&retired_key),q(&retired_hash),q(&retired_key),q(&retired_hash),q(&current_key),q(&current_hash),q(&current_key),q(&current_hash),third_party);
         std::fs::write(&trust, contents).unwrap();

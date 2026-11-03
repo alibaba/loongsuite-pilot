@@ -714,7 +714,7 @@ impl StateStore {
     }
 
     #[cfg(test)]
-    fn set_write_hook<F, Fut>(&self, hook: F)
+    pub(crate) fn set_write_hook<F, Fut>(&self, hook: F)
     where
         F: Fn(PathBuf, String) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), anyhow::Error>> + Send + 'static,

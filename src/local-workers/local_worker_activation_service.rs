@@ -1,7 +1,7 @@
 //! Port of `src/local-workers/local-worker-activation-service.ts`.
 //!
 //! Reconciliation, fingerprints, and supervisor status files are local. The
-//! real `PluginProbeStrategy` lives in the unported deployment module, so
+//! real `PluginProbeStrategy` lives in the deployment module, so
 //! deploy and stop go through [`WorkerSupervisor`].
 
 use super::instance_store::{
@@ -471,3 +471,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "local_worker_activation_failure_history_contract_tests.rs"]
+mod history_contract_tests;

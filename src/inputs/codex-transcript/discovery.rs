@@ -30,6 +30,27 @@ pub struct WalkBudget {
     pub remaining_rollout_files: usize,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DiscoveryPoint {
+    BeforeRead,
+    AfterRead,
+}
+#[cfg(test)]
+type DiscoveryObserver =
+    std::sync::Arc<dyn Fn(&str, DiscoveryPoint) -> std::io::Result<()> + Send + Sync>;
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static TEST_DISCOVERY: DiscoveryObserver;
+}
+#[cfg(test)]
+fn discovery_test_point(dir: &str, point: DiscoveryPoint) -> bool {
+    match TEST_DISCOVERY.try_with(|observe| observe(dir, point)) {
+        Ok(result) => result.is_ok(),
+        Err(_) => true,
+    }
+}
+
 pub async fn collect_rollout_files(
     dir: &str,
     files: &mut Vec<String>,
@@ -60,6 +81,10 @@ async fn collect_rollout_files_observed(
     let Some(snapshot) = directory_mtime(&meta) else {
         return false;
     };
+    #[cfg(test)]
+    if !discovery_test_point(dir, DiscoveryPoint::BeforeRead) {
+        return false;
+    }
     let mut entries = match fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(_) => return false,
@@ -74,6 +99,10 @@ async fn collect_rollout_files_observed(
         }
     }
     observed(dir);
+    #[cfg(test)]
+    if !discovery_test_point(dir, DiscoveryPoint::AfterRead) {
+        return false;
+    }
     let mut complete = true;
     for entry in names {
         let path = entry.path();

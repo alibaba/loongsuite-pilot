@@ -5308,3 +5308,6 @@ include!("workspace_privacy_history.rs");
 
 #[path = "engine_main346_history.rs"]
 mod main346_contracts;
+
+#[path = "discovery_cache_main_tests.rs"]
+mod discovery_cache_main_tests;

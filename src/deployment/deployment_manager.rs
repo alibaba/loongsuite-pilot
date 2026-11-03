@@ -1316,7 +1316,7 @@ mod tests {
         assert!(!cleanup.undeploy_agent(&a).await);
         assert_eq!(
             cleanup.recorded_settings_paths("grok-build"),
-            vec![bad_path.clone()]
+            vec![node_resolve(bad_path)]
         );
         assert!(
             !std::fs::read_to_string(&a.hook.as_ref().unwrap().settings_path)

@@ -111,8 +111,15 @@ impl CycleGate {
     }
 }
 
+enum CycleAction {
+    Wait(Arc<CycleGate>),
+    Lead(Arc<CycleGate>),
+}
+
 struct Lifecycle {
     running: bool,
+    collect_finished: bool,
+    rescan_requested: bool,
     start: Option<Arc<Gate>>,
     stop: Option<Arc<Gate>>,
     cycle: Option<Arc<CycleGate>>,
@@ -375,6 +382,8 @@ pub struct HostedInput<T: InputBody> {
     error_handlers: Mutex<Vec<ErrorHandler>>,
     delta_handlers: Mutex<Vec<DeltaHandler>>,
     running_flag: AtomicBool,
+    // One StateStore-owned save survives releasing an output wait on stop.
+    checkpoint_save: Mutex<Option<Arc<Gate>>>,
 }
 
 impl<T: InputBody> HostedInput<T> {
@@ -403,6 +412,8 @@ impl<T: InputBody> HostedInput<T> {
                 checkpoint_release: Notify::new(),
                 lifecycle: Mutex::new(Lifecycle {
                     running: false,
+                    collect_finished: false,
+                    rescan_requested: false,
                     start: None,
                     stop: None,
                     cycle: None,
@@ -421,6 +432,7 @@ impl<T: InputBody> HostedInput<T> {
             error_handlers: Mutex::new(Vec::new()),
             delta_handlers: Mutex::new(Vec::new()),
             running_flag: AtomicBool::new(false),
+            checkpoint_save: Mutex::new(None),
         })
     }
 
@@ -538,7 +550,7 @@ impl<T: InputBody> HostedInput<T> {
         let first = Arc::clone(self);
         let mut first_cycle = tokio::spawn(async move {
             if first.runtime.is_running() {
-                first.run_cycle().await;
+                first.run_cycle_request(false).await;
             }
         });
         loop {
@@ -659,56 +671,164 @@ impl<T: InputBody> HostedInput<T> {
         stopped
     }
 
-    pub fn request_collection(self: &Arc<Self>) {
-        if !self.runtime.is_running() {
-            return;
+    #[cfg(test)]
+    pub(crate) async fn await_current_cycle_for_test(&self) {
+        let cycle = self
+            .runtime
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .cycle
+            .clone();
+        if let Some(cycle) = cycle {
+            cycle.wait().await;
         }
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            this.run_cycle().await;
-        });
+    }
+
+    pub fn request_collection(self: &Arc<Self>) {
+        // Register synchronously: a wakeup burst creates one worker, not one
+        // task per notification. Existing work retains one pending rescan.
+        if let Some(CycleAction::Lead(gate)) = self.begin_cycle(true, true) {
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.run_cycle_lead(gate).await;
+            });
+        }
+    }
+
+    fn begin_cycle(&self, rescan_after_collect: bool, only_running: bool) -> Option<CycleAction> {
+        if self.runtime.state_store.save_failed() {
+            return None;
+        }
+        let mut life = self
+            .runtime
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if only_running && !life.running {
+            return None;
+        }
+        if let Some(gate) = life.cycle.as_ref().map(Arc::clone) {
+            if rescan_after_collect && life.running && life.collect_finished {
+                life.rescan_requested = true;
+            }
+            Some(CycleAction::Wait(gate))
+        } else {
+            let gate = Arc::new(CycleGate::new());
+            life.cycle = Some(Arc::clone(&gate));
+            life.collect_finished = false;
+            life.rescan_requested = false;
+            Some(CycleAction::Lead(gate))
+        }
     }
 
     pub async fn run_cycle(self: &Arc<Self>) {
-        if self.runtime.state_store.save_failed() {
-            return;
-        }
-        enum Action {
-            Wait(Arc<CycleGate>),
-            Lead(Arc<CycleGate>),
-        }
-        let action = {
-            let mut life = self
-                .runtime
-                .lifecycle
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            if let Some(cycle) = &life.cycle {
-                Action::Wait(Arc::clone(cycle))
-            } else {
-                let gate = Arc::new(CycleGate::new());
-                life.cycle = Some(Arc::clone(&gate));
-                Action::Lead(gate)
-            }
-        };
-        match action {
-            Action::Wait(gate) => gate.wait().await,
-            Action::Lead(gate) => {
-                self.run_cycle_once().await;
-                {
-                    let mut life = self
-                        .runtime
-                        .lifecycle
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner());
-                    life.cycle = None;
-                }
-                gate.finish();
-            }
+        self.run_cycle_request(true).await;
+    }
+
+    async fn run_cycle_request(self: &Arc<Self>, rescan_after_collect: bool) {
+        match self.begin_cycle(rescan_after_collect, false) {
+            Some(CycleAction::Wait(gate)) => gate.wait().await,
+            Some(CycleAction::Lead(gate)) => self.run_cycle_lead(gate).await,
+            None => {}
         }
     }
 
-    async fn run_cycle_once(&self) {
+    async fn run_cycle_lead(self: &Arc<Self>, gate: Arc<CycleGate>) {
+        loop {
+            self.run_cycle_once().await;
+            let failed = self.runtime.state_store.save_failed();
+            let rescan = {
+                let mut life = self
+                    .runtime
+                    .lifecycle
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                let rescan = life.rescan_requested && life.running && !failed;
+                life.rescan_requested = false;
+                life.collect_finished = false;
+                if !rescan {
+                    life.cycle = None;
+                }
+                rescan
+            };
+            if !rescan {
+                gate.finish();
+                return;
+            }
+            // Old collection and save have settled. Drain one coalesced
+            // post-collect request before releasing explicit cycle waiters.
+        }
+    }
+
+    fn report_cycle_error(&self, message: &str) {
+        self.runtime.logger.error(
+            "collection cycle failed",
+            json!({ "error": message }).as_object(),
+        );
+        let handlers = self
+            .error_handlers
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        for handler in handlers {
+            handler(message);
+        }
+    }
+
+    fn begin_checkpoint_save(self: &Arc<Self>) -> (Arc<Gate>, bool) {
+        let mut pending = self
+            .checkpoint_save
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(gate) = pending.as_ref() {
+            return (Arc::clone(gate), false);
+        }
+        let gate = Arc::new(Gate::new());
+        *pending = Some(Arc::clone(&gate));
+        let saved = Arc::clone(&gate);
+        let owner = Arc::clone(self);
+        tokio::spawn(async move {
+            // Dropping a cycle's wait must not drop StateStore's save leader.
+            let result = owner
+                .runtime
+                .state_store
+                .save()
+                .await
+                .map_err(|err| err.to_string());
+            {
+                let mut pending = owner
+                    .checkpoint_save
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if pending
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &saved))
+                {
+                    *pending = None;
+                }
+            }
+            if let Err(error) = &result {
+                owner.report_cycle_error(error);
+            }
+            saved.finish(result);
+        });
+        (gate, true)
+    }
+
+    async fn wait_checkpoint_save(self: &Arc<Self>, mut gate: Arc<Gate>, mut owns_save: bool) {
+        loop {
+            let result = gate.wait().await;
+            if owns_save || result.is_err() {
+                return;
+            }
+            // A restart reused an older pending save. Request one save after
+            // that generation, so completion cannot swallow our new revision.
+            (gate, owns_save) = self.begin_checkpoint_save();
+        }
+    }
+
+    async fn run_cycle_once(self: &Arc<Self>) {
         let started = InputRuntimeAccumulator::now();
         *self
             .runtime
@@ -721,6 +841,11 @@ impl<T: InputBody> HostedInput<T> {
             .begin_collect(self.body.checkpoint_namespaces());
         let produced = async {
             let entries = self.body.collect(&self.runtime).await?;
+            self.runtime
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .collect_finished = true;
             let filtered = self.runtime.with_workspace_policy(|policy| {
                 policy.filter_entries(&entries, self.runtime.agent_type)
             });
@@ -749,17 +874,18 @@ impl<T: InputBody> HostedInput<T> {
             produced?;
             let released = self.runtime.checkpoint_release.notified();
             let waiting = self.runtime.state_store.waiting_for_output();
-            if waiting {
-                self.runtime
-                    .checkpoint_waiting
-                    .store(true, Ordering::SeqCst);
-                self.runtime.checkpoint_ready.notify_waiters();
-            }
+            let (save, owns_save) = self.begin_checkpoint_save();
+            // Startup readiness is collection readiness, independent of IO.
+            // A write can acquire an output hold after it starts.
+            self.runtime
+                .checkpoint_waiting
+                .store(true, Ordering::SeqCst);
+            self.runtime.checkpoint_ready.notify_waiters();
             if waiting && !self.runtime.is_running() {
                 return Ok(());
             }
             tokio::select! {
-                result=self.runtime.state_store.save()=>result?,
+                _=self.wait_checkpoint_save(save, owns_save)=>{},
                 _=released=>{},
             }
             Ok::<(), anyhow::Error>(())
@@ -769,19 +895,7 @@ impl<T: InputBody> HostedInput<T> {
             .checkpoint_waiting
             .store(false, Ordering::SeqCst);
         if let Err(err) = cycle_result {
-            let message = err.to_string();
-            self.runtime.logger.error(
-                "collection cycle failed",
-                json!({ "error": message }).as_object(),
-            );
-            let handlers = self
-                .error_handlers
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .clone();
-            for handler in handlers {
-                handler(&message);
-            }
+            self.report_cycle_error(&err.to_string());
         }
         let duration = InputRuntimeAccumulator::now() - started;
         let delta = self
@@ -827,3 +941,7 @@ impl<T: InputBody> HostedInput<T> {
             .unwrap_or_else(|err| err.into_inner()) = Some(handle);
     }
 }
+
+#[cfg(test)]
+#[path = "checkpoint_lifecycle_main_tests.rs"]
+mod checkpoint_lifecycle_main_tests;

@@ -90,7 +90,7 @@ impl TurnBoundaryProcessor {
         let mut order = Vec::new();
         let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
         for (index, entry) in entries.iter().enumerate() {
-            if is_subagent(entry)
+            if (is_subagent(entry) && !is_codex(entry))
                 || matches!(
                     entry.event_name,
                     Some(
@@ -145,7 +145,12 @@ impl TurnBoundaryProcessor {
                 tracked.ended = true;
             }
 
-            if !tracked.started {
+            // Codex persists its native prompt marker with the input cursor.
+            // A fresh processor may see a restored suffix, not a new turn.
+            let codex_turn = indices
+                .first()
+                .is_some_and(|index| is_codex(&entries[*index]));
+            if !tracked.started && !codex_turn {
                 if let Some(first) = indices.first().copied() {
                     entries[first].turn_start = Some(true);
                     tracked.started = true;
@@ -208,7 +213,7 @@ impl Default for TurnBoundaryProcessor {
 
 /// Agent-aware terminal signal used only for additive boundary enrichment.
 pub fn is_terminal_turn_entry(entry: &AgentActivityEntry) -> bool {
-    if is_subagent(entry) {
+    if is_subagent(entry) && !is_codex(entry) {
         return false;
     }
     if entry.turn_end == Some(true) {
@@ -224,8 +229,9 @@ pub fn is_terminal_turn_entry(entry: &AgentActivityEntry) -> bool {
         return false;
     }
     if agent_type == "codex" {
-        let status = extra_str(entry, "agent.codex.turn_status");
-        return status == Some("completed") || status == Some("interrupted");
+        // Aborted status is stamped on every Codex record. Only its explicit
+        // native terminal marker closes a turn across input batches.
+        return false;
     }
     if agent_type == "openclaw" {
         return extra_str(entry, "agent.openclaw.hook") == Some("llm_output");
@@ -244,6 +250,10 @@ fn turn_key(entry: &AgentActivityEntry) -> Option<String> {
         normalize_agent_type(non_empty(Some(entry.agent_type.as_str())).unwrap_or("unknown"));
     let session_id = non_empty(Some(entry.session_id.as_str())).unwrap_or("");
     Some(format!("{agent_type}\u{0000}{session_id}\u{0000}{turn_id}"))
+}
+
+fn is_codex(entry: &AgentActivityEntry) -> bool {
+    normalize_agent_type(entry.agent_type.as_str()) == "codex"
 }
 
 fn is_subagent(entry: &AgentActivityEntry) -> bool {
@@ -634,12 +644,14 @@ mod tests {
             "other",
             json!({
                 "gen_ai.agent.type": "codex",
-                "agent.codex.turn_status": "completed"
+                "agent.codex.turn_status": "completed",
+                "gen_ai.turn.end": true
             }),
         )];
         processor.enrich(&mut response);
         processor.enrich(&mut terminal);
-        assert_eq!(response[0].turn_start, Some(true));
+        // main explicitly supersedes status-inferred end and synthetic Codex start.
+        assert_eq!(response[0].turn_start, None);
         assert_eq!(response[0].turn_end, None);
         assert_eq!(terminal[0].turn_start, None);
         assert_eq!(terminal[0].turn_end, Some(true));
@@ -654,6 +666,8 @@ mod tests {
             json!({
                 "gen_ai.agent.type": "codex",
                 "gen_ai.agent.scope": "subagent",
+                "gen_ai.session.id": "child-session",
+                "gen_ai.turn.id": "child-session:turn",
                 "gen_ai.response.finish_reasons": ["stop"]
             }),
         )];
@@ -662,14 +676,16 @@ mod tests {
             "other",
             json!({
                 "gen_ai.agent.type": "codex",
-                "agent.codex.turn_status": "completed"
+                "agent.codex.turn_status": "completed",
+                "gen_ai.turn.end": true
             }),
         )];
         processor.enrich(&mut child);
         processor.enrich(&mut root);
         assert_eq!(child[0].turn_start, None);
         assert_eq!(child[0].turn_end, None);
-        assert_eq!(root[0].turn_start, Some(true));
+        // main lets the child own native boundaries independently of the root.
+        assert_eq!(root[0].turn_start, None);
         assert_eq!(root[0].turn_end, Some(true));
     }
 
@@ -732,13 +748,19 @@ mod tests {
             "llm.response",
             json!({ "gen_ai.response.finish_reasons": ["cancelled"] }),
         )));
-        assert!(is_terminal_turn_entry(&entry(
+        // main supersedes only the old Codex status-only clause.
+        assert!(!is_terminal_turn_entry(&entry(
             "codex",
             "other",
             json!({
                 "gen_ai.agent.type": "codex",
                 "agent.codex.turn_status": "interrupted"
             }),
+        )));
+        assert!(is_terminal_turn_entry(&entry(
+            "codex-native-terminal",
+            "other",
+            json!({"gen_ai.agent.type":"codex","gen_ai.turn.end":true}),
         )));
         assert!(is_terminal_turn_entry(&entry(
             "openclaw",

@@ -173,7 +173,15 @@ async fn manager_l214_l426_disable_removes_current_and_retired_hooks_from_the_re
     let value = World::read(World::settings(&def));
     assert!(value["hooks"].get("Stop").is_some());
     assert!(value["hooks"].get("PreToolUse").is_some());
-    let command = def.hook.as_ref().unwrap().hook_command.clone();
+    // Use the same platform-resolved command that the real deployment loaded.
+    let command = manager
+        .get_definitions()
+        .into_iter()
+        .find(|loaded| loaded.id == def.id)
+        .unwrap()
+        .hook
+        .unwrap()
+        .hook_command;
     assert!(std::fs::read_to_string(World::settings(&def))
         .unwrap()
         .contains(command.replace('\\', "\\\\").as_str()));
@@ -306,6 +314,12 @@ async fn manager_l523_recorded_grok_settings_survive_definition_home_drift() {
     let manager = f.manager();
     let results = manager.deploy_all(None).await;
     assert!(results[0].success, "{results:?}");
+    // Real callers keep the manager's loaded definition; only its target home drifts.
+    def = manager
+        .get_definitions()
+        .into_iter()
+        .find(|loaded| loaded.id == "grok-build")
+        .unwrap();
     assert_eq!(
         f.state()["grok-build"]["hookSettingsPath"],
         json!(node_resolve(settings.to_str().unwrap()))
@@ -503,7 +517,7 @@ async fn manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_anothe
         assert_eq!(std::fs::read(&current).unwrap(), before);
         assert_eq!(
             f.state()["pi-coding-agent"]["pluginInjectConfigPath"],
-            json!(stale)
+            json!(node_resolve(stale.to_str().unwrap()))
         );
         assert_eq!(World::read(&current), foreign);
     }

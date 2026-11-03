@@ -2757,18 +2757,23 @@ mod tests {
     fn excluded_workspace_advances_cursor_without_history() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        let workspace = root.join("workspace");
         fs::write(
             root.join("config.json"),
-            r#"{"privacy":{"excludeWorkspaces":["/workspace"]}}"#,
+            json!({"privacy":{"excludeWorkspaces":[workspace]}}).to_string(),
         )
         .unwrap();
         let transcript = root.join("session.jsonl");
-        write_rows(&transcript, &real_shape());
+        let mut rows = real_shape();
+        for row in &mut rows {
+            row["cwd"] = json!(workspace);
+        }
+        write_rows(&transcript, &rows);
         let path = transcript.to_string_lossy().into_owned();
         let (code, stdout) = run_in(
             root,
             ARGS,
-            &payload(&path, "sess-qwen-1", "/workspace"),
+            &payload(&path, "sess-qwen-1", workspace.to_str().unwrap()),
             USER,
         );
         assert_eq!(code, 0);

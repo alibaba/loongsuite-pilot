@@ -1514,8 +1514,10 @@ mod tests {
         };
         let rewritten = definition_at_install_home(&def, "/workspace/.grok").unwrap();
         let path = rewritten.hook.unwrap().settings_path;
-        assert!(path.contains("workspace/.grok"));
-        assert!(path.ends_with("hooks/loongsuite-pilot.json"));
+        let expected = std::path::PathBuf::from(node_resolve("/workspace/.grok"))
+            .join("hooks")
+            .join("loongsuite-pilot.json");
+        assert_eq!(std::path::Path::new(&path), expected);
     }
 }
 

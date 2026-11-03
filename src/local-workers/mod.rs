@@ -23,3 +23,7 @@ pub use private_directory::{
     windows_acl_argv, WorkerPlatform, WINDOWS_ACL_COMMAND_TIMEOUT_MS, WINDOWS_ACL_PROTECT,
 };
 pub use worker_cli::{handle_worker_cli, handle_worker_cli_with, WorkerCliIo};
+
+#[cfg(test)]
+#[path = "deployment_test_isolation_history_contract_tests.rs"]
+mod deployment_isolation_history_contract_tests;

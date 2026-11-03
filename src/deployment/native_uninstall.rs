@@ -277,7 +277,8 @@ pub(super) async fn run_with_retirement(
             );
         }
         if let Err(error) =
-            super::runtime_retirement::cleanup_all(&data_dir.to_string_lossy(), &retirement).await
+            super::runtime_retirement::cleanup_uninstall(&data_dir.to_string_lossy(), &retirement)
+                .await
         {
             crate::utils::create_logger("NativeUninstall").error(
                 "legacy runtime cleanup failed; installation files preserved for retry",

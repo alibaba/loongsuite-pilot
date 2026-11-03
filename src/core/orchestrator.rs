@@ -3411,6 +3411,10 @@ impl crate::flushers::AlarmSink for AlarmBridge {
 }
 
 #[cfg(test)]
+#[path = "../local-workers/local_worker_activation_history_contract_tests.rs"]
+mod local_worker_history_contract_tests;
+
+#[cfg(test)]
 #[path = "orchestrator_watchdog_tests.rs"]
 mod watchdog_contract_tests;
 

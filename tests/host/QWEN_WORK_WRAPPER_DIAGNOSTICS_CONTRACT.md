@@ -8,7 +8,7 @@ installed location while forwarding only to that application's own runtime.
 
 Run this optional host contract with a development Node installation:
 
-    npm test -- tests/unit/hooks/qwen-work-cn-wrapper-path.test.mjs --cache=false --testNamePattern='derives diagnostics output from the runtime wrapper location'
+    npm run test:host:qwen-wrapper
 
 This selection executes one unchanged declaration. The other four declarations
 are handled separately: native shell/PowerShell installed-path tests replace

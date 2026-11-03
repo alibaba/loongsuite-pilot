@@ -128,7 +128,9 @@ mod tests {
         let snippet = build_rc_snippet("/home/user/.loongsuite-pilot");
         assert!(snippet.contains("# loongsuite-pilot BEGIN"));
         assert!(snippet.contains("# loongsuite-pilot END"));
-        assert!(snippet.contains("/home/user/.loongsuite-pilot/notifications"));
+        assert!(snippet
+            .replace('\\', "/")
+            .contains("/home/user/.loongsuite-pilot/notifications"));
         assert!(snippet.contains("cat"));
         assert!(snippet.contains("rm -f"));
         assert_eq!(build_rc_snippet("/data"), build_rc_snippet("/data"));

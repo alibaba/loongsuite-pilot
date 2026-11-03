@@ -192,14 +192,27 @@ fn wrapper(data_dir: &str) -> String {
         .to_string_lossy()
         .into_owned()
 }
-fn owned_paths(context: &Context, current: &str) -> [String; 2] {
-    [
-        current.to_owned(),
-        wrapper(&context.home.join(".loongsuite-pilot").to_string_lossy()),
-    ]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupOwnership {
+    Migration,
+    CurrentInstall,
 }
-fn owned_environment(context: &Context, current: &str, expected: &str) -> bool {
-    owned_paths(context, expected)
+fn owned_paths(context: &Context, current: &str, ownership: CleanupOwnership) -> Vec<String> {
+    let mut paths = vec![current.to_owned()];
+    if ownership == CleanupOwnership::Migration {
+        paths.push(wrapper(
+            &context.home.join(".loongsuite-pilot").to_string_lossy(),
+        ));
+    }
+    paths
+}
+fn owned_environment(
+    context: &Context,
+    current: &str,
+    expected: &str,
+    ownership: CleanupOwnership,
+) -> bool {
+    owned_paths(context, expected, ownership)
         .iter()
         .any(|owned| match context.host {
             Host::Windows => current.to_lowercase() == owned.to_lowercase(),
@@ -220,12 +233,28 @@ pub(crate) async fn cleanup_definition(
     context: &Context,
     def: Definition,
 ) -> Result<(), String> {
-    cleanup(context, def, &wrapper(data_dir)).await
+    cleanup(
+        context,
+        def,
+        &wrapper(data_dir),
+        CleanupOwnership::Migration,
+    )
+    .await
 }
 pub(crate) async fn cleanup_all(data_dir: &str, context: &Context) -> Result<(), String> {
+    cleanup_with_ownership(data_dir, context, CleanupOwnership::Migration).await
+}
+pub(crate) async fn cleanup_uninstall(data_dir: &str, context: &Context) -> Result<(), String> {
+    cleanup_with_ownership(data_dir, context, CleanupOwnership::CurrentInstall).await
+}
+async fn cleanup_with_ownership(
+    data_dir: &str,
+    context: &Context,
+    ownership: CleanupOwnership,
+) -> Result<(), String> {
     let mut failures = Vec::new();
     for def in definitions(context.host) {
-        if let Err(error) = cleanup_definition(data_dir, context, *def).await {
+        if let Err(error) = cleanup(context, *def, &wrapper(data_dir), ownership).await {
             failures.push(format!("{}: {error}", def.id));
         }
     }
@@ -235,7 +264,12 @@ pub(crate) async fn cleanup_all(data_dir: &str, context: &Context) -> Result<(),
         Err(failures.join("; "))
     }
 }
-async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<(), String> {
+async fn cleanup(
+    context: &Context,
+    def: Definition,
+    wrapper: &str,
+    ownership: CleanupOwnership,
+) -> Result<(), String> {
     if !context.backend.permits_cleanup() {
         return Ok(());
     }
@@ -250,7 +284,7 @@ async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<()
                 .await
                 .unwrap_or_default();
             let current = parse_windows_user_env(&current, def.env_name);
-            if current.is_empty() || !owned_environment(context, &current, wrapper) {
+            if current.is_empty() || !owned_environment(context, &current, wrapper, ownership) {
                 return Ok(());
             }
             context
@@ -280,7 +314,7 @@ async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<()
                 .run(Command::mac(&["getenv", def.env_name]))
                 .await
             {
-                if owned_environment(context, current.trim(), wrapper) {
+                if owned_environment(context, current.trim(), wrapper, ownership) {
                     if let Err(error) = context
                         .backend
                         .run(Command::mac(&["unsetenv", def.env_name]))
@@ -291,7 +325,7 @@ async fn cleanup(context: &Context, def: Definition, wrapper: &str) -> Result<()
                 }
             }
             if let Some(label) = def.plist_label {
-                if let Err(error) = cleanup_plist(context, def, label, wrapper).await {
+                if let Err(error) = cleanup_plist(context, def, label, wrapper, ownership).await {
                     failure = Some(error);
                 }
             }
@@ -359,6 +393,7 @@ async fn cleanup_plist(
     def: Definition,
     label: &str,
     wrapper: &str,
+    ownership: CleanupOwnership,
 ) -> Result<(), String> {
     let path = context
         .home
@@ -375,7 +410,7 @@ async fn cleanup_plist(
             return Ok(());
         }
     };
-    if !owned_paths(context, wrapper)
+    if !owned_paths(context, wrapper, ownership)
         .iter()
         .any(|owned| owned_xml(&first.bytes, label, def.env_name, owned))
     {

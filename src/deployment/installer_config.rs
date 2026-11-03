@@ -87,7 +87,7 @@ impl Options {
         }
     }
     fn boolean(&self, key: &str) -> Result<Option<bool>> {
-        match self.text(key).as_str() {
+        match self.text(key).to_ascii_lowercase().as_str() {
             "" => Ok(None),
             "true" | "1" => Ok(Some(true)),
             "false" | "0" => Ok(Some(false)),

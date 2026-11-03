@@ -17,12 +17,16 @@ fn persisted_l12_l17_hooks_parent_and_plain_settings_parent_resolve_to_the_exact
     let grok = t.path().join("workspace/.grok");
     let pi = t.path().join("pi-agent");
     assert_eq!(
-        home_from_config_file(grok.join("hooks/loongsuite-pilot.json").to_str().unwrap()),
-        node_resolve(grok.to_str().unwrap())
+        std::path::PathBuf::from(home_from_config_file(
+            grok.join("hooks/loongsuite-pilot.json").to_str().unwrap()
+        )),
+        grok
     );
     assert_eq!(
-        home_from_config_file(pi.join("settings.json").to_str().unwrap()),
-        node_resolve(pi.to_str().unwrap())
+        std::path::PathBuf::from(home_from_config_file(
+            pi.join("settings.json").to_str().unwrap()
+        )),
+        pi
     );
 }
 #[test]

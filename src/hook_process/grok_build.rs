@@ -1052,16 +1052,22 @@ fn default_log_dir(env: &Env) -> PathBuf {
     data_dir(env).join("logs").join(AGENT_ID)
 }
 
-fn file_ino(meta: &fs::Metadata) -> Option<String> {
+fn file_snapshot(path: &Path) -> io::Result<(fs::Metadata, Option<String>)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        Some(meta.ino().to_string())
+        let metadata = fs::metadata(path)?;
+        let ino = metadata.ino().to_string();
+        Ok((metadata, Some(ino)))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = meta;
-        None
+        use std::os::windows::fs::OpenOptionsExt;
+        // Attribute-only identity from one live handle: creation time is not
+        // an inode, and replacement may keep or increase the source length.
+        let file = OpenOptions::new().access_mode(0x80).open(path)?;
+        let identity = crate::utils::file_identity::identity_from_open(&file)?;
+        Ok((file.metadata()?, Some(identity.ino.to_string())))
     }
 }
 
@@ -1509,10 +1515,10 @@ fn wait_for_file_stable(path: &Path, min_size: u64) {
 }
 
 fn checkpoint_for(path: &Path, offset: u64) -> Checkpoint {
-    match fs::metadata(path) {
-        Ok(meta) => Checkpoint {
+    match file_snapshot(path) {
+        Ok((meta, ino)) => Checkpoint {
             offset: offset.min(meta.len()),
-            ino: file_ino(&meta),
+            ino,
             size: meta.len(),
         },
         Err(_) => Checkpoint {
@@ -1524,11 +1530,10 @@ fn checkpoint_for(path: &Path, offset: u64) -> Checkpoint {
 }
 
 fn resolve_chat_read_position(path: &Path, checkpoint: &Checkpoint) -> (u64, bool) {
-    let Ok(meta) = fs::metadata(path) else {
+    let Ok((meta, current_ino)) = file_snapshot(path) else {
         return (0, false);
     };
     let size = meta.len();
-    let current_ino = file_ino(&meta);
     let identity_changed = match (&checkpoint.ino, &current_ino) {
         (Some(saved), Some(current)) => saved != current,
         _ => false,
@@ -2162,8 +2167,8 @@ fn read_complete_lines(
     checkpoint: &Checkpoint,
     max_bytes: u64,
 ) -> Result<LineRead, String> {
-    let meta = match fs::metadata(path) {
-        Ok(meta) => meta,
+    let (meta, current_ino) = match file_snapshot(path) {
+        Ok(snapshot) => snapshot,
         Err(_) => {
             return Ok(LineRead {
                 lines: Vec::new(),
@@ -2177,7 +2182,6 @@ fn read_complete_lines(
         }
     };
     let file_size = meta.len();
-    let current_ino = file_ino(&meta);
     let identity_changed = match (&checkpoint.ino, &current_ino) {
         (Some(saved), Some(current)) => saved != current,
         _ => false,
@@ -5211,6 +5215,33 @@ mod tests {
         again["stop_reason"] = json!("end_turn");
         assert_eq!(world.run("stop", &again).0, 0);
         assert_eq!(world.records(), emitted);
+    }
+
+    #[test]
+    fn native_file_identity_keeps_appends_and_resets_larger_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("chat identity Ω.jsonl");
+        fs::write(&path, "old\n").unwrap();
+        let checkpoint = checkpoint_for(&path, 4);
+        assert!(checkpoint.ino.is_some());
+        let mut append = OpenOptions::new().append(true).open(&path).unwrap();
+        append.write_all(b"appended\n").unwrap();
+        drop(append);
+        let (offset, reset) = resolve_chat_read_position(&path, &checkpoint);
+        assert_eq!((offset, reset), (4, false));
+        assert_eq!(file_snapshot(&path).unwrap().1, checkpoint.ino);
+        let replacement = root.path().join("replacement.jsonl");
+        fs::write(&replacement, "replaced current turn\n").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let (offset, reset) = resolve_chat_read_position(&path, &checkpoint);
+        assert_eq!((offset, reset), (0, true));
+        let replacement_identity = file_snapshot(&path).unwrap().1;
+        assert!(replacement_identity.is_some());
+        assert_ne!(replacement_identity, checkpoint.ino);
+        let read = read_complete_lines(&path, &checkpoint, MAX_TRANSCRIPT_BYTES).unwrap();
+        assert!(read.reset);
+        assert_eq!(read.lines.len(), 1);
+        assert_eq!(read.lines[0].text, "replaced current turn");
     }
 
     #[test]

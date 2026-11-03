@@ -2635,3 +2635,9 @@ mod cross_version_upgrade;
 
 #[path = "installer_history/config_bridge.rs"]
 mod installer_config_bridge_history;
+
+#[path = "installer_history/version_and_hook_entry.rs"]
+mod installer_version_hook_history;
+
+#[path = "installer_history/status_edr_profile.rs"]
+mod installer_status_edr_profile_history;

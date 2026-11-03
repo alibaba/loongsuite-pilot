@@ -302,9 +302,9 @@ function Test-PidRunning {
 # cleanup stays in Stop-PidFile.
 function Test-PidAlive {
     param([string]$pidFile)
-    if (-not (Test-Path $pidFile)) { return $false }
+    if (-not (Test-Path -LiteralPath $pidFile)) { return $false }
     try {
-        $raw = Get-Content $pidFile -ErrorAction SilentlyContinue
+        $raw = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
         if (-not $raw) { return $false }
         $pidVal = ([string]$raw).Trim()
         if (-not $pidVal) { return $false }
@@ -351,7 +351,7 @@ function Stop-PidFile {
     param([string]$pidFile)
     # 身份未知时不删除 PID 文件，避免抹掉并发启动者或其他安装的状态。
     if (-not (Test-PidRunning $pidFile)) { return }
-    $pidVal = (Get-Content $pidFile -ErrorAction SilentlyContinue).Trim()
+    $pidVal = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue).Trim()
     $role = if ($pidFile -eq $UPDATER_PID_FILE) { "updater" } else { "collector" }
     if (-not (Test-InstalledProcess $pidVal $role)) { return }
     try { Stop-Process -Id $pidVal -ErrorAction SilentlyContinue } catch {}
@@ -380,7 +380,7 @@ function Stop-PidFile {
         $currentPid = ([string](Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue)).Trim()
     }
     if ($currentPid -eq $pidVal) {
-        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -547,8 +547,8 @@ function Get-TaskStartIntent {
 }
 
 function Get-InitType {
-    if (-not (Test-Path $INIT_TYPE_FILE)) { return "" }
-    $value = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue)
+    if (-not (Test-Path -LiteralPath $INIT_TYPE_FILE)) { return "" }
+    $value = (Get-Content -LiteralPath $INIT_TYPE_FILE -ErrorAction SilentlyContinue)
     if (-not $value) { return "" }
     return ([string]$value).Trim()
 }
@@ -645,7 +645,10 @@ function Test-AccessDeniedError {
 # the value is off by the timezone offset (8h here) and the reader's freshness check
 # would either reject this breadcrumb or accept a stale one.
 function Get-EpochSeconds {
-    return [int](((Get-Date).ToUniversalTime() - (Get-Date -Date "1970-01-01 00:00:00")).TotalSeconds)
+    # Integer conversion rounds a floating value; discard fractional ticks first.
+    $elapsed = (Get-Date).ToUniversalTime() - (Get-Date -Date "1970-01-01 00:00:00")
+    $ticks = $elapsed.Ticks
+    return [int](($ticks - ($ticks % 10000000)) / 10000000)
 }
 
 # 5.1 ConvertTo-Json serializes a nested hashtable as [{Key, Value}, ...], not a JSON
@@ -1180,7 +1183,7 @@ function Cmd-Start {
             if ($ok2) {
                 Start-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
             }
-            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Set-Content -LiteralPath $INIT_TYPE_FILE -Value "taskscheduler"
             if (Wait-ForCollectorHeartbeat) {
                 Write-Host "loongsuite-pilot started (Task Scheduler)"
                 return
@@ -1200,7 +1203,7 @@ function Cmd-Start {
         # regenerated with the new binary/config/package paths, so it is safe to
         # start and reuse that task after validating its action.
         if (Start-CompatibleExistingCollectorTask) {
-            Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+            Set-Content -LiteralPath $INIT_TYPE_FILE -Value "taskscheduler"
             Write-Host "Reused existing scheduled task: $TASK_NAME_COLLECTOR" -ForegroundColor Green
             return
         }
@@ -1338,7 +1341,7 @@ function Cmd-StartCollector {
         try {
             $ok = Install-CollectorTask $pilotBin -SkipCleanup
             if ($ok) {
-                Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                Set-Content -LiteralPath $INIT_TYPE_FILE -Value "taskscheduler"
                 Start-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction Stop
                 if (-not (Wait-ForCollectorHeartbeat 20)) { throw "恢复的 collector 任务未确认存活" }
                 Write-Host "collector task restored and running (Task Scheduler)"
@@ -1540,7 +1543,7 @@ function Cmd-RestartCollector {
                     # type first so a Set-Content failure cannot fall through to background.
                     $initType = "taskscheduler"
                     try {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Set-Content -LiteralPath $INIT_TYPE_FILE -Value "taskscheduler"
                     } catch {
                         # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
                     }
@@ -1733,7 +1736,7 @@ function Cmd-RestartUpdater {
                 } else {
                     $initType = "taskscheduler"
                     try {
-                        Set-Content -Path $INIT_TYPE_FILE -Value "taskscheduler"
+                        Set-Content -LiteralPath $INIT_TYPE_FILE -Value "taskscheduler"
                     } catch {
                         # Disk write failed; in-memory type already skips Start-BackgroundDaemon.
                     }
@@ -1889,7 +1892,7 @@ function Cmd-Status {
         Write-Host "   autostart: enabled (Task Scheduler, trigger: AtLogon)"
     } else {
         $initType = ""
-        if (Test-Path $INIT_TYPE_FILE) { $initType = (Get-Content $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
+        if (Test-Path -LiteralPath $INIT_TYPE_FILE) { $initType = (Get-Content -LiteralPath $INIT_TYPE_FILE -ErrorAction SilentlyContinue).Trim() }
         if ($initType -eq "background") {
             Write-Host "   autostart: disabled (background process fallback)"
         } else {

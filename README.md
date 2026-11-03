@@ -266,7 +266,7 @@ cargo build --locked --release
 ./target/release/loongsuite-pilot --help
 ```
 
-For local development:
+The root npm manifest is private and contains optional host-plugin development tools.\nIts default build, start, typecheck and test commands delegate to Cargo. Installing\nthose tools does not deploy Hooks; use the native CLI for installation. Host-only\nchecks have explicit `test:host:*` scripts.\n\nFor local development:
 
 ```bash
 cargo fmt --all -- --check

@@ -1,5 +1,5 @@
 //! Real Windows junction fixture with one fixed cmd template and scoped paths.
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,7 +15,6 @@ fn command_path(path: &Path) -> String {
 }
 
 pub(crate) fn create(target: &Path, alias: &Path, timeout: Duration) {
-    use std::os::windows::process::CommandExt;
     assert!(!timeout.is_zero());
     assert!(target.is_absolute() && alias.is_absolute());
     assert!(target.is_dir() && !alias.exists());
@@ -24,15 +23,16 @@ pub(crate) fn create(target: &Path, alias: &Path, timeout: Duration) {
     let mut stdout = tempfile::tempfile().unwrap();
     let mut stderr = tempfile::tempfile().unwrap();
     let mut command = Command::new(shell);
-    // /s removes exactly the enclosing command quotes. raw_arg avoids applying
-    // CreateProcess argv backslash escaping to cmd's separate built-in grammar.
-    // Paths never enter command text; /v:off keeps literal exclamation marks.
+    // The fixed ASCII input avoids cmd /c's separate command-line grammar.
+    // All paths stay in the scoped environment; delayed expansion is disabled.
+    let mut input = tempfile::tempfile().unwrap();
+    input.write_all(b"@echo off\r\nmklink /J \"%PILOT_TEST_JUNCTION_ALIAS%\" \"%PILOT_TEST_JUNCTION_TARGET%\"\r\nexit %errorlevel%\r\n").unwrap();
+    input.seek(SeekFrom::Start(0)).unwrap();
     command
-        .args(["/d", "/v:off", "/s", "/c"])
-        .raw_arg(r#""mklink /J "%PILOT_TEST_JUNCTION_ALIAS%" "%PILOT_TEST_JUNCTION_TARGET%"""#)
+        .args(["/d", "/v:off", "/q"])
         .env("PILOT_TEST_JUNCTION_ALIAS", command_path(alias))
         .env("PILOT_TEST_JUNCTION_TARGET", command_path(target))
-        .stdin(Stdio::null())
+        .stdin(Stdio::from(input))
         .stdout(Stdio::from(stdout.try_clone().unwrap()))
         .stderr(Stdio::from(stderr.try_clone().unwrap()));
     let mut child = super::candidate_process::CandidateChild::spawn(&mut command).unwrap();

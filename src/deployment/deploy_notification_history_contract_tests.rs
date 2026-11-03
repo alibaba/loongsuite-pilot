@@ -24,6 +24,7 @@ async fn notification_l32_l40_l48_l56_exact_mount_messages_append_and_return_onl
 #[test]
 fn notification_l67_l77_rc_snippet_markers_commands_target_and_same_input_are_exact() {
     let snippet = build_rc_snippet("/home/user/.loongsuite-pilot");
+    let normalized_paths = snippet.replace('\\', "/");
     for value in [
         "# loongsuite-pilot BEGIN",
         "# loongsuite-pilot END",
@@ -31,7 +32,7 @@ fn notification_l67_l77_rc_snippet_markers_commands_target_and_same_input_are_ex
         "cat",
         "rm -f",
     ] {
-        assert!(snippet.contains(value), "{value}");
+        assert!(normalized_paths.contains(value), "{value}");
     }
     assert_eq!(build_rc_snippet("/data"), build_rc_snippet("/data"));
 }

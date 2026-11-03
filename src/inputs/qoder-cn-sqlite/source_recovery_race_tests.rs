@@ -35,6 +35,9 @@ async fn physical_database_replacement_during_actual_query_discards_rows_before_
         |_| {},
     );
     input.start().await.unwrap();
+    // The race hook is task-local to the explicit query below. Settle the
+    // initial worker first; startup itself no longer waits for checkpoint IO.
+    input.inner.await_current_cycle_for_test().await;
     assert_eq!(store.get_row_id("qoder-cn-sqlite"), 10.0);
     assert!(entries.lock().unwrap().is_empty());
     let selected = database.clone();
