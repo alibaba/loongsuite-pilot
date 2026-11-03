@@ -18,13 +18,13 @@ AgentLoop 的原生跳转宿主适配尚未完成；不能直接复用 SLS 的�
 | 目标 | 控制台事件类型 | modern JSON `event` | 配置重点 |
 |---|---|---|---|
 | SLS Logstore | 打开日志库 | `logstore` | Project、Logstore、搜索过滤语句 |
-| SLS 仪表盘 | 打开仪表盘 | `dashboard` | Project、仪表盘 ID、目标变量映射 |
-| SLS 快速查询 | 打开快速查询 | `savedSearch` | Project、快速查询 ID、查询变量映射 |
+| SLS 仪表盘 | 打开仪表盘 | `dashboard` | Project、`dashboardName`（仪表盘资源名）、目标变量映射 |
+| SLS 快速查询 | 打开快速查询 | `savedSearch` | Project、`savedSearchName`（快速查询资源名）、查询变量映射 |
 | 任意业务页面或 HTTP(S) 地址 | 自定义 HTTP 链接 | `link` | 协议、地址、参数编码、打开方式 |
 
 纯 SLS 场景的前三类目标由原生事件处理资源路由、时间和变量传递，无需手工拼接 SLS URL、`token` JSON 或多次 URL 编码。AgentLoop 仪表盘间跳转使用下文内置的 [AgentLoop URL 配方](#agentloop-仪表盘间跳转)，包含站内路由、变量格式与编码规则，不能照搬 SLS 控制台的 `/lognext/...` 相对路径。任意业务 HTTP(S) 地址使用通用自定义链接。
 
-嵌入其他产品的仪表盘也需确认宿主对事件类型与路由的支持。按宿主能力选择并验证跳转方式；若目标错误，分别检查资源 ID、权限和宿主路由，不能仅凭独立 SLS 控制台中的成功结果宣称嵌入页面也可用。
+嵌入其他产品的仪表盘也需确认宿主对事件类型与路由的支持。按宿主能力选择并验证跳转方式；若目标错误，分别检查资源名、权限和宿主路由，不能仅凭独立 SLS 控制台中的成功结果宣称嵌入页面也可用。
 
 ## 定义交互契约
 
@@ -32,7 +32,7 @@ AgentLoop 的原生跳转宿主适配尚未完成；不能直接复用 SLS 的�
 
 - 查看环境：纯 SLS 控制台或 AgentLoop；AgentLoop 仪表盘间跳转按本文内置配方配置，在场景 spec 中绑定实际地域、AgentSpace、目标仪表盘与变量名。
 - 点击入口：查询标识（如 `A`）、图表类型、绑定字段、事件名称。
-- 跳转目标：事件类型、Project、目标资源 ID 或 HTTP 地址；展示名不能代替资源 ID。
+- 跳转目标：事件类型、Project、目标资源名或 HTTP 地址。原生仪表盘事件传 `dashboardName`，快速查询事件传 `savedSearchName`；两者均为资源名，不使用展示标题 `displayName` 或另行查找的内部 ID。
 - 传参：目标变量名 → 源查询结果列，必要时补充固定变量。
 - 上下文：时间范围、是否继承过滤与变量、是否打开新窗口。
 - 目标行为：所有受影响的图表如何消费参数，以及未选择、清空和未匹配对象时的行为。
@@ -88,7 +88,7 @@ WHERE dept_id = '${{dept_id}}'
 
 ## Modern JSON 配方
 
-以下均为合成资源示例。前三个原生配方用于纯 SLS 场景；AgentLoop 使用自定义 HTTP(S) 链接配方，并替换为宿主实际 URL。添加到图表的 `display` 中并保留其余显示配置；替换资源 ID、查询标识和结果列名。已有 legacy 图表保持原格式，必要时先在编辑器配置一个同类型事件并读取保存结果，不整体迁移大盘。
+以下均为合成资源示例。前三个原生配方用于纯 SLS 场景；AgentLoop 使用自定义 HTTP(S) 链接配方，并替换为宿主实际 URL。添加到图表的 `display` 中并保留其余显示配置；替换资源名、查询标识和结果列名。已有 legacy 图表保持原格式，必要时先在编辑器配置一个同类型事件并读取保存结果，不整体迁移大盘。
 
 ### 原生打开仪表盘
 
@@ -145,7 +145,7 @@ WHERE dept_id = '${{dept_id}}'
 
 ### 原生打开快速查询
 
-目标快速查询需在模板中声明 `session_id` 变量，`savedSearchName` 使用资源 ID：
+目标快速查询需在模板中声明 `session_id` 变量，`savedSearchName` 使用快速查询资源名：
 
 ```json
 {
@@ -190,14 +190,14 @@ WHERE dept_id = '${{dept_id}}'
 AgentLoop 仪表盘使用 AgentSpace 下的站内路由。当前以 `event: link` 按以下配方传递页面地址、变量和时间。
 
 ```text
-/agentloop/region/<region>/agentspace/<space>/app/dashboard/detail/<dashboard-id>
+/agentloop/region/<region>/agentspace/<space>/app/dashboard/detail/<dashboard-name>
 ```
 
 | 路由或参数 | 当前约定 |
 |---|---|
 | `region` | 目标 AgentSpace 所在地域，如 `cn-shanghai`。 |
 | `space` | 目标 AgentSpace 的名称，不是 SLS Project 名。 |
-| `dashboard-id` | SLS 仪表盘的 `dashboardName`，不是展示标题。 |
+| `dashboard-name` | SLS 仪表盘资源名 `dashboardName`，不是展示标题 `displayName`。 |
 | `dashboardSlsSource=agentSpace` | 使用当前 AgentSpace 绑定的 SLS 数据源；此配方针对该来源。 |
 | `queryTimeType=99` | 显式指定绝对时间范围。 |
 | `startTime` / `endTime` | 源图表查询起止时间，Unix 秒；分别引用 `${{__start_time__}}` / `${{__end_time__}}`。 |
@@ -221,7 +221,7 @@ url_encode(url_encode(json_format(
 
 当前 AgentLoop 跳转链路会解析并重写 URL，token JSON 采用双层编码以保留中文、`&` 等字符。单层编码会使特殊字符在传递过程中过早解码，可能导致目标变量截断或匹配不到数据。双层编码仅用于此 AgentLoop URL 配方；纯 SLS 原生事件直接传原始列值。不要编码整条 URL，也不要再对 `_jump_token` 追加编码。
 
-在实际点击字段的 `events` 中配置以下事件，替换地域、AgentSpace 名称和仪表盘 ID：
+在实际点击字段的 `events` 中配置以下事件，替换地域、AgentSpace 名称和仪表盘资源名 `dashboardName`：
 
 ```json
 {
@@ -252,7 +252,7 @@ url_encode(url_encode(json_format(
 | 检查项 | 通过条件 |
 |---|---|
 | 点击绑定 | 表格目标单元格、柱/扇区/点的指定系列均有正确事件；不出现“当前暂无配置” |
-| 资源与宿主 | 打开预期 Project、资源 ID 和产品页面，不落到首页或其他空间 |
+| 资源与宿主 | 打开预期 Project、资源名和产品页面，不落到首页或其他空间 |
 | 行值映射 | 至少选择两个不同对象；目标变量及实际查询结果分别对应点击对象 |
 | 特殊值 | 对适用的中文、空格、`&`、引号等值检查参数完整性、查询合法性与结果范围 |
 | 时间 | 绝对窗口起止一致；相对窗口预设符合约定，单位正确 |
