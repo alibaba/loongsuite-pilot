@@ -34,6 +34,18 @@ describe('CodexTurnJournal', () => {
     expect((await fs.readdir(directory)).every(name => /^codex-turn-[a-f0-9]{64}\.jsonl$/.test(name))).toBe(true);
   });
 
+  it('streams bounded batches and deduplicates IDs across batch boundaries', async () => {
+    const journal = new CodexTurnJournal(directory);
+    const first = entry('large-a', { 'gen_ai.input.messages': 'x'.repeat(600 * 1024) });
+    const second = entry('large-b', { 'gen_ai.input.messages': 'y'.repeat(600 * 1024) });
+    await journal.append([first, second, first]);
+    const batches = [];
+    for await (const batch of journal.loadBatches()) batches.push(batch);
+    expect(batches).toHaveLength(2);
+    expect(batches.map(batch => batch.last)).toEqual([false, true]);
+    expect(batches.flatMap(batch => batch.entries.map(record => record['event.id']))).toEqual(['large-a', 'large-b']);
+  });
+
   it('reads the next pending group only after the previous group is consumed', async () => {
     const journal = new CodexTurnJournal(directory);
     const records = Array.from({ length: 70 }, (_, index) => entry(`event-${index}`, {

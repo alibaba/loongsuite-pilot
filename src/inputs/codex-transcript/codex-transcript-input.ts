@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { Dirent, FSWatcher } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue, MultimodalUploadMode } from '../../types/index.js';
@@ -216,6 +217,13 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
   private wakeupWatcher: FSWatcher | null = null;
+  private wakeupTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly dirtyWakeupMarkers = new Set<string>();
+  private wakeupOnlyRequested = false;
+  private wakeupDiscoveryPending = false;
+  private wakeupDiscoveryRevision = 0;
+  private lastFullScanAt = -Infinity;
+  private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
@@ -317,8 +325,8 @@ export class CodexTranscriptInput extends BaseInput {
       fs.mkdir(this.spanContextDir, { recursive: true }),
     ]);
     try {
-      this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, () => {
-        this.requestCollection();
+      this.wakeupWatcher = fsSync.watch(this.wakeupDir, { persistent: false }, (_event, filename) => {
+        this.noteWakeup(filename?.toString());
       });
       this.wakeupWatcher.on('error', () => {
         this.wakeupWatcher?.close();
@@ -334,22 +342,95 @@ export class CodexTranscriptInput extends BaseInput {
   protected override async onStop(): Promise<void> {
     this.wakeupWatcher?.close();
     this.wakeupWatcher = null;
+    if (this.wakeupTimer) clearTimeout(this.wakeupTimer);
+    this.wakeupTimer = null;
+    this.dirtyWakeupMarkers.clear();
+    this.wakeupOnlyRequested = false;
+    this.wakeupDiscoveryPending = false;
+    this.wakeupDiscoveryRevision = 0;
+    this.wakeupPaths.clear();
+    this.lastFullScanAt = -Infinity;
     this.multimodalUriCache.clear();
     this.incompleteTails.clear();
     this.transcriptMetaCacheByPath.clear();
     this.transcriptMetaCacheBytes = 0;
   }
 
-  protected override async collect(): Promise<AgentActivityEntry[]> {
-    await this.cleanupExpiredSpanContexts(Date.now());
-    let emittedCount = 0;
-    const discovered = await this.discoverSessionFiles();
-    const discoveredPaths = new Set(discovered.map(file => file.filePath));
-    for (const filePath of this.rolloutIdleSnapshot.keys()) {
-      if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
+  /** Fixed window, not trailing debounce: continuous events cannot postpone work. */
+  private noteWakeup(filename?: string): void {
+    if (filename && (!/^[a-zA-Z0-9_-]+\.json$/.test(filename))) return;
+    // Bounded queue. Unknown/overflow notifications are covered by full polling.
+    if (this.dirtyWakeupMarkers.size < MAX_WAKEUP_MARKERS_PER_CLEANUP) {
+      this.dirtyWakeupMarkers.add(filename ?? '*');
+    } else {
+      this.wakeupDiscoveryPending = true;
+      this.wakeupDiscoveryRevision++;
     }
-    const skipPaths = this.historicalRolloutSkipPaths(discovered, Date.now());
-    await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+    this.scheduleWakeup();
+  }
+
+  private scheduleWakeup(): void {
+    if (this.wakeupTimer || !this.running || !this.dirtyWakeupMarkers.size) return;
+    this.wakeupTimer = setTimeout(() => {
+      this.wakeupTimer = null;
+      this.wakeupOnlyRequested = true;
+      this.requestCollection();
+      // A busy BaseInput coalesces requests. Keep retrying until collect takes
+      // the dirty set; never clear notifications just because a timer fired.
+      this.scheduleWakeup();
+    }, 200);
+    this.wakeupTimer.unref();
+  }
+
+  protected override async collect(): Promise<AgentActivityEntry[]> {
+    const wakeupOnly = this.wakeupOnlyRequested;
+    this.wakeupOnlyRequested = false;
+    const dirty = new Set(this.dirtyWakeupMarkers);
+    this.dirtyWakeupMarkers.clear();
+    const targeted = new Set<string>();
+    for (const marker of dirty) {
+      const paths = this.wakeupPaths.get(marker);
+      if (!paths) {
+        this.wakeupDiscoveryPending = true;
+        this.wakeupDiscoveryRevision++;
+      }
+      for (const file of paths ?? []) targeted.add(file);
+    }
+    const discoveryRevision = this.wakeupDiscoveryRevision;
+    const now = Date.now();
+    const fullScan = !wakeupOnly || now - this.lastFullScanAt >= this.pollIntervalMs;
+    await this.cleanupExpiredSpanContexts(now);
+    let emittedCount = 0;
+    let discovered: DiscoveredSessionFile[];
+    let skipPaths = new Set<string>();
+    if (fullScan) {
+      discovered = await this.discoverSessionFiles();
+      this.lastFullScanAt = now;
+      const discoveredPaths = new Set(discovered.map(file => file.filePath));
+      for (const filePath of this.rolloutIdleSnapshot.keys()) {
+        if (!discoveredPaths.has(filePath)) this.rolloutIdleSnapshot.delete(filePath);
+      }
+      skipPaths = this.historicalRolloutSkipPaths(discovered, now);
+      // A filename-less/overflow notification may carry only new ownership
+      // evidence for a cold file. Do not lose it to historical-file skipping.
+      if (this.wakeupDiscoveryPending) skipPaths.clear();
+      for (const file of targeted) skipPaths.delete(file);
+      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+      this.wakeupPaths.clear();
+      for (const { filePath } of discovered) {
+        const meta = this.transcriptMetaByPath.get(filePath);
+        if (!meta) continue;
+        const marker = `${safeWakeupSessionPart(meta.threadId)}.json`;
+        if (!this.wakeupPaths.has(marker)) this.wakeupPaths.set(marker, new Set());
+        this.wakeupPaths.get(marker)!.add(filePath);
+      }
+      if (this.wakeupDiscoveryRevision === discoveryRevision) this.wakeupDiscoveryPending = false;
+    } else {
+      // Known sessions need no directory/marker enumeration. Newly created
+      // sessions and filename-less notifications retain full polling fallback.
+      discovered = [...targeted].map(filePath => ({ filePath, baselineOnStart: false }));
+      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
+    }
     discovered.sort((left, right) => {
       const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
@@ -359,8 +440,9 @@ export class CodexTranscriptInput extends BaseInput {
       if (skipPaths.has(filePath)) continue;
       emittedCount += await this.processFile(filePath);
     }
-    emittedCount += await this.retryPendingAgentResults();
+    if (fullScan) emittedCount += await this.retryPendingAgentResults();
     this.reportSubagentLinks();
+    this.saveDelegationState();
     if (emittedCount > 0) {
       this.logger.debug('cycle produced entries', { count: emittedCount });
     }
@@ -583,7 +665,8 @@ export class CodexTranscriptInput extends BaseInput {
       const prepared = await this.prepareCopiedTranscript(filePath, stat.size, ownerMeta!, checkpoint);
       checkpointChanged ||= prepared.changed;
       if (!prepared.ready) {
-        this.saveCheckpoint(key, checkpoint);
+        if (checkpointChanged) this.saveCheckpoint(key, checkpoint);
+        else this.saveDelegationState();
         return 0;
       }
     }
@@ -1272,8 +1355,15 @@ export class CodexTranscriptInput extends BaseInput {
   private async indexDiscoveredTranscriptOwners(
     files: DiscoveredSessionFile[],
     skipPaths?: ReadonlySet<string>,
+    mode: 'full' | 'targeted' = 'full',
   ): Promise<void> {
     const kept = new Map<string, NonNullable<ReturnType<typeof extractCodexTranscriptMeta>>>();
+    const discoveredPaths = new Set(files.map(file => file.filePath));
+    if (mode === 'targeted') {
+      for (const [filePath, meta] of this.transcriptMetaByPath) {
+        if (meta && !discoveredPaths.has(filePath)) kept.set(filePath, meta);
+      }
+    }
     if (skipPaths) {
       for (const filePath of skipPaths) {
         const meta = this.transcriptMetaByPath.get(filePath);
@@ -1282,7 +1372,8 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
-    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
+    // Only a complete discovery can establish that an unrelated file is gone.
+    if (mode === 'full') this.pruneAbsentTranscriptMetaCache(discoveredPaths, Date.now());
     for (const [filePath, meta] of kept) {
       this.publishTranscriptOwnerMeta(filePath, meta);
     }
@@ -1844,6 +1935,8 @@ export class CodexTranscriptInput extends BaseInput {
     ownerMeta: CodexTranscriptMeta,
     checkpoint: CodexTranscriptCheckpoint,
   ): Promise<{ ready: boolean; changed: boolean }> {
+    const previousBootstrap = checkpoint.forkBootstrap;
+    const changed = () => !isDeepStrictEqual(previousBootstrap, checkpoint.forkBootstrap);
     // A newly discovered live fork must not enter the normal scanner until its
     // first positively-owned turn is located.
     if (checkpoint.scanOffset === 0 && checkpoint.forkBootstrap === undefined) {
@@ -1857,7 +1950,7 @@ export class CodexTranscriptInput extends BaseInput {
     if (!current) return { ready: true, changed: false };
     if (current.state === 'baseline-tail') {
       const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return { ready: rebuilt, changed: rebuilt || changed() };
     }
 
     // Prefer the lifecycle Hook's exact initial turn. UUIDv7 causality is the
@@ -1897,6 +1990,12 @@ export class CodexTranscriptInput extends BaseInput {
     checkpoint.forkBootstrap = bootstrap;
     const searchedNewBytes = bootstrap.searchOffset < fileSize;
 
+    const searchStat = await fs.stat(filePath);
+    if (searchStat.size !== fileSize) return { ready: false, changed: changed() };
+    if (!await this.incompleteTailReady(filePath, bootstrap.searchOffset, searchStat, this.getInputRuntimeAccumulator())) {
+      return { ready: false, changed: changed() };
+    }
+
     const located = await findTurnStartOffset(
       filePath,
       ownerMeta.threadId,
@@ -1906,6 +2005,16 @@ export class CodexTranscriptInput extends BaseInput {
       fileSize,
       this.getInputRuntimeAccumulator(),
     );
+    if (located.incompleteTail?.endOffset === fileSize && sameFileVersion(searchStat, await fs.stat(filePath))) {
+      this.incompleteTails.delete(filePath);
+      this.incompleteTails.set(filePath, {
+        ...located.incompleteTail, inode: searchStat.ino, device: searchStat.dev,
+        mtimeMs: searchStat.mtimeMs, ctimeMs: searchStat.ctimeMs, fileSize,
+      });
+      if (this.incompleteTails.size > MAX_CACHED_INCOMPLETE_TAILS) {
+        this.incompleteTails.delete(this.incompleteTails.keys().next().value!);
+      }
+    }
     if (located.startOffset === null) {
       checkpoint.forkBootstrap = {
         state: bootstrap.state,
@@ -1926,7 +2035,7 @@ export class CodexTranscriptInput extends BaseInput {
           searchedBytes: located.nextOffset,
         });
       }
-      return { ready: false, changed: true };
+      return { ready: false, changed: changed() };
     }
 
     if (located.anchorKind === 'initial-hook' || located.anchorKind === 'uuidv7') {
@@ -1948,7 +2057,7 @@ export class CodexTranscriptInput extends BaseInput {
         baselineOffset: previousScanOffset,
       });
       const rebuilt = await this.rebuildForkBaselineTail(filePath, checkpoint);
-      return { ready: rebuilt, changed: true };
+      return { ready: rebuilt, changed: rebuilt || changed() };
     }
 
     checkpoint.scanOffset = Math.max(previousScanOffset, located.startOffset);
@@ -2423,10 +2532,23 @@ export class CodexTranscriptInput extends BaseInput {
 
   private saveDelegationState(): void {
     const global = this.stateStore.get(this.id);
-    this.stateStore.update(this.id, { extra: { ...(global.extra ?? {}),
-      codexDelegations: this.subagentLinker.serialize(),
-      codexResultInvocations: [...this.deliveredInvocations].slice(-MAX_LINK_DESCRIPTORS),
-      codexPendingAgentResults: [...this.pendingAgentResults.values()],
+    const extra = global.extra ?? {};
+    const delegations = this.subagentLinker.serialize();
+    const invocations = [...this.deliveredInvocations].slice(-MAX_LINK_DESCRIPTORS);
+    const pending = [...this.pendingAgentResults.values()];
+    const same = (before: unknown, after: unknown[]) => (before === undefined && after.length === 0)
+      || (Array.isArray(before) && before.length === after.length
+        && after.every((value, index) => before[index] === value));
+    const emptyDelegations = delegations.spawns.length === 0 && delegations.children.length === 0
+      && delegations.bindings.length === 0 && !delegations.completedWorkResults?.length
+      && !delegations.workTerminals?.length;
+    if ((extra.codexDelegations === delegations || (extra.codexDelegations === undefined && emptyDelegations))
+      && same(extra.codexResultInvocations, invocations)
+      && same(extra.codexPendingAgentResults, pending)) return;
+    this.stateStore.update(this.id, { extra: { ...extra,
+      codexDelegations: delegations,
+      codexResultInvocations: invocations,
+      codexPendingAgentResults: pending,
     } });
   }
 
@@ -3002,6 +3124,7 @@ async function findTurnStartOffset(
 ): Promise<{
   startOffset: number | null;
   nextOffset: number;
+  incompleteTail?: IncompleteJsonlTail;
   turnId?: string;
   anchorKind?: ForkAnchorKind;
 }> {
@@ -3011,7 +3134,7 @@ async function findTurnStartOffset(
   const safeStart = boundedSearchOffset(startOffset, fileSize);
   const scanEnd = Math.min(fileSize, safeStart + MAX_SCAN_BYTES_PER_FILE_CYCLE);
   const ownerTimestamp = uuidV7TimestampMs(ownerThreadId);
-  const { nextOffset } = await scanJsonLines(filePath, safeStart, scanEnd, line => {
+  const processLine = (line: JsonLine): void | false => {
     const payload = asRecord(line.record.payload);
     if (!payload) return undefined;
     const candidateTurnId = turnIdForStart(line.record, payload);
@@ -3043,10 +3166,21 @@ async function findTurnStartOffset(
       return false;
     }
     return undefined;
-  }, runtime);
+  };
+  let scan = await scanJsonLines(filePath, safeStart, scanEnd, processLine, runtime);
+  // A cycle budget is not a record-size limit. Finish one record when the
+  // window contains no complete line, as the baseline-tail scanner does.
+  // scanJsonLines retains its normal oversized-record quarantine bound.
+  if (scan.nextOffset === safeStart && scanEnd < fileSize) {
+    scan = await scanJsonLines(filePath, safeStart, fileSize, line => {
+      processLine(line);
+      return false;
+    }, runtime);
+  }
   return {
     startOffset: turnStartOffset,
-    nextOffset,
+    nextOffset: scan.nextOffset,
+    ...(scan.incompleteTail ? { incompleteTail: scan.incompleteTail } : {}),
     ...(matchedTurnId ? { turnId: matchedTurnId } : {}),
     ...(anchorKind ? { anchorKind } : {}),
   };

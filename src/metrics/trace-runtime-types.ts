@@ -12,6 +12,11 @@ export interface TraceRuntimeCounters {
 export interface TraceRuntimeSnapshot extends TraceRuntimeCounters {
   agent_type: string;
   pending_buffers: number;
+  /** Durable Codex resident payload gauges (not RSS); spills remain pending. */
+  resident_records?: number;
+  resident_payload_bytes?: number;
+  spilled_buffers?: number;
+  spilled_records?: number;
   pending_records: number;
   pending_logical_bytes: number;
   pending_unmeasured_records: number;

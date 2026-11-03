@@ -427,6 +427,31 @@ async function appendOversizedTerminal(transcript: string, terminal = 'task_comp
 }
 
 describe('CodexTranscriptInput', () => {
+  it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-real-wakeup-'));
+    tempDirs.push(root);
+    const { input, sessionDir, wakeupDir, entries, stateStore } = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const transcript = await writeTranscript(sessionDir, lines[0] + '\n');
+    try {
+      await input.start();
+      const discovery = vi.spyOn(input as any, 'discoverSessionFiles');
+      await fs.appendFile(transcript, lines.slice(1).join('\n') + '\n');
+      await writeWakeupMarker(wakeupDir, 'session-1', { session_id: 'session-1', transcript_path: transcript,
+        hook_event: 'stop', received_at: new Date().toISOString() });
+      await waitFor(() => entries.some(entry => entry['gen_ai.turn.end'] === true));
+      expect(discovery).not.toHaveBeenCalled();
+      expect(responsesForTurn(entries, 'turn-1')).toHaveLength(3);
+      expect(entries.filter(entry => entry['event.name'] === 'tool.call')).toHaveLength(2);
+      expect(entries.filter(entry => entry['event.name'] === 'tool.result')).toHaveLength(2);
+      expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+      await input.stop();
+      expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
+        scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
+      });
+    } finally { await input.stop(); }
+  });
+
   it('closes an already emitted turn at the next start without duplicating its responses', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-missing-terminal-'));
     tempDirs.push(root);

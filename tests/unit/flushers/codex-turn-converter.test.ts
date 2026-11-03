@@ -63,8 +63,26 @@ describe('Codex native turn conversion', () => {
       await journal.append(source);
       manager.setWorkspacePolicy(new WorkspacePolicy(['/tmp/codex-private']));
       if (mode === 'startup') await f.start();
-      else await (f as unknown as { replayCodexJournal(groups: AsyncIterable<AgentActivityEntry[]>): Promise<void> })
-        .replayCodexJournal(journal.load(codexTurnJournalGroupKey(source[0])));
+      else await (f as unknown as { replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> })
+        .replayCodexJournal(journal.loadBatches(codexTurnJournalGroupKey(source[0])));
+      expect(spans).toHaveLength(0);
+      expect(await journal.isAcknowledged(source[0])).toBe(false);
+      expect(await readJournal(journal)).toEqual([]);
+    } finally { await f.shutdown(); }
+  });
+
+  it('preflights late workspace evidence across streamed journal batches before accepting earlier records', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-replay-late-policy-'));
+    const journal = new CodexTurnJournal(root);
+    const manager = new InputManager();
+    manager.setWorkspacePolicy(new WorkspacePolicy(['/tmp/codex-private']));
+    const source = records('child', 'late-policy', 'a'.repeat(32), 0, 'I');
+    source[0]['gen_ai.input.messages'] = 'x'.repeat(2 * 1024 * 1024);
+    source[source.length - 1]['workspace.path'] = '/tmp/codex-private';
+    await journal.append(source);
+    const { f, spans } = flusher(journal, false, undefined, entries => manager.prepareRestoredEntries(entries));
+    try {
+      await f.start();
       expect(spans).toHaveLength(0);
       expect(await journal.isAcknowledged(source[0])).toBe(false);
       expect(await readJournal(journal)).toEqual([]);
