@@ -429,7 +429,7 @@ export class CodexTranscriptInput extends BaseInput {
       // Known sessions need no directory/marker enumeration. Newly created
       // sessions and filename-less notifications retain full polling fallback.
       discovered = [...targeted].map(filePath => ({ filePath, baselineOnStart: false }));
-      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths);
+      await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
     }
     discovered.sort((left, right) => {
       const leftDepth = this.transcriptMetaByPath.get(left.filePath)?.depth ?? 0;
@@ -1355,8 +1355,15 @@ export class CodexTranscriptInput extends BaseInput {
   private async indexDiscoveredTranscriptOwners(
     files: DiscoveredSessionFile[],
     skipPaths?: ReadonlySet<string>,
+    mode: 'full' | 'targeted' = 'full',
   ): Promise<void> {
     const kept = new Map<string, NonNullable<ReturnType<typeof extractCodexTranscriptMeta>>>();
+    const discoveredPaths = new Set(files.map(file => file.filePath));
+    if (mode === 'targeted') {
+      for (const [filePath, meta] of this.transcriptMetaByPath) {
+        if (meta && !discoveredPaths.has(filePath)) kept.set(filePath, meta);
+      }
+    }
     if (skipPaths) {
       for (const filePath of skipPaths) {
         const meta = this.transcriptMetaByPath.get(filePath);
@@ -1365,7 +1372,8 @@ export class CodexTranscriptInput extends BaseInput {
     }
     this.transcriptMetaByPath.clear();
     this.transcriptPathByThreadId.clear();
-    this.pruneAbsentTranscriptMetaCache(new Set(files.map(file => file.filePath)), Date.now());
+    // Only a complete discovery can establish that an unrelated file is gone.
+    if (mode === 'full') this.pruneAbsentTranscriptMetaCache(discoveredPaths, Date.now());
     for (const [filePath, meta] of kept) {
       this.publishTranscriptOwnerMeta(filePath, meta);
     }

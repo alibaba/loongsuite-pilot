@@ -126,3 +126,33 @@ it('does not create empty delegation state on startup, but persists clearing rea
   expect(update).toHaveBeenCalledTimes(2);
   expect(state.get('codex-transcript').extra?.codexResultInvocations).toEqual([]);
 });
+
+it('retains other owners and their fast path across targeted wakeups and historical skipping', async () => {
+  const { root, probe } = await fixture();
+  const files = ['a', 'b'].map(id => ({ filePath: path.join(root, `rollout-${id}.jsonl`), baselineOnStart: true }));
+  for (const [i, file] of files.entries()) await fs.writeFile(file.filePath, JSON.stringify({
+    type: 'session_meta', payload: { id: i === 0 ? 'a' : 'b', model_provider: 'openai' },
+  }) + '\n');
+  vi.spyOn(probe, 'discoverSessionFiles').mockResolvedValue(files);
+  vi.spyOn(probe, 'cleanupExpiredSpanContexts').mockResolvedValue(undefined);
+  const skip = vi.spyOn(probe, 'historicalRolloutSkipPaths').mockReturnValue(new Set());
+  const process = vi.spyOn(probe, 'processFile').mockResolvedValue(0);
+  vi.spyOn(probe, 'retryPendingAgentResults').mockResolvedValue(0);
+  vi.spyOn(probe, 'reportSubagentLinks').mockReturnValue(undefined);
+  await probe.collect();
+  expect(probe.transcriptMetaByPath.size).toBe(2);
+  const cachedB = probe.transcriptMetaCacheByPath.get(files[1].filePath);
+  expect(cachedB).toBeDefined();
+  probe.dirtyWakeupMarkers.add('a.json'); probe.wakeupOnlyRequested = true;
+  await probe.collect();
+  expect(probe.transcriptMetaByPath.has(files[1].filePath)).toBe(true);
+  expect(probe.transcriptPathByThreadId.get('b')).toBe(files[1].filePath);
+  expect(probe.transcriptMetaCacheByPath.get(files[1].filePath)).toBe(cachedB);
+  skip.mockReturnValue(new Set([files[1].filePath]));
+  await probe.collect();
+  expect(probe.wakeupPaths.get('b.json').has(files[1].filePath)).toBe(true);
+  process.mockClear();
+  probe.dirtyWakeupMarkers.add('b.json'); probe.wakeupOnlyRequested = true;
+  await probe.collect();
+  expect(process.mock.calls.map(call => call[0])).toEqual([files[1].filePath]);
+});
