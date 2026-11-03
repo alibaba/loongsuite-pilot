@@ -22,7 +22,7 @@ AgentLoop 的原生跳转宿主适配尚未完成；不能直接复用 SLS 的�
 | SLS 快速查询 | 打开快速查询 | `savedSearch` | Project、快速查询 ID、查询变量映射 |
 | 任意业务页面或 HTTP(S) 地址 | 自定义 HTTP 链接 | `link` | 协议、地址、参数编码、打开方式 |
 
-纯 SLS 场景的前三类目标由原生事件处理资源路由、时间和变量传递，无需手工拼接 SLS URL、`token` JSON 或多次 URL 编码。AgentLoop 场景及任意业务 HTTP(S) 地址使用自定义链接；AgentLoop URL 的路由、变量格式与编码按宿主约定配置，不能照搬 SLS 控制台的 `/lognext/...` 相对路径。
+纯 SLS 场景的前三类目标由原生事件处理资源路由、时间和变量传递，无需手工拼接 SLS URL、`token` JSON 或多次 URL 编码。AgentLoop 仪表盘间跳转使用下文内置的 [AgentLoop URL 配方](#agentloop-仪表盘间跳转)，包含站内路由、变量格式与编码规则，不能照搬 SLS 控制台的 `/lognext/...` 相对路径。任意业务 HTTP(S) 地址使用通用自定义链接。
 
 嵌入其他产品的仪表盘也需确认宿主对事件类型与路由的支持。按宿主能力选择并验证跳转方式；若目标错误，分别检查资源 ID、权限和宿主路由，不能仅凭独立 SLS 控制台中的成功结果宣称嵌入页面也可用。
 
@@ -30,7 +30,7 @@ AgentLoop 的原生跳转宿主适配尚未完成；不能直接复用 SLS 的�
 
 每个交互在 spec 中写清以下内容，不依赖图表标题推断：
 
-- 查看环境：纯 SLS 控制台或 AgentLoop；宿主路由约定写入场景 spec。
+- 查看环境：纯 SLS 控制台或 AgentLoop；AgentLoop 仪表盘间跳转按本文内置配方配置，在场景 spec 中绑定实际地域、AgentSpace、目标仪表盘与变量名。
 - 点击入口：查询标识（如 `A`）、图表类型、绑定字段、事件名称。
 - 跳转目标：事件类型、Project、目标资源 ID 或 HTTP 地址；展示名不能代替资源 ID。
 - 传参：目标变量名 → 源查询结果列，必要时补充固定变量。
@@ -184,6 +184,63 @@ WHERE dept_id = '${{dept_id}}'
 此 JSON 格式将协议与地址分开，`link` 不重复写 `https://`；以 `/` 开头的路径依赖当前宿主域名。页面输入格式如有差异，以编辑器保存后的 JSON 为准。
 
 含 `&`、空格、中文、`#`、`%` 等字符的动态值应按目标 URL 的路径段或查询参数分别编码；可在查询中产生专用 URL 参数列，再在链接中引用。已有 `?` 时用 `&` 追加参数。`slsEncode` 对应界面的“是否转码”，不能据此假定任意 URL 参数均已正确编码，应核对真实目标收到的值。原生事件无需预编码变量；自定义链接的编码次数由目标解析约定决定，不默认双重编码。不把鉴权信息或完整日志正文拼进 URL。
+
+### AgentLoop 仪表盘间跳转
+
+AgentLoop 仪表盘使用 AgentSpace 下的站内路由。当前以 `event: link` 按以下配方传递页面地址、变量和时间。
+
+```text
+/agentloop/region/<region>/agentspace/<space>/app/dashboard/detail/<dashboard-id>
+```
+
+| 路由或参数 | 当前约定 |
+|---|---|
+| `region` | 目标 AgentSpace 所在地域，如 `cn-shanghai`。 |
+| `space` | 目标 AgentSpace 的名称，不是 SLS Project 名。 |
+| `dashboard-id` | SLS 仪表盘的 `dashboardName`，不是展示标题。 |
+| `dashboardSlsSource=agentSpace` | 使用当前 AgentSpace 绑定的 SLS 数据源；此配方针对该来源。 |
+| `queryTimeType=99` | 显式指定绝对时间范围。 |
+| `startTime` / `endTime` | 源图表查询起止时间，Unix 秒；分别引用 `${{__start_time__}}` / `${{__end_time__}}`。 |
+| `token` | 目标查询变量的 `{key,value}` 对象数组，先转为 JSON 字符串，再做两次 URL 编码。 |
+
+例如，目标查询声明 `${{dept_name}}`，点击行的部门全称应作为 `value`。编码前的 token 内容为：
+
+```json
+[{"key":"dept_name","value":"示例团队-平台&数据"}]
+```
+
+假设源查询已有字符串列 `dept_name`，在最终结果的同一行追加以下辅助列。多个目标变量放在同一数组中；值使用字符串，变量名与目标 `tokenQuery` 一致。
+
+```sql
+url_encode(url_encode(json_format(
+  CAST(ARRAY[
+    map(ARRAY['key','value'], ARRAY['dept_name', dept_name])
+  ] AS JSON)
+))) AS _jump_token
+```
+
+当前 AgentLoop 跳转链路会解析并重写 URL，token JSON 采用双层编码以保留中文、`&` 等字符。单层编码会使特殊字符在传递过程中过早解码，可能导致目标变量截断或匹配不到数据。双层编码仅用于此 AgentLoop URL 配方；纯 SLS 原生事件直接传原始列值。不要编码整条 URL，也不要再对 `_jump_token` 追加编码。
+
+在实际点击字段的 `events` 中配置以下事件，替换地域、AgentSpace 名称和仪表盘 ID：
+
+```json
+{
+  "event": "link",
+  "values": {
+    "name": "查看部门明细",
+    "protocol": "https",
+    "link": "/agentloop/region/cn-shanghai/agentspace/example-space/app/dashboard/detail/department-detail?dashboardSlsSource=agentSpace&queryTimeType=99&startTime=${{__start_time__}}&endTime=${{__end_time__}}&token=${{_jump_token}}",
+    "blank": true,
+    "slsEncode": false
+  }
+}
+```
+
+这里的相对路径沿用 AgentLoop 当前域名；跨域打开时改用目标 AgentLoop 域名，并遵守协议与地址分开的格式。该配方显式传递时间和变量，不依赖原生事件的 `timeRange`、`searchToken` 或继承开关。现有配置中的 `${__start_time__}` / `${__end_time__}` 也是渲染器支持的系统时间写法。
+
+柱图仍绑定数值系列；表格绑定部门列，两者都从点击行取 `_jump_token`。表格可在 `display.queryOptionMap.A.closedKeys` 中加入 `_jump_token` 隐藏辅助列。目标页面需使用相同变量名配置筛选器与查询，所有相关图表均须消费该变量。
+
+目标页面可能将 token 改写为 `key:value` 的地址表示，不要把重写后的浏览器 URL 当作新链接的构造模板；生成链接仍使用上述 JSON 数组。验收时核对目标页面、变量控件、实际查询结果和起止时间，至少包含一个有中文及 `&` 的测试值。此处确认的是仪表盘间跳转；日志库和快速查询在 AgentLoop 中的页面路由需单独核对，不能套用仪表盘详情路径。
 
 ## 控制台配置与验收
 
