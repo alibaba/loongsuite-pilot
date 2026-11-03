@@ -73,6 +73,8 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 多张盘之间保持命名、筛选器、标题风格与版式节奏一致。
 
+涉及总览到明细、原始日志或业务页面的点击跳转时，读取 [交互事件与下钻报表](references/drill-down-events.md)，先定义点击字段、目标资源、变量映射和时间继承。日志库、仪表盘、快速查询使用对应原生事件；自定义 HTTP 链接用于业务地址或明确要求的宿主路由。
+
 ## 任务包工作流
 
 当输入包含需求文档、查询方案、结果文件或参考大盘时，按以下顺序：
@@ -140,6 +142,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 - 目标受众为中文运维或业务时，图例、轴标签、表头使用规范中文  
 - 新改动基于最新线上大盘，而非更旧的本地副本  
 - `droplistpro` 非装饰，必须绑定真实 key 或 token 路径  
+- 交互绑定字段与传参来源列分别校验；表格单元格与柱图数值系列按实际点击位置配置。目标查询必须消费同名变量，保存后在实际 SLS 或嵌入宿主中验证点击、参数和结果；HTML 预览不能替代交互验收
 - 分组趋势不强行塞进错误的图表家族  
 - 老格式大盘不静默整体迁到现代结构  
 - 使用预聚合 CTE 时，检查外层是否对 `approx_distinct` 结果做了 `sum()`——如果是，该指标需要改为在原始事件上直接去重，或从 CTE 中移除  
@@ -187,6 +190,7 @@ python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
 - `references/layout.md` — 网格或自由布局规则  
 - `references/chart-templates.md` — 基础图表模板  
 - `references/query-syntax.md` — `query` 与 `tokenQuery` 规则  
+- [references/drill-down-events.md](references/drill-down-events.md) — 原生日志库、仪表盘、快速查询下钻，自定义 HTTP 链接，字段绑定、传参及验收
 
 ## 示例
 
