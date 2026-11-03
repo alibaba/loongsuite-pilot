@@ -798,95 +798,97 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| panic!("native checkpoint chain did not settle at {stage}"))
         }
-        let root = tempfile::tempdir().unwrap();
-        let session_dir = root.path().join("sessions");
-        tokio::fs::create_dir(&session_dir).await.unwrap();
-        let rollout = session_dir.join("rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
-        // Keep an actual empty live source in the initial directory scan.
-        // Later bytes must exercise journal acceptance, not race the OS's
-        // directory-mtime publication for a newly created file.
-        tokio::fs::write(&rollout, "").await.unwrap();
-        let key = format!("codex-transcript:{}", rollout.to_string_lossy());
-        let state_path = root.path().join("state.json");
-        let state = Arc::new(StateStore::new(&state_path));
-        state.set_offset(&key, 0.0);
-        state.set_offset("unrelated-input", 0.0);
-        state.save().await.unwrap();
-        let manager = Arc::new(InputManager::new());
-        manager.set_state_store(Arc::clone(&state));
-        manager.set_user_id("synthetic-user");
-        let journal = Arc::new(CodexTurnJournal::new(root.path().join("journal")));
-        let exports = Arc::new(AtomicUsize::new(0));
-        let capture = Arc::new(Capture(Arc::clone(&exports)));
-        let weak = Arc::downgrade(&manager);
-        let trace=Arc::new(OtlpTraceFlusher::with_parts(
+        for delegated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session_dir = root.path().join("sessions");
+            tokio::fs::create_dir(&session_dir).await.unwrap();
+            let rollout = session_dir.join("rollout-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+            // Keep an actual empty live source in the initial directory scan.
+            // Later bytes must exercise journal acceptance, not race the OS's
+            // directory-mtime publication for a newly created file.
+            tokio::fs::write(&rollout, "").await.unwrap();
+            let key = format!("codex-transcript:{}", rollout.to_string_lossy());
+            let state_path = root.path().join("state.json");
+            let state = Arc::new(StateStore::new(&state_path));
+            state.set_offset(&key, 0.0);
+            state.set_offset("unrelated-input", 0.0);
+            state.save().await.unwrap();
+            let manager = Arc::new(InputManager::new());
+            manager.set_state_store(Arc::clone(&state));
+            manager.set_user_id("synthetic-user");
+            let journal = Arc::new(CodexTurnJournal::new(root.path().join("journal")));
+            let exports = Arc::new(AtomicUsize::new(0));
+            let capture = Arc::new(Capture(Arc::clone(&exports)));
+            let weak = Arc::downgrade(&manager);
+            let trace=Arc::new(OtlpTraceFlusher::with_parts(
             serde_json::from_value(json!({"enabled":true,"protocol":"http/protobuf","serviceName":"checkpoint-fixture",
                 "endpoints":[{"name":"capture","endpoint":"http://127.0.0.1:4318","compression":"none"}],
                 "dataDir":root.path(),"turnIdleTimeoutMs":0})).unwrap(),None,
             Some(Arc::new(move |_|Arc::clone(&capture) as Arc<dyn TraceExporter>)),None
         ).unwrap().with_codex_journal(Arc::clone(&journal),move |entries|Ok(weak.upgrade().unwrap().prepare_restored_entries(entries))));
-        let jsonl = Arc::new(JsonlFlusher::new(JsonlFlusherConfig {
-            enabled: true,
-            output_dir: root.path().join("output").to_string_lossy().into_owned(),
-            rotate_daily: false,
-            max_file_size_mb: 100.into(),
-        }));
-        jsonl.start().await.unwrap();
-        // Restore must finish before taking the journal lock; otherwise this
-        // would test startup restoration instead of new source acceptance.
-        within("trace startup", trace.start()).await.unwrap();
-        manager.set_flusher(Arc::new(MultiFlusher::new(vec![
-            jsonl.clone(),
-            trace.clone(),
-        ])));
-        let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
-            state_store: Arc::clone(&state),
-            session_dir: Some(session_dir.to_string_lossy().into_owned()),
-            wakeup_dir: Some(root.path().join("wakeups").to_string_lossy().into_owned()),
-            span_context_dir: Some(
-                root.path()
-                    .join("span-contexts")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            poll_interval_ms: Some(60000),
-            multimodal: None,
-        }));
-        let (running, start, stop) = (Arc::clone(&input), Arc::clone(&input), Arc::clone(&input));
-        manager.register_input(LiveInput::new(
-            "codex-transcript",
-            "codex",
-            "session-file-polling",
-            move || running.collector_running(),
-            move || {
-                let input = Arc::clone(&start);
-                Box::pin(async move { input.start().await })
-            },
-            move || {
-                let input = Arc::clone(&stop);
-                Box::pin(async move {
-                    input.stop().await.unwrap();
-                })
-            },
-        ));
-        let weak = Arc::downgrade(&manager);
-        input.on_entries(move |entries| {
-            if let Some(manager) = weak.upgrade() {
-                manager.bind_entries("codex-transcript", entries.to_vec());
-            }
-        });
-        within("input startup", manager.start_input("codex-transcript")).await;
-        // Startup is ready before its checkpoint IO; establish the empty
-        // source metadata baseline before testing new-prefix acceptance.
-        within("empty startup checkpoint", state.save())
-            .await
-            .unwrap();
-        let before = tokio::fs::read(&state_path).await.unwrap();
-        let held = journal.state.lock().await;
-        let record = |time: &str, kind: &str, payload: serde_json::Value| {
-            json!({"timestamp":time,"type":kind,"payload":payload}).to_string()
-        };
-        let prefix=[
+            let jsonl = Arc::new(JsonlFlusher::new(JsonlFlusherConfig {
+                enabled: true,
+                output_dir: root.path().join("output").to_string_lossy().into_owned(),
+                rotate_daily: false,
+                max_file_size_mb: 100.into(),
+            }));
+            jsonl.start().await.unwrap();
+            // Restore must finish before taking the journal lock; otherwise this
+            // would test startup restoration instead of new source acceptance.
+            within("trace startup", trace.start()).await.unwrap();
+            manager.set_flusher(Arc::new(MultiFlusher::new(vec![
+                jsonl.clone(),
+                trace.clone(),
+            ])));
+            let input = Arc::new(CodexTranscriptInput::new(CodexTranscriptInputOptions {
+                state_store: Arc::clone(&state),
+                session_dir: Some(session_dir.to_string_lossy().into_owned()),
+                wakeup_dir: Some(root.path().join("wakeups").to_string_lossy().into_owned()),
+                span_context_dir: Some(
+                    root.path()
+                        .join("span-contexts")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                poll_interval_ms: Some(60000),
+                multimodal: None,
+            }));
+            let (running, start, stop) =
+                (Arc::clone(&input), Arc::clone(&input), Arc::clone(&input));
+            manager.register_input(LiveInput::new(
+                "codex-transcript",
+                "codex",
+                "session-file-polling",
+                move || running.collector_running(),
+                move || {
+                    let input = Arc::clone(&start);
+                    Box::pin(async move { input.start().await })
+                },
+                move || {
+                    let input = Arc::clone(&stop);
+                    Box::pin(async move {
+                        input.stop().await.unwrap();
+                    })
+                },
+            ));
+            let weak = Arc::downgrade(&manager);
+            input.on_entries(move |entries| {
+                if let Some(manager) = weak.upgrade() {
+                    manager.bind_entries("codex-transcript", entries.to_vec());
+                }
+            });
+            within("input startup", manager.start_input("codex-transcript")).await;
+            // Startup is ready before its checkpoint IO; establish the empty
+            // source metadata baseline before testing new-prefix acceptance.
+            within("empty startup checkpoint", state.save())
+                .await
+                .unwrap();
+            let before = tokio::fs::read(&state_path).await.unwrap();
+            let held = journal.state.lock().await;
+            let record = |time: &str, kind: &str, payload: serde_json::Value| {
+                json!({"timestamp":time,"type":kind,"payload":payload}).to_string()
+            };
+            let prefix=[
             record("2026-08-07T02:00:00Z","session_meta",json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","thread_source":"user","model_provider":"openai"})),
             record("2026-08-07T02:00:01Z","turn_context",json!({"turn_id":"prefix","model":"gpt-test"})),
             record("2026-08-07T02:00:01.010Z","event_msg",json!({"type":"task_started","turn_id":"prefix"})),
@@ -897,75 +899,97 @@ mod tests {
             record("2026-08-07T02:00:06Z","event_msg",json!({"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}})),
             record("2026-08-07T02:00:07Z","event_msg",json!({"type":"agent_message","phase":"commentary","message":"next wave"})),
         ].join("\n")+"\n";
-        tokio::fs::write(&rollout, prefix).await.unwrap();
-        let cycling = Arc::clone(&input);
-        let cycling_state = Arc::clone(&state);
-        let cycling_key = key.clone();
-        let mut cycle = tokio::spawn(async move {
-            // A manual cycle may join the initial empty startup cycle.
-            // Drive the source until this new rollout has actually been read.
-            loop {
-                cycling.run_cycle().await;
-                if cycling_state.get(&cycling_key).last_offset().unwrap_or(0.0) > 0.0 {
-                    break;
+            let expected_tool = if delegated { "spawn-a" } else { "tool-one" };
+            let prefix = if delegated {
+                [
+                record("2026-08-07T02:00:00Z","session_meta",json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","timestamp":"2026-08-07T02:00:00Z","thread_source":"user","model_provider":"openai"})),
+                record("2026-08-07T02:00:01Z","turn_context",json!({"turn_id":"p1","model":"gpt-test"})),
+                record("2026-08-07T02:00:01.010Z","event_msg",json!({"type":"task_started","turn_id":"p1"})),
+                record("2026-08-07T02:00:01.020Z","response_item",json!({"type":"message","role":"user","content":[{"type":"input_text","text":"delegate"}]})),
+                record("2026-08-07T02:00:02Z","response_item",json!({"type":"function_call","call_id":"spawn-a","name":"spawn_agent","arguments":r#"{"message":"child-a"}"#})),
+                record("2026-08-07T02:00:02.010Z","response_item",json!({"type":"function_call_output","call_id":"spawn-a","output":r#"{"agent_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","nickname":"Fixture"}"#})),
+                record("2026-08-07T02:00:03.010Z","event_msg",json!({"type":"token_count","info":{"last_token_usage":{"input_tokens":11,"output_tokens":7,"total_tokens":18,"cached_input_tokens":0}}})),
+            ].join("\n")+"\n"
+            } else {
+                prefix
+            };
+            tokio::fs::write(&rollout, prefix).await.unwrap();
+            let cycling = Arc::clone(&input);
+            let cycling_state = Arc::clone(&state);
+            let cycling_key = key.clone();
+            let mut cycle = tokio::spawn(async move {
+                // A manual cycle may join the initial empty startup cycle.
+                // Drive the source until this new rollout has actually been read.
+                loop {
+                    cycling.run_cycle().await;
+                    if cycling_state.get(&cycling_key).last_offset().unwrap_or(0.0) > 0.0 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
+            });
+            within("source offset before journal acceptance", async {
+                while state.get(&key).last_offset().unwrap_or(0.0) <= 0.0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            assert!(state.waiting_for_output());
+            state.set_offset("unrelated-input", 9.0);
+            let saving = Arc::clone(&state);
+            let mut save = tokio::spawn(async move { saving.save().await });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut save)
+                    .await
+                    .is_err(),
+                "shared checkpoint saved before journal acceptance"
+            );
+            assert_eq!(tokio::fs::read(&state_path).await.unwrap(), before);
+            assert!(!cycle.is_finished());
+            assert_eq!(exports.load(Ordering::SeqCst), 0);
+            if delegated {
+                let fresh = Arc::new(CodexTurnJournal::new(root.path().join("journal")));
+                assert!(
+                    read(&fresh, None).await.is_empty(),
+                    "fresh journal reader saw an unaccepted spawn prefix"
+                );
             }
-        });
-        within("source offset before journal acceptance", async {
-            while state.get(&key).last_offset().unwrap_or(0.0) <= 0.0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await;
-        assert!(state.waiting_for_output());
-        state.set_offset("unrelated-input", 9.0);
-        let saving = Arc::clone(&state);
-        let mut save = tokio::spawn(async move { saving.save().await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), &mut save)
+            // The in-memory journal mutex is real storage serialization. Releasing
+            // it permits the real append/file flush, then acceptance, then save.
+            drop(held);
+            within("source acceptance after journal unlock", &mut cycle)
                 .await
-                .is_err(),
-            "shared checkpoint saved before journal acceptance"
-        );
-        assert_eq!(tokio::fs::read(&state_path).await.unwrap(), before);
-        assert!(!cycle.is_finished());
-        assert_eq!(exports.load(Ordering::SeqCst), 0);
-        // The in-memory journal mutex is real storage serialization. Releasing
-        // it permits the real append/file flush, then acceptance, then save.
-        drop(held);
-        within("source acceptance after journal unlock", &mut cycle)
-            .await
-            .unwrap();
-        within("shared checkpoint save", &mut save)
-            .await
-            .unwrap()
-            .unwrap();
-        let groups = read(&journal, None).await;
-        let pending: Vec<_> = groups.into_iter().flatten().collect();
-        assert!(pending
-            .iter()
-            .any(|entry| entry.tool_call_id.as_deref() == Some("tool-one")));
-        assert!(pending
-            .iter()
-            .any(|entry| entry.event_name == Some(crate::types::AgentEventName::LlmResponse)));
-        assert!(pending.iter().all(|entry| entry.turn_end != Some(true)));
-        assert!(!pending.is_empty());
-        assert!(!journal.is_acknowledged(&pending[0]).await.unwrap());
-        let disk: serde_json::Value =
-            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
-        assert!(disk[key.as_str()]["lastOffset"].as_f64().unwrap() > 0.0);
-        assert_eq!(disk["unrelated-input"]["lastOffset"], 9.0);
-        let native_file = journal.file(&codex_turn_journal_group_key(&pending[0]));
-        assert!(tokio::fs::metadata(native_file).await.unwrap().len() > 0);
-        within("input shutdown", manager.stop_all()).await;
-        within("trace shutdown", trace.shutdown()).await.unwrap();
-        jsonl.shutdown().await.unwrap();
-        assert_eq!(
-            exports.load(Ordering::SeqCst),
-            0,
-            "unfinished prefix was fabricated into a completed trace"
-        );
+                .unwrap();
+            within("shared checkpoint save", &mut save)
+                .await
+                .unwrap()
+                .unwrap();
+            let groups = read(&journal, None).await;
+            let pending: Vec<_> = groups.into_iter().flatten().collect();
+            assert!(pending
+                .iter()
+                .any(|entry| entry.tool_call_id.as_deref() == Some(expected_tool)));
+            assert!(pending
+                .iter()
+                .any(|entry| entry.event_name == Some(crate::types::AgentEventName::LlmResponse)));
+            assert!(pending.iter().all(|entry| entry.turn_end != Some(true)));
+            assert!(!pending.is_empty());
+            assert!(!journal.is_acknowledged(&pending[0]).await.unwrap());
+            let disk: serde_json::Value =
+                serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+            assert!(disk[key.as_str()]["lastOffset"].as_f64().unwrap() > 0.0);
+            assert_eq!(disk["unrelated-input"]["lastOffset"], 9.0);
+            let native_file = journal.file(&codex_turn_journal_group_key(&pending[0]));
+            assert!(tokio::fs::metadata(native_file).await.unwrap().len() > 0);
+            within("input shutdown", manager.stop_all()).await;
+            within("trace shutdown", trace.shutdown()).await.unwrap();
+            jsonl.shutdown().await.unwrap();
+            assert_eq!(
+                exports.load(Ordering::SeqCst),
+                0,
+                "unfinished prefix was fabricated into a completed trace"
+            );
+        }
     }
 }
 

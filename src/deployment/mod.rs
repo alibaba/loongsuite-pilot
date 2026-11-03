@@ -120,3 +120,6 @@ pub use worker_manifest_supervisor::{
 pub(crate) mod runtime_retirement;
 
 pub mod eager_injection;
+
+pub(crate) use deployed_state_merge::open_state_lock;
+pub(crate) mod runtime_data_assets;

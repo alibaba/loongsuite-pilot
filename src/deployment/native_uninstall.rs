@@ -201,6 +201,11 @@ pub(super) async fn run_with_retirement(
         "dataDir must be absolute"
     );
     let data = Path::new(&options.data_dir);
+    ensure!(
+        !super::runtime_data_assets::recovery_pending(data),
+        "Runtime resource activation is pending; configuration and runtime assets were preserved"
+    );
+
     let checked_data = std::fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
     let home = PathBuf::from(crate::utils::resolve_home("~"));
     let checked_home = std::fs::canonicalize(&home).unwrap_or(home);
@@ -269,12 +274,22 @@ pub(super) async fn run_with_retirement(
     let home = PathBuf::from(crate::utils::resolve_home("~"));
     super::legacy_uninstall::preflight(&home)?;
     if !options.check_only {
+        let mut failures = Vec::new();
         for target in &targets {
+            if manager.undeploy_agent(target).await {
+                continue;
+            }
+            // A dangling DSH YAML reference must retain the old early refusal.
             ensure!(
-                manager.undeploy_agent(target).await,
+                target.deploy_mode != DeployMode::DshYamlPatch,
                 "Native cleanup failed for Agent {}; runtime assets were preserved",
                 target.id
             );
+            let reason = format!("Native cleanup failed for Agent {}", target.id);
+            eprintln!(
+                "{reason}; continuing external cleanup; installation files preserved for retry"
+            );
+            failures.push(reason);
         }
         if let Err(error) =
             super::runtime_retirement::cleanup_uninstall(&data_dir.to_string_lossy(), &retirement)
@@ -285,11 +300,25 @@ pub(super) async fn run_with_retirement(
                 json!({"phase":"before-runtime-removal","error":&error}).as_object(),
             );
             eprintln!("[runtime-retirement] uninstall cleanup failed; installation files preserved for retry: {error}");
-            anyhow::bail!(
-                "Runtime environment cleanup failed; installation files were preserved for retry"
-            );
+            eprintln!("[runtime-retirement] continuing external cleanup; installation files preserved for retry");
+            failures.push("Runtime environment cleanup failed".to_owned());
         }
-        super::legacy_uninstall::run(&home, &data_dir, options.purge).await?;
+        // A failed external cleanup must not stop independent owned cleanup or
+        // allow the caller to remove the runtime needed for a later retry.
+        if let Err(error) =
+            super::legacy_uninstall::run(&home, &data_dir, options.purge && failures.is_empty())
+                .await
+        {
+            eprintln!(
+                "Legacy external cleanup failed; installation files preserved for retry: {error}"
+            );
+            failures.push("Legacy external cleanup failed".to_owned());
+        }
+        ensure!(
+            failures.is_empty(),
+            "{}; installation files were preserved for retry",
+            failures.join("; ")
+        );
     }
     Ok(json!({"agents":agents,"checkOnly":options.check_only,"ok":true}).to_string())
 }

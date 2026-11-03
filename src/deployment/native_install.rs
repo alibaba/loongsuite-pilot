@@ -115,12 +115,12 @@ pub(super) async fn run_with_retirement(
                         super::with_deployed_state_lock(
                             config_lock.to_str().context("配置锁路径编码无效")?,
                             || async {
-                                let targets = activation_targets(
+                                let mut targets = activation_targets(
                                     &paths.cache_dir,
                                     &destination,
                                     &paths.config_path,
                                 );
-                                recover_runtime_files(&paths.cache_dir, targets.clone())?;
+                                recover_runtime_files_with_data(&paths.cache_dir, targets.clone(), &paths.data_dir)?;
                                 let prepared = PreparedConfig::load(&paths)?;
                                 if operation == "rollback-package" {
                                     ensure!(rollback_source_version(&paths)? == manifest.version,
@@ -151,8 +151,19 @@ pub(super) async fn run_with_retirement(
                                         "发布候选必须位于本安装 versions 目录"
                                     );
                                 }
+                                let resources = if publish {
+                                    super::runtime_data_assets::recover_eager(&paths.data_dir).await?;
+                                    let plan = super::runtime_data_assets::RuntimeDataAssets::load(
+                                        &paths.source_dir, &paths.data_dir, &paths.cache_dir, &manifest,
+                                    )?;
+                                    targets.extend(plan.targets(&paths.data_dir, paths.deploy_hooks)?);
+                                    Some(plan)
+                                } else { None };
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
+                                if let Some(plan) = &resources {
+                                    plan.install(&mut transaction, paths.deploy_hooks)?;
+                                }
                                 if let Some(prepared) = &prepared {
                                     ensure!(
                                         super::installer_helper::read_config(&paths.config_path)?.0
@@ -202,6 +213,7 @@ pub(super) async fn run_with_retirement(
                                     transaction.write(&key, &bytes, mode)?;
                                 }
                                 transaction.commit()?;
+                                if let Some(plan) = &resources { plan.report(); }
                                 if publish {
                                     if let Err(error) = super::runtime_retirement::cleanup_all(
                                         &paths.data_dir.to_string_lossy(), &retirement,
@@ -556,9 +568,26 @@ where
 }
 
 /// 兼容已落盘的独立服务事务；后续写入一律使用完整目标集合和同一个 journal。
+#[cfg(test)]
 pub(crate) fn recover_runtime_files(
     cache: &Path,
     targets: BTreeMap<String, PathBuf>,
+) -> Result<()> {
+    recover_runtime_files_inner(cache, targets, None)
+}
+
+pub(crate) fn recover_runtime_files_with_data(
+    cache: &Path,
+    targets: BTreeMap<String, PathBuf>,
+    data: &Path,
+) -> Result<()> {
+    recover_runtime_files_inner(cache, targets, Some(data))
+}
+
+fn recover_runtime_files_inner(
+    cache: &Path,
+    targets: BTreeMap<String, PathBuf>,
+    data: Option<&Path>,
 ) -> Result<()> {
     let legacy = cache.join("service-sync");
     ensure!(
@@ -571,7 +600,11 @@ pub(crate) fn recover_runtime_files(
     }
     let mut legacy_targets = targets.clone();
     legacy_targets.remove("config");
-    ActivationTransaction::recover_compatible(cache, targets, legacy_targets)
+    if let Some(data) = data {
+        super::runtime_data_assets::recover(cache, targets, legacy_targets, data)
+    } else {
+        ActivationTransaction::recover_compatible(cache, targets, legacy_targets)
+    }
 }
 
 pub(crate) fn cleanup_legacy_windows_cli(

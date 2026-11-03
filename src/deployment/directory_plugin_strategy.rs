@@ -152,6 +152,17 @@ impl DirectoryPluginStrategy {
         assert_directory(&source_dir, "sourceDir").await?;
         let target_state = self.inspect_at(&target_dir, &marker_file, &def.id).await?;
         if matches!(target_state, TargetState::Unmanaged) {
+            let marker_path = Path::new(&target_dir).join(&marker_file);
+            // Diagnostics grant no relocation authority and do not follow an
+            // unknown target/ancestor link or read an unbounded marker.
+            if crate::utils::runtime_paths::runtime_metadata(&marker_path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 64 * 1024)
+                && read_owned_marker(&marker_path, &def.id)
+                    .await
+                    .is_some_and(|marker| marker.data_dir != self.data_dir)
+            {
+                return Err("refusing to overwrite managed directory: dataDir ownership differs; clean the plugin from its owning installation before retrying".into());
+            }
             return Err(format!(
                 "refusing to overwrite unmanaged non-empty directory: {target_dir}"
             ));
@@ -1285,3 +1296,7 @@ mod history_test_hooks;
 #[cfg(test)]
 #[path = "directory_plugin_removal_history_contract_tests.rs"]
 mod removal_history_contract_tests;
+
+#[cfg(test)]
+#[path = "directory_data_dir_history_contract_tests.rs"]
+mod data_dir_history_contract_tests;

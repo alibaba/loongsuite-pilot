@@ -355,7 +355,9 @@ fn dashboard_l413_public_powershell_parser_and_real_native_writer_preserve_full_
         + 3;
     let guard = r#"
 if ($env:TEST_DASH_CLM -eq '1') {
- $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
+ if ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') {
+  $ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'
+ }
  if ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') { throw 'child left CLM' }
  $blocked=$false
  try { $null=[System.IO.File]::Exists('PILOT_DASH_CLM_CANARY') } catch { if ($_.FullyQualifiedErrorId -notmatch 'ConstrainedLanguage') { throw }; $blocked=$true }

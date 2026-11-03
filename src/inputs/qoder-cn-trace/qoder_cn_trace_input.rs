@@ -758,3 +758,7 @@ mod legacy_533_contract_tests;
 #[cfg(test)]
 #[path = "cn_source_533_tests.rs"]
 mod source_533_contract_tests;
+
+#[cfg(test)]
+#[path = "native_pipeline_history_tests.rs"]
+mod native_pipeline_history_tests;

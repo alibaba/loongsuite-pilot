@@ -19,17 +19,19 @@ fn installer_probe_preserves_unicode_json_across_legacy_codepages_without_public
     .unwrap();
     fs::write(f.data.join("config.json"),"\u{feff}{\"agents\":{\"openclaw\":{\"captureMessageContent\":false}},\"keep\":\"保留\u{feff}\"}\n").unwrap();
     let snapshot = || {
-        walkdir::WalkDir::new(f.root.path())
+        // WalkDir caches Windows enumeration metadata. Close all enumeration
+        // handles before taking fresh, non-following metadata for every path.
+        let mut paths = walkdir::WalkDir::new(f.root.path())
             .into_iter()
-            .map(Result::unwrap)
-            .map(|entry| {
-                let meta = entry.metadata().unwrap();
+            .map(|entry| entry.unwrap().into_path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let meta = fs::symlink_metadata(&path).unwrap();
                 (
-                    entry
-                        .path()
-                        .strip_prefix(f.root.path())
-                        .unwrap()
-                        .to_path_buf(),
+                    path.strip_prefix(f.root.path()).unwrap().to_path_buf(),
                     meta.len(),
                     meta.modified().unwrap(),
                 )

@@ -43,6 +43,24 @@ impl PluginInjectStrategy {
         }
     }
 
+    /// Read-only eligibility gate used before shared runtime preparation.
+    pub(super) async fn preflight_eager_host(&self, def: &AgentDefinition) -> Result<(), String> {
+        let Some(config) = def.plugin_inject.as_ref() else {
+            return Ok(());
+        };
+        if !self.is_openclaw_nested(config) {
+            return Ok(());
+        }
+        let mut probe = Self::new(self.data_dir.clone(), self.pilot_dir.clone());
+        if probe.resolve_deployment_host().await.is_none() {
+            return Err(probe
+                .last_openclaw_problem
+                .clone()
+                .unwrap_or_else(|| openclaw_binding_problem(None, None)));
+        }
+        Ok(())
+    }
+
     pub async fn resolve_existing_config_path(
         &self,
         config: &PluginInjectConfig,
@@ -519,25 +537,58 @@ impl PluginInjectStrategy {
         mutated
     }
 
-    fn removable_openclaw_entry(&self, json: &Value, config: &PluginInjectConfig) -> bool {
-        let shared = json["plugins"]["load"]["paths"]
+    fn has_other_openclaw_reference(&self, json: &Value, config: &PluginInjectConfig) -> bool {
+        let prefix = format!(
+            "{}/",
+            self.normalize_spec(&node_resolve(&self.to_openclaw_path(&self.data_dir)))
+                .trim_end_matches('/')
+        );
+        let mut suffixes: Vec<_> = std::iter::once(&config.plugin_spec)
+            .chain(config.replace_specs.iter().flatten())
+            .filter_map(|spec| {
+                self.normalize_spec(&node_resolve(
+                    &self.to_openclaw_path(&self.resolve_spec(spec)),
+                ))
+                .strip_prefix(&prefix)
+                .map(str::to_owned)
+            })
+            .collect();
+        // Declared legacy package directories can also supply this plugin ID.
+        // These suffixes only prevent deleting a shared entry; they never grant
+        // authority to remove a foreign path.
+        suffixes.extend(
+            config
+                .replace_specs
+                .iter()
+                .flatten()
+                .filter(|spec| !spec.is_empty() && !spec.contains(['/', '\\', ':', '$']))
+                .flat_map(|name| [name.clone(), format!("{name}/plugin.mjs")]),
+        );
+        let legacy = ["plugin", "plugins"]
+            .into_iter()
+            .flat_map(|key| json[key].as_array().into_iter().flatten())
+            .filter_map(entry_spec);
+        let nested = json["plugins"]["load"]["paths"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
-            .any(|entry| {
-                let path = self.to_openclaw_path(entry);
-                std::iter::once(&config.plugin_spec)
-                    .chain(config.replace_specs.iter().flatten())
-                    .filter_map(|spec| {
-                        spec.strip_prefix("file://")
-                            .unwrap_or(spec)
-                            .strip_prefix("$PILOT_DATA/")
-                    })
-                    .any(|suffix| path.trim_end_matches('/').ends_with(&format!("/{suffix}")))
-            });
-        // 同一插件 ID 的 entry 由所有路径共享；仅凭资源当前缺失不能认定其他引用已失效。
-        if shared {
+            .filter_map(Value::as_str);
+        // Entries are shared by plugin ID. A remaining legacy reference has
+        // the same authority as a remaining nested load path.
+        legacy.chain(nested).any(|entry| {
+            let path = self.to_openclaw_path(entry);
+            let path = self
+                .normalize_spec(&node_resolve(&path))
+                .to_ascii_lowercase();
+            suffixes.iter().any(|suffix| {
+                path.trim_end_matches('/')
+                    .ends_with(&format!("/{}", suffix.to_ascii_lowercase()))
+            })
+        })
+    }
+
+    fn removable_openclaw_entry(&self, json: &Value, config: &PluginInjectConfig) -> bool {
+        if self.has_other_openclaw_reference(json, config) {
             return false;
         }
         let managed = config
@@ -561,10 +612,12 @@ impl PluginInjectStrategy {
         config: &PluginInjectConfig,
         verified_own_resources: bool,
     ) -> bool {
+        let mut legacy_config = config.clone();
+        legacy_config.config_key = None;
+        let mut mutated = self.flat_array_remove(json, resolved_spec, &legacy_config);
         if !json.get("plugins").is_some_and(Value::is_object) {
-            return false;
+            return mutated;
         }
-        let mut mutated = false;
         // Replaced legacy aliases alone do not prove that this install owns the
         // entry. Require its exact current path before considering extra options.
         let exact_own_path = json
@@ -596,6 +649,7 @@ impl PluginInjectStrategy {
         }
         let exclusive_owned_entry = verified_own_resources
             && exact_own_path
+            && !self.has_other_openclaw_reference(json, config)
             && json
                 .pointer("/plugins/load/paths")
                 .and_then(Value::as_array)

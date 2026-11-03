@@ -500,9 +500,15 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
             StartupBody(collections.clone()),
             "StartupBody",
             store.clone(),
-            Some(60000),
+            Some(5),
         );
-        let http = Arc::new(HttpFlusher::new(config(&receiver.url)));
+        let http = Arc::new(HttpFlusher::new(
+            serde_json::from_value(json!({
+                "enabled":true,"url":receiver.url,"batchMaxSize":100,
+                "flushIntervalMs":20,"requestTimeoutMs":if hang {60000} else {100}
+            }))
+            .unwrap(),
+        ));
         let manager = Arc::new(InputManager::new());
         manager.set_state_store(store.clone());
         manager.set_flusher(http.clone());
@@ -531,7 +537,8 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
         });
         let later = Arc::new(AtomicUsize::new(0));
         let later_counter = later.clone();
-        let (start_input, stop_input) = (input.clone(), input.clone());
+        let start_input = input.clone();
+        let stop_manager = manager.clone();
         let discovery = Arc::new(AgentDiscoveryService::new(vec![
             Arc::new(Detection {
                 id: "codex-startup",
@@ -540,8 +547,11 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
                     Box::pin(async move { input.start().await.map_err(anyhow::Error::msg) })
                 }),
                 stop: Arc::new(move || {
-                    let input = stop_input.clone();
-                    Box::pin(async move { input.stop().await.map_err(anyhow::Error::msg) })
+                    let manager = stop_manager.clone();
+                    Box::pin(async move {
+                        manager.stop_input("codex-startup").await;
+                        Ok(())
+                    })
                 }),
             }),
             Arc::new(Detection {
@@ -559,6 +569,9 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
             .unwrap();
         eventually(|| receiver.requests.load(Ordering::SeqCst) >= if hang { 1 } else { 3 }).await;
         assert_eq!(later.load(Ordering::SeqCst), 1);
+        let states = discovery.get_states();
+        assert_eq!(format!("{:?}", states["codex-startup"]), "Running");
+        assert_eq!(format!("{:?}", states["later-agent"]), "Running");
         for _ in 0..100 {
             input.request_collection();
         }
@@ -571,11 +584,12 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
                 .unwrap()
                 .unwrap();
             assert_eq!(disk_offset(&path, "codex-startup").await, 1.0);
+            assert_eq!(receiver.accepted.lock().unwrap().len(), 1);
         }
-        manager.cancel_pending_outputs();
         tokio::time::timeout(Duration::from_secs(1), discovery.stop())
             .await
             .unwrap();
+        assert!(!input.running());
         tokio::time::timeout(Duration::from_secs(1), manager.stop_all())
             .await
             .unwrap();
@@ -587,6 +601,8 @@ async fn discovery_startup_outage_keeps_later_agents_running_and_one_inflight_cy
             eventually(|| receiver.disconnected.load(Ordering::SeqCst) > 0).await;
             assert!(store.save_failed());
             assert_eq!(disk_offset(&path, "codex-startup").await, 0.0);
+            http.flush().await.unwrap();
+            assert_eq!(receiver.requests.load(Ordering::SeqCst), 1);
         }
     }
 }

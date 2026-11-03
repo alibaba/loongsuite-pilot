@@ -559,10 +559,12 @@ fn executable(p: &Package, relative: &str, body: &str) {
 }
 #[cfg(unix)]
 async fn status_until(path: &Path, accept: impl Fn(&Value) -> bool) -> Value {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let observed = std::sync::Mutex::new(None);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if let Ok(bytes) = tokio::fs::read(path).await {
                 if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                    *observed.lock().unwrap() = Some(value.clone());
                     if accept(&value) {
                         break value;
                     }
@@ -571,8 +573,13 @@ async fn status_until(path: &Path, accept: impl Fn(&Value) -> bool) -> Value {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("worker status did not satisfy its real lifecycle contract")
+    .await;
+    result.unwrap_or_else(|_| {
+        panic!(
+            "worker status did not satisfy its real lifecycle contract: path={path:?} last={:?}",
+            observed.into_inner().unwrap()
+        )
+    })
 }
 #[cfg(unix)]
 #[tokio::test]

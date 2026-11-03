@@ -132,26 +132,83 @@ fn format_hook_command(
     )
 }
 
+fn owned_legacy_codex_scripts(
+    hook_command: &str,
+    agent_id: &str,
+    data_dir: Option<&Path>,
+) -> Option<[PathBuf; 2]> {
+    if cfg!(windows) || agent_id != "codex" {
+        return None;
+    }
+    let data = data_dir.filter(|data| {
+        data.is_absolute()
+            && Path::new(hook_command) == data.join("hooks/codex-loongsuite-pilot-hook.sh")
+    })?;
+    Some([
+        data.join("hooks/codex-loongsuite-pilot-hook.sh"),
+        data.join("hooks/codex-loongsuite-pilot-hook.mjs"),
+    ])
+}
+
+fn legacy_codex_path_spellings(script: &str) -> Vec<String> {
+    let mut out = legacy_claude_hook_paths(script);
+    for spelling in [
+        quote_claude_hook_path(script),
+        format!("'{}'", script.replace('\'', "'\\''")),
+    ] {
+        if !out.contains(&spelling) {
+            out.push(spelling);
+        }
+    }
+    out
+}
+
 fn legacy_hook_commands(
     hook_command: &str,
     event: &str,
     style: Option<EventSubcommand>,
     agent_id: &str,
+    data_dir: Option<&Path>,
 ) -> Vec<String> {
-    if !cfg!(windows) && (agent_id == "claude-code" || hook_command.ends_with(".sh")) {
-        return legacy_claude_hook_paths(hook_command)
+    let mut out = if !cfg!(windows) && (agent_id == "claude-code" || hook_command.ends_with(".sh"))
+    {
+        legacy_claude_hook_paths(hook_command)
             .into_iter()
             .map(|command| append_event_subcommand(&command, event, style))
-            .collect();
+            .collect()
+    } else if cfg!(windows) {
+        let current = format_hook_command(hook_command, event, style, agent_id);
+        windows_compatible_hook_commands(hook_command, event, style)
+            .into_iter()
+            .filter(|command| command != &current)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Old Unix Codex uninstall accepted bash-prefixed .sh/.mjs commands.
+    // Enumerate only known spellings rooted in this install's explicit resource
+    // authority. Never infer ownership from a basename or parse arbitrary shell.
+    if let Some(paths) = owned_legacy_codex_scripts(hook_command, agent_id, data_dir) {
+        for path in paths {
+            for spelling in legacy_codex_path_spellings(&path.to_string_lossy()) {
+                for base in [spelling.clone(), format!("bash {spelling}")] {
+                    // Legacy uninstall also found a fixed Stop command in
+                    // other event groups. Accept that known old suffix only,
+                    // never arbitrary additional arguments or shell syntax.
+                    for legacy_event in [event, "Stop"] {
+                        let command = append_event_subcommand(&base, legacy_event, style);
+                        if !out.contains(&command) {
+                            out.push(command);
+                        }
+                    }
+                }
+            }
+        }
+        let current = format_hook_command(hook_command, event, style, agent_id);
+        out.retain(|command| command != &current);
     }
-    if !cfg!(windows) {
-        return Vec::new();
-    }
-    let current = format_hook_command(hook_command, event, style, agent_id);
-    windows_compatible_hook_commands(hook_command, event, style)
-        .into_iter()
-        .filter(|command| command != &current)
-        .collect()
+    out
 }
 
 // Only enumerate known command forms. Arguments remain byte-exact so an
@@ -829,9 +886,18 @@ impl HookStrategy {
             .collect();
         let hooks_json = node_resolve(&resolve_home(&hook.settings_path));
         let old_locations = if hook.trust_toml.is_some() {
-            self.resolve_codex_hooks_from_data(def, &events, true, &document.data, true)?
+            // Cleanup removes every exact-owned direct/nested handler. Normal
+            // deployment and trust repair still require one handler per event.
+            self.resolve_codex_hook_locations_from_data(
+                def,
+                &events,
+                true,
+                &document.data,
+                true,
+                !uninstall,
+            )?
         } else {
-            HashMap::new()
+            Vec::new()
         };
         if !uninstall {
             self.ensure_settings_file(def, &mut document)?;
@@ -880,7 +946,7 @@ impl HookStrategy {
             // Parsing the unreconciled duplicate tables first would prevent
             // that existing repair path from ever running.
             let owned_keys: Vec<_> = old_locations
-                .values()
+                .iter()
                 .map(|location| installed_hook_state_key(&hooks_json, location))
                 .collect();
             if uninstall {
@@ -942,10 +1008,24 @@ impl HookStrategy {
         }
         if uninstall && self.preserve_runtime_assets {
             let path = resolve_home(&hook.hook_command);
-            let needles = [path.clone(), quote_claude_hook_path(&path)]
+            let mut needles = [path.clone(), quote_claude_hook_path(&path)]
                 .into_iter()
                 .map(|path| normalize_hook_reference(&path))
                 .collect::<Vec<_>>();
+            if let Some(paths) = owned_legacy_codex_scripts(
+                &path,
+                &def.id,
+                self.resource_roots.as_ref().map(|(_, data)| data.as_path()),
+            ) {
+                for legacy in paths {
+                    for spelling in legacy_codex_path_spellings(&legacy.to_string_lossy()) {
+                        let needle = normalize_hook_reference(&spelling);
+                        if !needles.contains(&needle) {
+                            needles.push(needle);
+                        }
+                    }
+                }
+            }
             if document
                 .data
                 .get("hooks")
@@ -955,7 +1035,19 @@ impl HookStrategy {
             }
         }
         if document.changed() && (!uninstall || document.raw != initial_raw) {
-            edits.insert("config".into(), document.raw);
+            // The former Codex cleanup writer emitted BOM-free UTF-8. Only an
+            // actual Codex uninstall edit changes this encoding boundary; a
+            // no-op and every other Agent keep the original bytes.
+            let raw = if uninstall && def.id == "codex" {
+                document
+                    .raw
+                    .strip_prefix('\u{feff}')
+                    .unwrap_or(&document.raw)
+                    .to_owned()
+            } else {
+                document.raw
+            };
+            edits.insert("config".into(), raw);
         }
         if let Some((_, installed_by)) = &self.deployment_state {
             if let Some(state) = super::deployed_state_merge::plan_hook_state(
@@ -1009,17 +1101,40 @@ impl HookStrategy {
         data: &Value,
         include_legacy: bool,
     ) -> Result<HashMap<String, InstalledCodexHookLocation>, String> {
+        Ok(self
+            .resolve_codex_hook_locations_from_data(
+                def,
+                event_names,
+                allow_missing,
+                data,
+                include_legacy,
+                true,
+            )?
+            .into_iter()
+            .map(|location| (location.event_name.clone(), location))
+            .collect())
+    }
+
+    fn resolve_codex_hook_locations_from_data(
+        &self,
+        def: &AgentDefinition,
+        event_names: &[String],
+        allow_missing: bool,
+        data: &Value,
+        include_legacy: bool,
+        require_unique: bool,
+    ) -> Result<Vec<InstalledCodexHookLocation>, String> {
         let hook = def.hook.as_ref().ok_or("missing hook config")?;
         let hook_command = resolve_home(&hook.hook_command);
         let settings_path = resolve_home(&hook.settings_path);
         if allow_missing && data.get("hooks").is_none() {
-            return Ok(HashMap::new());
+            return Ok(Vec::new());
         }
         let hooks = data
             .get("hooks")
             .and_then(Value::as_object)
             .ok_or_else(|| format!("installed hooks object missing: {settings_path}"))?;
-        let mut result = HashMap::new();
+        let mut result = Vec::new();
         for event_name in event_names {
             let event_key =
                 event_key(event_name).ok_or_else(|| format!("Unknown hook event: {event_name}"))?;
@@ -1057,6 +1172,7 @@ impl HookStrategy {
                                 event_name,
                                 hook.event_subcommand,
                                 &def.id,
+                                self.resource_roots.as_ref().map(|(_, data)| data.as_path()),
                             )
                             .iter()
                             .any(|old| hook_commands_match(installed_command, old)));
@@ -1102,13 +1218,13 @@ impl HookStrategy {
             if matches.is_empty() && allow_missing {
                 continue;
             }
-            if matches.len() != 1 {
+            if matches.is_empty() || (require_unique && matches.len() != 1) {
                 return Err(format!(
                     "expected exactly one installed Pilot handler for {event_name}; found {}",
                     matches.len()
                 ));
             }
-            result.insert(event_name.clone(), matches.remove(0));
+            result.extend(matches);
         }
         Ok(result)
     }
@@ -1223,6 +1339,7 @@ impl HookStrategy {
             event,
             hook_config.event_subcommand,
             &def.id,
+            self.resource_roots.as_ref().map(|(_, data)| data.as_path()),
         ));
         HookDefinition {
             agent_id: def.id.clone(),
@@ -1324,6 +1441,7 @@ impl HookStrategy {
                 event,
                 hook_config.event_subcommand,
                 &def.id,
+                self.resource_roots.as_ref().map(|(_, data)| data.as_path()),
             );
             arr.retain(|item| {
                 item.get("command")
@@ -1508,7 +1626,9 @@ mod tests {
             "C:\\Users\\a & b\\hooks\\qoder.ps1",
             "C:/folder.ps1/hooks/KIRO.PS1",
         ] {
-            let expected = format!("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\" --agent-id qoder-cn");
+            let expected = format!(
+                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{script}\" --agent-id qoder-cn"
+            );
             assert_eq!(
                 wrap_ps1_for_platform(&format!("{script} --agent-id qoder-cn"), true),
                 expected
@@ -1528,7 +1648,9 @@ mod tests {
         let commands =
             windows_compatible_hook_commands(path, "Stop", Some(EventSubcommand::KebabCase));
         for path in [path.to_string(), path.replace('/', "\\")] {
-            let command = format!("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\" stop");
+            let command = format!(
+                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\" stop"
+            );
             assert!(commands.contains(&command));
             let legacy = format!("powershell -NoProfile -ExecutionPolicy Bypass -File {path} stop");
             assert!(
@@ -1638,6 +1760,7 @@ mod tests {
                 "stop",
                 None,
                 "cursor",
+                None,
             ));
             assert!(!definition
                 .replace_hook_commands

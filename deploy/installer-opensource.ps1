@@ -197,9 +197,9 @@ if ($MultimodalMode -and $MultimodalMode -ne "none") {
 }
 
 # ============================================================
-# Resolve package URL
+# Resolve install/upgrade defaults; uninstall only uses explicit package URLs.
 # ============================================================
-if (-not $PackageUrl) {
+if ($Command -ne 'uninstall' -and -not $PackageUrl) {
     if ($Version) {
         $PackageUrl = "$_OSS_BASE_URL/$Version/$PACKAGE_NAME.zip"
     } else {

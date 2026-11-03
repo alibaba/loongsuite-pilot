@@ -1,0 +1,33 @@
+[
+  [
+    {
+      "label": "complete",
+      "cache": {
+        "read": 2,
+        "write": 0
+      },
+      "input": 12
+    },
+    {
+      "label": "missing",
+      "input": 10
+    },
+    {
+      "label": "null",
+      "cache": null,
+      "input": 10
+    },
+    {
+      "label": "partial",
+      "cache": {
+        "read": 2
+      },
+      "input": 12
+    }
+  ],
+  [
+    "session.execution.interrupted",
+    "session.execution.failed",
+    "session.deleted"
+  ]
+]

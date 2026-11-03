@@ -10,7 +10,7 @@ use super::paths::node_resolve;
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 // 保留锁文件本身，避免删除后其他进程锁住不同 inode；句柄关闭即释放系统锁。
-fn open_state_lock(path: &Path) -> anyhow::Result<Option<std::fs::File>> {
+pub(crate) fn open_state_lock(path: &Path) -> anyhow::Result<Option<std::fs::File>> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
             let metadata = crate::utils::runtime_paths::runtime_metadata(path)?;

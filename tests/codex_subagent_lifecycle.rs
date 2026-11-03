@@ -154,15 +154,22 @@ struct Harness {
     emitted: Arc<Mutex<Vec<AgentActivityEntry>>>,
     running: Option<Running>,
     current_privacy: bool,
+    wire_endpoint: Option<String>,
 }
+type NativeExporterFactory =
+    Arc<dyn Fn(loongsuite_pilot::flushers::ExporterOpts) -> Arc<dyn TraceExporter> + Send + Sync>;
 impl Harness {
     async fn new() -> Self {
+        Self::with_wire_endpoint(None).await
+    }
+    async fn with_wire_endpoint(wire_endpoint: Option<String>) -> Self {
         let mut harness = Self {
             root: tempfile::tempdir().unwrap(),
             spans: Arc::new(Mutex::new(Vec::new())),
             emitted: Arc::new(Mutex::new(Vec::new())),
             running: None,
             current_privacy: false,
+            wire_endpoint,
         };
         tokio::fs::create_dir(harness.root.path().join("sessions"))
             .await
@@ -179,6 +186,9 @@ impl Harness {
         manager.set_state_store(Arc::clone(&state));
         manager.set_user_id("synthetic-user");
         if self.current_privacy {
+            let legacy: loongsuite_pilot::types::AgentsConfig =
+                serde_json::from_value(json!({"codex":{"captureMessageContent":false}})).unwrap();
+            manager.set_agents_config(&legacy);
             manager.set_mask_config(loongsuite_pilot::types::MaskConfig {
                 mode: loongsuite_pilot::types::MaskMode::All,
                 types: Vec::new(),
@@ -197,14 +207,21 @@ impl Harness {
         }
         let weak = Arc::downgrade(&manager);
         let capture = Arc::new(Capture(Arc::clone(&self.spans)));
+        let factory: Option<NativeExporterFactory> = if self.wire_endpoint.is_some() {
+            None
+        } else {
+            Some(Arc::new(move |_| {
+                Arc::clone(&capture) as Arc<dyn TraceExporter>
+            }))
+        };
         let trace = Arc::new(OtlpTraceFlusher::with_parts(
             serde_json::from_value(json!({
                 "enabled":true,"protocol":"http/protobuf","serviceName":"codex-matrix",
-                "endpoints":[{"name":"capture","endpoint":"http://127.0.0.1:4318","compression":"none"}],
+                "endpoints":[{"name":"capture","endpoint":self.wire_endpoint.as_deref().unwrap_or("http://127.0.0.1:4318"),"compression":"none"}],
                 "dataDir":root,"turnIdleTimeoutMs":0
             })).unwrap(),
             None,
-            Some(Arc::new(move |_| Arc::clone(&capture) as Arc<dyn TraceExporter>)),
+            factory,
             None,
         ).unwrap().with_codex_journal(
             Arc::new(CodexTurnJournal::new(root.join("journal"))),
@@ -903,6 +920,298 @@ async fn native_codex_current_mask_and_workspace_policy_cover_fresh_collection_a
         !journal.is_acknowledged(&excluded_entry).await.unwrap(),
         "workspace filtering fabricated backend acknowledgement"
     );
+    assert_unique(&logs, &spans);
+    h.stop().await;
+}
+
+mod native_wire {
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Export {
+        #[prost(message, repeated, tag = "1")]
+        pub resources: Vec<Resource>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Resource {
+        #[prost(message, repeated, tag = "2")]
+        pub scopes: Vec<Scope>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Scope {
+        #[prost(message, repeated, tag = "2")]
+        pub spans: Vec<Span>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Span {
+        #[prost(bytes = "vec", tag = "1")]
+        pub trace_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "2")]
+        pub span_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "4")]
+        pub parent_span_id: Vec<u8>,
+        #[prost(message, repeated, tag = "9")]
+        pub attributes: Vec<Attribute>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Attribute {
+        #[prost(string, tag = "1")]
+        pub key: String,
+        #[prost(message, optional, tag = "2")]
+        pub value: Option<AnyValue>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct AnyValue {
+        #[prost(string, optional, tag = "1")]
+        pub text: Option<String>,
+    }
+}
+struct WireReceiver {
+    endpoint: String,
+    spans: Arc<Mutex<Vec<native_wire::Span>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for WireReceiver {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl WireReceiver {
+    async fn new() -> Self {
+        use prost::Message;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&spans);
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut part = [0; 4096];
+                let header_end = loop {
+                    let n = socket.read(&mut part).await.unwrap();
+                    if n == 0 {
+                        break None;
+                    }
+                    bytes.extend_from_slice(&part[..n]);
+                    assert!(bytes.len() <= 10 * 1024 * 1024 + 65536);
+                    if let Some(i) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                        break Some(i + 4);
+                    }
+                };
+                let Some(end) = header_end else { continue };
+                let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                assert!(
+                    !headers.contains("content-encoding: gzip"),
+                    "fixture selects actual uncompressed protobuf"
+                );
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                assert!(length <= 10 * 1024 * 1024);
+                while bytes.len() < end + length {
+                    let n = socket.read(&mut part).await.unwrap();
+                    assert_ne!(n, 0);
+                    bytes.extend_from_slice(&part[..n]);
+                }
+                let decoded = native_wire::Export::decode(&bytes[end..end + length]).unwrap();
+                let decoded = decoded
+                    .resources
+                    .into_iter()
+                    .flat_map(|resource| resource.scopes)
+                    .flat_map(|scope| scope.spans)
+                    .collect::<Vec<_>>();
+                assert!(
+                    !decoded.is_empty(),
+                    "real OTLP request must contain protobuf spans"
+                );
+                sink.lock().unwrap().extend(decoded);
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            spans,
+            task,
+        }
+    }
+}
+fn wire_string<'a>(span: &'a native_wire::Span, key: &str) -> Option<&'a str> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| attribute.value.as_ref())
+        .and_then(|value| value.text.as_deref())
+}
+#[tokio::test]
+async fn native_codex_subagent_real_http_protobuf_matches_jsonl_operation_ids_and_parent_tree() {
+    let receiver = WireReceiver::new().await;
+    let mut h = Harness::with_wire_endpoint(Some(receiver.endpoint.clone())).await;
+    h.write(
+        PARENT,
+        [
+            vec![metadata(PARENT, 0.0, None, 1)],
+            begin("p1", 1.0, "delegate", false),
+            dispatch("spawn-a", CHILD, 2.0, "child-a", "spawn_agent"),
+            end("p1", 3.0),
+        ]
+        .concat(),
+        None,
+    )
+    .await;
+    h.write(
+        CHILD,
+        [
+            vec![metadata(CHILD, 2.005, Some(PARENT), 1)],
+            work("c1", 4.0, "child-a"),
+        ]
+        .concat(),
+        Some("c1"),
+    )
+    .await;
+    let logs = h.logs().await;
+    h.stop().await;
+    let spans = receiver.spans.lock().unwrap().clone();
+    assert!(!spans.is_empty());
+    let tool = spans
+        .iter()
+        .find(|span| {
+            wire_string(span, "gen_ai.tool.call.id") == Some("spawn-a")
+                && wire_string(span, "gen_ai.span.kind") == Some("TOOL")
+        })
+        .unwrap();
+    let child = spans
+        .iter()
+        .find(|span| {
+            wire_string(span, "gen_ai.span.kind") == Some("AGENT")
+                && wire_string(span, "gen_ai.session.id") == Some(CHILD)
+        })
+        .unwrap();
+    assert_eq!(child.parent_span_id, tool.span_id);
+    assert_eq!(child.trace_id, tool.trace_id);
+    let mut checked = 0;
+    for entry in logs.iter().filter(|entry| {
+        matches!(
+            entry["event.name"].as_str(),
+            Some("llm.request" | "llm.response" | "tool.call" | "tool.result")
+        )
+    }) {
+        let operation = spans
+            .iter()
+            .find(|span| hex::encode(&span.span_id) == entry["span_id"].as_str().unwrap())
+            .expect("every physical JSONL operation must exist on real protobuf wire");
+        assert_eq!(
+            hex::encode(&operation.trace_id),
+            entry["trace_id"].as_str().unwrap()
+        );
+        for key in ["gen_ai.session.id", "gen_ai.turn.id", "gen_ai.step.id"] {
+            assert_eq!(wire_string(operation, key), entry[key].as_str(), "{key}");
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "operation identity comparison must not be vacuous"
+    );
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| &span.span_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        spans.len()
+    );
+}
+
+#[tokio::test]
+async fn native_codex_legacy_optout_keeps_masked_subagent_invocation_tree_and_excludes_peer_workspace(
+) {
+    let mut h = Harness::new().await;
+    h.stop().await;
+    h.current_privacy = true;
+    h.start().await;
+    let key = "sk-1234567890abcdefghijklmnop";
+    let prompt = format!("child-a {key}");
+    h.write(
+        PARENT,
+        [
+            vec![metadata(PARENT, 0.0, None, 1)],
+            begin("p1", 1.0, "delegate", false),
+            dispatch("spawn-a", CHILD, 2.0, &prompt, "spawn_agent"),
+            end("p1", 3.0),
+        ]
+        .concat(),
+        None,
+    )
+    .await;
+    h.write(
+        CHILD,
+        [
+            vec![metadata(CHILD, 2.005, Some(PARENT), 1)],
+            work("c1", 4.0, &prompt),
+        ]
+        .concat(),
+        Some("c1"),
+    )
+    .await;
+    let mut excluded = begin("excluded-turn", 8.0, "excluded-content-sentinel", false);
+    excluded[0] = record(
+        8.0,
+        "turn_context",
+        json!({"turn_id":"excluded-turn","model":"gpt-test",
+        "cwd":h.root.path().join("excluded-workspace/project")}),
+    );
+    h.write(
+        PEER,
+        [
+            vec![metadata(PEER, 7.0, None, 1)],
+            excluded,
+            end("excluded-turn", 9.0),
+        ]
+        .concat(),
+        None,
+    )
+    .await;
+    let logs = h.logs().await;
+    let spans = h.captured();
+    assert_child(&logs, &spans, CHILD, "c1", "spawn-a");
+    assert!(logs
+        .iter()
+        .any(|row| !row["gen_ai.input.messages"].is_null()
+            || !row["gen_ai.input.messages_delta"].is_null()));
+    for field in [
+        "gen_ai.output.messages",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+    ] {
+        assert!(
+            logs.iter().any(|row| !row[field].is_null()),
+            "legacy switch removed {field}"
+        );
+    }
+    for text in [
+        serde_json::to_string(&logs).unwrap(),
+        serde_json::to_string(
+            &spans
+                .iter()
+                .map(|span| &span.attributes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    ] {
+        for retained in ["child-a", "fixture-result", "[APIKEY_MASKED]"] {
+            assert!(text.contains(retained));
+        }
+        assert!(!text.contains(key));
+        assert!(!text.contains("excluded-content-sentinel"));
+    }
+    assert!(!logs.iter().any(|row| row["gen_ai.session.id"] == PEER));
+    assert!(!spans
+        .iter()
+        .any(|span| span.attributes.get("gen_ai.session.id") == Some(&json!(PEER))));
     assert_unique(&logs, &spans);
     h.stop().await;
 }

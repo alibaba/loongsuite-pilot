@@ -937,9 +937,10 @@ impl Updater {
                         crate::deployment::installer_helper::with_config_lock(
                             Path::new(&self.config_path),
                             || async {
-                                crate::deployment::native_install::recover_runtime_files(
+                                crate::deployment::native_install::recover_runtime_files_with_data(
                                     Path::new(&self.paths.cache_dir),
                                     self.activation_targets(),
+                                    Path::new(&self.paths.data_dir),
                                 )?;
                                 self.check_locked().await.map_err(anyhow::Error::msg)
                             },
@@ -1241,11 +1242,25 @@ impl Updater {
             Path::new(&self.paths.data_dir),
         )
         .map_err(|err| format!("服务入口归属校验失败：{err:#}"))?;
-        let mut transaction = ActivationTransaction::begin(
+        crate::deployment::runtime_data_assets::recover_eager(Path::new(&self.paths.data_dir))
+            .await
+            .map_err(|error| format!("运行资源恢复失败：{error:#}"))?;
+        let resources = crate::deployment::runtime_data_assets::RuntimeDataAssets::load(
+            staging,
+            Path::new(&self.paths.data_dir),
             Path::new(&self.paths.cache_dir),
-            self.activation_targets(),
+            &runtime,
         )
-        .map_err(|err| format!("无法保存更新恢复材料：{err:#}"))?;
+        .map_err(|error| format!("运行资源计划无效：{error:#}"))?;
+        let mut targets = self.activation_targets();
+        targets.extend(
+            resources
+                .targets(Path::new(&self.paths.data_dir), true)
+                .map_err(|error| error.to_string())?,
+        );
+        let mut transaction =
+            ActivationTransaction::begin(Path::new(&self.paths.cache_dir), targets)
+                .map_err(|err| format!("无法保存更新恢复材料：{err:#}"))?;
         let old_current = read_pointer_checked(&self.paths.current_file).await?;
         // 不覆盖任何现有版本目录，Windows 正在执行的 updater 也无需被替换。
         let dir_name = format!(
@@ -1258,6 +1273,7 @@ impl Updater {
         std::fs::create_dir_all(&self.paths.versions_dir).map_err(|err| err.to_string())?;
         std::fs::rename(staging, &target).map_err(|err| err.to_string())?;
         let switch = (|| -> anyhow::Result<()> {
+            resources.install(&mut transaction, true)?;
             // Pin the installed final target, never the temporary unpacked path.
             let service_files = crate::deployment::native_install::service_files(
                 &target,
@@ -1282,6 +1298,7 @@ impl Updater {
                 .map_err(|rollback| format!("{err:#}; 回滚失败：{rollback:#}"))?;
             return Err(err.to_string());
         }
+        resources.report();
         Ok(transaction)
     }
 
@@ -3713,6 +3730,7 @@ mod tests {
         quiet.start();
         assert!(!quiet.is_scheduled());
     }
+    include!("updater_asset_history_tests.rs");
     include!("updater_contract_tests.rs");
     include!("updater_metrics_timer_history_tests.rs");
 }

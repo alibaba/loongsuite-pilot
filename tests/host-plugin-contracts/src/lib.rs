@@ -15,3 +15,9 @@ mod host;
 mod openclaw;
 #[cfg(test)]
 mod opencode;
+
+#[cfg(test)]
+mod hermes_upstream_history;
+
+#[cfg(test)]
+mod opencode_v2_trace_history;

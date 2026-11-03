@@ -410,3 +410,142 @@ fn installed_powershell_qwen_resolves_data_and_native_pin_without_node() {
     Child::spawn(command).finish(Instant::now() + Duration::from_secs(15));
     assert_qwen_custom_root(&f);
 }
+
+/// Original custom-root integration, including the actual native-segment overlay.
+/// The dedicated installed shell resolves its own data root before the stale env.
+#[cfg(unix)]
+#[tokio::test]
+async fn qwen_custom_root_actual_installed_shell_and_trace_use_native_segments_without_default_or_stale_output(
+) {
+    use loongsuite_pilot::{
+        checkpoints::{InputState, StateStore},
+        inputs::qwen_work_cn::{QwenWorkCnTraceInput, QwenWorkCnTraceOptions},
+    };
+    use std::sync::{Arc, Mutex};
+    let f = Fixture::new();
+    let transcript = f.root.path().join("qwen-transcript.jsonl");
+    let rows = [
+        json!({"sessionId":"session-custom","cwd":"/workspace/custom","version":"1.0.0","isSidechain":false,
+            "type":"user","uuid":"user-custom","promptId":"turn-custom","timestamp":"2026-08-07T08:00:00.000Z",
+            "message":{"role":"user","content":[{"type":"text","text":"custom data dir test"}]}}),
+        json!({"sessionId":"session-custom","cwd":"/workspace/custom","version":"1.0.0","isSidechain":false,
+            "type":"assistant","uuid":"assistant-custom","parentUuid":"user-custom","timestamp":"2026-08-07T08:00:01.000Z",
+            "message":{"role":"assistant","id":"response-custom","model":"qwen-custom","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}),
+    ];
+    fs::write(
+        &transcript,
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let stale = f.root.path().join("stale-pilot-data");
+    let mut cmd = Command::new("/bin/bash");
+    cmd.arg(f.hooks.join("qwenworkcn-loongsuite-pilot-hook.sh"));
+    let mut cmd=f.command(cmd,false,json!({"hook_event_name":"Stop","transcript_path":transcript,"session_id":"session-custom","cwd":"/workspace/custom"}));
+    cmd.env("LOONGSUITE_PILOT_DATA_DIR", &stale);
+    Child::spawn(cmd).finish(Instant::now() + Duration::from_secs(5));
+    let history = f.data.join("logs/qwen-work-cn/history");
+    let files: Vec<_> = fs::read_dir(&history)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert!(!f.home.join(".loongsuite-pilot/logs").exists());
+    assert!(!stale.join("logs").exists());
+    let segments = f.root.path().join("sessions");
+    let directory = segments.join("-workspace-custom/session-custom/segments");
+    fs::create_dir_all(&directory).unwrap();
+    let rows = [
+        json!({"type":"model.request.started","ts":"2026-08-07T08:00:00.000Z","turn_id":"turn-custom","request_id":"request-custom","data":{"model":"qwen-custom"}}),
+        json!({"type":"model.response.completed","ts":"2026-08-07T08:00:01.000Z","turn_id":"turn-custom","request_id":"request-custom","data":{"model":"qwen-custom","input_tokens":120,"output_tokens":30,"cache_read_input_tokens":90}}),
+    ];
+    fs::write(
+        directory.join("run.jsonl"),
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let store = Arc::new(StateStore::new(f.root.path().join("native-state.json")));
+    store.set(
+        "qwen-work-cn-trace",
+        InputState::new()
+            .with_last_file(files[0].file_name().unwrap().to_string_lossy())
+            .with_last_offset(0.0),
+    );
+    let input = QwenWorkCnTraceInput::new(QwenWorkCnTraceOptions {
+        state_store: store,
+        log_dir: Some(history.to_string_lossy().into_owned()),
+        segments_root: Some(segments.to_string_lossy().into_owned()),
+        poll_interval_ms: Some(60000),
+    });
+    let entries = Arc::new(Mutex::new(Vec::new()));
+    let captured = entries.clone();
+    input.bind_collector(
+        move |batch| captured.lock().unwrap().extend_from_slice(batch),
+        |_| {},
+    );
+    input.start().await.unwrap();
+    input.inner.run_cycle().await;
+    input.stop().await.unwrap();
+    let entries: Vec<Value> = entries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect();
+    let response = entries
+        .iter()
+        .find(|e| e["gen_ai.response.id"] == "response-custom")
+        .expect("actual dedicated hook must reach trace enrichment");
+    for (field, expected) in [
+        ("gen_ai.usage.input_tokens", 120),
+        ("gen_ai.usage.output_tokens", 30),
+        ("gen_ai.usage.total_tokens", 150),
+        ("gen_ai.usage.cache_read.input_tokens", 90),
+    ] {
+        assert_eq!(response[field], expected, "{field}");
+    }
+    assert!(response.get("gen_ai.usage.reasoning_tokens").is_none());
+    assert!(entries
+        .iter()
+        .all(|e| e.get("gen_ai.system_instructions").is_none()));
+    assert!(!f.data.join("logs/qwenworkcn-intercept.jsonl").exists());
+    assert!(!stale.join("logs").exists());
+    f.assert_no_default_data();
+}
+
+#[cfg(unix)]
+#[test]
+fn qwen_development_asset_entrypoint_keeps_explicit_data_root() {
+    let f = Fixture::new();
+    let source = f.root.path().join("source/assets/hooks");
+    fs::create_dir_all(source.join("shared")).unwrap();
+    for file in [
+        "qwenworkcn-loongsuite-pilot-hook.sh",
+        "shared/native.sh",
+        "pilot-bin",
+    ] {
+        fs::copy(f.hooks.join(file), source.join(file)).unwrap();
+    }
+    let mut command = Command::new("/bin/bash");
+    command.arg(source.join("qwenworkcn-loongsuite-pilot-hook.sh"));
+    let command = f.command(command, true, qwen_payload(&f));
+    Child::spawn(command).finish(Instant::now() + Duration::from_secs(5));
+    assert_qwen_custom_root(&f);
+    assert!(!f.root.path().join("source/assets/logs").exists());
+}
+#[test]
+fn qwen_direct_native_cli_keeps_explicit_data_root_without_a_wrapper_location() {
+    let f = Fixture::new();
+    let mut command = f.native("qwen-work-cn", None, qwen_payload(&f));
+    command.args(["--agent-id", "qwen-work-cn", "--log-prefix", "qwen-work-cn"]);
+    Child::spawn(command).finish(Instant::now() + Duration::from_secs(5));
+    assert_qwen_custom_root(&f);
+}

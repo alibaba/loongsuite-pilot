@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "effectiveProjectTimeoutMs": 15000,
+  "caseFile": "tests/unit/local-workers/local-worker-activation-service.test.ts",
+  "sourceProof": [
+    {
+      "ref": "ef8953",
+      "configSha256": "ad0a57bda492d3f2e3f22b79eb073b66d45438ced9954b3c65b21c708f817cfa",
+      "configTimeoutLines": [
+        "testTimeout: 15_000,"
+      ],
+      "relevantScripts": {
+        "test": "vitest run"
+      },
+      "testFileSha256": "c1a7fdfa0b930538f94631eb81963e13bf8fcd7304a9f63da3ec50f5c3d54581",
+      "firstCaseEndsWithoutTimeoutArgument": true
+    },
+    {
+      "ref": "f84e388",
+      "configSha256": "ad0a57bda492d3f2e3f22b79eb073b66d45438ced9954b3c65b21c708f817cfa",
+      "configTimeoutLines": [
+        "testTimeout: 15_000,"
+      ],
+      "relevantScripts": {
+        "test": "vitest run"
+      },
+      "testFileSha256": "c1a7fdfa0b930538f94631eb81963e13bf8fcd7304a9f63da3ec50f5c3d54581",
+      "firstCaseEndsWithoutTimeoutArgument": true
+    },
+    {
+      "ref": "dae1582",
+      "configSha256": "ad0a57bda492d3f2e3f22b79eb073b66d45438ced9954b3c65b21c708f817cfa",
+      "configTimeoutLines": [
+        "testTimeout: 15_000,"
+      ],
+      "relevantScripts": {
+        "test": "vitest run"
+      },
+      "testFileSha256": "c1a7fdfa0b930538f94631eb81963e13bf8fcd7304a9f63da3ec50f5c3d54581",
+      "firstCaseEndsWithoutTimeoutArgument": true
+    }
+  ],
+  "originalOneAndThreeSecondPollsUnchanged": true,
+  "productionStopGraceMsUnchanged": 5000
+}

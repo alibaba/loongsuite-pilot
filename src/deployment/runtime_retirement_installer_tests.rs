@@ -805,3 +805,6 @@ async fn failure_uninstall_diagnoses_before_runtime_removal_and_can_retry_remain
 
 #[path = "runtime_uninstall_history_contract_tests.rs"]
 mod uninstall_history_contract_tests;
+
+#[path = "runtime_retirement_windows_history_tests.rs"]
+mod windows_history_tests;

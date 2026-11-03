@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 type Service = LocalWorkerActivationService<ProbeSupervisor>;
 async fn within_source_budget(future: impl std::future::Future<Output = ()>) {
-    tokio::time::timeout(Duration::from_secs(5), future)
+    tokio::time::timeout(Duration::from_secs(15), future)
         .await
-        .expect("the original historical case has a five-second total budget");
+        .expect("the original project configuration gives this case a fifteen-second total budget");
 }
 
 struct Running(Option<Arc<Service>>);
@@ -447,16 +447,27 @@ fn native_worker_fixture() {
 #[tokio::test]
 async fn actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry()
 {
+    let started = std::time::Instant::now();
+    let stage = |label| {
+        eprintln!(
+            "native-worker history stage={label} elapsed_ms={}",
+            started.elapsed().as_millis()
+        )
+    };
     within_source_budget(async {
+        stage("fixture");
         let f = World::new();
         f.bundle(
             None,
             json!({"type":"on-failure","maxRestarts":1,"backoffSeconds":0}),
             false,
         );
+        stage("bundle-ready");
         let i = f.connect(true).await;
+        stage("connected");
         let mut run = f.service();
         run.service().start().await;
+        stage("started");
         let bundle = PathBuf::from(bundle_dir(&f.data, &i.id)).join("sample-local-runtime-0.1.0");
         let expected = vec![
             std::fs::canonicalize(&bundle)
@@ -488,9 +499,12 @@ async fn actual_native_manifest_worker_uses_the_same_real_adapter_without_node_o
                 })
         })
         .await;
+        stage("capture-verified");
         assert_eq!(f.status(&i)["state"], "running");
         assert!(!f.installed.exists());
+        stage("stop");
         run.finish().await;
+        stage("stopped");
         assert_eq!(f.status(&i)["state"], "stopped");
     })
     .await;

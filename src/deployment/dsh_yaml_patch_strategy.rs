@@ -171,7 +171,13 @@ impl DshYamlPatchStrategy {
             eprintln!("DSH cleanup failed before patch lock: stage=enabled-marker error={err}");
             return false;
         }
-        let initial = read_bytes(&target.patch_path).await.unwrap_or_default();
+        let initial = match read_bytes(&target.patch_path).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("DSH cleanup failed before patch lock: stage=patch-edit error={err}");
+                return false;
+            }
+        };
         if initial.is_empty() && !file_exists(&target.patch_path).await {
             return true;
         }

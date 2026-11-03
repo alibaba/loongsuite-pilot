@@ -288,8 +288,8 @@ validate_install_user() {
     esac
 }
 
-# Resolve PACKAGE_URL from OSS if not explicitly set
-if [ -z "$PACKAGE_URL" ]; then
+# Resolve install/upgrade defaults; uninstall uses current unless a candidate is explicit.
+if [ "$COMMAND" != "uninstall" ] && [ -z "$PACKAGE_URL" ]; then
     if [ -n "$INSTALL_VERSION" ]; then
         PACKAGE_URL="${_OSS_BASE_URL}/${INSTALL_VERSION}/${PACKAGE_NAME}.tar.gz"
     else

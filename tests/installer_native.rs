@@ -2662,3 +2662,24 @@ mod installer_empty_hooks_history;
 
 #[path = "installer_history/uninstall_contracts.rs"]
 mod installer_uninstall_contracts_history;
+
+#[path = "installer_history/uninstall_plugin_matrix.rs"]
+mod installer_uninstall_plugin_matrix_history;
+
+#[path = "installer_history/asset_trees.rs"]
+mod installer_asset_tree_history;
+
+#[path = "installer_history/windows_cleanup.rs"]
+mod windows_cleanup_history;
+
+#[path = "installer_history/copilot_uninstall.rs"]
+mod installer_copilot_uninstall_history;
+
+#[path = "installer_history/uninstall_extra_history.rs"]
+mod installer_uninstall_extra_history;
+
+#[path = "installer_history/uninstall_entry.rs"]
+mod installer_uninstall_public_entry_history;
+
+#[path = "installer_history/openclaw_path_guard.rs"]
+mod installer_openclaw_path_guard_history;

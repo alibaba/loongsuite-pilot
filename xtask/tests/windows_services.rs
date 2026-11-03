@@ -159,7 +159,20 @@ impl Fixture {
                 let phase = fs::read_to_string(&stage).unwrap_or_else(|_| "unavailable".into());
                 let stderr = fs::read(&err).unwrap_or_default();
                 let stdout = fs::read(&out).unwrap_or_default();
-                panic!("PowerShell acceptance exceeded unchanged {:?} budget: shell={} stage={} stdout={} stderr={}",budget,shell.display(),phase.trim_start_matches('\u{feff}').trim(),String::from_utf8_lossy(&stdout).chars().take(3000).collect::<String>(),String::from_utf8_lossy(&stderr).chars().take(3000).collect::<String>());
+                panic!(
+                    "PowerShell acceptance exceeded unchanged {:?} budget: shell={} stage={} stdout={} stderr={}",
+                    budget,
+                    shell.display(),
+                    phase.trim_start_matches('\u{feff}').trim(),
+                    String::from_utf8_lossy(&stdout)
+                        .chars()
+                        .take(3000)
+                        .collect::<String>(),
+                    String::from_utf8_lossy(&stderr)
+                        .chars()
+                        .take(3000)
+                        .collect::<String>()
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -2368,8 +2381,10 @@ impl NativeHermesBridgeFixture {
             helper.is_absolute() && helper.is_file(),
             "build the real native CLI before Windows bridge acceptance"
         );
-        format!("$env:PILOT_FIXTURE_MODE = 'hermes-rollback-delegate'\n$env:PILOT_FIXTURE_NATIVE_HELPER = {}\n",
-            ps_single_quote(helper.to_str().unwrap()))
+        format!(
+            "$env:PILOT_FIXTURE_MODE = 'hermes-rollback-delegate'\n$env:PILOT_FIXTURE_NATIVE_HELPER = {}\n",
+            ps_single_quote(helper.to_str().unwrap())
+        )
     }
     fn direct_call(&self) -> String {
         format!(
@@ -2713,6 +2728,371 @@ function Register-ScheduledTask {{ throw 'help must not register tasks' }}
                 );
                 assert!(!fixture.data.join("logs").exists());
             }
+        }
+    }
+}
+
+fn survivability_installer_function(name: &str) -> String {
+    let source = include_str!("../../deploy/installer-opensource.ps1").replace("\r\n", "\n");
+    let start = source.find(&format!("function {name} {{")).unwrap();
+    let tail = &source[start..];
+    tail[..tail.find("\n}\n").unwrap() + 3].to_owned()
+}
+#[test]
+fn survivability_l174_l193_actual_native_schtasks_stderr_reaches_cause_diagnostic_and_restores_eap()
+{
+    for shell in shells() {
+        for constrained in [false, true] {
+            for scenario in ["cmdlet-success", "native-success", "native-denied"] {
+                let fixture = Fixture::new();
+                let tools = fixture.home.join("private schtasks");
+                fs::create_dir(&tools).unwrap();
+                let native = tools.join("schtasks.exe");
+                fs::copy(env!("CARGO_BIN_EXE_pilot-fixture"), &native).unwrap();
+                let body = survivability_installer_function("Remove-OnePilotScheduledTask")
+                    + &format!(
+                        r#"
+$env:PATH = (Join-Path $env:USERPROFILE 'private schtasks') + ';' + $env:PATH
+$expectedNative = Join-Path (Join-Path $env:USERPROFILE 'private schtasks') 'schtasks.exe'
+$resolvedNative = (Get-Command schtasks.exe -CommandType Application -ErrorAction Stop).Source
+if ($resolvedNative -ne $expectedNative) {{ throw 'native task transport escaped private fixture' }}
+$script:queries = 0
+$script:scenario = '{scenario}'
+function Get-ScheduledTask {{
+ [CmdletBinding()] param($TaskName,$TaskPath)
+ $script:queries++
+ if ($script:queries -eq 1) {{ return @{{State='Ready'}} }}
+ return $null
+}}
+function Stop-ScheduledTask {{ throw 'ready fixture task must not stop a real task' }}
+function Unregister-ScheduledTask {{
+ [CmdletBinding(SupportsShouldProcess=$true)] param($TaskName,$TaskPath)
+ if ($script:scenario -ne 'cmdlet-success') {{ throw 'private cmdlet refusal' }}
+}}
+$env:PILOT_FIXTURE_MODE = if ($script:scenario -eq 'native-denied') {{ 'restart-stderr' }} else {{ 'exit' }}
+$global:LASTEXITCODE = 0
+$message = ''
+try {{ Remove-OnePilotScheduledTask -TaskName 'private task 用户' -TaskPath '\LoongsuitePilot' }}
+catch {{ $message=[string]$_.Exception.Message }}
+@{{message=$message;preference=[string]$ErrorActionPreference;queries=$script:queries;exit=$global:LASTEXITCODE}} |
+ ConvertTo-Json -Compress |
+ Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'survive-schtasks.json') -Encoding UTF8
+$global:LASTEXITCODE = 0
+"#
+                    );
+                success(&fixture.invoke_with_budget(
+                    &shell,
+                    &body,
+                    constrained,
+                    Duration::from_secs(15),
+                ));
+                let result = ps_private_result(&fixture, "survive-schtasks.json");
+                assert_eq!(result["preference"], "Stop");
+                let log = fixture.home.join("invocations.jsonl");
+                let records = if log.exists() {
+                    fixture.records()
+                } else {
+                    Vec::new()
+                };
+                if scenario == "cmdlet-success" {
+                    assert!(records.is_empty());
+                } else {
+                    assert_eq!(records.len(), 1);
+                    assert_eq!(
+                        records[0]["args"],
+                        json!([
+                            "/Delete",
+                            "/TN",
+                            r"\LoongsuitePilot\private task 用户",
+                            "/F"
+                        ])
+                    );
+                }
+                let message = result["message"].as_str().unwrap();
+                if scenario == "native-denied" {
+                    assert_eq!(result["queries"], 1);
+                    assert_eq!(result["exit"], 7);
+                    for expected in [
+                        "private cmdlet refusal",
+                        "schtasks exit: 7",
+                        "synthetic schtasks refusal",
+                        "BUILTIN\\Administrators",
+                        "does not need administrator",
+                        "reinstall without elevation",
+                    ] {
+                        assert!(message.contains(expected), "{expected}: {message}");
+                    }
+                    assert_eq!(message.matches("synthetic schtasks refusal").count(), 1);
+                    for frame in [
+                        "CategoryInfo",
+                        "FullyQualifiedErrorId",
+                        "NativeCommandError",
+                        "At line:",
+                    ] {
+                        assert!(!message.contains(frame), "{message}");
+                    }
+                } else {
+                    assert_eq!(result["queries"], 2);
+                    assert_eq!(message, "");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn survivability_l163_actual_uninstall_preserved_data_branch_names_credentials_before_returning_success(
+) {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let config = fixture.data.join("config.json");
+            fs::write(&config, "private reporting credentials must remain").unwrap();
+            let body = survivability_installer_function("Cmd-Uninstall")
+                + r#"
+$script:messages=@()
+$script:calls=@()
+function Msg { param($Chinese,$English); $script:messages += [string]$English }
+function Resolve-NativeUninstallSource { $script:calls += 'resolve-native' }
+function Invoke-NativeUninstall { param([switch]$CheckOnly); if ($CheckOnly) { $script:calls+='preflight' } else { $script:calls+='cleanup' } }
+function Stop-PilotService { $script:calls += 'stop-callback' }
+function Remove-PilotScheduledTasks { $script:calls += 'tasks-callback' }
+function Remove-PilotInstallationFiles { $script:calls += 'remove-install-callback' }
+$PACKAGE_NAME='private-fixture'
+$DataDir=$env:LOONGSUITE_PILOT_DATA_DIR
+$CACHE_DIR=$env:LOONGSUITE_PILOT_CACHE_DIR
+$Purge=$false
+Cmd-Uninstall
+@{messages=@($script:messages);calls=@($script:calls)} |
+ ConvertTo-Json -Compress |
+ Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'survive-retained.json') -Encoding UTF8
+"#;
+            success(&fixture.invoke_with_budget(
+                &shell,
+                &body,
+                constrained,
+                Duration::from_secs(15),
+            ));
+            let result = ps_private_result(&fixture, "survive-retained.json");
+            let messages = result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(messages.contains("config.json holds reporting credentials"));
+            assert!(messages.contains("add -Purge to remove"));
+            assert_eq!(
+                result["calls"],
+                json!([
+                    "resolve-native",
+                    "preflight",
+                    "stop-callback",
+                    "tasks-callback",
+                    "cleanup",
+                    "remove-install-callback"
+                ])
+            );
+            assert_eq!(
+                fs::read(config).unwrap(),
+                b"private reporting credentials must remain"
+            );
+            assert!(fixture.binary.is_file());
+            assert!(
+                !fixture.home.join("invocations.jsonl").exists(),
+                "this verifies actual message/control flow with inert lifecycle callbacks; native safety is tested independently"
+            );
+        }
+    }
+}
+#[test]
+fn survivability_l221_actual_elevation_warning_is_nonfatal_in_clm_and_precedes_any_dependency_work()
+{
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let mut body = String::new();
+            for name in ["Test-PilotElevated", "Warn-ElevatedInstall", "Cmd-Install"] {
+                body.push_str(&survivability_installer_function(name));
+                body.push('\n');
+            }
+            body.push_str(r#"
+$actualElevation = Test-PilotElevated
+if ($ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage' -and $actualElevation) { throw 'CLM-forbidden elevation probe did not fail open' }
+$script:messages=@()
+function Msg { param($Chinese,$English); $script:messages += [string]$English }
+function Test-PilotElevated { return $true }
+function Check-Deps {
+ $text=$script:messages -join [char]10
+ foreach ($required in @('elevated (administrator) session','BUILTIN\Administrators','non-elevated PowerShell')) {
+  if (-not $text.Contains($required)) { throw ('warning missing before dependency work: '+$required) }
+ }
+ throw 'controlled dependency boundary stop'
+}
+function Download-AndExtract { throw 'warning test must never download' }
+function Stop-PilotService { throw 'warning test must never stop service' }
+function Enable-PilotScheduledTasksAfterDeploy { throw 'warning test must never restore real tasks' }
+$PACKAGE_NAME='private-fixture'
+$caught=''
+try { Cmd-Install } catch { $caught=[string]$_.Exception.Message }
+@{message=$caught;actualElevation=$actualElevation;messages=@($script:messages)} |
+ ConvertTo-Json -Compress |
+ Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'survive-elevation.json') -Encoding UTF8
+"#);
+            success(&fixture.invoke_with_budget(
+                &shell,
+                &body,
+                constrained,
+                Duration::from_secs(15),
+            ));
+            let result = ps_private_result(&fixture, "survive-elevation.json");
+            assert_eq!(result["message"], "controlled dependency boundary stop");
+            assert!(result["actualElevation"].as_bool().is_some());
+            assert!(!fixture.home.join("invocations.jsonl").exists());
+        }
+    }
+}
+
+#[test]
+fn cleanup_l447_actual_task_name_removal_preserves_foreign_legacy_owners_in_both_shells_and_clm() {
+    let functions = [
+        "Get-PilotAccountName",
+        "Get-PilotUserTag",
+        "Remove-PilotScheduledTasks",
+    ]
+    .map(survivability_installer_function)
+    .join("\n");
+    for shell in shells() {
+        for constrained in [false, true] {
+            for foreign in [false, true] {
+                let f = Fixture::new();
+                let body = format!(
+                    r#"
+{functions}
+$env:USERNAME = '用户 O''Brien 🚀'
+$env:USERDOMAIN = 'CORP'
+$script:Removed = @()
+$script:LegacyOwner = '{}'
+function Get-ScheduledTask {{
+    param([string]$TaskName, [string]$TaskPath, $ErrorAction)
+    if ($TaskPath -ne '\LoongsuitePilot\') {{ throw 'unexpected task folder' }}
+    return @{{State='Ready'; Principal=@{{UserId=$script:LegacyOwner}}}}
+}}
+function Remove-OnePilotScheduledTask {{
+    param([string]$TaskName, [string]$TaskPath)
+    $script:Removed += ($TaskPath + '|' + $TaskName)
+}}
+$tag = Get-PilotUserTag
+$expected = @()
+$expected += ('\LoongsuitePilot\|LoongsuitePilot-' + $tag)
+$expected += ('\LoongsuitePilot\|LoongsuitePilotUpdater-' + $tag)
+if (-not {}) {{ $expected += @('\LoongsuitePilot\|LoongsuitePilot', '\LoongsuitePilot\|LoongsuitePilotUpdater') }}
+Remove-PilotScheduledTasks
+if (($script:Removed -join [char]10) -cne ($expected -join [char]10)) {{
+    throw ('task removal ownership mismatch: ' + ($script:Removed -join ','))
+}}
+"#,
+                    if foreign {
+                        "OTHER\\foreign-owner"
+                    } else {
+                        "CORP\\用户 O''Brien 🚀"
+                    },
+                    if foreign { "$true" } else { "$false" }
+                );
+                success(&f.invoke_with_budget(&shell, &body, constrained, Duration::from_secs(15)));
+            }
+        }
+    }
+}
+
+#[test]
+fn cleanup_l459_actual_extended_path_removes_deep_unicode_tree_and_keeps_outside_bytes_in_both_shells_and_clm(
+) {
+    let functions = [
+        "ConvertTo-ExtendedLengthPath",
+        "Assert-SafePilotDirectory",
+        "Remove-PilotPath",
+    ]
+    .map(survivability_installer_function)
+    .join("\n");
+    for shell in shells() {
+        for constrained in [false, true] {
+            let f = Fixture::new();
+            let target = f.home.join("deep-target 用户 [tree]");
+            let mut leaf = target.clone();
+            while leaf.to_string_lossy().encode_utf16().count() < 340 {
+                leaf.push("nested-用户 [folder]-0123456789");
+            }
+            fs::create_dir_all(&leaf).unwrap();
+            fs::write(leaf.join("payload.txt"), "deep private payload").unwrap();
+            let outside = f.home.join("outside-preserved.txt");
+            fs::write(&outside, "outside bytes must remain").unwrap();
+            let body = format!(
+                r#"
+{functions}
+$target = Join-Path $env:USERPROFILE 'deep-target 用户 [tree]'
+$safe = Assert-SafePilotDirectory -Path $target -Purpose 'private history test'
+if (-not (ConvertTo-ExtendedLengthPath -Path $safe).StartsWith('\\?\')) {{
+    throw 'extended-length path missing'
+}}
+Remove-PilotPath -Path $safe
+"#
+            );
+            success(&f.invoke_with_budget(&shell, &body, constrained, Duration::from_secs(15)));
+            assert!(
+                !target.exists(),
+                "deep target must actually disappear: {}",
+                target.display()
+            );
+            assert_eq!(fs::read(&outside).unwrap(), b"outside bytes must remain");
+            assert!(f.binary.is_file(), "foreign private candidate must remain");
+        }
+    }
+}
+
+#[test]
+fn cleanup_l459_actual_locked_tree_failure_is_visible_and_preserves_retry_assets_in_both_shells_and_clm(
+) {
+    let functions = ["ConvertTo-ExtendedLengthPath", "Remove-PilotPath"]
+        .map(survivability_installer_function)
+        .join("\n");
+    for shell in shells() {
+        for constrained in [false, true] {
+            let f = Fixture::new();
+            let target = f.home.join("locked-target 用户 [tree]");
+            fs::create_dir_all(&target).unwrap();
+            let locked = target.join("locked.txt");
+            fs::write(&locked, "locked bytes must remain").unwrap();
+            let mut options = fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(1); // Read sharing only: deletion is genuinely denied.
+            }
+            let lock = options.open(&locked).unwrap();
+            let config = f.data.join("config.json");
+            fs::write(&config, "private retry config").unwrap();
+            let body = format!(
+                r#"
+{functions}
+Remove-PilotPath -Path (Join-Path $env:USERPROFILE 'locked-target 用户 [tree]')
+throw 'unreachable after real denied deletion'
+"#
+            );
+            let out = f.invoke_with_budget(&shell, &body, constrained, Duration::from_secs(15));
+            assert!(!out.status.success(), "real denied deletion must fail");
+            let error = String::from_utf8_lossy(&out.stderr);
+            assert!(!error.is_empty(), "failure must be observable on stderr");
+            assert!(
+                !error.contains("unreachable after real denied deletion"),
+                "deletion failure must propagate"
+            );
+            assert_eq!(fs::read(&locked).unwrap(), b"locked bytes must remain");
+            assert_eq!(fs::read(&config).unwrap(), b"private retry config");
+            assert!(f.binary.is_file(), "runtime must remain for retry");
+            drop(lock);
         }
     }
 }

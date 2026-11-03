@@ -213,7 +213,10 @@ async fn shell_snapshots(home: &Path) -> anyhow::Result<Vec<Snapshot>> {
         home.join("Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1"),
     ];
     for profile in paths {
-        let snapshot = Snapshot::read(&profile).await?;
+        // Profiles are explicit user configuration, just like settings.json:
+        // follow only a final alias captured by the same identity/mode/CAS
+        // guard. Package assets and ownership markers stay ordinary files.
+        let snapshot = Snapshot::read_config(&profile).await?;
         remove_blocks(snapshot.content.as_deref().unwrap_or_default())?;
         profiles.push(snapshot);
     }
@@ -411,6 +414,37 @@ impl CopilotPluginStrategy {
         self.home_dir = home.into();
         self
     }
+    // The manager calls this before recording a pending cleanup target.
+    // Registration repeats the snapshots under its lock, so any later I/O/CAS
+    // failure still retains the already persisted owner-bound retry record.
+    pub(super) async fn preflight_deploy(&self, def: &AgentDefinition) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !cfg!(windows),
+            "Copilot automatic deployment currently supports Unix shells only"
+        );
+        let config = def
+            .copilot_plugin
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing copilotPlugin config"))?;
+        let settings =
+            Snapshot::read_config(Path::new(&resolve_home(&config.settings_path))).await?;
+        let installed =
+            Snapshot::read_config(Path::new(&resolve_home(&config.config_path))).await?;
+        let settings_value = settings.json()?;
+        let config_value = installed.json()?;
+        validate_registration(&settings_value, &config_value)?;
+        shell_snapshots(&self.home_dir).await?;
+        owned_root(
+            Path::new(&resolve_home(&config.plugin_root)),
+            Some((config, &settings_value, &config_value)),
+        )
+        .await?;
+        if let Some(pilot) = &self.pilot_dir {
+            super::hook_assets::HookAssets::load(def, Some(pilot), &self.data_dir)?;
+        }
+        Ok(())
+    }
+
     async fn lock_path(&self) -> anyhow::Result<String> {
         let directory = self.data_dir.join("state/copilot");
         tokio::fs::create_dir_all(&directory).await?;
@@ -596,8 +630,11 @@ impl DeployStrategy for CopilotPluginStrategy {
     }
     async fn deploy(&self, def: &AgentDefinition) -> DeployResult {
         let Some(config) = &def.copilot_plugin else {
-            return result(def, Some("Missing copilotPlugin config".into()));
+            return result(def, Some("missing copilotPlugin config".into()));
         };
+        if let Err(error) = self.preflight_deploy(def).await {
+            return result(def, Some(error.to_string()));
+        }
         let lock = match self.lock_path().await {
             Ok(lock) => lock,
             Err(error) => return result(def, Some(error.to_string())),
@@ -1187,3 +1224,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "copilot_plugin_main_history_contract_tests.rs"]
+mod main_history_contract_tests;
+
+#[cfg(test)]
+#[path = "copilot_config_main_history_contract_tests.rs"]
+mod config_main_history_contract_tests;

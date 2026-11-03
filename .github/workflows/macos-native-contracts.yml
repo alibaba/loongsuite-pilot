@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --workspace --all-features --locked --bins
-          cargo test -p loongsuite-pilot --all-features --locked --lib --test cli_native --no-run
+          cargo test -p loongsuite-pilot --all-features --locked --lib --test cli_native --test installer_native --no-run
       - name: Real owned processes, shared locks and lifecycle budgets
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
@@ -82,6 +82,17 @@ jobs:
       - name: Shipped CLI safe help and parameter rejection
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: cargo test -p loongsuite-pilot --all-features --locked --test cli_native help_version_and_argument_errors_do_not_touch_home_or_load_config -- --exact --nocapture
+      - name: Runtime data resource transactions and safe native uninstall
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cargo test -p loongsuite-pilot --all-features --locked --lib updater::activation_transaction:: -- --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_asset_tree_history:: -- --test-threads=2 --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_uninstall_plugin_matrix_history:: -- --test-threads=2 --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_uninstall_extra_history:: -- --test-threads=2 --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_uninstall_public_entry_history:: -- --test-threads=2 --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_openclaw_path_guard_history:: -- --test-threads=2 --nocapture
+          cargo test -p loongsuite-pilot --all-features --locked --test installer_native installer_copilot_uninstall_history:: -- --test-threads=2 --nocapture
       - name: Build precompiled Swift UI and run its tests without launching it
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: ./target/debug/xtask build-status-bar --arch "${{ matrix.ui_arch }}" --output "$RUNNER_TEMP/pilot-native-statusbar/LoongSuitePilotMenuBarApp"

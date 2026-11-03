@@ -708,6 +708,7 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
             agents.push(failed("*", "invalid-deployment-state", None, None));
         }
     }
+    let mut runtime_prepared = false;
     for def in &selected {
         if state_error.is_some() {
             agents.push(failed(
@@ -896,6 +897,65 @@ pub async fn run_hook_install(opts: HookInstallRunOptions<'_>) -> HookInstallRun
                 settings_path,
             ));
             continue;
+        }
+        // Prepare only after a concrete target passes the same read-only
+        // gates as deployment. Failed/unsupported targets must not publish
+        // unrelated global runtime resources.
+        if home.is_none() && !manager.is_agent_detected(&active).await {
+            if matches!(selection, AgentSelection::Named { .. }) {
+                agents.push(failed(
+                    &def.id,
+                    "not-detected",
+                    Some(active.deploy_mode.as_str()),
+                    settings_path,
+                ));
+            }
+            continue;
+        }
+        let host_probe = super::plugin_inject_strategy::PluginInjectStrategy::new(
+            opts.data_dir.clone(),
+            opts.pilot_dir.clone(),
+        );
+        if let Err(error) = host_probe.preflight_eager_host(&active).await {
+            let mut failure = failed(
+                &def.id,
+                classify_deploy_error(&error),
+                Some(active.deploy_mode.as_str()),
+                settings_path,
+            );
+            failure.hint = Some(error);
+            agents.push(failure);
+            continue;
+        }
+        if !runtime_prepared {
+            if let Err(error) = super::runtime_data_assets::prepare_eager(
+                Path::new(&opts.pilot_dir),
+                Path::new(&opts.data_dir),
+            )
+            .await
+            {
+                warnings.push(format!("运行资源准备失败；已有资源和配置保留：{error:#}"));
+                agents.push(failed(
+                    &def.id,
+                    "runtime-unprepared",
+                    Some(active.deploy_mode.as_str()),
+                    settings_path,
+                ));
+                return HookInstallRunResult {
+                    exit_code: 1,
+                    report: HookInstallReport {
+                        schema: 1,
+                        identity: identity.identity,
+                        ts,
+                        scope: "detected".into(),
+                        agents,
+                        alarm_sent: None,
+                    },
+                    warnings,
+                    wrote_result: false,
+                };
+            }
+            runtime_prepared = true;
         }
         let result = if home.is_some() {
             manager.deploy_prepared(&active, true).await

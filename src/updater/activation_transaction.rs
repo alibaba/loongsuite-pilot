@@ -1,5 +1,6 @@
 //! 更新指针和服务入口的持久事务；取消时回滚，崩溃后在下次检查前恢复。
 
+use super::activation_file_targets as binding;
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,6 +44,10 @@ pub(crate) struct ActivationTransaction {
 
 impl ActivationTransaction {
     pub fn begin(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<Self> {
+        ensure!(targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        let targets = binding::bind_all(targets)?;
+        let journal_path = binding::bind(&cache.join("update-recovery.json"))?;
+        binding::validate(&targets, &journal_path)?;
         ensure!(
             !targets.is_empty() && targets.len() <= MAX_TARGETS,
             "更新目标数量无效"
@@ -60,6 +65,7 @@ impl ActivationTransaction {
             "更新目标路径不能重复"
         );
         Self::recover(cache, targets.clone())?;
+        let _resource_lock = binding::resource_lock(&targets)?;
         let changes = targets
             .iter()
             .map(|(key, path)| {
@@ -73,7 +79,7 @@ impl ActivationTransaction {
             })
             .collect::<Result<_>>()?;
         let transaction = Self {
-            path: cache.join("update-recovery.json"),
+            path: journal_path,
             targets: targets.clone(),
             journal: Journal {
                 schema: 2,
@@ -97,21 +103,69 @@ impl ActivationTransaction {
         targets: BTreeMap<String, PathBuf>,
         legacy: BTreeMap<String, PathBuf>,
     ) -> Result<()> {
-        let path = cache.join("update-recovery.json");
+        Self::recover_registered(cache, &[targets, legacy], &BTreeMap::new())
+    }
+
+    /// Resource roles come from the fixed compiled registry; disk paths never authorize restoration.
+    pub fn recover_registered(
+        cache: &Path,
+        required: &[BTreeMap<String, PathBuf>],
+        registered: &BTreeMap<String, PathBuf>,
+    ) -> Result<()> {
+        ensure!(
+            !required.is_empty() && required.len() <= 3,
+            "恢复布局数量无效"
+        );
+        let path = binding::bind(&cache.join("update-recovery.json"))?;
         let Some(bytes) = read_bounded(&path, MAX_JOURNAL_BYTES)? else {
             return Ok(());
         };
         let journal: Journal =
             serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
-        let targets = if journal.targets == targets {
-            targets
-        } else {
-            ensure!(journal.targets == legacy, "更新恢复记录的目标集合无效");
-            legacy
-        };
+        ensure!(journal.targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        // Keep the original physical authority. Never canonicalize a recorded path
+        // again and silently authorize the new destination of a replaced ancestor.
+        for recorded in journal.targets.values() {
+            binding::ensure_bound(recorded)?;
+        }
+        let base_keys: std::collections::BTreeSet<_> = journal
+            .targets
+            .keys()
+            .filter(|key| !registered.contains_key(*key))
+            .cloned()
+            .collect();
+        let base = required
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == base_keys
+            })
+            .context("更新恢复记录的目标集合无效")?;
+        let mut targets = binding::bind_all(base.clone())?;
+        for (key, recorded) in &journal.targets {
+            if let Some(allowed) = registered.get(key) {
+                let allowed = binding::bind(allowed)?;
+                ensure!(
+                    binding::same(recorded, &allowed),
+                    "运行资源恢复目标不属于当前安装"
+                );
+                targets.insert(key.clone(), recorded.clone());
+            } else {
+                ensure!(
+                    targets
+                        .get(key)
+                        .is_some_and(|allowed| binding::same(recorded, allowed)),
+                    "更新恢复记录的目标路径无效"
+                );
+            }
+        }
+        binding::validate(&targets, &path)?;
         ensure!(
             journal.schema == 2
-                && journal.targets == targets
+                && journal.targets.len() == targets.len()
                 && !targets.is_empty()
                 && targets.len() <= MAX_TARGETS
                 && targets.values().all(|path| path.is_absolute())
@@ -124,6 +178,15 @@ impl ActivationTransaction {
                 && journal.changes.keys().eq(targets.keys()),
             "更新恢复记录的目标集合无效"
         );
+        if let Some(marker) = journal.changes.get(binding::DSH_MARKER) {
+            if let Some(intended) = &marker.intended {
+                ensure!(
+                    intended.hex == hex::encode(b"enabled\n")
+                        && intended.mode == comparable_mode(0o600),
+                    "DSH 运行标记意图无效"
+                );
+            }
+        }
         for change in journal.changes.values() {
             for state in [&change.original, &change.intended].into_iter().flatten() {
                 ensure!(
@@ -133,6 +196,7 @@ impl ActivationTransaction {
                 hex::decode(&state.hex)?;
             }
         }
+        let targets = journal.targets.clone();
         let mut transaction = Self {
             path,
             targets,
@@ -176,12 +240,26 @@ impl ActivationTransaction {
     }
 
     pub fn write(&mut self, key: &str, bytes: &[u8], mode: u32) -> Result<()> {
+        let _resource_lock = binding::resource_lock(&self.targets)?;
+        self.record_intent(key, bytes, mode)?;
+        atomic_write(self.targets.get(key).context("未知更新目标")?, bytes, mode)
+    }
+
+    /// An exact producer-owned child side effect is journaled without enabling the Agent early.
+    pub fn expect_dsh_marker(&mut self) -> Result<()> {
+        let _resource_lock = binding::resource_lock(&self.targets)?;
+        self.record_intent(binding::DSH_MARKER, b"enabled\n", 0o600)
+    }
+
+    fn record_intent(&mut self, key: &str, bytes: &[u8], mode: u32) -> Result<()> {
         ensure!(!self.finished, "更新事务已结束");
         ensure!(
             bytes.len() <= MAX_SNAPSHOT_BYTES && mode & !0o777 == 0,
             "更新文件超出快照限制"
         );
+        self.check_bound()?;
         let path = self.targets.get(key).context("未知更新目标")?;
+        binding::writable_parent(path)?;
         let change = self.journal.changes.get_mut(key).context("未知更新目标")?;
         ensure!(
             change.intended.is_none(),
@@ -205,11 +283,21 @@ impl ActivationTransaction {
         });
         // 写入意图先持久化；崩溃发生在任一侧都能确定允许恢复的字节。
         self.persist()?;
-        atomic_write(path, bytes, mode)
+        Ok(())
     }
 
     pub fn commit(&mut self) -> Result<()> {
+        let _resource_lock = binding::resource_lock(&self.targets)?;
+        self.check_bound()?;
         ensure!(!self.finished, "更新事务已结束");
+        if let Some(marker) = self.journal.changes.get_mut(binding::DSH_MARKER) {
+            if marker.intended.is_some()
+                && snapshot(&self.targets[binding::DSH_MARKER])? == marker.original
+            {
+                marker.intended = None;
+                self.persist()?;
+            }
+        }
         for (key, change) in &self.journal.changes {
             let expected = change.intended.as_ref().or(change.original.as_ref());
             ensure!(
@@ -232,6 +320,8 @@ impl ActivationTransaction {
         if self.finished {
             return Ok(());
         }
+        let _resource_lock = binding::resource_lock(&self.targets)?;
+        self.check_bound()?;
         // 先检查全部目标，避免发现用户改动时只恢复了一半。
         for (key, change) in &self.journal.changes {
             let current = snapshot(&self.targets[key])?;
@@ -260,7 +350,17 @@ impl ActivationTransaction {
         Ok(())
     }
 
+    fn check_bound(&self) -> Result<()> {
+        binding::ensure_bound(&self.path)?;
+        for path in self.targets.values() {
+            binding::ensure_bound(path)?;
+        }
+        binding::validate(&self.targets, &self.path)
+    }
+
     fn persist(&self) -> Result<()> {
+        self.check_bound()?;
+        binding::writable_parent(&self.path)?;
         let bytes = serde_json::to_vec(&self.journal)?;
         ensure!(bytes.len() <= MAX_JOURNAL_BYTES, "更新恢复记录大小超限");
         atomic_write(&self.path, &bytes, 0o600)
@@ -505,3 +605,5 @@ mod tests {
         assert!(ActivationTransaction::recover(root.path(), targets(root.path())).is_err());
     }
 }
+
+include!("activation_resource_history_tests.rs");

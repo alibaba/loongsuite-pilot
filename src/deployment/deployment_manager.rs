@@ -209,7 +209,11 @@ impl DeploymentManager {
             plugin_inject_config_path: None,
         };
         let has_record = self.state.lock().unwrap().contains_key(&def.id);
-        if !matches!(def.deploy_mode, DeployMode::Hook | DeployMode::DshYamlPatch) || !has_record {
+        if !matches!(
+            def.deploy_mode,
+            DeployMode::Hook | DeployMode::DshYamlPatch | DeployMode::CopilotPlugin
+        ) || !has_record
+        {
             return result;
         }
         let record = self.state.lock().unwrap().get(&def.id).cloned();
@@ -225,7 +229,11 @@ impl DeploymentManager {
             }
             return result;
         }
-        let ok = self.dsh.undeploy_recorded(&target, record.as_ref()).await;
+        let ok = if target.deploy_mode == DeployMode::CopilotPlugin {
+            self.copilot.undeploy(&target).await
+        } else {
+            self.dsh.undeploy_recorded(&target, record.as_ref()).await
+        };
         if !ok {
             result.success = false;
             result.skipped = Some(false);
@@ -692,6 +700,10 @@ impl DeploymentManager {
         // Record Copilot cleanup targets before the first external write. A
         // partial deployment must remain discoverable even after HOME changes.
         if def.deploy_mode == DeployMode::CopilotPlugin {
+            self.copilot
+                .preflight_deploy(&def)
+                .await
+                .map_err(|error| error.to_string())?;
             if let Some(config) = &def.copilot_plugin {
                 let previous = self.state.lock().unwrap().get(&def.id).cloned();
                 let mut pending = previous.unwrap_or(DeployedAgentRecord {
@@ -1349,3 +1361,7 @@ mod tests {
 #[cfg(test)]
 #[path = "deployment_manager_history_contract_tests.rs"]
 mod history_contract_tests;
+
+#[cfg(test)]
+#[path = "deployment_manager_copilot_history_contract_tests.rs"]
+mod copilot_history_contract_tests;

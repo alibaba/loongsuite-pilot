@@ -3,6 +3,7 @@
 //! `src/updater/index.ts` is the standalone process entry. It is ported as
 //! [`run_updater_main`] but is not wired from `src/main.rs` in this change.
 
+pub(crate) mod activation_file_targets;
 mod activation_transaction;
 mod auto_update_config;
 mod package_archive;

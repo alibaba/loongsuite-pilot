@@ -21542,7 +21542,7 @@
     },
     {
       "legacy": "tests/unit/scripts/postinstall-asset-trees.test.mjs",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [
         {
           "file": "src/deployment/plugin_assets.rs",
@@ -21601,7 +21601,676 @@
           "test": "packaged_openclaw_reconciles_versioned_config_and_stale_paths_without_runtime"
         }
       ],
-      "note": "承接四种 Plugin-Inject 资源复制与 shared 依赖，按批准计划通过 Rust 正式部署路径完成，新增摘要、链接边界与普通失败恢复。Hook/shared 的 manifest 登记唯一性、schema/runtime/target/version/edition 及同字节 SHA-256 经正式 CLI 的安装前后 × install/status 故障验证；只有完整开发根允许缺清单。缺资源不再通过仅配置写入假报成功。四种托管插件已共同事务化配置、首次备份与共享资源，并验证取消、真实进程退出、下次正式恢复及外部修改冲突；DSH/Hermes、skills、AppleDouble 历史清理、薄安装器完整消息合同及全部部署状态共同恢复仍待承接，旧 postinstall 不可删除。"
+      "note": "All17 exact AST declarations are individually accounted:5 native behavioral mappings plus12 explicitly retired Node/helper/unsafe destination-deletion mechanisms. Successful runtime resource availability is retained; old partial-state/zero-exit/grepped-text/count-floor mechanisms are not claimed as Native passes. Unknown optional skill siblings/content are preserved; required dsh/shared dirty resources fail closed. Execution is separately receipted on GNU/proprietary; platforms are applicability, not Windows/macOS execution claims.",
+      "source_hash": "9d3f2aeae363d18590836e1c97f861384d6062992d6a83d3b2f1e459c44e4bc0",
+      "cases": [
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "no shipped script or source file calls fs.cpSync",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Node fs.cpSync source scan is a runtime-specific mechanism: default collector/install/update are native Rust, and real publication runs without node/python on PATH. The required verified resource-copy capability is retained.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Node fs.cpSync source scan is a runtime-specific mechanism: default collector/install/update are native Rust, and real publication runs without node/python on PATH. The required verified resource-copy capability is retained.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C3",
+            "title": "postinstall.js explains why, so nobody puts cpSync back",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The explanatory comment for Node's C++ Windows cpSync abort belongs to the removed postinstall.js execution path; Rust does not reintroduce that Node API or comment contract.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "The explanatory comment for Node's C++ Windows cpSync abort belongs to the removed postinstall.js execution path; Rust does not reintroduce that Node API or comment contract.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L110:C3",
+            "title": "installs hooks, skills and plugins into the data dir",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native verified publication prepares selected native Hook wrappers and all manifest-declared registered skills/runtime modules at their real dataDir paths, with byte comparisons. Node-specific full-copy count floors and main's hook-metrics.mjs literal file assertion are retired with the replaced Node helper; no claim that the old 30-file floor or JS helper still ships.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "fresh_native_publication_materializes_the_exact_dsh_plugin_path_before_real_dsh_deployment"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "source_sidecars_are_not_copied_and_unknown_siblings_are_never_replaced"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L130:C3",
+            "title": "installs the exact plugin path the dsh agent definition resolves to",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact official DSH declaration is resolved by production AgentDefLoader to data/plugins/dsh/plugin.mjs, actual Native publication installs its verified bytes plus shared/resource-context.mjs, then real DeploymentManager DSH deployment succeeds. Missing entry/shared and empty-selection dependency bypass are rejected before live file writes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "fresh_native_publication_materializes_the_exact_dsh_plugin_path_before_real_dsh_deployment"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L154:C3",
+            "title": "one failing tree does not take the others down with it",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Standalone Node postinstall per-tree partial-state behavior is retired. Native required resources participate in the activation file transaction; failure restores them and prevents publication. Optional unknown/unreadable skills preserve bytes/mode and report without blocking required runtime installation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Standalone Node postinstall per-tree partial-state behavior is retired. Native required resources participate in the activation file transaction; failure restores them and prevents publication. Optional unknown/unreadable skills preserve bytes/mode and report without blocking required runtime installation.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L176:C3",
+            "title": "exits 0 on a partial failure, and says so",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "npm-compatible exit-zero-on-partial plus warning text is retired. Native required-resource errors return nonzero and restore the activation; optional preserved documents are explicitly reported as a successful preservation policy.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "npm-compatible exit-zero-on-partial plus warning text is retired. Native required-resource errors return nonzero and restore the activation; optional preserved documents are explicitly reported as a successful preservation policy.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L195:C3",
+            "title": "clears AppleDouble sidecars an earlier install left behind",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Broad deletion of pre-existing destination AppleDouble/.DS_Store files is intentionally retired under explicit user-data protection: unknown siblings are not read/moved/deleted. Verified source junk exclusion remains native-tested separately.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Broad deletion of pre-existing destination AppleDouble/.DS_Store files is intentionally retired under explicit user-data protection: unknown siblings are not read/moved/deleted. Verified source junk exclusion remains native-tested separately.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L218:C3",
+            "title": "does not carry AppleDouble sidecars into the data dir",
+            "suites": [
+              "postinstall installs every asset tree"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Source AppleDouble/.DS_Store files are excluded by exact resource/Hook file plans across real Native publication. Existing unknown siblings, including destination sidecars, remain untouched; this does not claim destination-junk deletion.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "source_sidecars_are_not_copied_and_unknown_siblings_are_never_replaced"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "every .ps1 installer captures the postinstall exit code",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "PowerShell capture of postinstall.js's numeric process exit is retired with that child entry. Native helper nonzero/error handling and installed Windows bridges remain required and separately tested; no retirement of safe publication failure handling.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "PowerShell capture of postinstall.js's numeric process exit is retired with that child entry. Native helper nonzero/error handling and installed Windows bridges remain required and separately tested; no retirement of safe publication failure handling.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L252:C3",
+            "title": "every .ps1 installer also catches a partial failure",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Grepping Node partial-output strings in PowerShell is retired. The verified Native helper returns nonzero for required-asset failures; optional skill preservation uses structured relative-path/count reporting.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Grepping Node partial-output strings in PowerShell is retired. The verified Native helper returns nonzero for required-asset failures; optional skill preservation uses structured relative-path/count reporting.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C3",
+            "title": "postinstall.js still prints the two lines the installers grep for",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pinning Node postinstall's grepped warning phrases/comments is retired; no native failure may be hidden by a successful publish. Actual missing-runtime-resource and late-pointer failures are covered by Native CLI tests.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Pinning Node postinstall's grepped warning phrases/comments is retired; no native failure may be hidden by a successful publish. Actual missing-runtime-resource and late-pointer failures are covered by Native CLI tests.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L286:C3",
+            "title": "no .ps1 installer keeps going after a failed postinstall",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Literal PowerShell postinstall-block exit/partial-output checks are retired with the npm entry. Actual Native publication owns durable rollback before its nonzero failure returns; Windows public bridge behavior is tracked in installer_native tests and requires physical platform validation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Literal PowerShell postinstall-block exit/partial-output checks are retired with the npm entry. Actual Native publication owns durable rollback before its nonzero failure returns; Windows public bridge behavior is tracked in installer_native tests and requires physical platform validation.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L326:C3",
+            "title": "the exit check is byte-identical across the .ps1 installers",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Byte-identical copies of the old postinstall-exit-check comment block across installer mirrors are retired. Current native installer bridges delegate the resource transaction to one compiled implementation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Byte-identical copies of the old postinstall-exit-check comment block across installer mirrors are retired. Current native installer bridges delegate the resource transaction to one compiled implementation.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L336:C3",
+            "title": "every .sh installer checks the postinstall exit code too",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Shell postinstall.js exit-check code is retired. Native install/update resources are prepared by the verified helper, and required-source failures prevent pointer publication.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Shell postinstall.js exit-check code is retired. Native install/update resources are prepared by the verified helper, and required-source failures prevent pointer publication.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L346:C3",
+            "title": "no .sh installer keeps going after a failed postinstall either",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Shell grepping of Node partial warnings and Node-specific rollback call sites is retired. Required Native failures restore exact controlled files/pointers; unknown documents remain untouched and retry stays possible.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Shell grepping of Node partial warnings and Node-specific rollback call sites is retired. Required Native failures restore exact controlled files/pointers; unknown documents remain untouched and retry stays possible.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "dirty_mandatory_runtime_file_refuses_all_writes_and_preserves_its_bytes"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "verified_upgrade_pointer_failure_restores_files_modes_and_unknown_siblings_then_retry_succeeds"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "missing_dsh_assets_or_shared_dependency_are_rejected_before_any_live_file_write"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L366:C3",
+            "title": "every installer tells postinstall which data dir to fill",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native installed and public eager entries use explicit Unicode/O'Brien dataDir independently of source directory, HOME default and unrelated config. Child-only inputs remain scoped by structured helper protocol; native installation/runtime bridges retain their own separately tracked shell/Windows environment restoration contracts.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "fresh_native_publication_materializes_the_exact_dsh_plugin_path_before_real_dsh_deployment"
+              },
+              {
+                "file": "tests/installer_history/asset_trees.rs",
+                "test": "actual_eager_entry_installs_resources_and_prepared_child_does_not_wait_for_parent_locks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L388:C3",
+            "title": "the auto-upgrade path runs postinstall and reports what it said",
+            "suites": [
+              "installers report what postinstall actually did"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The actual verified updater activation path runs the same resource plan after package/candidate preflight and before pointer/service writes; one existing file journal commits or restores resource bytes with pointers. Component candidate execution responses are scripted, while real Native candidate subprocesses are covered separately. Optional docs report only relative paths/count; required-resource errors are fatal.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_asset_history_tests.rs",
+                "test": "updater_asset_preflight_failure_never_touches_live_resources_or_version"
+              },
+              {
+                "file": "src/updater/updater_asset_history_tests.rs",
+                "test": "updater_activation_and_rollback_use_one_tree_and_pointer_journal"
+              },
+              {
+                "file": "src/updater/updater_asset_history_tests.rs",
+                "test": "updater_owned_asset_upgrade_commits_and_preserves_unknown_documents"
+              }
+            ]
+          }
+        }
+      ]
     },
     {
       "legacy": "tests/unit/deployment/deploy-notification.test.ts",
@@ -104050,7 +104719,7 @@
       "source_hash": "08ba4aab1006326033280d5658e2ad3588c3be1fac5820cdd0bae2f6d33f9165",
       "coverage": "partial",
       "rust": [],
-      "note": "19/20 exact EF declarations complete, f84/2b identical. Original failure diagnostic/retry marker assertions are preserved through atomic metadata-only pending publication after SDK rollback. Source assertions were not weakened; the contrary prior Native missing/empty assumption was updated explicitly. DataDir migration L278 remains a genuine gap pending trustworthy ownership/activity gating, not retired. Linux actual only; Windows/macOS applicable but unexecuted.",
+      "note": "19/20 exact EF declarations complete, f84/2b identical. Original failure diagnostic/retry marker assertions are preserved through atomic metadata-only pending publication after SDK rollback. Source assertions were not weakened; the contrary prior Native missing/empty assumption was updated explicitly. DataDir migration L278 remains a genuine gap pending trustworthy ownership/activity gating, not retired. Linux actual only; Windows/macOS applicable but unexecuted. All20 exact declarations accounted:19 complete from unchanged EF/Main source; L278 remains explicitly partial because automatic cross-dataDir adoption has no strong same-install relocation authority. Real Native fixed ownership diagnostic, zero-write refusal, explicit cleanup from the owning installation and successful retry/health are tested; dirty/unknown old targets are preserved. No automatic relocation API or marker-only takeover introduced.",
       "cases": [
         {
           "source": {
@@ -104582,6 +105251,36 @@
               {
                 "file": "src/deployment/directory_plugin_history_contract_tests.rs",
                 "test": "source_l416_copy_failure_removes_all_temporary_staging_directories"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L278:C3",
+            "title": "redeploys when the Pilot data directory changes",
+            "suites": [
+              "DirectoryPluginStrategy"
+            ],
+            "parameters": []
+          },
+          "coverage": "partial",
+          "behavior": "Original automatic dataDir redeployment remains intentionally unsupported without same-install relocation authority. Actual Native producer old-data deployment -> new-data refusal with bytes/marker preserved -> explicit old-owner safe cleanup -> new-data retry/marker/health success is verified. Dirty old content and unknown sibling prevent both old cleanup and new takeover. Fixed diagnostic explains owning-install cleanup/retry; original five-second budget remains.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/directory_data_dir_history_contract_tests.rs",
+                "test": "original_l278_reports_data_ownership_and_safe_old_install_cleanup_allows_explicit_retry"
+              },
+              {
+                "file": "src/deployment/directory_data_dir_history_contract_tests.rs",
+                "test": "original_l278_retry_never_removes_dirty_old_or_unknown_plugin_content"
               }
             ]
           }
@@ -121786,7 +122485,7 @@
       "source_hash": "c1a7fdfa0b930538f94631eb81963e13bf8fcd7304a9f63da3ec50f5c3d54581",
       "coverage": "complete",
       "rust": [],
-      "note": "EF/f84/main source hashes identical. Seven exact AST declarations, with six parameter values retained inside L419. No Node executable substitution or release behavior change. Five historical Bash fixtures are explicit Unix tests; a separate real native-entry control covers current cross-platform command form. Actual GNU Linux/glibc2.34 Rust1.99.1 verification only; no physical macOS/Windows pass claimed. Native service refresh is driven by the production Core adapter/caller instead of reproducing a redundant test-only timer.",
+      "note": "EF/f84/main source hashes identical. Seven exact AST declarations, with six parameter values retained inside L419. No Node executable substitution or release behavior change. Five historical Bash fixtures are explicit Unix tests; a separate real native-entry control covers current cross-platform command form. Actual GNU Linux/glibc2.34 Rust1.99.1 verification only; no physical macOS/Windows pass claimed. Native service refresh is driven by the production Core adapter/caller instead of reproducing a redundant test-only timer. Budget provenance is committed in tests/fixtures/history/local-worker-effective-budget.json; internal waits and production stop grace are unchanged.",
       "cases": [
         {
           "source": {
@@ -121798,7 +122497,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Exact nested tar archive is extracted, default scripts/install.sh actually writes the marker, Bash worker captures cwd/bootstrap-token-file/token/workDir/id/pluginInstallScope/modelConfigMode/stateDir/pluginDir in exact nine-field order, running PID/status and real worker.log checked. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original total5s case deadline retained; exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run. Additional independent native-manifest control runs the current Rust test binary through the same real adapter, capturing the same nine argument/environment fields without Node or a Unix entry script. It is portable source coverage only until actual target execution; current cwd alone is canonicalized for Windows verbatim-path equivalence.",
+          "behavior": "Exact nested tar archive is extracted, default scripts/install.sh actually writes the marker, Bash worker captures cwd/bootstrap-token-file/token/workDir/id/pluginInstallScope/modelConfigMode/stateDir/pluginDir in exact nine-field order, running PID/status and real worker.log checked. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original project total15s case deadline retained (all three immutable baselines set testTimeout=15_000 without a per-case override); exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run. Additional independent native-manifest control runs the current Rust test binary through the same real adapter, capturing the same nine argument/environment fields without Node or a Unix entry script. It is portable source coverage only until actual target execution; current cwd alone is canonicalized for Windows verbatim-path equivalence.",
           "platforms": [
             "linux",
             "macos"
@@ -121827,7 +122526,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Real archive bytes change from v1 to v2; actual adapter refresh stops the owned old worker and starts new code with the same instance id and bootstrap token file/content. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original total5s case deadline retained; exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
+          "behavior": "Real archive bytes change from v1 to v2; actual adapter refresh stops the owned old worker and starts new code with the same instance id and bootstrap token file/content. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original project total15s case deadline retained (all three immutable baselines set testTimeout=15_000 without a per-case override); exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
           "platforms": [
             "linux",
             "macos"
@@ -121852,7 +122551,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Only bootstrap token file bytes change, preserving source fingerprint; actual refresh leaves the old captured token and real install marker mtime unchanged without reinstall/restart. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original total5s case deadline retained; exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
+          "behavior": "Only bootstrap token file bytes change, preserving source fingerprint; actual refresh leaves the old captured token and real install marker mtime unchanged without reinstall/restart. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original project total15s case deadline retained (all three immutable baselines set testTimeout=15_000 without a per-case override); exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
           "platforms": [
             "linux",
             "macos"
@@ -121877,7 +122576,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Manifest PID path under custom bundle location is actually used and default stateDir/worker.pid is absent; same-fingerprint refresh plus original250ms control leaves exactly one run. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original total5s case deadline retained; exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
+          "behavior": "Manifest PID path under custom bundle location is actually used and default stateDir/worker.pid is absent; same-fingerprint refresh plus original250ms control leaves exactly one run. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original project total15s case deadline retained (all three immutable baselines set testTimeout=15_000 without a per-case override); exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
           "platforms": [
             "linux",
             "macos"
@@ -121902,7 +122601,7 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Real exit7 child enters backoff1s/maxRestarts1, repeated refresh never redeploys during backoff or after exhausted exited state. Original initial1s/second3s waits and both250ms stability controls retained. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original total5s case deadline retained; exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
+          "behavior": "Real exit7 child enters backoff1s/maxRestarts1, repeated refresh never redeploys during backoff or after exhausted exited state. Original initial1s/second3s waits and both250ms stability controls retained. Uses the actual private Core ProbeSupervisor and production PluginProbeStrategy/WorkerManifestSupervisor through public connect/start/refresh/stop, not a fake generic supervisor. Original project total15s case deadline retained (all three immutable baselines set testTimeout=15_000 without a per-case override); exact Bash fixture is Unix-specific and is physically exercised on GNU Linux, not claimed as a Windows run.",
           "platforms": [
             "linux",
             "macos"
@@ -125020,7 +125719,7 @@
       "source_hash": "cb6594c71ed9836b0181611ffb0ceeb0a50e18607b5f2a1bdac1fcbced95de80",
       "coverage": "partial",
       "rust": [],
-      "note": "Standalone production regression slice for exact EF L959 only. Whole source file has65 baseline declarations; remaining64 and current-main additional4 are not claimed complete by this small slice and remain in upcoming lifecycle mapping work. Original case is Windows-facing; actual Native coordinator is tested on GNU Linux with explicit isolated Mac/Windows command backends, not actual OS commands or a physical Windows pass. Whole native product uninstall now prunes only empty hook containers after actually removing owned handlers, preserving unrelated JSONC and ordinary undeploy semantics. Only two original parameterized AST declarations mapped here (generic hook target coverage, EF dynamically derived11 unique setting paths across13 Hook definitions). Whole65 declaration file remains partial; no additional L183 count (33b already mapped it). Exact EF per-resource hash/id/settings index frozen. Current13 source definitions all exercised through production loader/HookStrategy producer/actual Native uninstaller. EF/current-main generic settings match, but no full resource-payload/hash parity claim. Physical GNU/proprietary only, no physical Windows/macOS execution claim.",
+      "note": "Standalone production regression slice for exact EF L959 only. Whole source file has65 baseline declarations; remaining64 and current-main additional4 are not claimed complete by this small slice and remain in upcoming lifecycle mapping work. Original case is Windows-facing; actual Native coordinator is tested on GNU Linux with explicit isolated Mac/Windows command backends, not actual OS commands or a physical Windows pass. Whole native product uninstall now prunes only empty hook containers after actually removing owned handlers, preserving unrelated JSONC and ordinary undeploy semantics. Only two original parameterized AST declarations mapped here (generic hook target coverage, EF dynamically derived11 unique setting paths across13 Hook definitions). Whole65 declaration file remains partial; no additional L183 count (33b already mapped it). Exact EF per-resource hash/id/settings index frozen. Current13 source definitions all exercised through production loader/HookStrategy producer/actual Native uninstaller. EF/current-main generic settings match, but no full resource-payload/hash parity claim. Physical GNU/proprietary only, no physical Windows/macOS execution claim. ONLY assigned Windows19 AST subset (EF19/61 and f84/Dae19/69), registration body hashes match each baseline exactly.18 active Native/source contracts +1 narrow external-Node resolution retirement. Parent combines remaining cases by sourceID. GNU runtime policies/actual Native CLI have real receipts; new task/deep-tree and private-registry OS tests require WindowsCI and are not called physically passed. Full/CLM source-policy adaptation does not claim three-platform OS execution. Do not replace this partial source row with whole-file complete. CANDIDATE ONLY, not runtime completion evidence; Root must finish integrated strict/full before merging this ledger. Exact source50 subset of69 Dae declarations, excluding Output19 ownership.3 already-EF-complete clauses are provenance rebases only; EF43new subset excludes those3 and Output19 (one already-complete EF959 explains count43 rather than42). Source actual extra5Native functions/21scenarios +55related broad PASS (56unique total including Hermes); private strict fails solely old Root late-init fixture fixed in central after snapshot, no false strict green claim. Root sixth8actualPASS and Output B32 GNU whole5actualPASS are separate receipts; Root new default OpenClaw4 combo, precise wholeSH3 and final integrated suite pending. Physical Windows PS full-file parse still pending, hence317partial;375/561/818 explicit safe behavior/protocol differences remain partial. Only deleted private body/brace-helper mechanisms297/313/322 retired; active PS parsing/MiMo/OpenCode/ownership cleanup remain in real Native targets. No copied old Collector/Node cleaner is counted as Native proof, no ignored target. EF includes43 newly offered declarations only; existing4/Output18pending are excluded, no double count.",
       "cases": [
         {
           "source": {
@@ -125032,15 +125731,17 @@
             "parameters": []
           },
           "coverage": "complete",
-          "behavior": "Actual NativeUninstall.run_with_retirement previously used migration cleanup that accepts both current-data and known default-HOME legacy paths. A custom dataDir uninstall really deleted both overrides belonging to a separate live default install, reproduced red through the actual public coordinator. Fix introduces explicit CurrentInstall cleanup scope for uninstall only, applying exact current dataDir ownership to both Windows registry values and Mac historical plists. Migration/publication/watchdog/rollback keep original current+known-legacy scope. Eight actual coordinator matrices (Mac/Windows command adapters × current/default/mixed/foreign) assert exact remaining env maps, owned-only plist removal, preserved foreign/default bytes, separate default current/version/wrapper untouched and current wrapper assets retained until outer installer removal. No broad substring or known-filename ownership reintroduced.",
           "platforms": [
-            "linux",
-            "macos",
             "windows"
           ],
+          "behavior": "Uninstall only retires values owned by the exact current dataDir and preserves the separate default install and wrappers; actual run_with_retirement covers both Mac and Windows protocol backends.",
           "target": {
             "kind": "rust",
             "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_uninstall_keeps_other_install_and_preserves_wrappers"
+              },
               {
                 "file": "src/deployment/runtime_uninstall_history_contract_tests.rs",
                 "test": "cleanup_l959_real_uninstall_preserves_the_separate_default_install_and_only_retires_current_data"
@@ -125138,6 +125839,2049 @@
               {
                 "file": "tests/installer_history/uninstall_contracts.rs",
                 "test": "cleanup_l173_l176_exact_ef_hook_manifest_settings_are_still_covered_by_native_definitions"
+              },
+              {
+                "file": "tests/installer_history/uninstall_contracts.rs",
+                "test": "cleanup_l173_l176_l183_real_native_uninstall_cleans_every_shipped_hook_and_preserves_user_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L368:C3",
+            "title": "uses PowerShell unregister with a checked schtasks fallback",
+            "suites": [
+              "Windows uninstall verifies scheduled task removal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Checked actual scheduler removal retains cmdlet first and native fallback exit/stderr/EAP diagnostics; original static guards and real native PE fallback rows remain.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l174_schtasks_native_stderr_is_captured_at_continue_and_eap_restored_in_finally"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "survivability_l174_l193_actual_native_schtasks_stderr_reaches_cause_diagnostic_and_restores_eap"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L379:C3",
+            "title": "removes both current-user collector and updater task names",
+            "suites": [
+              "Windows uninstall verifies scheduled task removal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "The real task-name removal function reconstructs both Unicode current-user names and removes legacy names only for current owners; foreign legacy owners remain. Scheduler operations are inert callbacks.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "cleanup_l447_actual_task_name_removal_preserves_foreign_legacy_owners_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L391:C3",
+            "title": "uses the extended-length path API instead of recursive Remove-Item",
+            "suites": [
+              "Windows uninstall removes deep installation trees"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual production extended-path removal must delete a private tree deeper than340 UTF16 units in Full and CLM; real deny-delete handle failure must reach stderr and retain locked bytes/config/runtime. No string-only pass, no budget increase.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "cleanup_l459_actual_extended_path_removes_deep_unicode_tree_and_keeps_outside_bytes_in_both_shells_and_clm"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "cleanup_l459_actual_locked_tree_failure_is_visible_and_preserves_retry_assets_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L404:C3",
+            "title": "resolves node-bin before PATH-based candidates and before removing installation files",
+            "suites": [
+              "Windows uninstall reuses the installer-pinned Node runtime"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Only installer-pinned external Node resolution order is retired; Native cleanup still precedes runtime/file removal and public Windows uninstall works without Node/Python.",
+          "target": {
+            "kind": "retired",
+            "reason": "The original AST only orders the node-bin/NVM/PATH Resolve-Node implementation. The shipped Rust installer resolves its own verified Native binary, invokes checked cleanup-agents before installation resources, and retains the purge path. Default cleanup no longer needs an external Node runtime. This retirement does not retire uninstall, ownership protection, failure visibility, deep deletion, or retained data behavior. No retired AST is counted as a new Native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_native_uninstall_preflight_and_cleanup_finish_before_installation_files"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L422:C3",
+            "title": "removes only Pilot direct or nested Codex hook commands",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Genuine Codex HookStrategy producer plus real Native cleanup removes exact Pilot direct and nested commands from the same mixed event; keeps otel-codex-hook, cached handlers, unrelated commands, null/empty user groups, third-party assets, and private fields. Both actual-owned trust locations are generated by the real trust writer.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_party_handlers_and_unrelated_trust"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L436:C3",
+            "title": "keeps Codex cleanup separate from the generic hook cleaner",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "The old dedicated-vs-generic function split is represented by typed Codex definition dispatch in Native cleanup; real Codex mixed handlers and trust are handled without changing foreign data, while real Cursor cleanup preserves its distinct BOM/config behavior.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_party_handlers_and_unrelated_trust"
+              },
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_other_agents_keep_initial_bom_during_real_native_hook_cleanup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L444:C3",
+            "title": "calls dedicated Codex cleanup from uninstall",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual checked public installer bridge invokes Native cleanup-agents before file removal, and the real binary resolves and cleans the declared Codex definition.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_native_uninstall_preflight_and_cleanup_finish_before_installation_files"
+              },
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_party_handlers_and_unrelated_trust"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L449:C3",
+            "title": "does not restore broad marker-based trust deletion",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Only keys for current exact-owned Codex locations are removed: real production-generated trust for nested/direct locations disappears; current foreign slot and unrelated user trust remain exactly, even with Pilot marker comments. Unknown owned-looking references refuse atomically.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_l490_l504_l512_l517_actual_codex_uninstall_keeps_mixed_third_party_handlers_and_unrelated_trust"
+              },
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_codex_noop_keeps_initial_bom_and_unknown_owned_reference_keeps_every_retry_byte"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L455:C3",
+            "title": "passes a valid fs module literal to node when rewriting Codex files",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "The Node fs literal/quoting implementation is replaced by Native transactional edits. Its active UTF8-without-initial-BOM writer capability is retained on an actual Codex cleanup edit; no-op original bytes and other Agent BOMs stay unchanged.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_l523_actual_codex_native_rewrite_emits_utf8_without_initial_bom"
+              },
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_codex_noop_keeps_initial_bom_and_unknown_owned_reference_keeps_every_retry_byte"
+              },
+              {
+                "file": "tests/installer_history/windows_cleanup.rs",
+                "test": "cleanup_other_agents_keep_initial_bom_during_real_native_hook_cleanup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L480:C3",
+            "title": "preserves the existing best-effort uninstall policy",
+            "suites": [
+              "Windows uninstall has dedicated Codex hook cleanup"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Real Native Codex failure is accumulated; independent confirmed Cursor/legacy cleanup continues, final exit is nonzero, and config/runtime/Codex retry assets remain. DSH first-refusal and global preflight remain intact.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l548_codex_failure_continues_other_owned_agents_and_legacy_cleanup_but_preserves_retry_assets"
+              },
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_native_uninstall_preflight_and_cleanup_finish_before_installation_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L898:C3",
+            "title": "unconditionally retires both overrides without any injection helpers",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Both runtime names are always queried without injection helpers, app/config/selection gates or wrapper existence. Native post-commit retirement replaces the old function call while publication/start ordering remains explicit.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_all_rows_query_both_names_without_app_selection_or_wrapper_gates"
+              },
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_install_and_upgrade_publish_before_enable_and_start_without_old_injectors"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L910:C3",
+            "title": "Cmd-%s retires overrides after stopping the old collector and before starting the new one",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": [
+              "it.each(['Install', 'Upgrade'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual stage-package has zero retirement calls; actual publish-package commits current pointer/service before each of exactly two Windows-name retirements. Public Install/Upgrade stop before deploy and enable/start only afterwards.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_native_install_and_upgrade_retire_only_after_publication_before_return_to_start"
+              },
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_install_and_upgrade_publish_before_enable_and_start_without_old_injectors"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L920:C3",
+            "title": "retires only exact custom-dataDir or legacy Pilot overrides and is a no-op when absent",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Missing is a no-op; case-insensitive exact current or known legacy Pilot wrappers are retired, while foreign paths merely containing loongsuite-pilot are preserved. No broadened wildcard ownership.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_all_rows_query_both_names_without_app_selection_or_wrapper_gates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L929:C3",
+            "title": "uses CLM-safe registry deletion and a guarded null Explorer broadcast, never setting a runtime path",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Native adapter uses checked query/delete and never add; deletion precedes null User broadcast, broadcast failure is warning/signout guidance. Actual OS adapter test strictly rewrites HKCU Environment to a private Software key and intercepts every broadcast.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_delete_failure_continues_other_name_and_broadcast_failure_is_warning"
+              },
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_native_registry_unicode_cleanup_uses_only_private_key_and_never_user_environment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L944:C3",
+            "title": "treats a missing runtime override as absent instead of aborting under ErrorActionPreference Stop",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Native process status makes missing registry query a benign absence independently of PowerShell EAP; both names are queried in the missing row. The actual private-key OS test also checks genuine missing query status after cleanup.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_all_rows_query_both_names_without_app_selection_or_wrapper_gates"
+              },
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_native_registry_unicode_cleanup_uses_only_private_key_and_never_user_environment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L954:C3",
+            "title": "has no app, config, selection or wrapper-existence gates and leaves wrapper files untouched",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "The Windows strategy queries both names even when home/data/app/config/wrapper roots are absent, does not create them, and leaves existing wrapper bytes intact.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_all_rows_query_both_names_without_app_selection_or_wrapper_gates"
+              },
+              {
+                "file": "src/deployment/runtime_retirement_windows_history_tests.rs",
+                "test": "windows_cleanup_history_uninstall_keeps_other_install_and_preserves_wrappers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L965:C3",
+            "title": "continues external cleanup but preserves retry assets when runtime env cleanup fails",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual Native uninstall continues the second runtime name and safe legacy external cleanup after the first delete error, returns failure and preserves config/session/runtime even with purge=true. HostWindows uses an isolated protocol backend, not live registry.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/runtime_uninstall_history_contract_tests.rs",
+                "test": "cleanup_l1033_runtime_failure_still_cleans_independent_external_files_and_keeps_retry_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L979:C3",
+            "title": "cleans hook configs and runtime overrides before deleting their files and pinned node",
+            "suites": [
+              "Windows QoderWork-family runtime override lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Native Agent and runtime-env cleanup finish before public installation-file removal. A real retirement failure blocks runtime/data deletion and leaves retry assets; source call order and actual failure boundary are both covered.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_uninstall_source_history.rs",
+                "test": "windows_cleanup_history_native_uninstall_preflight_and_cleanup_finish_before_installation_files"
+              },
+              {
+                "file": "src/deployment/runtime_uninstall_history_contract_tests.rs",
+                "test": "cleanup_l1033_runtime_failure_still_cleans_independent_external_files_and_keeps_retry_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L194:C3",
+            "title": "sh defines remove_opencode_plugin",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L198:C3",
+            "title": "sh calls remove_opencode_plugin inside cmd_uninstall",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L203:C3",
+            "title": "ps1 defines Remove-OpenCodePlugin",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L207:C3",
+            "title": "ps1 calls Remove-OpenCodePlugin inside Cmd-Uninstall",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L213:C5",
+            "title": "`sh cleans ~/.config/opencode/${cfg}`",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": [
+              "['opencode.jsonc', 'opencode.json', 'config.json']"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L216:C5",
+            "title": "`ps1 cleans .config\\\\opencode\\\\${cfg}`",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": [
+              "['opencode.jsonc', 'opencode.json', 'config.json']"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C3",
+            "title": "matches our entries by pluginId or plugin file path",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "All three shipped OpenCode default configs and exact own package/file vectors; public cleanup call reaches Native. Legacy private language-specific function names are replaced by one Native coordinator. Real default3 configs/own-only vectors and true caller boundaries preserve the cleanup capability; no old Node body is restored. New whole-entry runtime proof awaits Root integrated run and actual Windows job.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l241_whole_public_shell_uninstall_uses_custom_data_and_preserves_foreign_opencode"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L232:C3",
+            "title": "ps1 Remove-OpenCodePlugin body opens with $configs = @(",
+            "suites": [
+              "uninstall cleans the OpenCode plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "OpenCode cleanup remains available and exact-owned-only. Narrow retirement only: the deleted embedded-Node private Remove-OpenCodePlugin body beginning with $configs=@( has no product role. Live cleanup is preserved by the real Native default-path vector matrix; live full-PowerShell syntax remains separately partial at317 pending physical Windows.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Narrow retirement only: the deleted embedded-Node private Remove-OpenCodePlugin body beginning with $configs=@( has no product role. Live cleanup is preserved by the real Native default-path vector matrix; live full-PowerShell syntax remains separately partial at317 pending physical Windows.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L247:C3",
+            "title": "open { count equals close } count across the whole file",
+            "suites": [
+              "installer-opensource.ps1 brace balance"
+            ],
+            "parameters": []
+          },
+          "coverage": "partial",
+          "behavior": "Live shipped PowerShell installer must remain parseable and not have orphan structural braces. PARTIAL: the actual whole shipped installer/service files are passed to real PowerShell Language.Parser.ParseFile and the complete public installer executes PS5/7 x Full/CLM16 rows in the new contract, but physical Windows execution is still pending. GNU Rust compilation is not PowerShell execution; no old brace-count helper is used as proof.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L253:C3",
+            "title": "Remove-MimoCodePlugin is followed by exactly one closing brace",
+            "suites": [
+              "installer-opensource.ps1 brace balance"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Live shipped PowerShell installer must remain parseable and not have orphan structural braces. Narrow retirement only: structuralBraces helper self-test / deleted private Remove-MimoCodePlugin lexical brace boundary is obsolete. Do not retire whole PowerShell syntax or MiMo cleanup; true complete-file Parser.ParseFile and actual whole public entry replace the mechanism. Live full-file parsing remains317 and physical Windows is pending.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Narrow retirement only: structuralBraces helper self-test / deleted private Remove-MimoCodePlugin lexical brace boundary is obsolete. Do not retire whole PowerShell syntax or MiMo cleanup; true complete-file Parser.ParseFile and actual whole public entry replace the mechanism. Live full-file parsing remains317 and physical Windows is pending.",
+            "replacement": [
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L270:C3",
+            "title": "sh defines and calls remove_pi_coding_agent_extension",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pi default/env locations, exact owned extension specs, persisted config path preference, real local SDK registrations, unrelated extensions/JSONC preserved. Real Native registered Pi SDK builder/local definition, physical JSONC cleanup/backup and persisted custom Pi home with env absent; production loader proves default/override/blank paths. Recorded targets are selected and real whole-uninstall additionally clears exact-owned existing alternatives to avoid dangling resources; foreign references are not broadened.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l366_real_registered_sdk_definition_keeps_jsonc_user_fields_and_original_backup"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L276:C3",
+            "title": "ps1 defines and calls Remove-PiCodingAgentExtension",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pi default/env locations, exact owned extension specs, persisted config path preference, real local SDK registrations, unrelated extensions/JSONC preserved. Real Native registered Pi SDK builder/local definition, physical JSONC cleanup/backup and persisted custom Pi home with env absent; production loader proves default/override/blank paths. Recorded targets are selected and real whole-uninstall additionally clears exact-owned existing alternatives to avoid dangling resources; foreign references are not broadened.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l366_real_registered_sdk_definition_keeps_jsonc_user_fields_and_original_backup"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "targets Pi settings and matches only the Pilot extension",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pi default/env locations, exact owned extension specs, persisted config path preference, real local SDK registrations, unrelated extensions/JSONC preserved. Real Native registered Pi SDK builder/local definition, physical JSONC cleanup/backup and persisted custom Pi home with env absent; production loader proves default/override/blank paths. Recorded targets are selected and real whole-uninstall additionally clears exact-owned existing alternatives to avoid dangling resources; foreign references are not broadened.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l366_real_registered_sdk_definition_keeps_jsonc_user_fields_and_original_backup"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L293:C3",
+            "title": "prefers the persisted Pi pluginInjectConfigPath over the current env",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pi default/env locations, exact owned extension specs, persisted config path preference, real local SDK registrations, unrelated extensions/JSONC preserved. Real Native registered Pi SDK builder/local definition, physical JSONC cleanup/backup and persisted custom Pi home with env absent; production loader proves default/override/blank paths. Recorded targets are selected and real whole-uninstall additionally clears exact-owned existing alternatives to avoid dangling resources; foreign references are not broadened.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l366_real_registered_sdk_definition_keeps_jsonc_user_fields_and_original_backup"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L298:C3",
+            "title": "discovers registered PI SDK Agent settings from local definitions",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Pi default/env locations, exact owned extension specs, persisted config path preference, real local SDK registrations, unrelated extensions/JSONC preserved. Real Native registered Pi SDK builder/local definition, physical JSONC cleanup/backup and persisted custom Pi home with env absent; production loader proves default/override/blank paths. Recorded targets are selected and real whole-uninstall additionally clears exact-owned existing alternatives to avoid dangling resources; foreign references are not broadened.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l366_real_registered_sdk_definition_keeps_jsonc_user_fields_and_original_backup"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l388_pi_override_reaches_detection_and_settings_paths"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l447_pi_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L307:C3",
+            "title": "%s cleanup accepts JSONC and continues past damaged targets",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": [
+              "it.each([\n    ['Unix', extractPiCleanupNodeScript(sh, 'sh'), 'HOME'],\n    ['Windows', extractPiCleanupNodeScript(ps1, 'ps1'), 'USERPROFILE'],\n  ])"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Damaged default/custom configs do not block independent good registered JSONC cleanup; good backup/comment and URL// preserved; bad bytes unchanged. PARTIAL: Root actual sixth8PASS includes broken default Pi + broken registered custom + independent good registered JSONC/URL/comment/exact backup, damaged bytes intact. New final Native exit1 retains retry runtime; original private Node helper exit0/stdout=partial is intentionally not claimed 1:1 and the whole compound declaration is not retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l375_damaged_registered_target_does_not_block_good_jsonc_cleanup_and_keeps_failed_runtime"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L314:C3",
+            "title": "cleans a persisted custom Pi home when uninstall has no PI_CODING_AGENT_DIR",
+            "suites": [
+              "uninstall cleans the Pi Coding Agent extension injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Whole shell uninstall resolves persisted custom Pi settings with PI_CODING_AGENT_DIR absent; exact foreign extension survives. Complete unchanged public shell entry, custom data root, persisted Pi home without PI_CODING_AGENT_DIR and exact third-party extension preserved. Original20s whole-shell cap retained. Prior defaultURL bug was genuinely red and B32 fixed; Root final public-script rerun pending, not represented as already passed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_whole_public_shell_uninstall_uses_recorded_pi_home_without_environment_override"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L493:C3",
+            "title": "removes only Pilot handlers from mixed groups (%s)",
+            "suites": [
+              "Unix Codex uninstall preserves third-party assets"
+            ],
+            "parameters": [
+              "it.each(['sh', 'mjs'])"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Both old .sh/.mjs Pilot handler forms removed in direct+nested mixed groups; null/empty and unrelated handlers kept; legacy OTel/cache hooks + sessions/trace.jsonl + config.toml + otel-config.json byte-preserved after twice cleanup. PARTIAL: true Native old bash-prefix .sh/.mjs, mixed direct/nested groups, old fixed Stop command inside SessionStart, null/empty groups and foreign/OTel/cache handlers are tested. Physical trace.jsonl/config.toml/otel-config.json bytes survive two passes. Valid foreign TOML allows own cleanup; the original opaque invalid config.toml sentinel now fails closed and keeps every original hook/asset byte instead of clearing hooks. Extra args/arbitrary shell wrappers refuse; exact-current-root quote forms remove only own paths. Two true reds fixed; no arbitrary basename/root authority.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "cleanup_l561_legacy_codex_sh_and_mjs_mixed_handlers_keep_foreign_groups_and_all_otel_assets"
+              },
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "legacy_codex_cleanup_keeps_foreign_same_names_and_refuses_unrecognized_shell_or_arguments"
+              },
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "legacy_codex_known_current_install_quotes_do_not_authorize_foreign_same_names"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L526:C3",
+            "title": "shell OTel cleanup only targets the Claude cache",
+            "suites": [
+              "legacy OTel uninstall leaves non-Pilot Codex assets untouched"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Legacy uninstall only cleans Claude resources; Codex cache/trust/OTel assets are excluded. Actual Native coordinator runs the production Claude-only legacy stage, removes real Claude legacy fields/runtime preload and preserves user/history. All5 Codex files including the original opaque invalid TOML/JSON sentinel remain byte-exact after two calls. A minimal runtime with no selected Codex Hook definition isolates this legacy stage; Codex Hook/trust cleanup is separately561. No physical PowerShell execution is claimed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "cleanup_l594_l601_native_legacy_cleanup_is_claude_only_and_preserves_raw_codex_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L533:C3",
+            "title": "PowerShell OTel cleanup only targets the Claude cache",
+            "suites": [
+              "legacy OTel uninstall leaves non-Pilot Codex assets untouched"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Legacy uninstall only cleans Claude resources; Codex cache/trust/OTel assets are excluded. Actual Native coordinator runs the production Claude-only legacy stage, removes real Claude legacy fields/runtime preload and preserves user/history. All5 Codex files including the original opaque invalid TOML/JSON sentinel remain byte-exact after two calls. A minimal runtime with no selected Codex Hook definition isolates this legacy stage; Codex Hook/trust cleanup is separately561. No physical PowerShell execution is claimed.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "cleanup_l594_l601_native_legacy_cleanup_is_claude_only_and_preserves_raw_codex_assets"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L542:C3",
+            "title": "sh defines remove_mimocode_plugin",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L546:C3",
+            "title": "sh calls remove_mimocode_plugin inside cmd_uninstall",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L551:C3",
+            "title": "ps1 defines Remove-MimoCodePlugin",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L555:C3",
+            "title": "ps1 calls Remove-MimoCodePlugin inside Cmd-Uninstall",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L561:C5",
+            "title": "`sh cleans ~/.config/mimocode/${cfg}`",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": [
+              "['mimocode.jsonc', 'mimocode.json']"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L564:C5",
+            "title": "`ps1 cleans .config\\\\mimocode\\\\${cfg}`",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": [
+              "['mimocode.jsonc', 'mimocode.json']"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L569:C3",
+            "title": "matches our entries by pluginId or plugin file path",
+            "suites": [
+              "uninstall cleans the MiMo Code plugin-inject spec"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both shipped default mimocode.jsonc/mimocode.json locations; exact own file/package vectors; unknown directory forms/foreign specs and backups retained. Actual shipped MiMo definition and exact default mimocode.jsonc/mimocode.json files are used, not replacement paths. Exact declared file/package aliases are removed from both keys, unknown directory-root forms/foreign specs and exact backups preserved. The obsolete private Node function layout is replaced; current-platform Native evidence is distinct from physical PowerShell execution.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l194_l210_all_opencode_and_mimo_config_names_remove_exact_owned_vectors_from_both_keys"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L578:C3",
+            "title": "defines and calls cleanup in both installers",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact current/legacy owned paths and entry removed; unrelated legacy flat/nested refs and entries retained; cleanup happens while runtime exists. Root real before-red/after-green fixes legacy top-level plugin/plugins arrays alongside nested load.paths and generated entries. Shared generated entry remains when foreign legacy/nested copies need it; unrelated load paths/entries/allow/deny policy and backups retain the prior contract. Cleanup-agents executes before version/runtime removal. Expanded default4 and whole-script reruns await final Root full result, not claimed by this candidate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l660_l686_openclaw_no_foreign_control_removes_owned_entry_and_preserves_other_values"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_foreign_legacy_reference_keeps_shared_generated_entry_and_user_policy"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_openclaw_preserves_other_install_paths_and_shared_entries"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L585:C3",
+            "title": "checks the supported config paths and environment overrides",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "OPENCLAW_CONFIG_PATH/OPENCLAW_STATE_DIR control real injection+undeploy; both default openclaw.json/config.json paths remain supported. Native true child contracts already prove explicit OPENCLAW_CONFIG_PATH and empty-config-plus-OPENCLAW_STATE_DIR precedence through real deploy/undeploy. Root has now expanded the legacy-key Native leaf into plugin/plugins x shipped default openclaw.json/config.json4 scenes without definition override. New4 scene execution is pending Root final full; do not call it already passed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "source_l422_official_container_config_path_controls_both_injection_and_cleanup"
+              },
+              {
+                "file": "src/deployment/openclaw_strategy_history_contract_tests.rs",
+                "test": "native_empty_config_hint_allows_official_state_directory_precedence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L592:C3",
+            "title": "removes the exact entry and managed path while filtering arrays",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact current/legacy owned paths and entry removed; unrelated legacy flat/nested refs and entries retained; cleanup happens while runtime exists. Root real before-red/after-green fixes legacy top-level plugin/plugins arrays alongside nested load.paths and generated entries. Shared generated entry remains when foreign legacy/nested copies need it; unrelated load paths/entries/allow/deny policy and backups retain the prior contract. Cleanup-agents executes before version/runtime removal. Expanded default4 and whole-script reruns await final Root full result, not claimed by this candidate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l660_l686_openclaw_no_foreign_control_removes_owned_entry_and_preserves_other_values"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_foreign_legacy_reference_keeps_shared_generated_entry_and_user_policy"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_openclaw_preserves_other_install_paths_and_shared_entries"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L602:C3",
+            "title": "streams cleanup code and paths without putting openclaw in Node argv",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact current/legacy owned paths and entry removed; unrelated legacy flat/nested refs and entries retained; cleanup happens while runtime exists. Only the old Node -e/pipe literal transport is superseded. The privacy/argument boundary remains active: real Native cleanup-agents consumes serialized --input-env request, and complete public callers use the Native helper with no external Node runtime. Neither source text signature nor a copied Node cleaner is runtime proof. Whole public/current-candidate execution is recorded by Root/B32 receipts; physical Windows pending.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l660_l686_openclaw_no_foreign_control_removes_owned_entry_and_preserves_other_values"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_path_arguments_and_json_protocol_have_the_same_readonly_boundary"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L618:C3",
+            "title": "%s streamed cleanup removes both current and legacy managed paths",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": [
+              "it.each(extractOpenClawCleanupScripts())"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Exact current/legacy owned paths and entry removed; unrelated legacy flat/nested refs and entries retained; cleanup happens while runtime exists. Root real before-red/after-green fixes legacy top-level plugin/plugins arrays alongside nested load.paths and generated entries. Shared generated entry remains when foreign legacy/nested copies need it; unrelated load paths/entries/allow/deny policy and backups retain the prior contract. Cleanup-agents executes before version/runtime removal. Expanded default4 and whole-script reruns await final Root full result, not claimed by this candidate.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l660_l686_openclaw_no_foreign_control_removes_owned_entry_and_preserves_other_values"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_foreign_legacy_reference_keeps_shared_generated_entry_and_user_policy"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_openclaw_preserves_other_install_paths_and_shared_entries"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L674:C3",
+            "title": "runs cleanup before installation files are removed",
+            "suites": [
+              "uninstall cleans only the Pilot OpenClaw plugin injection"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact current/legacy owned paths and entry removed; unrelated legacy flat/nested refs and entries retained; cleanup happens while runtime exists. Root real before-red/after-green fixes legacy top-level plugin/plugins arrays alongside nested load.paths and generated entries. Shared generated entry remains when foreign legacy/nested copies need it; unrelated load paths/entries/allow/deny policy and backups retain the prior contract. Cleanup-agents executes before version/runtime removal. Expanded default4 and whole-script reruns await final Root full result, not claimed by this candidate.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l660_l686_openclaw_no_foreign_control_removes_owned_entry_and_preserves_other_values"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_legacy_array_keys_remove_only_current_install_and_declared_aliases"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "openclaw_foreign_legacy_reference_keeps_shared_generated_entry_and_user_policy"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_openclaw_preserves_other_install_paths_and_shared_entries"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_whole_public_shell_uses_current_without_network_or_external_runtimes"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L685:C3",
+            "title": "defines and calls marker-aware cleanup in the shell installer",
+            "suites": [
+              "uninstall only cleans the managed Hermes directory plugin"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Only owner=loongsuite-pilot+agent=hermes-agent target/persisted home; shipped plugins disable loongsuite-pilot must execute before files/assets removed. Real shipped Hermes activation arguments and real producer markers, private executable observes exact plugins/disable/loongsuite-pilot argv while target/plugin/marker/source still exist. Persisted custom target wins over another current-env owned fallback; fallback/source bytes preserved. Wrong owner, wrong agentId and disable exit23 refuse without deleting marker/plugin/state/runtime. Source actual4 scenes passed on GNU under5s CLI/producer and15s per-scenario; actual macOS/Windows entry execution is not claimed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "cleanup_l753_l766_shipped_hermes_disable_runs_before_recorded_target_removal_and_refuses_foreign_markers"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_removes_only_directory_plugins_owned_by_the_current_install"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L698:C3",
+            "title": "defines and calls marker-aware cleanup in the PowerShell installer",
+            "suites": [
+              "uninstall only cleans the managed Hermes directory plugin"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Only owner=loongsuite-pilot+agent=hermes-agent target/persisted home; shipped plugins disable loongsuite-pilot must execute before files/assets removed. Real shipped Hermes activation arguments and real producer markers, private executable observes exact plugins/disable/loongsuite-pilot argv while target/plugin/marker/source still exist. Persisted custom target wins over another current-env owned fallback; fallback/source bytes preserved. Wrong owner, wrong agentId and disable exit23 refuse without deleting marker/plugin/state/runtime. Source actual4 scenes passed on GNU under5s CLI/producer and15s per-scenario; actual macOS/Windows entry execution is not claimed.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_extra_history.rs",
+                "test": "cleanup_l753_l766_shipped_hermes_disable_runs_before_recorded_target_removal_and_refuses_foreign_markers"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_removes_only_directory_plugins_owned_by_the_current_install"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L711:C3",
+            "title": "removes Hermes on rollback only when the target version lacks support",
+            "suites": [
+              "uninstall only cleans the managed Hermes directory plugin"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Only unsupported rollback target causes owned Hermes removal; supported target/foreign/unknown ownership true noops; invalid binding/dirty marker preserves all bytes/state; recorded target preferred. Existing actual Native contracts preserve this exact assertion boundary; current-main full outer call and every directly used helper are byte-identical to EF except the explicitly reviewed PS brace-helper changes. Execution applicability and actual platform remain distinct.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/hermes_rollback.rs",
+                "test": "hermes_l711_real_native_rollback_removes_only_current_owned_and_preserves_other_agent_state"
+              },
+              {
+                "file": "tests/installer_history/hermes_rollback.rs",
+                "test": "hermes_l711_supported_target_unknown_and_foreign_ownership_are_true_noops"
+              },
+              {
+                "file": "tests/installer_history/hermes_rollback.rs",
+                "test": "hermes_modified_current_owned_plugin_and_invalid_binding_preserve_all_state_and_bytes"
+              },
+              {
+                "file": "tests/installer_history/hermes_rollback.rs",
+                "test": "actual_shell_bridge_calls_real_native_cleanup_without_node_and_captures_outgoing_before_publish"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L724:C3",
+            "title": "honours DSH_HOME when cleaning the YAML patch",
+            "suites": [
+              "DSH uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Nonblank DSH_HOME reaches real locator; default/blank behavior remains ~/.dsh; real strategy removes actual selected YAML patch without touching plugin asset; persisted path preserved. Existing actual Native contracts preserve this exact assertion boundary; current-main full outer call and every directly used helper are byte-identical to EF except the explicitly reviewed PS brace-helper changes. Execution applicability and actual platform remain distinct.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/dsh_yaml_patch_strategy.rs",
+                "test": "tests::writes_and_removes_a_created_patch_file"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l567_dsh_override_keeps_detection_and_absent_patch_path_for_process_locator"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l595_dsh_unset_defaults_to_user_dsh"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l620_dsh_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_uses_persisted_dsh_path_and_preserves_assets_on_conflict"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L732:C3",
+            "title": "honours GROK_HOME when cleaning the hook file",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "GROK_HOME or ~/.grok resolves actual detection/settings; actual shipped Hook producer+Native uninstall remove own commands. Existing actual Native contracts preserve this exact assertion boundary; current-main full outer call and every directly used helper are byte-identical to EF except the explicitly reviewed PS brace-helper changes. Execution applicability and actual platform remain distinct.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l481_grok_override_reaches_detection_and_hook_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l510_grok_unset_defaults_to_user_home_for_detection_and_settings"
+              },
+              {
+                "file": "src/deployment/loader_env_history_contract_tests.rs",
+                "test": "source_l539_grok_blank_override_is_unset"
+              },
+              {
+                "file": "tests/installer_history/uninstall_contracts.rs",
+                "test": "cleanup_l173_l176_l183_real_native_uninstall_cleans_every_shipped_hook_and_preserves_user_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L738:C3",
+            "title": "prefers the persisted Grok hookSettingsPath over the current env",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Persisted hookSettingsPath is selected over currently resolved environment path. Real persisted Grok hookSettingsPath is consumed with no GROK_HOME requirement. Native coordinator follows recorded target and additionally cleans other existing exact-owned alternatives for full uninstall, preserving foreign config. The old assertion only checked access to persisted state; it did not assert exclusive deletion of a fallback.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L743:C3",
+            "title": "cleans the Windows Grok config before deleting the pinned runtime and assets",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exactly once owned Grok settings cleanup precedes removal of pinned runtime/assets. Grok own cleanup lives in the common Native all-agent stage. Whole PowerShell performs readonly preflight and one mutating cleanup before deleting pinned runtime/assets; actual Native selected Grok direct/nested cleanup is separate from the actual Windows caller boundary. Original private Remove-GrokBuildHookConfig call is replaced, not restored. Final physical Windows whole-entry evidence remains pending.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              },
+              {
+                "file": "tests/installer_history/uninstall_entry.rs",
+                "test": "uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L750:C3",
+            "title": "%s cleanup removes direct/nested Pilot hooks and preserves third-party hooks",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": [
+              "it.each([\n    ['POSIX', extractGrokCleanupNodeScript(sh, 'sh')],\n    ['PowerShell', extractGrokCleanupNodeScript(ps1, 'ps1')],\n  ])"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Same configuration has POSIX .sh and Windows powershell.exe -File quoted drive path commands; both exact owned forms removed and foreign direct/nested groups retained. PARTIAL: valid current-install owned direct/nested Grok handlers are removed and foreign/user group metadata retained through actual Native. Original helper only received config, no dataDir, and removed arbitrary /custom/pilot plus C:/pilot data basename matches. That broad ownership projection is superseded by current-install authority and unknown-reference protection; it is not restored or counted as passing. Whole declaration/live cleanup not retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L757:C3",
+            "title": "removes Pilot direct and nested hooks from an isolated HOME and preserves third-party hooks",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Whole shell uninstall uses private HOME or persisted custom Grok home without GROK_HOME; removes exact direct+nested own only and preserves foreign metadata. Actual complete public shell reaches Native Grok persisted-home cleanup with no GROK_HOME and keeps direct/nested foreign handlers. Actual all-shipped Hook producer/uninstall additionally exercises default effective HOME settings. Original20s whole-shell cap retained; prior wget failure was real defaultURL product defect fixed by B32. Root final whole-script rerun pending.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l825_l892_whole_public_shell_uninstall_cleans_direct_nested_grok_in_recorded_home"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
+              },
+              {
+                "file": "tests/installer_history/uninstall_contracts.rs",
+                "test": "cleanup_l173_l176_l183_real_native_uninstall_cleans_every_shipped_hook_and_preserves_user_content"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L824:C3",
+            "title": "cleans a persisted custom Grok home when uninstall has no GROK_HOME",
+            "suites": [
+              "Grok Build uninstall smoke"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Whole shell uninstall uses private HOME or persisted custom Grok home without GROK_HOME; removes exact direct+nested own only and preserves foreign metadata. Actual complete public shell reaches Native Grok persisted-home cleanup with no GROK_HOME and keeps direct/nested foreign handlers. Actual all-shipped Hook producer/uninstall additionally exercises default effective HOME settings. Original20s whole-shell cap retained; prior wget failure was real defaultURL product defect fixed by B32. Root final whole-script rerun pending.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l825_l892_whole_public_shell_uninstall_cleans_direct_nested_grok_in_recorded_home"
+              },
+              {
+                "file": "tests/installer_history/uninstall_plugin_matrix.rs",
+                "test": "cleanup_l382_l892_recorded_pi_and_grok_custom_homes_do_not_need_current_environment_overrides"
               },
               {
                 "file": "tests/installer_history/uninstall_contracts.rs",
@@ -130057,6 +132801,440 @@
               {
                 "file": "xtask/tests/desktop_shell_history.rs",
                 "test": "menubar_l100_l107_unsupported_or_missing_runtime_exits_before_native_or_collector_start"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-uninstall-survivability.test.mjs",
+      "source_hash": "72524f88065639698a9f2f418c7815d1ebf7a5ef184492d3cb61b69595590718",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact12 original AST:9 active contracts and3 narrow Node-specific mechanism retirements. Original file unedited, no newignore. Source-policy7 actualGNU passes; DSH real error strategy/manager2 passed under27a; current DD existingNative contract passed GNU and actual dualWindows. New private PS diagnostic/notice/elevation matrices are implemented and Rust-body strict only, physical pending.",
+      "cases": [
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "finds the scripts to check",
+            "suites": [
+              "Resolve-Node cannot take the caller down with it"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual source sweep still finds at least two scripts including service wrapper and public installer, guarding empty/renamed/cwd sweeps.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l61_scripts_sweep_is_nonempty_and_keeps_the_service_wrapper"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C5",
+            "title": "`${file}: the version-manager probes in Resolve-Node are non-fatal`",
+            "suites": [
+              "Resolve-Node cannot take the caller down with it"
+            ],
+            "parameters": [
+              "PS1"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "External Node probe/skip implementation retirement only; native uninstall without these runtimes remains actually exercised.",
+          "target": {
+            "kind": "retired",
+            "reason": "Only old external Node implementation is retired: third-party NVM/fnm discovery and exactly-two-probe policy (L68), try/catch Resolve-Node with empty NODE_BIN (L93), empty-Node skip guards in per-agent legacy cleanup (L105). Active Cmd-Uninstall resolves its own Rust runtime and invokes checked native cleanup; it never calls Resolve-Node, Python or these old cleanup helpers, and service wrapper has no Resolve-Node definition. Actual public Native uninstall cleans with no Node/Python, preserving data or purging it and rejecting bad state; current DD GNU and both Windows architectures have exact passing evidence. Cleanup/ownership/failure visibility capabilities are retained; only obsolete Node probe/skip syntax is retired. No retired AST is called a newly executed Native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_retired_node_l68_l93_l105_default_uninstall_never_resolves_or_skips_node_cleanups"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L93:C5",
+            "title": "`${file}: Cmd-Uninstall guards its Resolve-Node call`",
+            "suites": [
+              "uninstall continues when Node cannot be resolved"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "External Node probe/skip implementation retirement only; native uninstall without these runtimes remains actually exercised.",
+          "target": {
+            "kind": "retired",
+            "reason": "Only old external Node implementation is retired: third-party NVM/fnm discovery and exactly-two-probe policy (L68), try/catch Resolve-Node with empty NODE_BIN (L93), empty-Node skip guards in per-agent legacy cleanup (L105). Active Cmd-Uninstall resolves its own Rust runtime and invokes checked native cleanup; it never calls Resolve-Node, Python or these old cleanup helpers, and service wrapper has no Resolve-Node definition. Actual public Native uninstall cleans with no Node/Python, preserving data or purging it and rejecting bad state; current DD GNU and both Windows architectures have exact passing evidence. Cleanup/ownership/failure visibility capabilities are retained; only obsolete Node probe/skip syntax is retired. No retired AST is called a newly executed Native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_retired_node_l68_l93_l105_default_uninstall_never_resolves_or_skips_node_cleanups"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C5",
+            "title": "`${file}: every Node-dependent cleanup skips explicitly without a Node`",
+            "suites": [
+              "uninstall continues when Node cannot be resolved"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "External Node probe/skip implementation retirement only; native uninstall without these runtimes remains actually exercised.",
+          "target": {
+            "kind": "retired",
+            "reason": "Only old external Node implementation is retired: third-party NVM/fnm discovery and exactly-two-probe policy (L68), try/catch Resolve-Node with empty NODE_BIN (L93), empty-Node skip guards in per-agent legacy cleanup (L105). Active Cmd-Uninstall resolves its own Rust runtime and invokes checked native cleanup; it never calls Resolve-Node, Python or these old cleanup helpers, and service wrapper has no Resolve-Node definition. Actual public Native uninstall cleans with no Node/Python, preserving data or purging it and rejecting bad state; current DD GNU and both Windows architectures have exact passing evidence. Cleanup/ownership/failure visibility capabilities are retained; only obsolete Node probe/skip syntax is retired. No retired AST is called a newly executed Native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_retired_node_l68_l93_l105_default_uninstall_never_resolves_or_skips_node_cleanups"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_external_runtimes"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_without_node_python"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L127:C5",
+            "title": "`${file}: both refusals check the managed block first`",
+            "suites": [
+              "a refusal to unpatch DSH is gated on something actually dangling"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual native cleanup gates DSH refusal on real safety: recorded malformed managed block fails with bytes/assets intact; valid historical block is removed preserving user rows, repeated cleanup works; truly missing patch is successful no-op. Missing external Node/JS helper refusal branches are removed with that implementation, while real read error now returnsfalse and real manager retains exact state/plugin/config bytes. DD existing contract passed GNU and both Windows; new read-error patch27a passed GNU, new Windows pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_native.rs",
+                "test": "native_uninstall_uses_persisted_dsh_path_and_preserves_assets_on_conflict"
+              },
+              {
+                "file": "tests/installer_uninstall_survivability_history.rs",
+                "test": "dsh_survivability_absent_patch_is_a_noop_but_real_read_error_is_not_success"
+              },
+              {
+                "file": "tests/installer_uninstall_survivability_history.rs",
+                "test": "dsh_survivability_manager_keeps_deployment_state_and_resource_bytes_on_real_read_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L145:C5",
+            "title": "`${file}: the probe answers \"managed\" when it cannot tell`",
+            "suites": [
+              "a refusal to unpatch DSH is gated on something actually dangling"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original unknown-read=>conservative-preserve semantics found a real Native bug: initial unwrap_or_default plus file_exists silently treated directory/read errors as absence and cleared deployed record. Actual before2RED after2GREEN uses real IO read failure, real strategy and real DeploymentManager; no mocked reader or permission changes. NotFound no-op stays positive; error preserves BOM deployment state including Cursor, plugin and credential config bytes. New physical Windows validation pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_uninstall_survivability_history.rs",
+                "test": "dsh_survivability_absent_patch_is_a_noop_but_real_read_error_is_not_success"
+              },
+              {
+                "file": "tests/installer_uninstall_survivability_history.rs",
+                "test": "dsh_survivability_manager_keeps_deployment_state_and_resource_bytes_on_real_read_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L156:C3",
+            "title": "the block is byte-identical across the installers",
+            "suites": [
+              "a refusal to unpatch DSH is gated on something actually dangling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Old manual byte-identical DSH cleanup blocks are replaced by one compiled Rust strategy, used by actual native uninstall manager. All current installer default Cmd-Uninstall bodies delegate same native cleanup and do not call inline Remove-DshYamlPatch. Static single-implementation/call-graph policy executes and real strategy missing/error controls execute; unused old block text is not used as evidence of product safety. No DSH safety capability retired.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l156_native_dsh_uninstall_has_one_strategy_and_no_default_inline_copy"
+              },
+              {
+                "file": "tests/installer_uninstall_survivability_history.rs",
+                "test": "dsh_survivability_absent_patch_is_a_noop_but_real_read_error_is_not_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L163:C5",
+            "title": "`${file}: a preserved data dir says what is still in it`",
+            "suites": [
+              "a refusal to unpatch DSH is gated on something actually dangling"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact credential-preserved notice source policy remains. Actual Cmd-Uninstall retained-data branch is additionally exercised with inert lifecycle/native callbacks solely to verify active control flow/order, credential notice and unchanged private config/binary, never called real native cleanup integration. Real Native no-Node keep/purge/bad-state safety independently has exact DD dual-Windows/GNU passing evidence. New PS notice matrix pending physical Windows.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l163_retained_data_notice_explicitly_names_reporting_credentials"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "survivability_l163_actual_uninstall_preserved_data_branch_names_credentials_before_returning_success"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L174:C5",
+            "title": "`${file}: the schtasks call runs at \"Continue\" and restores in finally`",
+            "suites": [
+              "the scheduled-task failure reaches the user"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original Continue/finally prevEAP restoration, checked LASTEXITCODE, initial nonzero exit and no empty catch source assertions retained. Actual PS5/PS7 Full/CLM matrix uses private native PE named schtasks.exe, confirms Get-Command resolves only private path, tests cmdlet success/no fallback, Native success and real native stderr+blank exit7 failure. Mock scheduler callbacks never touch OS; original ErrorActionPreference and meaningful cause exception checked. Typed body strict only; physical new Windows matrix pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l174_schtasks_native_stderr_is_captured_at_continue_and_eap_restored_in_finally"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "survivability_l174_l193_actual_native_schtasks_stderr_reaches_cause_diagnostic_and_restores_eap"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L193:C5",
+            "title": "`${file}: the message names the cause, not just the workaround`",
+            "suites": [
+              "the scheduled-task failure reaches the user"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original ownership cause BUILTIN Administrators, uninstall-not-admin requirement, reinstall-without-elevation and raw Exception.Message/no Out-String rules preserved. Native stderr failure matrix additionally asserts raw detail appears once, native exit7 and cmdlet cause both remain, no CategoryInfo/FullyQualifiedErrorId/NativeCommandError/source frame noise. New actual Windows execution pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l193_schtasks_failure_names_ownership_cause_raw_stderr_and_both_remedies"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "survivability_l174_l193_actual_native_schtasks_stderr_reaches_cause_diagnostic_and_restores_eap"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L221:C5",
+            "title": "`${file}: warns before doing any work`",
+            "suites": [
+              "an elevated install says what it costs"
+            ],
+            "parameters": [
+              "INSTALLERS"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original real warning block catch=>false and active Cmd-Install warning-before-dependencies/download rules retained. Actual PS function probe is invoked, CLM forbidden identity falls back false, controlled elevated branch invokes actual warning and a dependency sentinel confirms all cause/remedy text arrived before any work. No download/service/task runs. New physical Windows pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l221_l242_elevation_warning_is_best_effort_before_deps_and_byte_identical"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "survivability_l221_actual_elevation_warning_is_nonfatal_in_clm_and_precedes_any_dependency_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L242:C3",
+            "title": "the block is byte-identical across the installers",
+            "suites": [
+              "an elevated install says what it costs"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Nonempty actual installer sweep checks original elevation marker block and exact equality among all present installers. Only public installer is tracked in these real open-source baselines; missing private variants are not fabricated or claimed executed. Active warning semantics/source order remain and new Windows flow exists underL221.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/uninstall_survivability_source_history.rs",
+                "test": "survivability_l221_l242_elevation_warning_is_best_effort_before_deps_and_byte_identical"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/qwen-work-cn-custom-data-dir.test.ts",
+      "source_hash": "f9835cb6ffe9f99f75b8b208438cff430ed3b3ad52a12b262263be98d04e1392",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae declaration ownership; all applicable Rust contracts actually execute under Rust1.99.1/glibc2.34 Linux, Host cases under Node22.22.3/glibc2.34. Windows/macOS applicability is not a claim of physical execution. Original full files (all helpers/fixtures/imports) are byte-identical to f84; Qwen custom also EF byte-identical. No dependency changes. Three real-personal Qwen acceptance rows remain separately pending and are not part of this receipt.",
+      "cases": [
+        {
+          "source": {
+            "id": "L30:C3",
+            "title": "reads custom-root Hook history and enriches it from native segments",
+            "suites": [
+              "QwenWorkCN custom dataDir pipeline"
+            ],
+            "parameters": [
+              "describe.runIf(process.platform !== 'win32')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Original exact user/assistant transcript and original native two-segment fixture through actual installed dedicated Bash entrypoint -> shipped Native CLI -> physical history -> real QwenWorkCnTraceInput: response-custom has input120/output30/total150/cache90, no invented reasoning/system instructions; inherited stale env and private HOME logs remain absent, no qwen interception file. Original actual self-location precedence exposed a real bug: bound only the installed Qwen wrapper root, leaving source/package-assets explicit env semantics unchanged. Native5s child bound is stricter than the original project15s per-case budget. Original suite applies Unix.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_entry_history.rs",
+                "test": "qwen_custom_root_actual_installed_shell_and_trace_use_native_segments_without_default_or_stale_output"
               }
             ]
           }
