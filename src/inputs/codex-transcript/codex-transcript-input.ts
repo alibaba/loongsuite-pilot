@@ -221,7 +221,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
-  private readonly ownerOffsetProbes = new LruMap<{ version: string; endOffset: number; offset: number | null }>(MAX_OWNER_OFFSET_PROBES);
+  private readonly ownerOffsetProbes = new LruMap<number | null>(MAX_OWNER_OFFSET_PROBES);
   private wakeupWatcher: FSWatcher | null = null;
   private wakeupTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly dirtyWakeupMarkers = new Set<string>();
@@ -1501,13 +1501,13 @@ export class CodexTranscriptInput extends BaseInput {
     stat: fsSync.Stats,
     endOffset = stat.size,
   ): Promise<number | null> {
-    // Owner selection uses the rollout filename, so keep the latest probe per
-    // path. Reuse still requires the exact file version and scan boundary.
-    const version = sourceVersion(stat);
-    const previous = this.ownerOffsetProbes.get(filePath);
+    // Owner selection uses the rollout filename, so paths stay distinct even
+    // for hard links. Different scan boundaries can coexist for one version.
+    const key = JSON.stringify([filePath, sourceVersion(stat), endOffset]);
+    const previous = this.ownerOffsetProbes.get(key);
     // A shorter search cannot establish absence in the rest of the file, and
     // an owner found by a longer search may lie outside the requested prefix.
-    if (previous?.version === version && previous.endOffset === endOffset) return previous.offset;
+    if (previous !== undefined) return previous;
     const offset = await findOwnerSessionMetaOffset(filePath, endOffset, this.getInputRuntimeAccumulator());
     // Never cache a result observed while a writer changed or removed the file.
     try {
@@ -1515,7 +1515,7 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return null;
     }
-    this.ownerOffsetProbes.set(filePath, { version, endOffset, offset });
+    this.ownerOffsetProbes.set(key, offset);
     return offset;
   }
 

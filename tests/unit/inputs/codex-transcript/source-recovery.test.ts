@@ -99,7 +99,7 @@ it('does not memoize a negative probe when a writer changes the file during its 
     if (!changed) { changed = true; fsSync.appendFileSync(f.file, meta()); }
   });
   expect(await f.probe.findOwnerOffset(f.file, before)).toBeNull();
-  expect(f.probe.ownerOffsetProbes.has(f.file)).toBe(false);
+  expect(f.probe.ownerOffsetProbes.size).toBe(0);
   expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).not.toBeNull();
 });
 
@@ -115,7 +115,7 @@ it('does not reread an incomplete tail after finding the fork baseline boundary'
   expect(cycle.rawReadBytes).toBeLessThanOrEqual(stat.size + Buffer.byteLength(prefix) + 1);
 });
 
-it.each(['limited-first', 'full-first'])('does not share owner-probe results across scan boundaries (%s)', async order => {
+it.each(['limited-first', 'full-first'])('isolates and reuses alternating owner-probe boundaries (%s)', async order => {
   const f = await fixture();
   const prefix = diagnostic();
   await fs.writeFile(f.file, prefix + meta());
@@ -125,6 +125,33 @@ it.each(['limited-first', 'full-first'])('does not share owner-probe results acr
   expect(await f.probe.findOwnerOffset(f.file, stat, boundary)).toBeNull();
   expect((await measure(f, () => f.probe.findOwnerOffset(f.file, stat, boundary))).rawReadBytes).toBe(0);
   expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(boundary);
+  for (let i = 0; i < 3; i++) {
+    expect((await measure(f, async () => {
+      expect(await f.probe.findOwnerOffset(f.file, stat, boundary)).toBeNull();
+      expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(boundary);
+    })).rawReadBytes).toBe(0);
+  }
+});
+
+it('keeps filename-dependent owner selection separate for hard-linked rollout paths', async () => {
+  const f = await fixture();
+  const firstId = '11111111-1111-4111-8111-111111111111';
+  const secondId = '22222222-2222-4222-8222-222222222222';
+  const firstPath = path.join(f.root, 'sessions', `rollout-${firstId}.jsonl`);
+  const secondPath = path.join(f.root, 'sessions', `rollout-${secondId}.jsonl`);
+  const firstHeader = row('session_meta', { id: firstId, model_provider: 'openai' });
+  await fs.writeFile(firstPath, firstHeader + row('session_meta', { id: secondId, model_provider: 'openai' }) + diagnostic());
+  await fs.link(firstPath, secondPath);
+  const firstStat = await fs.stat(firstPath);
+  const secondStat = await fs.stat(secondPath);
+  expect([firstStat.dev, firstStat.ino, firstStat.size, firstStat.mtimeMs, firstStat.ctimeMs])
+    .toEqual([secondStat.dev, secondStat.ino, secondStat.size, secondStat.mtimeMs, secondStat.ctimeMs]);
+  expect(await f.probe.findOwnerOffset(firstPath, firstStat)).toBe(0);
+  expect(await f.probe.findOwnerOffset(secondPath, secondStat)).toBe(Buffer.byteLength(firstHeader));
+  expect((await measure(f, async () => {
+    expect(await f.probe.findOwnerOffset(firstPath, firstStat)).toBe(0);
+    expect(await f.probe.findOwnerOffset(secondPath, secondStat)).toBe(Buffer.byteLength(firstHeader));
+  })).rawReadBytes).toBe(0);
 });
 
 it('keeps indexing healthy files when a probed file disappears before the final stat', async () => {
@@ -144,13 +171,13 @@ it('keeps indexing healthy files when a probed file disappears before the final 
     { filePath: f.file }, { filePath: healthy },
   ])).resolves.toBeUndefined();
   expect(removed).toBe(true);
-  expect(f.probe.ownerOffsetProbes.has(f.file)).toBe(false);
+  expect(f.probe.ownerOffsetProbes.size).toBe(1);
   expect(f.probe.transcriptMetaByPath.has(healthy)).toBe(true);
 });
 
 it('bounds probe metadata and clears it on stop', async () => {
   const f = await fixture(); await fs.writeFile(f.file, diagnostic());
-  for (let i = 0; i < 2048; i++) f.probe.ownerOffsetProbes.set(`old-${i}`, { version: 'old', offset: null });
+  for (let i = 0; i < 2048; i++) f.probe.ownerOffsetProbes.set(`old-${i}`, null);
   await f.probe.findOwnerOffset(f.file, await fs.stat(f.file));
   expect(f.probe.ownerOffsetProbes.size).toBe(2048);
   expect(f.probe.ownerOffsetProbes.has('old-0')).toBe(false);
@@ -164,7 +191,7 @@ it.each([false, true])('keeps a recently used owner probe resident under cache c
   const expected = hasOwner ? 0 : null;
   expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(expected);
   // Fill the rest of the metadata cache without creating thousands of files.
-  for (let i = 0; i < 2047; i++) f.probe.ownerOffsetProbes.set(`cold-${i}`, { version: 'old', endOffset: 0, offset: null });
+  for (let i = 0; i < 2047; i++) f.probe.ownerOffsetProbes.set(`cold-${i}`, null);
   expect((await measure(f, () => f.probe.findOwnerOffset(f.file, stat))).rawReadBytes).toBe(0);
   const added = path.join(f.root, 'sessions', 'rollout-added.jsonl');
   await fs.writeFile(added, diagnostic());
