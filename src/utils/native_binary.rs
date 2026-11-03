@@ -39,7 +39,7 @@ fn inspect(input: &mut (impl Read + Seek), size: u64, target: &str) -> Result<Bi
     let arm = target.starts_with("aarch64-");
     let architecture = if arm { "aarch64" } else { "x86_64" };
     let (format, interpreter) = if target.contains("linux") {
-        ("elf64", elf(input, size, arm, target.ends_with("musl"))?)
+        ("elf64", elf(input, size, arm)?)
     } else if target.contains("apple") {
         macho(input, size, arm)?;
         ("mach-o64", None)
@@ -84,7 +84,7 @@ fn u64le(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("固定长度字段"))
 }
 
-fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool, musl: bool) -> Result<Option<String>> {
+fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<Option<String>> {
     let header = read_at::<64>(input, size, 0)?;
     ensure!(
         &header[..7] == b"\x7fELF\x02\x01\x01",
@@ -136,11 +136,10 @@ fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool, musl: bool) -> Resu
                     "ELF 解释器未正确终止"
                 );
                 let path = String::from_utf8(bytes)?;
-                let expected = match (arm, musl) {
-                    (false, false) => "/lib64/ld-linux-x86-64.so.2",
-                    (true, false) => "/lib/ld-linux-aarch64.so.1",
-                    (false, true) => "/lib/ld-musl-x86_64.so.1",
-                    (true, true) => "/lib/ld-musl-aarch64.so.1",
+                let expected = if arm {
+                    "/lib/ld-linux-aarch64.so.1"
+                } else {
+                    "/lib64/ld-linux-x86-64.so.2"
                 };
                 ensure!(path == expected, "ELF 动态解释器与目标 libc 不匹配：{path}");
                 interpreter = Some(path);
@@ -322,16 +321,12 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn all_eight_formats_accept_only_matching_os_and_architecture() {
+    fn all_six_formats_accept_only_matching_os_and_architecture() {
         for source in SUPPORTED_TARGETS {
             let bytes = fixture_binary(source);
             for target in SUPPORTED_TARGETS {
                 let result = inspect(&mut Cursor::new(&bytes), bytes.len() as u64, target);
-                // 静态 ELF 本身不能区分 GNU/musl，动态链接另有解释器强断言。
-                let compatible = source == target
-                    || (source.contains("linux")
-                        && target.contains("linux")
-                        && source.split('-').next() == target.split('-').next());
+                let compatible = source == target;
                 assert_eq!(
                     result.is_ok(),
                     compatible,
@@ -375,11 +370,10 @@ mod tests {
             bytes[56..58].copy_from_slice(&2u16.to_le_bytes());
             bytes[120..124].copy_from_slice(&3u32.to_le_bytes());
             bytes[128..136].copy_from_slice(&256u64.to_le_bytes());
-            let interpreter = match (target.starts_with("aarch64"), target.ends_with("musl")) {
-                (false, false) => "/lib64/ld-linux-x86-64.so.2",
-                (true, false) => "/lib/ld-linux-aarch64.so.1",
-                (false, true) => "/lib/ld-musl-x86_64.so.1",
-                (true, true) => "/lib/ld-musl-aarch64.so.1",
+            let interpreter = if target.starts_with("aarch64") {
+                "/lib/ld-linux-aarch64.so.1"
+            } else {
+                "/lib64/ld-linux-x86-64.so.2"
             };
             bytes[152..160].copy_from_slice(&((interpreter.len() + 1) as u64).to_le_bytes());
             bytes[256..256 + interpreter.len()].copy_from_slice(interpreter.as_bytes());
@@ -394,6 +388,31 @@ mod tests {
                     "{target} => {candidate}: {result:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn rejects_removed_musl_targets_and_their_interpreters() {
+        for (gnu, musl, interpreter) in [
+            (
+                "x86_64-unknown-linux-gnu",
+                "x86_64-unknown-linux-musl",
+                "/lib/ld-musl-x86_64.so.1",
+            ),
+            (
+                "aarch64-unknown-linux-gnu",
+                "aarch64-unknown-linux-musl",
+                "/lib/ld-musl-aarch64.so.1",
+            ),
+        ] {
+            let mut bytes = fixture_binary(gnu);
+            assert!(inspect(&mut Cursor::new(&bytes), bytes.len() as u64, musl).is_err());
+            bytes[56..58].copy_from_slice(&2u16.to_le_bytes());
+            bytes[120..124].copy_from_slice(&3u32.to_le_bytes());
+            bytes[128..136].copy_from_slice(&256u64.to_le_bytes());
+            bytes[152..160].copy_from_slice(&((interpreter.len() + 1) as u64).to_le_bytes());
+            bytes[256..256 + interpreter.len()].copy_from_slice(interpreter.as_bytes());
+            assert!(inspect(&mut Cursor::new(&bytes), bytes.len() as u64, gnu).is_err());
         }
     }
 

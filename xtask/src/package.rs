@@ -593,6 +593,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn removed_musl_target_is_rejected_before_filesystem_or_candidate_execution() {
+        let temporary = tempfile::tempdir().unwrap();
+        let absent = temporary.path().join("no-source-or-binary");
+        let output = temporary.path().join("must-not-be-created");
+        for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+            let error = build(
+                &absent,
+                Options {
+                    target: target.into(),
+                    binary: absent.clone(),
+                    commit: "a".repeat(40),
+                    edition: "opensource".into(),
+                    output: output.clone(),
+                    status_bar_binary: None,
+                    allow_dirty: true,
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("不支持的目标平台"), "{error:#}");
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
     fn whitelist_keeps_host_dependencies_and_excludes_standalone_legacy_tools() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let files = runtime_files(root, SUPPORTED_TARGETS[0]).unwrap();

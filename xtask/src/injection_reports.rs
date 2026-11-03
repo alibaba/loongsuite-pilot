@@ -110,12 +110,25 @@ impl Matrix {
         let manifest: Manifest =
             serde_json::from_str(include_str!("../../tests/e2e-injection/manifest.json"))?;
         ensure!(
-            targets.schema == 1 && targets.targets.len() == 8,
-            "八平台清单缺项"
+            targets.schema == 1
+                && targets.targets.len()
+                    == loongsuite_pilot::utils::runtime_paths::SUPPORTED_TARGETS.len(),
+            "六平台清单缺项"
         );
         ensure!(
             manifest.schema == 1 && manifest.scope == "injection-only",
             "注入清单 schema/scope 无效"
+        );
+        ensure!(
+            targets
+                .targets
+                .iter()
+                .map(|target| target.target.as_str())
+                .collect::<BTreeSet<_>>()
+                == loongsuite_pilot::utils::runtime_paths::SUPPORTED_TARGETS
+                    .into_iter()
+                    .collect(),
+            "注入矩阵必须与运行时支持的平台完全一致"
         );
         let mut seen = BTreeSet::new();
         for target in &targets.targets {
@@ -270,7 +283,7 @@ impl Matrix {
         }
         ensure!(
             packages.keys().copied().collect::<BTreeSet<_>>() == targets,
-            "候选包必须包含全部八平台"
+            "候选包必须包含全部六平台"
         );
         let mut seen_targets = BTreeSet::new();
         let mut record_count = 0;
@@ -328,7 +341,7 @@ impl Matrix {
         }
         ensure!(
             seen_targets == targets,
-            "必须收齐全部八平台报告，缺失/取消/跳过不可通过"
+            "必须收齐全部六平台报告，缺失/取消/跳过不可通过"
         );
         Ok(serde_json::json!({
             "schema": 1, "scope": "injection-only", "commit": commit,
@@ -386,7 +399,7 @@ pub fn check_reports(
     report_paths(reports_root, &mut paths)?;
     ensure!(
         paths.len() == matrix.targets.targets.len(),
-        "平台报告文件数量必须为八，不接受缺失或重复"
+        "平台报告文件数量必须为六，不接受缺失或重复"
     );
     let reports: Vec<Report> = paths
         .iter()
@@ -468,12 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn fixed_matrix_has_176_baselines_plus_required_scenarios() {
+    fn fixed_six_platform_matrix_has_132_baselines_plus_required_scenarios() {
         let matrix = Matrix::load(root()).unwrap();
         let (index, reports) = fixtures(&matrix);
         let summary = matrix.validate(&index, &reports, &index.commit).unwrap();
-        assert_eq!(summary["baselineResults"], 176);
-        assert!(summary["scenarioResults"].as_u64().unwrap() > 176);
+        assert_eq!(summary["baselineResults"], 132);
+        assert!(summary["scenarioResults"].as_u64().unwrap() > 132);
         assert_eq!(summary["noInjection"][0]["id"], "wukong");
     }
 

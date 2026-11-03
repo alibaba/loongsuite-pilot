@@ -26,13 +26,11 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 6
       matrix:
         include:
           - {os: ubuntu-22.04, host: x86_64-unknown-linux-gnu, target: x86_64-unknown-linux-gnu}
           - {os: ubuntu-22.04-arm, host: aarch64-unknown-linux-gnu, target: aarch64-unknown-linux-gnu}
-          - {os: ubuntu-22.04, host: x86_64-unknown-linux-gnu, target: x86_64-unknown-linux-musl}
-          - {os: ubuntu-22.04-arm, host: aarch64-unknown-linux-gnu, target: aarch64-unknown-linux-musl}
           - {os: macos-15-intel, host: x86_64-apple-darwin, target: x86_64-apple-darwin, ui: x64}
           - {os: macos-15, host: aarch64-apple-darwin, target: aarch64-apple-darwin, ui: arm64}
           - {os: windows-2022, host: x86_64-pc-windows-msvc, target: x86_64-pc-windows-msvc}
@@ -123,15 +121,9 @@ jobs:
             cargo test --locked -p loongsuite-pilot --lib deployment::legacy_uninstall::tests || pilot_platform_failures=1
           fi
           test "$pilot_platform_failures" -eq 0
-      - name: 安装本架构 musl 编译器
-        if: contains(matrix.target, 'musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
       - name: 构建开源二进制
         run: |
           set -euo pipefail
-          if [[ "$TARGET" == *musl ]]; then export CC=musl-gcc; fi
           cargo build --locked --release -p loongsuite-pilot --bin loongsuite-pilot --target "$TARGET"
       - name: macOS 原生 UI 与现有 Swift 测试
         if: runner.os == 'macOS'
@@ -199,7 +191,7 @@ jobs:
         run: |
           ./target/debug/xtask release --packages "$RUNNER_TEMP/$RELEASE_INPUT" \
             --output "$RUNNER_TEMP/$RELEASE_OUTPUT" --commit "$(git rev-parse HEAD)" --repository "$REPOSITORY"
-      - name: 核对八平台资产并自动发布已有 tag
+      - name: 核对六平台资产并自动发布已有 tag
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}

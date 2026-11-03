@@ -40,12 +40,6 @@ DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
 # OSS download base URL
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
-# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
-NODE_VERSION="${LOONGSUITE_PILOT_NODE_VERSION:-22.22.2}"
-NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node}"
-NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules}"
-
-
 # ============================================================
 # Parse sub-command
 # ============================================================
@@ -384,227 +378,7 @@ resolve_node() {
     return 1
 }
 
-# >>> managed-node-runtime >>>
-# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
-# Everything here logs to stderr only: ensure_managed_node is captured via
-# $(...) and must print the node path — and nothing else — on stdout.
-_mn_msg() {
-    if [ "${LANG_MODE:-en}" = "zh" ]; then echo "$1" >&2; else echo "$2" >&2; fi
-}
 
-managed_node_platform() {
-    local os arch
-    case "$(uname -s)" in
-        Darwin) os="darwin" ;;
-        Linux) os="linux" ;;
-        MINGW*|MSYS*|CYGWIN*) os="win" ;;
-        *)
-            echo "managed node: unsupported platform $(uname -s)" >&2
-            return 1 ;;
-    esac
-    case "$(uname -m)" in
-        arm64|aarch64) arch="arm64" ;;
-        x86_64|amd64) arch="x64" ;;
-        *)
-            echo "managed node: unsupported architecture $(uname -m)" >&2
-            return 1 ;;
-    esac
-    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
-        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
-                "managed node: no win-arm64 artifact, falling back to system node + npm install"
-        return 1
-    fi
-    if [ "$os" = "linux" ] && managed_node_is_musl; then
-        _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
-                "managed node: no linux-musl artifact, falling back to system node + npm install"
-        return 1
-    fi
-    echo "$os $arch"
-}
-
-managed_node_is_musl() {
-    ls /lib/ld-musl-* >/dev/null 2>&1 && return 0
-    ldd --version 2>&1 | grep -qi musl && return 0
-    return 1
-}
-
-managed_node_download() {
-    # managed_node_download <url> <dest>
-    # Bounded timeouts mirror the .ps1 installer (-TimeoutSec 600); without
-    # them a stalled TCP connection hangs the installer indefinitely.
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$1" -o "$2"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --tries=2 --timeout=20 "$1" -O "$2"
-    else
-        return 1
-    fi
-}
-
-managed_node_sha256() {
-    if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "managed node: neither shasum nor sha256sum available" >&2
-        return 1
-    fi
-}
-
-managed_node_verify() {
-    # managed_node_verify <archive> <shasums-file> <archive-basename>
-    local expected actual
-    # [*]? accepts sha256sum binary-mode lines ("<hash> *<name>"), matching
-    # the .ps1 installer's Test-ManagedNodeChecksum.
-    expected=$(grep -E "[[:space:]][*]?${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
-    if [ -z "$expected" ]; then
-        echo "managed node: SHASUMS256.txt has no entry for $3" >&2
-        return 1
-    fi
-    actual=$(managed_node_sha256 "$1") || return 1
-    if [ "$expected" != "$actual" ]; then
-        echo "managed node: sha256 mismatch for $3 (expected $expected, got $actual)" >&2
-        return 1
-    fi
-    return 0
-}
-
-managed_node_bin() {
-    # managed_node_bin <node-dir> <os>
-    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
-    local bin="$1/bin/node"
-    [ "$2" = "win" ] && bin="$1/bin/node.exe"
-    if [ -x "$bin" ]; then
-        echo "$bin"
-        return 0
-    fi
-    if [ "$2" = "win" ] && [ -x "$1/node.exe" ]; then
-        echo "$1/node.exe"
-        return 0
-    fi
-    return 1
-}
-
-ensure_managed_node() {
-    local runtime_dir="$DATA_DIR/runtime"
-    local tuple os arch
-    tuple=$(managed_node_platform) || return 1
-    os="${tuple% *}"; arch="${tuple#* }"
-
-    local ext="tar.gz"
-    [ "$os" = "win" ] && ext="zip"
-    local archive="node-v${NODE_VERSION}-${os}-${arch}.${ext}"
-    local node_dir="$runtime_dir/node-v${NODE_VERSION}-${os}-${arch}"
-    local node_bin=""
-    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
-
-    if [ -n "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
-        echo "$node_bin"
-        return 0
-    fi
-
-    local base="${NODE_DEPS_BASE%/}/${NODE_VERSION}"
-    local tmp
-    tmp=$(mktemp -d) || return 1
-
-    _mn_msg "==> 下载托管 Node.js v${NODE_VERSION} (${os}-${arch})..." \
-            "==> Downloading managed Node.js v${NODE_VERSION} (${os}-${arch})..."
-    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
-        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
-        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-
-    mkdir -p "$runtime_dir"
-    rm -rf "$node_dir"
-    if [ "$ext" = "zip" ]; then
-        if ! command -v unzip >/dev/null 2>&1 || ! unzip -q "$tmp/$archive" -d "$runtime_dir"; then
-            rm -rf "$tmp" "$node_dir"
-            return 1
-        fi
-    else
-        if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$runtime_dir" 2>/dev/null \
-                || tar -xzf "$tmp/$archive" -C "$runtime_dir"; }; then
-            rm -rf "$tmp" "$node_dir"
-            return 1
-        fi
-    fi
-    rm -rf "$tmp"
-
-    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
-    if [ -z "$node_bin" ]; then
-        echo "managed node: extracted archive has no usable node binary under $node_dir (bin/node or node.exe)" >&2
-        rm -rf "$node_dir"
-        return 1
-    fi
-    if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
-        xattr -dr com.apple.quarantine "$node_dir" 2>/dev/null || true
-    fi
-    echo "$node_bin"
-}
-
-ensure_node_modules() {
-    # ensure_node_modules <app-version>  (expects PERMANENT_DIR to point at the deployed version dir)
-    local app_version="${1:-latest}"
-    local tuple os arch
-    tuple=$(managed_node_platform) || return 1
-    os="${tuple% *}"; arch="${tuple#* }"
-
-    local modules_dir="$PERMANENT_DIR/node_modules"
-    local marker="$modules_dir/.pilot-modules-version"
-    local stamp="${app_version} ${os} ${arch}"
-    if [ -d "$modules_dir" ] && [ "$(cat "$marker" 2>/dev/null)" = "$stamp" ]; then
-        return 0
-    fi
-
-    local archive="node-modules-${os}-${arch}.tar.gz"
-    local base="${NODE_MODULES_BASE%/}/${app_version}"
-    local tmp
-    tmp=$(mktemp -d) || return 1
-
-    _mn_msg "==> 下载预编译 node_modules (${os}-${arch}, app v${app_version})..." \
-            "==> Downloading prebuilt node_modules (${os}-${arch}, app v${app_version})..."
-    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
-        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
-        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-
-    local stage="$tmp/stage"
-    mkdir -p "$stage"
-    if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$stage" 2>/dev/null \
-            || tar -xzf "$tmp/$archive" -C "$stage"; }; then
-        rm -rf "$tmp"
-        return 1
-    fi
-    if [ ! -d "$stage/node_modules" ]; then
-        rm -rf "$tmp"
-        echo "managed node_modules: archive does not contain node_modules/" >&2
-        return 1
-    fi
-    echo "$stamp" > "$stage/node_modules/.pilot-modules-version"
-    rm -rf "$modules_dir"
-    if ! mv "$stage/node_modules" "$modules_dir"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-    return 0
-}
-
-run_npm() {
-    # npm shipped with the managed runtime is a symlink to npm-cli.js, whose
-    # `#!/usr/bin/env node` shebang resolves node through PATH. The runtime's bin dir
-    # is not on PATH, so calling "$NPM_BIN" directly dies with
-    # "env: node: No such file or directory" on hosts without a system node — exactly
-    # the hosts the managed runtime exists for. Mirrors the .ps1 npm fallback, which
-    # already prepends the node dir.
-    PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" "$@"
-}
-# <<< managed-node-runtime <<<
 
 check_deps() {
     msg "==> 检查下载与解压工具..." "==> Checking download and archive tools..."
@@ -2614,9 +2388,50 @@ cmd_uninstall() {
     echo "============================================================"
 }
 
+# >>> native-platform-support >>>
+# Establish libc before downloading a package or touching an existing installation.
+# GNU and musl use different executable loaders; unknown libc must not select GNU.
+native_installer_target() {
+    local os arch libc loader
+    os=$(uname -s) || return 1
+    arch=$(uname -m) || return 1
+    case "$arch" in
+        x86_64|amd64) arch=x86_64 ;;
+        aarch64|arm64) arch=aarch64 ;;
+        *) printf '%s\n' "Unsupported architecture: $arch" >&2; return 1 ;;
+    esac
+    case "$os" in
+        Darwin) printf '%s-apple-darwin\n' "$arch"; return 0 ;;
+        Linux)
+            for loader in /lib/ld-musl-*.so*; do
+                if [ -e "$loader" ]; then
+                    printf '%s\n' 'Unsupported platform: Linux musl (Alpine); GNU libc is required.' >&2
+                    return 1
+                fi
+            done
+            libc=$(ldd --version 2>&1 || true)
+            case "$libc" in
+                *musl*|*Musl*|*MUSL*)
+                    printf '%s\n' 'Unsupported platform: Linux musl (Alpine); GNU libc is required.' >&2
+                    return 1 ;;
+            esac
+            libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+            case "$libc" in
+                "glibc "[0-9]*) printf '%s-unknown-linux-gnu\n' "$arch"; return 0 ;;
+            esac
+            printf '%s\n' 'Unsupported platform: Linux libc could not be verified as GNU libc.' >&2
+            return 1 ;;
+        *) printf '%s\n' "Unsupported platform: $os" >&2; return 1 ;;
+    esac
+}
+# <<< native-platform-support <<<
+
 # ============================================================
 # Main dispatcher
 # ============================================================
+if [ "$COMMAND" = "install" ] || [ "$COMMAND" = "upgrade" ]; then
+    native_installer_target >/dev/null || exit 1
+fi
 case "$COMMAND" in
     install)   cmd_install ;;
     upgrade)   cmd_upgrade ;;

@@ -1,4 +1,4 @@
-//! 八平台轻发布门禁；默认仅准备资产，远端写入需要显式 --publish。
+//! 六平台轻发布门禁；默认仅准备资产，远端写入需要显式 --publish。
 
 use anyhow::{ensure, Context, Result};
 use clap::Args;
@@ -178,7 +178,7 @@ pub fn run(root: &Path, options: Options) -> Result<()> {
         publish(&options, &tag, &parsed, temporary.path())?;
     } else {
         println!(
-            "dry-run：八平台轻门禁通过，资产位于 {}；未创建 Release/tag",
+            "dry-run：六平台轻门禁通过，资产位于 {}；未创建 Release/tag",
             options.output.display()
         );
     }
@@ -224,7 +224,7 @@ fn validate_candidate<'a>(
 fn validate_targets(seen: &BTreeSet<String>) -> Result<()> {
     ensure!(
         *seen == SUPPORTED_TARGETS.into_iter().map(str::to_owned).collect(),
-        "必须包含完整八平台，不允许缩小集合发布"
+        "必须包含完整六平台，不允许缩小集合发布"
     );
     Ok(())
 }
@@ -342,7 +342,7 @@ fn publish(
     }
     // --verify-tag 防止 gh 隐式创建 tag；创建 draft 后任何失败都保留未公开状态。
     let notes = temporary.join("notes.txt");
-    fs::write(&notes, format!("Rust 原生发行 {tag}\n\n提交：{}\n八平台构建与包内预检通过。完整 Agent 注入及平台安装生命周期验收暂缓；详见 release-summary.json。\n", options.commit))?;
+    fs::write(&notes, format!("Rust 原生发行 {tag}\n\n提交：{}\n六平台构建与包内预检通过。完整 Agent 注入及平台安装生命周期验收暂缓；详见 release-summary.json。\n", options.commit))?;
     let mut create = vec![
         "release".into(),
         "create".into(),
@@ -429,6 +429,19 @@ mod tests {
             "preflight": {"schema": 1, "ok": true, "runtime": "rust", "version": "1.2.0",
                 "target": target, "edition": "opensource", "check": {"details": {"gitCommit": COMMIT}}}
         })
+    }
+
+    #[test]
+    fn removed_musl_candidates_cannot_enter_the_six_target_release_set() {
+        for target in ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"] {
+            assert!(validate_candidate(&candidate(target), "1.2.0", COMMIT).is_err());
+            let mut seen = SUPPORTED_TARGETS
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            seen.insert(target.into());
+            assert!(validate_targets(&seen).is_err());
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Rust Packages And Platforms
 
-The intended release set is Linux x86_64/aarch64 (GNU and musl), macOS x86_64/aarch64, and Windows x86_64/aarch64 MSVC: eight targets. No successful eight-platform GitHub run has been recorded yet. Historical Node acceptance and Linux unit tests do not establish Rust platform acceptance.
+The release set is Linux x86_64/aarch64 with GNU libc, macOS x86_64/aarch64, and Windows x86_64/aarch64 MSVC: six targets. Linux musl (including Alpine) is unsupported; the Unix installer rejects musl and unknown libc before downloading or changing an installation. Historical eight-target runs do not establish acceptance of the current six-target code.
 
 Download the installer (`installer.sh` or `installer.ps1`), `SHA256SUMS`, and `loongsuite-pilot-<version>-<target>.tar.gz` (Windows: `.zip`) from the same Rust Release. Verify the archive checksum before explicitly installing it. For Linux x64 GNU:
 
@@ -22,7 +22,7 @@ sha256sum --ignore-missing --check SHA256SUMS
 bash ./installer.sh install --package-url "file://$(pwd)/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
-Use `Get-FileHash -Algorithm SHA256` on Windows and pass `-PackageUrl`; macOS can use `shasum -a 256`. Substitute the actual version and target. Packages include `runtime-manifest.json`; Rust updater accepts only the separate eight-platform `latest-rust.json`, not legacy Node archives.
+Use `Get-FileHash -Algorithm SHA256` on Windows and pass `-PackageUrl`; macOS can use `shasum -a 256`. Substitute the actual version and target. Packages include `runtime-manifest.json`; Rust updater accepts only the separate six-platform `latest-rust.json`, not legacy Node archives.
 
 The OSS examples below describe the historical channel and are not guaranteed to return Rust packages. Pass an explicit, verified `--package-url` / `-PackageUrl` for Rust installation. This CI does not publish to OSS or migrate existing installations automatically. `.mjs` Span enrichers require migration to compiled Rust extensions; see [Trace output](trace-output.md#custom-span-enrichment).
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rust 发布薄入口：默认只核对八平台候选并生成本地发布资产。
+# Rust 发布薄入口：默认只核对六平台候选并生成本地发布资产。
 # 正式发布必须显式传入已有 --tag 和 --publish；不自动 bump、commit、tag 或上传 OSS。
 # 旧 --patch/--minor/--major/--version/--oss-only 参数由 xtask 拒绝。
 # 示例：bash deploy/release-opensource.sh --packages target/release-input \

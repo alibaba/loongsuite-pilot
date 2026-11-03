@@ -61,25 +61,25 @@
 ## 自动发布方案
 
 - `.github/workflows/release.yml`：`v*` tag 触发正式发布；手动运行仅 dry-run，不创建 tag、Release，也不更新渠道。
-- 固定八平台：Linux x64/ARM64 的 GNU、musl，macOS Intel/Apple Silicon，Windows x64/ARM64 MSVC。每个平台 1 个构建任务，加 1 个汇总/发布任务，共 9 个 runner 任务，不因失败自动缩小矩阵。
+- 固定六平台：Linux x64/ARM64 的 GNU libc，macOS Intel/Apple Silicon，Windows x64/ARM64 MSVC。按用户 2026-11-03 指令移除 musl 支持；每个平台 1 个构建任务，加 1 个汇总/发布任务，共 7 个 runner 任务，不因失败自动缩小剩余矩阵。musl 与未知 libc 在安装器下载、停止服务、写配置前明确拒绝；不回退 GNU 或系统 Node。
 - Cargo 是版本唯一来源，工具链固定 Rust 1.99.1；tag 必须等于 `v<Cargo version>`，来源提交必须属于 main/master/dev/v2.0.0/loongsuite-pilot-rust 中的受信任分支。
 - 公开构建不带 proprietary feature。每包仅包含相应平台二进制、白名单资源及 `runtime-manifest.json`。macOS 必须携带对应架构 Swift UI，Rust、C 依赖与 Swift 的最低系统版本统一为 macOS 13。
 - `xtask package` 在对应 OS/架构执行包内 `--version`、`probe --build-edition`、`check --json`；隔离 HOME 和 PATH，核对执行前后文件未被修改。
 - CI 候选包、汇总输入与发布输出放在 `RUNNER_TEMP` 下，按 run/attempt/target 隔离，不进入 Cargo `target` 缓存；包工具仍拒绝覆盖旧候选。`.sh` / `.ps1` 通过 `.gitattributes` 统一 LF，保持 Hook 模板逐字节校验。非 Linux 构建复用包、Hook、候选进程及 canonical 配置路径回归，不增加 runner。
-- 汇总必须检查八个平台集合、版本、提交、edition、归档格式和 SHA-256；拒绝 dirty 候选、缺包、重复包或预检失败，不重新编译已验收的发行包。
+- 汇总必须检查六个平台集合、版本、提交、edition、归档格式和 SHA-256；拒绝 dirty 候选、缺包、重复包或预检失败，不重新编译已验收的发行包。
 - 正式发布使用 `release` Environment，手动使用 `release-dry-run`；写权限仅限汇总/发布 job（GitHub 权限按 job 生效），只有正式发布步骤显式传入 `GH_TOKEN`，dry-run 不调用远端写入。发布前及公开前核对远端 tag 实际指向的提交。先创建 draft，上传并核对完整资产，再公开。已有版本不覆盖；失败 draft 保留供检查，不静默补写可能不一致的文件。
 - stable 与 prerelease 分开：预发布不得成为 latest，也不得更新稳定清单。工作流按仓库串行发布，不取消正在上传的版本；旧版本不得覆盖更新的 stable。
 - 本次不接入 OSS 上传、不自动 bump Cargo 版本、不自动 commit/tag，不切换用户安装，不恢复真实自动更新。首次 Rust 安装使用显式平台包地址，见[安装指南](installation.md#rust-发行包与平台)。
 
 `deploy/package-opensource.sh` 和 `deploy/release-opensource.sh` 仅转发对应 `xtask` 参数。打包前先构建目标二进制，再传 `--target`、`--binary`、`--commit`；旧 `--skip-build`、`-o <archive>` 不再支持。发布默认只准备本地资产，需要 `--packages`、`--output`、`--commit`、`--repository`；旧自动升版/OSS 参数不再支持，正式发布还需显式 `--tag` 和 `--publish`。
 
-正式资产为八个 `loongsuite-pilot-<version>-<target>` 归档、安装脚本、`SHA256SUMS`、轻门禁摘要，以及 stable 的 `latest-rust.json`（预发布使用独立文件）。清单由当前候选包生成，不接受旧 Node 通用包。
+正式资产为六个 `loongsuite-pilot-<version>-<target>` 归档、安装脚本、`SHA256SUMS`、轻门禁摘要，以及 stable 的 `latest-rust.json`（预发布使用独立文件）。清单由当前候选包生成，不接受旧 Node 通用包。
 
 这是一条“构建与包预检”发布门禁，不是完整 Agent 注入或安装生命周期验收。第五、六轮 GitHub dry-run 的八平台包及汇总均已通过，具体提交、日志与资产摘要见文末；不得把轻门禁通过称作八平台全部行为验收完成。系统签名、notarization、GUI/真实 Agent 会话不在本轮轻门禁内。文件采集与 WorkBuddy 的 inotify 唤醒仅限 Linux，非 Linux 使用既有轮询兜底，不代表已实现 macOS/Windows 原生文件监视。
 
 ## 日常 CI 预算
 
-日常 PR、main/master/loongsuite-pilot-rust push 和手动 CI：目标为整个工作流 10 分钟内完成，不是每个矩阵任务各跑 10 分钟。使用一个 Linux 质量任务，现有 Secret Scan 独立任务保持不变；总数远低于 10。不在日常 CI 重复八平台 release 编译或新增逐 Agent runner。
+日常 PR、main/master/loongsuite-pilot-rust push 和手动 CI：目标为整个工作流 10 分钟内完成，不是每个矩阵任务各跑 10 分钟。使用一个 Linux 质量任务，现有 Secret Scan 独立任务保持不变；总数远低于 10。不在日常 CI 重复六平台 release 编译或新增逐 Agent runner。
 
 日常阻断项：
 
@@ -93,14 +93,14 @@ cargo test --workspace --locked --all-features
 
 10 分钟是预算与超时上限，不是所有运行的性能保证。实测：独立测试提交前冷缓存为 3 分 22 秒；纳入独立测试后缓存命中为 2 分 45 秒，未命中缓存的完整 1,367 项回归为 2 分 49 秒；最终代码 `2d56ecd` 的 1,369 项回归缓存命中为 2 分 04 秒，均为 1 个 runner。冷缓存、排队及依赖下载可能超出墙钟目标；超时则 CI 失败，不能直接跳过失败步骤。优先优化 Cargo 缓存、编译配置和重复 feature 编译，超预算仍无法解决时交由维护者决定下面的裁剪项。
 
-发布构建单独计时，不受日常 10 分钟预算限制，但每次最多 9 个 runner 任务；每个构建有有限超时。不能用拆分 workflow 绕过 runner 预算。
+发布构建单独计时，不受日常 10 分钟预算限制，但每次最多 7 个 runner 任务；每个构建有有限超时。不能用拆分 workflow 绕过 runner 预算。
 
 ## 测试优先级与可裁剪范围
 
 | 优先级 | 内容 | 当前安排 | 裁剪风险 / 决策 |
 |---|---|---|---|
 | P0 | fmt、严格 clippy、Rust 编译、已有核心单元测试 | 日常阻断；不删已有快测 | 编译失败、类型错误和主要回归；不建议裁剪 |
-| P0 | 八平台包完整性、版本/提交/摘要、包内原生预检 | 发布阻断，8 个构建内执行 | 错平台包或损坏包进入更新渠道；不建议裁剪 |
+| P0 | 六平台包完整性、版本/提交/摘要、包内原生预检 | 发布阻断，6 个构建内执行 | 错平台包或损坏包进入更新渠道；不建议裁剪 |
 | P0 | 安装/更新事务、配置保护、checkpoint、脱敏、Hook 协议、真实 OTLP 编解码的现有 Rust 断言 | 已保留；独立测试已分批提交并通过 Linux CI | 数据丢失、破坏用户配置或泄漏；优先迁移，不按数量删减 |
 | P1 | 默认与 all-features 的重复全量测试 | 日常 all-features，发布 Linux 跑默认 | 两种构建仍有覆盖；若改为周期运行需维护者确认 |
 | P1 | Windows/macOS 专属路径、服务、编码、worker 测试 | 包、Hook、候选进程与配置路径已实跑；其余后续按平台归组 | 完整平台生命周期仍暂缓；不能把轻回归外推为全部通过 |
@@ -149,7 +149,7 @@ cargo run -p xtask -- migration-audit --require-complete
 1. 文档：README、中英文安装/Trace、项目导航和本文。
 2. 原生运行链路：Cargo/lock/toolchain、Rust 生产模块及其内嵌测试、必要 fixture；独立集成测试先留在工作区。
 3. 运行脚本与资源：安装、服务、Hook 薄入口及必需资源；不清理尚未承接的历史工具。
-4. 发布工具与 CI：Rust 打包/发布校验工具、薄脚本、八平台发布和日常质量工作流。
+4. 发布工具与 CI：Rust 打包/发布校验工具、薄脚本、六平台发布和日常质量工作流。
 5. 独立测试：现有 Rust 集成测试与迁移映射分批提交，再按上表补齐旧行为。
 
 推送前检查暂存文件清单、敏感内容、编译必需 `include_str!` / `include_bytes!` 引用及工作区以外依赖；从提交树验证构建和门禁，不能只依赖包含未提交 fixture 的工作区测试结果。提交历史可分批，本轮全部主要批次准备好且严格 clippy 清零后再推送，避免远端收到缺依赖的中间状态。
@@ -320,3 +320,10 @@ Codex 默认目录扫描在读取前记录纳秒级目录代次，仅完整遍�
 新增 Copilot 压力测试保留原 60/180 秒和 1/100 MiB 界限，64 并发生产者完整记录、1024 条旧历史排除、原生64步骤Token及128个32MiB稀疏封片与三类严格超过3GiB文件回收通过；128/256/512重放数量断言仍失败，不能放宽成观察值。新库断言的通过数量不等于历史声明数，也不能替代八平台验证。
 
 原生 SpanEnricher 尚拒绝旧有效脚本配置，是运行能力缺口，正在补原生嵌入式加载；不能用原生拒绝断言将其退役。Windows PowerShell、ARM64 DSH、JSONC清理与来源首次恢复保持集中验收条目。正式发布仍关闭；本批未生成新安装包，远端已安装开发版本未被这批测试变更覆盖。
+
+
+## 2026-11-03 当前平台范围
+
+按用户明确要求，当前发行、安装、原生包格式校验、更新清单和注入报告门禁统一为六个平台：Linux x64/ARM64 GNU libc、macOS Intel/Apple Silicon、Windows x64/ARM64 MSVC。移除 musl 构建器、产物允许项与未被原生安装流程调用的 managed Node 下载回退；原生运行和卸载清理不因此增加 Node 依赖。旧 managed-node 测试中只针对 provisioning/musl fallback 的合同随产品能力退出，保留不可变历史来源用于审计；不把它们冒充 Rust 迁移通过。
+
+上文八平台实跑记录与摘要属于既往提交证据，保留原文；它们不是当前六平台的新验收结果。保留 GNU libc 2.34 验证环境和 libc 依赖，不降低工具链或其他依赖版本。本次不创建 tag 或正式 Release。

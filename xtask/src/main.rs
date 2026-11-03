@@ -30,7 +30,7 @@ struct Args {
 enum Task {
     /// 按指定 target 生成白名单候选包，并执行包内原生预检。
     Package(package::Options),
-    /// 核对八平台候选并生成发布资产；默认 dry-run，--publish 才写 GitHub。
+    /// 核对六平台候选并生成发布资产；默认 dry-run，--publish 才写 GitHub。
     Release(release::Options),
     /// 检查 JSONL 字段填充率；验收门禁使用 --strict。
     FieldCoverage(field_coverage::Options),
@@ -49,7 +49,7 @@ enum Task {
         #[arg(long)]
         skip_tests: bool,
     },
-    /// 输出固定八平台与全部 Agent/场景清单，不执行注入。
+    /// 输出固定六平台与全部 Agent/场景清单，不执行注入。
     Matrix,
     /// 严格核对注入报告、构建提交与候选包摘要；缺失、失败和跳过均拒绝。
     CheckReports {

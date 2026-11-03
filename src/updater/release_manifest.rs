@@ -91,7 +91,7 @@ impl VersionManifest {
         );
         ensure!(
             self.assets.len() == SUPPORTED_TARGETS.len(),
-            "更新清单必须包含完整八平台资产"
+            "更新清单必须包含完整六平台资产"
         );
         for target in SUPPORTED_TARGETS {
             let asset = self

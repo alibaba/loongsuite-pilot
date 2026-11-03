@@ -8,11 +8,9 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_TARGETS: [&str; 8] = [
+pub const SUPPORTED_TARGETS: [&str; 6] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
@@ -20,20 +18,22 @@ pub const SUPPORTED_TARGETS: [&str; 8] = [
 ];
 
 pub fn build_target() -> &'static str {
-    match (
+    target_for(
         std::env::consts::ARCH,
         std::env::consts::OS,
-        cfg!(target_env = "musl"),
+        cfg!(target_env = "gnu"),
         cfg!(target_env = "msvc"),
-    ) {
-        ("x86_64", "linux", false, _) => SUPPORTED_TARGETS[0],
-        ("aarch64", "linux", false, _) => SUPPORTED_TARGETS[1],
-        ("x86_64", "linux", true, _) => SUPPORTED_TARGETS[2],
-        ("aarch64", "linux", true, _) => SUPPORTED_TARGETS[3],
-        ("x86_64", "macos", _, _) => SUPPORTED_TARGETS[4],
-        ("aarch64", "macos", _, _) => SUPPORTED_TARGETS[5],
-        ("x86_64", "windows", _, true) => SUPPORTED_TARGETS[6],
-        ("aarch64", "windows", _, true) => SUPPORTED_TARGETS[7],
+    )
+}
+
+fn target_for(arch: &str, os: &str, gnu: bool, msvc: bool) -> &'static str {
+    match (arch, os, gnu, msvc) {
+        ("x86_64", "linux", true, _) => SUPPORTED_TARGETS[0],
+        ("aarch64", "linux", true, _) => SUPPORTED_TARGETS[1],
+        ("x86_64", "macos", _, _) => SUPPORTED_TARGETS[2],
+        ("aarch64", "macos", _, _) => SUPPORTED_TARGETS[3],
+        ("x86_64", "windows", _, true) => SUPPORTED_TARGETS[4],
+        ("aarch64", "windows", _, true) => SUPPORTED_TARGETS[5],
         _ => "unsupported",
     }
 }
@@ -395,6 +395,29 @@ mod tests {
         fs::create_dir_all(root.join("agents.d")).unwrap();
         fs::create_dir_all(root.join("assets")).unwrap();
         fs::write(root.join("runtime-manifest.json"), "{}").unwrap();
+    }
+
+    #[test]
+    fn platform_selection_never_falls_back_from_non_gnu_linux() {
+        for arch in ["x86_64", "aarch64"] {
+            assert_eq!(target_for(arch, "linux", false, false), "unsupported");
+            assert_eq!(target_for(arch, "linux", false, true), "unsupported");
+            assert!(SUPPORTED_TARGETS.contains(&target_for(arch, "linux", true, false)));
+            assert_eq!(target_for(arch, "windows", false, false), "unsupported");
+        }
+        for (arch, os, gnu, msvc, expected) in [
+            ("x86_64", "linux", true, false, SUPPORTED_TARGETS[0]),
+            ("aarch64", "linux", true, false, SUPPORTED_TARGETS[1]),
+            ("x86_64", "macos", false, false, SUPPORTED_TARGETS[2]),
+            ("aarch64", "macos", false, false, SUPPORTED_TARGETS[3]),
+            ("x86_64", "windows", false, true, SUPPORTED_TARGETS[4]),
+            ("aarch64", "windows", false, true, SUPPORTED_TARGETS[5]),
+        ] {
+            assert_eq!(target_for(arch, os, gnu, msvc), expected);
+        }
+        for arch in ["x86", "arm", "riscv64"] {
+            assert_eq!(target_for(arch, "linux", true, false), "unsupported");
+        }
     }
 
     #[test]

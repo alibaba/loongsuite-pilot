@@ -15,12 +15,12 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 
 ## Rust 发行包与平台
 
-本分支的八平台目标如下。尚未记录成功的 GitHub 八平台运行；不可把构建配置、历史 Node 版本的支持声明或 Linux 单测视为 Rust 平台验收。
+当前固定支持以下六个平台。Linux 仅支持 GNU libc；musl（包括 Alpine）不受支持，Unix 安装器在下载或修改安装态前拒绝 musl 和无法确认的 libc。历史八平台运行、Node 支持声明或 Linux 单测不能替代当前六平台代码的验收。
 
 | 系统 | target triple | 格式 |
 |---|---|---|
-| Linux x64 | `x86_64-unknown-linux-gnu`、`x86_64-unknown-linux-musl` | tar.gz |
-| Linux ARM64 | `aarch64-unknown-linux-gnu`、`aarch64-unknown-linux-musl` | tar.gz |
+| Linux x64 | `x86_64-unknown-linux-gnu` | tar.gz |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | tar.gz |
 | macOS Intel / Apple Silicon | `x86_64-apple-darwin`、`aarch64-apple-darwin` | tar.gz |
 | Windows x64 / ARM64 | `x86_64-pc-windows-msvc`、`aarch64-pc-windows-msvc` | zip |
 
@@ -129,7 +129,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 
 安装后的采集进程、更新进程和 Hook 处理都是 `loongsuite-pilot` 二进制。版本目录是 `~/.loongsuite-pilot/versions/<版本>/`，其中 `bin/loongsuite-pilot` 是可执行文件，`current` 指向正在使用的版本名。`~/.local/bin/loongsuite-pilot` 是启动脚本，`run` 和 `run-updater` 会执行这个二进制。
 
-版本包通过 `runtime-manifest.json` 记录平台、edition、提交和资源摘要；Rust updater 只接受独立的 `latest-rust.json` 八平台清单，不接受旧 Node 通用包。首次从 Node 版迁移必须使用 Rust 安装器和匹配的平台包，不直接混用旧自动更新渠道。
+版本包通过 `runtime-manifest.json` 记录平台、edition、提交和资源摘要；Rust updater 只接受独立的 `latest-rust.json` 六平台清单，不接受旧 Node 通用包。首次从 Node 版迁移必须使用 Rust 安装器和匹配的平台包，不直接混用旧自动更新渠道。
 
 仍保留的 JavaScript/Python 仅用于 Agent 宿主插件、preload 和 runtime wrapper；Dashboard 为静态前端，macOS 菜单栏为预编译 Swift UI。Pilot 内部 `.mjs` Span enricher 已不支持，见 [Trace 扩展迁移](trace-output.md#自定义-span-属性补齐)。
 
