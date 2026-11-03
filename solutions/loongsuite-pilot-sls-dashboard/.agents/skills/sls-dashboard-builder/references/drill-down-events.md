@@ -177,6 +177,8 @@ AgentLoop 的原生跳转宿主适配尚未完成；不能直接复用 SLS 的�
 
 含 `&`、空格、中文、`#`、`%` 等字符的动态值应按目标 URL 的路径段或查询参数分别编码；可在查询中产生专用 URL 参数列，再在链接中引用。已有 `?` 时用 `&` 追加参数。`slsEncode` 对应界面的“是否转码”，不能据此假定任意 URL 参数均已正确编码，应核对真实目标收到的值。原生事件无需预编码变量；自定义链接的编码次数由目标解析约定决定，不默认双重编码。不把鉴权信息或完整日志正文拼进 URL。
 
+<a id="agentloop-dashboard-navigation"></a>
+
 ### AgentLoop 仪表盘间跳转
 
 AgentLoop 仪表盘使用 AgentSpace 下的站内路由。当前以 `event: link` 按以下配方传递页面地址、变量和时间。
@@ -228,7 +230,7 @@ url_encode(url_encode(json_format(
 }
 ```
 
-这里的相对路径沿用 AgentLoop 当前域名；跨域打开时改用目标 AgentLoop 域名，并遵守协议与地址分开的格式。该配方显式传递时间和变量，不依赖原生事件的 `timeRange`、`searchToken` 或继承开关。现有配置中的 `${__start_time__}` / `${__end_time__}` 也是渲染器支持的系统时间写法。
+这里的相对路径沿用 AgentLoop 当前域名；跨域打开时改用目标 AgentLoop 域名，并遵守协议与地址分开的格式。该配方显式传递时间和变量，不依赖原生事件的 `timeRange`、`searchToken` 或继承开关。新建或修改 modern JSON 时统一使用 `${{__start_time__}}` / `${{__end_time__}}`，与本文配方一致。当前 SLS 交互链接解析器也兼容单层写法 `${__start_time__}` / `${__end_time__}`，两者读取相同的系统时间值；已有单层写法无需仅为语法转换而重写。这是 SLS 交互链接的兼容能力，不代表本地 HTML 预览脚本支持系统时间替换。
 
 柱图仍绑定数值系列；表格绑定部门列，两者都从点击行取 `_jump_token`。表格可在 `display.queryOptionMap.A.closedKeys` 中加入 `_jump_token` 隐藏辅助列。目标页面需使用相同变量名配置筛选器与查询，所有相关图表均须消费该变量。
 

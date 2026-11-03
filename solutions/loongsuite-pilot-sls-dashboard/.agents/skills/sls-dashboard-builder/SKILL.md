@@ -73,7 +73,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 多张盘之间保持命名、筛选器、标题风格与版式节奏一致。
 
-涉及总览到明细、原始日志或业务页面的点击跳转时，读取 [交互事件与下钻报表](references/drill-down-events.md)，先确定报表的查看环境，再定义点击字段、目标资源、变量映射和时间继承。纯 SLS 控制台场景的日志库、仪表盘、快速查询使用对应原生事件；需要在 AgentLoop 中查看并跳转的报表，当前暂时仅支持自定义 HTTP URL 方式，使用 `event: link` 指向 AgentLoop 宿主页面；仪表盘间跳转按参考文档内置的 [AgentLoop URL 配方](references/drill-down-events.md#agentloop-仪表盘间跳转) 配置站内路由、时间参数和双层编码的 token JSON。宿主原生跳转适配修复并验证后再切换。任意业务 HTTP(S) 地址同样使用自定义链接。
+涉及总览到明细、原始日志或业务页面的点击跳转时，读取 [交互事件与下钻报表](references/drill-down-events.md)，先确定报表的查看环境，再定义点击字段、目标资源、变量映射和时间继承。纯 SLS 控制台场景的日志库、仪表盘、快速查询使用对应原生事件；需要在 AgentLoop 中查看并跳转的报表，当前暂时仅支持自定义 HTTP URL 方式，使用 `event: link` 指向 AgentLoop 宿主页面；仪表盘间跳转按参考文档内置的 [AgentLoop URL 配方](references/drill-down-events.md#agentloop-dashboard-navigation) 配置站内路由、时间参数和双层编码的 token JSON。宿主原生跳转适配修复并验证后再切换。任意业务 HTTP(S) 地址同样使用自定义链接。
 
 ## 任务包工作流
 

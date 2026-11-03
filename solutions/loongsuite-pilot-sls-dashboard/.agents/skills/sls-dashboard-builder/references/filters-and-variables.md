@@ -174,7 +174,16 @@ WHERE ('${{dept_id|__all__}}' = '__all__'
 4. 动态候选：切换时间及其他筛选后，选项仍符合数据源与继承规则。
 5. 下钻：目标收到点击行的原始标识，保留所需时间范围，查询与结果确实缩小到目标对象。
 
-`render-report --var key=value` 当前只替换查询中的精确 `${{key}}`，不模拟默认值、前缀、下拉选中态、字段过滤、单图变量或跳转。渲染器读取 `chartQueries[].query`；含高级模板时可使用已展开的 `query` 检查该参数下的数据与布局，保留 `tokenQuery` 供线上交互使用。控件、替换过程与跳转仍在实际 SLS 或 AgentLoop 宿主中验收。
+预览入口是本 skill 的 `scripts/render_report.py`，从报表方案根目录执行，例如（替换示例输入与输出路径）：
+
+```bash
+python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
+  --dashboard cases/example/output/overview-dashboard.json \
+  --output cases/example/output/overview-report.html \
+  --var bucket_seconds=60
+```
+
+`--var key=value` 当前只替换查询中的精确 `${{key}}`，不模拟默认值、前缀、下拉选中态、字段过滤、单图变量或跳转。渲染器读取 `chartQueries[].query`；含高级模板时可使用已展开的 `query` 检查该参数下的数据与布局，保留 `tokenQuery` 供线上交互使用。控件、替换过程与跳转仍在实际 SLS 或 AgentLoop 宿主中验收。
 
 ## 参考资料
 
