@@ -1501,6 +1501,8 @@ export class CodexTranscriptInput extends BaseInput {
     stat: fsSync.Stats,
     endOffset = stat.size,
   ): Promise<number | null> {
+    // Owner selection uses the rollout filename, so keep the latest probe per
+    // path. Reuse still requires the exact file version and scan boundary.
     const version = sourceVersion(stat);
     const previous = this.ownerOffsetProbes.get(filePath);
     // A shorter search cannot establish absence in the rest of the file, and

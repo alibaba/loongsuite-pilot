@@ -192,6 +192,8 @@ async function pendingFixture(size = 2 * 1024 * 1024) {
 
 it('defers an unparseable legacy range, consumes the later turn, and never rereads unchanged data', async () => {
   // Explicitly seeded legacy pending state: this tests recovery, not its original entry path.
+  // Retained history exceeds the normal 16 MiB scan budget. Keep real file I/O
+  // so this also covers oversized-range recovery, tail progress and restart reads.
   const f = await pendingFixture(20 * 1024 * 1024);
   const initial = checkpoint(f);
   Object.assign(initial.activeTurn!, { emittedPrompt: true, emittedStepCount: 7,
