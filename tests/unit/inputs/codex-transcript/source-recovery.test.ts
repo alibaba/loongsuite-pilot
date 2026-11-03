@@ -627,6 +627,42 @@ function legacyRecoveryState(cp: CodexTranscriptCheckpoint, end: number) {
   cp.forkBootstrap = { state: 'live-pending', searchOffset: 0 };
 }
 
+it('parses legacy pending-subagent migration deterministically without manufacturing retry attempts', async () => {
+  const f = await pendingFixture(1024); const cp = checkpoint(f);
+  cp.pendingTerminal = null;
+  cp.pendingSubagent = { turnId: 'old', terminalEndOffset: f.end } as any;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const update = vi.spyOn(f.state, 'update');
+  const first = f.probe.readCheckpoint(key(f));
+  now += 30_000;
+  expect(f.probe.readCheckpoint(key(f))).toEqual(first);
+  expect(first.pendingTerminal).toEqual({ turnId: 'old', terminalEndOffset: f.end });
+  expect(update).not.toHaveBeenCalled();
+});
+
+it('records the first actual legacy-migration recovery attempt once and retains its time across restart', async () => {
+  const f = await pendingFixture(1024); const cp = checkpoint(f);
+  cp.pendingTerminal = null;
+  cp.pendingSubagent = { turnId: 'old', terminalEndOffset: f.end } as any;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  const firstAttempt = Date.now(); let now = firstAttempt;
+  vi.spyOn(Date, 'now').mockImplementation(() => now);
+  await processFile(f);
+  const pending = checkpoint(f).deferredTerminals![0]!.pendingTerminal;
+  expect(pending).toMatchObject({ retryCount: 1, firstPendingAtMs: firstAttempt, lastAttemptAtMs: firstAttempt });
+  expect(responses(f, 'later')).toHaveLength(1);
+  await f.state.save(); await f.state.load();
+  const restarted = await fixture(f.root, f.state);
+  now += 3600_000;
+  const recover = vi.spyOn(restarted.probe, 'recoverTurnSegment');
+  await processFile(restarted);
+  expect(recover).not.toHaveBeenCalled();
+  expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal).toMatchObject({
+    retryCount: 1, firstPendingAtMs: firstAttempt, lastAttemptAtMs: firstAttempt,
+  });
+});
+
 it.each(['eof', 'unsafe-range'])('repairs persisted owner offsets outside the current file (%s)', async mode => {
   const f = await pendingFixture(1024); const cp = checkpoint(f);
   cp.ownerSessionMetaOffset = mode === 'eof' ? (await fs.stat(f.file)).size : Number.MAX_SAFE_INTEGER;

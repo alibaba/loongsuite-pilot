@@ -2584,7 +2584,9 @@ export class CodexTranscriptInput extends BaseInput {
       // Older pendingSubagent checkpoints blocked the child file and retained
       // the active turn at the top level. They have no reliable spawn identity,
       // so recover them through the normal independent terminal path.
-      pendingTerminal ??= parsePendingTerminal(newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0));
+      // Parsing records no attempt; recovery initializes retry metadata only
+      // when it actually tries to convert the retained source range.
+      pendingTerminal ??= { turnId: subagent.turnId, terminalEndOffset: subagent.terminalEndOffset };
     }
     if (pendingTerminal && (!activeTurn || pendingTerminal.turnId !== activeTurn.turnId
       || pendingTerminal.terminalEndOffset < activeTurn.startOffset
