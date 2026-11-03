@@ -517,12 +517,22 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     if (stopLine < 0) return waiting('stop-not-found');
 
     // Resolve the start from the actual Stop instead of trusting a global
-    // cursor that may have been reset by redeployment.
+    // cursor that may have been reset by redeployment. A UserPromptSubmit
+    // progress row can also arrive after the user row in the same turn.
     let startLine = -1;
     for (let i = stopLine - 1; i >= 0; i--) {
       if (hookEventOf(rows[i]) === 'UserPromptSubmit') {
         startLine = i;
         break;
+      }
+    }
+    if (startLine >= 0) {
+      for (let i = startLine - 1; i >= 0; i--) {
+        if (isRealUserPrompt(rows[i]) && !isControlUserRow(rows[i])) {
+          startLine = i;
+          break;
+        }
+        if (rows[i]?.type === 'assistant' || hookEventOf(rows[i]) === 'Stop') break;
       }
     }
     if (startLine < 0) {

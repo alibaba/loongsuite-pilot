@@ -621,6 +621,33 @@ describe('findTriggeredTurnWindow', () => {
     });
   });
 
+  it('keeps the user row when another UserPromptSubmit progress arrives after it', () => {
+    const rows = [
+      progress('UserPromptSubmit'),
+      progress('UserPromptSubmit'),
+      user('first prompt'),
+      progress('UserPromptSubmit'),
+      assistant('first answer'),
+      progress('Stop'),
+      progress('SessionEnd'),
+      progress('UserPromptSubmit'),
+      user('second prompt'),
+      progress('UserPromptSubmit'),
+      assistant('second answer'),
+      progress('Stop'),
+      progress('SessionEnd'),
+    ];
+    const transcript = writeTranscript('post-user-progress.jsonl', rows);
+    const snapshot = readTranscriptSnapshot(transcript);
+
+    const first = findTriggeredTurnWindow(snapshot, 5);
+    const second = findTriggeredTurnWindow(snapshot, 11);
+    expect(first).toMatchObject({ status: 'complete', startLine: 2, stopLine: 5, endLine: 7 });
+    expect(second).toMatchObject({ status: 'complete', startLine: 8, stopLine: 11, endLine: 13 });
+    expect(snapshot.rows.slice(first.startLine, first.endLine).some(row => row.message?.content === 'first prompt')).toBe(true);
+    expect(snapshot.rows.slice(second.startLine, second.endLine).some(row => row.message?.content === 'second prompt')).toBe(true);
+  });
+
   it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),
