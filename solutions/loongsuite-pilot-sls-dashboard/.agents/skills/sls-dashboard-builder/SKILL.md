@@ -84,7 +84,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 3. 若有名称或 URL，优先拉取真实参考大盘  
 4. 将视图归组为大盘区块，例如 `概览`、`趋势`、`TOP`、`Cohort`、`钻取`  
 5. 按**视图意图**选图表配方，不按产品营销名称选  
-6. 仅当图表查询**确实可被过滤或可被 token 替换**时才加筛选器  
+6. 涉及筛选器或查询参数时，先读 [筛选器与变量替换](references/filters-and-variables.md)，确定机制、作用范围、原值与标签、默认值及消费变量的查询
 7. 受阻指标写成简短 `markdownpro` 说明，或明确省略；**绝不编造**缺失的源数据  
 8. 每张大盘输出完整 JSON  
 
@@ -177,7 +177,7 @@ python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
 - `--dashboard <path>`：指定 dashboard JSON。
 - `--output <path>`：指定 HTML 输出路径。
 - `--case-dir <path> <scenario>`：按 `cases/<business-skill>/output/<scenario>-dashboard.json` 约定读取并输出。
-- `--var key=value`：替换 SQL 中的 `${{key}}` token。
+- `--var key=value`：仅替换 SQL 中精确的 `${{key}}` token；高级模板与交互的预览范围见 [筛选器与变量替换](references/filters-and-variables.md#验证与本地预览)。
 - `--profile test`：指定 aliyun CLI profile；本交付目录默认使用 `test`。
 - `--with-diff`：和 git HEAD 中同一路径 dashboard JSON 做 SQL / 结果 diff。
 
@@ -192,7 +192,8 @@ python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
 - `references/datasources.md` — `chartQueries` 形态  
 - `references/layout.md` — 网格或自由布局规则  
 - `references/chart-templates.md` — 基础图表模板  
-- `references/query-syntax.md` — `query` 与 `tokenQuery` 规则  
+- `references/query-syntax.md` — 搜索、SQL、SPL 与 PromQL 查询写法
+- [references/filters-and-variables.md](references/filters-and-variables.md) — 筛选机制、作用范围、变量语法、控件 JSON、候选列表、单图变量与验证
 - [references/drill-down-events.md](references/drill-down-events.md) — 原生日志库、仪表盘、快速查询下钻，自定义 HTTP 链接，字段绑定、传参及验收
 
 ## 示例
