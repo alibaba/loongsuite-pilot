@@ -221,14 +221,14 @@ it('defers an unparseable legacy range, consumes the later turn, and never rerea
   // Explicitly seeded legacy pending state: this tests recovery, not its original entry path.
   // Retained history exceeds the normal 16 MiB scan budget. Keep real file I/O
   // so this also covers oversized-range recovery, tail progress and restart reads.
-  const f = await pendingFixture(20 * 1024 * 1024);
+  const f = await pendingFixture(17 * 1024 * 1024);
   const initial = checkpoint(f);
   Object.assign(initial.activeTurn!, { emittedPrompt: true, emittedStepCount: 7,
     emittedStepRequestIds: ['request-before-failure'], emittedStepResponseIds: ['response-before-failure'],
     emittedToolCallIds: ['tool-before-failure'], emittedToolResultIds: ['tool-before-failure'],
     emittedTraceId: 'a'.repeat(32) });
   f.state.update(key(f), { extra: { codexTranscript: initial } });
-  expect((await processFile(f)).rawReadBytes).toBeGreaterThan(20 * 1024 * 1024);
+  expect((await processFile(f)).rawReadBytes).toBeGreaterThan(17 * 1024 * 1024);
   expect(responses(f, 'later')).toHaveLength(1);
   expect(checkpoint(f).pendingTerminal).toBeNull();
   expect(checkpoint(f).deferredTerminals).toHaveLength(1);
@@ -626,6 +626,40 @@ function legacyRecoveryState(cp: CodexTranscriptCheckpoint, end: number) {
     terminalEndOffset: end, activeTurn: { ...cp.activeTurn! } };
   cp.forkBootstrap = { state: 'live-pending', searchOffset: 0 };
 }
+
+it.each(['eof', 'unsafe-range'])('repairs persisted owner offsets outside the current file (%s)', async mode => {
+  const f = await pendingFixture(1024); const cp = checkpoint(f);
+  cp.ownerSessionMetaOffset = mode === 'eof' ? (await fs.stat(f.file)).size : Number.MAX_SAFE_INTEGER;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  await f.state.save(); await f.state.load();
+  const findOwner = vi.spyOn(f.probe, 'findOwnerOffset');
+  await processFile(f);
+  expect(findOwner).toHaveBeenCalledTimes(1);
+  expect(checkpoint(f).ownerSessionMetaOffset).toBe(0);
+  expect(responses(f, 'later')).toHaveLength(1);
+});
+
+it('retains a valid owner ahead of a parked live-fork scan cursor across restart', async () => {
+  const f = await fixture();
+  const ownerId = '019b76da-a800-7000-8000-000000000001';
+  f.file = path.join(path.dirname(f.file), `rollout-${ownerId}.jsonl`);
+  const copiedMeta = row('session_meta', { id: 'parent', model_provider: 'openai' });
+  await fs.writeFile(f.file, copiedMeta
+    + row('session_meta', { id: ownerId, model_provider: 'openai', forked_from_id: 'parent' })
+    + completed('copied-parent-turn', false));
+  await processFile(f);
+  expect(checkpoint(f)).toMatchObject({ scanOffset: 0, ownerSessionMetaOffset: Buffer.byteLength(copiedMeta),
+    forkBootstrap: { state: 'live-pending' } });
+  await f.state.save(); await f.state.load();
+  const restarted = await fixture(f.root, f.state);
+  restarted.file = f.file;
+  expect(restarted.probe.readCheckpoint(key(restarted)).ownerSessionMetaOffset).toBe(Buffer.byteLength(copiedMeta));
+  const findOwner = vi.spyOn(restarted.probe, 'findOwnerOffset');
+  await processFile(restarted);
+  expect(findOwner).not.toHaveBeenCalled();
+  expect(checkpoint(restarted)).toMatchObject({ scanOffset: 0, ownerSessionMetaOffset: Buffer.byteLength(copiedMeta) });
+  expect(restarted.entries).toEqual([]);
+});
 
 it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
   'rejects invalid owner/legacy recovery byte offsets %s without blocking later work', async offset => {

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { QoderLegacyHookReader } from '../../../src/inputs/qoder-trace/legacy-hook-reader.js';
 import type { InputRuntimeAccumulator } from '../../../src/inputs/base/input-runtime-metrics.js';
 
+// Copy the ESM namespace so spies can replace exports. Direct spying on the
+// native namespace throws "Cannot redefine property: stat" in this runner.
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
 }));
@@ -102,13 +104,18 @@ it('invalidates a growing partial record when its identity prefix was rewritten'
 it.each(['rewrite', 'append'])('checks growing partial records with unchanged timestamps (%s)', async mode => {
   const p = setup();
   const coarseTimes = { mtimeMs: 1700000000000, ctimeMs: 1700000000000 };
+  const snapshot = (stat: fs.Stats): fs.Stats => Object.create(Object.getPrototypeOf(stat), {
+    ...Object.getOwnPropertyDescriptors(stat),
+    mtimeMs: { value: coarseTimes.mtimeMs, enumerable: true, configurable: true },
+    ctimeMs: { value: coarseTimes.ctimeMs, enumerable: true, configurable: true },
+  });
   const open = promises.open;
   // Model a coarse-timestamp filesystem while retaining real bytes, inode,
   // sizes and bounded reads. Both stat paths must describe the same source.
-  vi.spyOn(promises, 'stat').mockImplementation(async file => Object.assign(fs.statSync(file), coarseTimes));
+  vi.spyOn(promises, 'stat').mockImplementation(async file => snapshot(fs.statSync(file)));
   vi.spyOn(promises, 'open').mockImplementation(async (...args) => {
     const handle = await open(...args);
-    vi.spyOn(handle, 'stat').mockImplementation(async () => Object.assign(fs.fstatSync(handle.fd), coarseTimes));
+    vi.spyOn(handle, 'stat').mockImplementation(async () => snapshot(fs.fstatSync(handle.fd)));
     return handle;
   });
   fs.writeFileSync(p.file, '{"id":"old","text":"' + 'x'.repeat(96 * 1024));

@@ -635,6 +635,12 @@ export class CodexTranscriptInput extends BaseInput {
     runtime?.observeBacklog(Math.max(0, stat.size - checkpoint.scanOffset));
     if (rolloutCaughtUp(checkpoint, stat)) return 0;
 
+    // An owner may be ahead of a parked live-fork scan cursor. Its actual
+    // read boundary is the current file size, not the consumed scan offset.
+    if (checkpoint.ownerSessionMetaOffset !== null && checkpoint.ownerSessionMetaOffset >= stat.size) {
+      checkpoint.ownerSessionMetaOffset = null;
+      checkpointChanged = true;
+    }
     if (checkpoint.ownerSessionMetaOffset === null) {
       const offset = await this.findOwnerOffset(filePath, stat);
       if (offset !== null) {
@@ -2627,6 +2633,8 @@ export class CodexTranscriptInput extends BaseInput {
       // Do not migrate legacy latestSessionMetaOffset. In forked rollouts that
       // value commonly points at copied parent metadata, so processFile will
       // perform one bounded header scan to recover the owning meta safely.
+      // A live fork can park scanOffset at zero behind valid owner metadata;
+      // scanRolloutFile checks this position against file size before use.
       ownerSessionMetaOffset: isNonNegativeSafeInteger(value.ownerSessionMetaOffset)
         ? value.ownerSessionMetaOffset
         : null,
