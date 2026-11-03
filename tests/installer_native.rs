@@ -2653,3 +2653,6 @@ mod installer_scheduled_tasks_history;
 
 #[path = "installer_history/hermes_rollback.rs"]
 mod installer_hermes_rollback_history;
+
+#[path = "installer_history/empty_hooks.rs"]
+mod installer_empty_hooks_history;

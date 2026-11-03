@@ -46166,6 +46166,95 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/scripts/ps1-comments-ascii.test.mjs",
+      "source_hash": "cec9cd23b19557f3a19b8f148eab757f0d62d9a07842f9dd37fef41c9f1742e5",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact original three ASCII source-policy declarations migrated; actual git-index PS1 inventory floor remains >10, original four whitelist paths unchanged and reverse asserted, same balanced-quote comment matcher, no new exemptions. BOM-less nonASCII check retained. Fifteen migrated service.ps1 comments corrected to ASCII only; output strings and execution preserved. Linux actually ran all3; applicability enums do not claim physical Windows/macOS execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "finds .ps1 files to check",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l55_finds_original_minimum_of_actual_tracked_powershell_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C5",
+            "title": "`${file} ${expectClean ? 'has ASCII-only comments' : '(known unconverted)'}`",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": [
+              "tracked"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l61_keeps_every_original_comment_exception_and_reverse_ratchet"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "flags a BOM-less file only if it still holds non-ASCII bytes anywhere",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l73_requires_bom_for_every_nonascii_byte_outside_original_exceptions"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

@@ -124790,7 +124790,7 @@
       "source_hash": "cb6594c71ed9836b0181611ffb0ceeb0a50e18607b5f2a1bdac1fcbced95de80",
       "coverage": "partial",
       "rust": [],
-      "note": "Standalone production regression slice for exact EF L959 only. Whole source file has65 baseline declarations; remaining64 and current-main additional4 are not claimed complete by this small slice and remain in upcoming lifecycle mapping work. Original case is Windows-facing; actual Native coordinator is tested on GNU Linux with explicit isolated Mac/Windows command backends, not actual OS commands or a physical Windows pass.",
+      "note": "Standalone production regression slice for exact EF L959 only. Whole source file has65 baseline declarations; remaining64 and current-main additional4 are not claimed complete by this small slice and remain in upcoming lifecycle mapping work. Original case is Windows-facing; actual Native coordinator is tested on GNU Linux with explicit isolated Mac/Windows command backends, not actual OS commands or a physical Windows pass. Whole native product uninstall now prunes only empty hook containers after actually removing owned handlers, preserving unrelated JSONC and ordinary undeploy semantics.",
       "cases": [
         {
           "source": {
@@ -124814,6 +124814,40 @@
               {
                 "file": "src/deployment/runtime_uninstall_history_contract_tests.rs",
                 "test": "cleanup_l959_real_uninstall_preserves_the_separate_default_install_and_only_retires_current_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L183:C3",
+            "title": "ps1 removes the empty hooks object after the last Pilot hook",
+            "suites": [
+              "uninstall cleans hook configs for all hook agents"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "True Native producer→actual uninstall red left Claude hooks:{} after last owned handler. Only whole-product uninstall now prunes the actually changed owned empty event/parent hooks containers inside the existing config transaction/lock. Normal per-agent Hook editing retains its previous empty containers; third-party nested handlers/group metadata, JSONC header, unrelated fields and script bytes remain unchanged. User empty hooks without owned edits remain exact byte Noop; repeated cleanup of the single owned target is stable. No new filesystem write after the transaction, no foreign ownership widening.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/empty_hooks.rs",
+                "test": "cleanup_l183_actual_native_uninstall_removes_only_empty_owned_hook_containers_in_json_and_jsonc"
+              },
+              {
+                "file": "tests/installer_history/empty_hooks.rs",
+                "test": "native_uninstall_keeps_third_party_groups_fields_and_jsonc_trivia_after_own_handlers_leave"
+              },
+              {
+                "file": "tests/installer_history/empty_hooks.rs",
+                "test": "ordinary_hook_undeploy_and_unowned_empty_native_inputs_keep_their_previous_container_contracts"
               }
             ]
           }
@@ -127821,6 +127855,95 @@
               "assets/dashboard/index.html"
             ],
             "npm_script": "test:host:dashboard"
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/ps1-comments-ascii.test.mjs",
+      "source_hash": "cec9cd23b19557f3a19b8f148eab757f0d62d9a07842f9dd37fef41c9f1742e5",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact original three ASCII source-policy declarations migrated; actual git-index PS1 inventory floor remains >10, original four whitelist paths unchanged and reverse asserted, same balanced-quote comment matcher, no new exemptions. BOM-less nonASCII check retained. Fifteen migrated service.ps1 comments corrected to ASCII only; output strings and execution preserved. Linux actually ran all3; applicability enums do not claim physical Windows/macOS execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "finds .ps1 files to check",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l55_finds_original_minimum_of_actual_tracked_powershell_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C5",
+            "title": "`${file} ${expectClean ? 'has ASCII-only comments' : '(known unconverted)'}`",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": [
+              "tracked"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l61_keeps_every_original_comment_exception_and_reverse_ratchet"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "flags a BOM-less file only if it still holds non-ASCII bytes anywhere",
+            "suites": [
+              "tracked .ps1 comments are ASCII-only"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual tracked repository .ps1 files are read and checked with the original inventory, comment/exemption reverse ratchet, or BOM/nonASCII rule; no text-only dormant fixture or Node is used.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_ascii_comment_history.rs",
+                "test": "source_ascii_l73_requires_bom_for_every_nonascii_byte_outside_original_exceptions"
+              }
+            ]
           }
         }
       ]

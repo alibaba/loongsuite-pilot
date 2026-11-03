@@ -60,18 +60,27 @@ impl Fixture {
 
     fn invoke(&self, shell: &Path, body: &str, constrained: bool) -> Output {
         let test = self.home.join("case.ps1");
-        let prelude = if constrained {
-            "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n"
-        } else {
-            ""
-        };
+        let mut prelude = String::from(
+            "$env:PSModulePath = $PSHOME + '\\Modules'\n$ErrorActionPreference = 'Stop'\n",
+        );
+        for module in ["Utility", "Management", "Archive"] {
+            prelude.push_str(&format!(
+                "Import-Module -Name ($PSHOME + '\\Modules\\Microsoft.PowerShell.{module}\\Microsoft.PowerShell.{module}.psd1') -ErrorAction Stop\n"
+            ));
+        }
+        prelude.push_str("function Set-PilotPrivateCaseStage { param([string]$Stage); Set-Content -LiteralPath $env:PILOT_CASE_STAGE_FILE -Value $Stage -Encoding UTF8 }\nSet-PilotPrivateCaseStage 'trusted-modules-ready'\n");
+        if constrained {
+            prelude.push_str("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\nif ($ExecutionContext.SessionState.LanguageMode -ne 'ConstrainedLanguage') { throw 'Pilot code must remain constrained' }\n$blocked = $false\ntry { $null = [System.IO.File]::Exists('PILOT_CLM_CANARY') } catch { if ($_.FullyQualifiedErrorId -notmatch 'ConstrainedLanguage') { throw }; $blocked = $true }\nif (-not $blocked) { throw 'CLM canary unexpectedly allowed forbidden static IO' }\n");
+        }
         fs::write(
             &test,
             format!(
-                "\u{feff}{prelude}. $env:PILOT_SCRIPT\n$ErrorActionPreference = 'Stop'\n{body}\n"
+                "\u{feff}{prelude}Set-PilotPrivateCaseStage 'source-service'\n. $env:PILOT_SCRIPT\n$ErrorActionPreference = 'Stop'\nSet-PilotPrivateCaseStage 'body-start'\n{body}\nSet-PilotPrivateCaseStage 'body-complete'\n"
             ),
         )
         .unwrap();
+        let stage = self.home.join("case-stage.txt");
+        fs::write(&stage, "rust-before-spawn").unwrap();
         let out = self.home.join("stdout.txt");
         let err = self.home.join("stderr.txt");
         let mut command = Command::new(shell);
@@ -101,6 +110,7 @@ impl Fixture {
                 self.home.join("显式配置.json"),
             )
             .env("PILOT_SCRIPT", &self.script)
+            .env("PILOT_CASE_STAGE_FILE", &stage)
             .env("PILOT_FIXTURE_LOG", self.home.join("invocations.jsonl"))
             .env("PILOT_FIXTURE_MODE", "exit")
             // PowerShell needs an executable extension list even for absolute
@@ -110,7 +120,19 @@ impl Fixture {
             .stdin(Stdio::null())
             .stdout(fs::File::create(&out).unwrap())
             .stderr(fs::File::create(&err).unwrap());
-        for key in ["SystemRoot", "WINDIR", "PSModulePath"] {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "PSModulePath",
+            "ComSpec",
+            "COMPUTERNAME",
+        ] {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
@@ -124,7 +146,10 @@ impl Fixture {
             if start.elapsed() > Duration::from_secs(30) {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("PowerShell 验收超时：{}", shell.display());
+                let phase = fs::read_to_string(&stage).unwrap_or_else(|_| "unavailable".into());
+                let stderr = fs::read(&err).unwrap_or_default();
+                let stdout = fs::read(&out).unwrap_or_default();
+                panic!("PowerShell acceptance exceeded unchanged 30s budget: shell={} stage={} stdout={} stderr={}",shell.display(),phase.trim_start_matches('\u{feff}').trim(),String::from_utf8_lossy(&stdout).chars().take(3000).collect::<String>(),String::from_utf8_lossy(&stderr).chars().take(3000).collect::<String>());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -1192,6 +1217,7 @@ function schtasks.exe { $global:LASTEXITCODE = 0 }
 $binary = Resolve-PilotBinary
 if (-not (Install-CollectorTask $binary)) { throw 'collector registration failed' }
 if (-not (Install-UpdaterTask $binary)) { throw 'updater registration failed' }
+$registrationScopes=@($script:scopes)
 function Get-ScheduledTask { return $null }
 function Get-TaskQuery { return @{exists=$true;error=''} }
 function Get-TaskStartIntent { return @{should_start=$true;confirmed_missing=$false;exists_schtasks='yes'} }
@@ -1204,13 +1230,27 @@ function Wait-ForCollectorHeartbeat { return $true }
 function Wait-ForUpdaterAlive { return $true }
 function Schedule-UpdaterRestart { throw 'deferred handoff must not run' }
 Cmd-RestartCollector -Options @('--defer-updater-restart')
+$collectorScopes=@($script:scopes)
 Cmd-RestartUpdater
-@{scopes=@($script:scopes)} | ConvertTo-Json -Compress |
+@{scopes=@($script:scopes);registration=@($registrationScopes);collector=@($collectorScopes)} | ConvertTo-Json -Compress |
     Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'scope-result.json') -Encoding UTF8
 "#, constrained));
+            let result = ps_private_result(&fixture, "scope-result.json");
+            assert_eq!(result["registration"], json!(["^collector$", "^updater$"]));
             assert_eq!(
-                ps_private_result(&fixture, "scope-result.json")["scopes"],
-                json!(["^collector$", "^updater$", "^collector$", "^updater$"])
+                result["collector"],
+                json!(["^collector$", "^updater$", "^collector$", "^collector$"])
+            );
+            assert_eq!(
+                result["scopes"],
+                json!([
+                    "^collector$",
+                    "^updater$",
+                    "^collector$",
+                    "^collector$",
+                    "^updater$",
+                    "^updater$"
+                ])
             );
         }
     }
@@ -1388,9 +1428,10 @@ catch { $message = [string]$_.Exception.Message }
                     constrained,
                 ));
                 let result = ps_private_result(&fixture, "init-result.json");
+                assert_eq!(result["init"], init);
                 assert_eq!(
-                    result["init"],
-                    if init.is_empty() { "unknown" } else { init }
+                    fs::read(fixture.data.join("init-type")).unwrap(),
+                    init.as_bytes()
                 );
                 if init == "taskscheduler" {
                     assert_eq!(result["starts"], 0);
@@ -1420,7 +1461,16 @@ function Start-Process {
     }
     if ($WorkingDirectory -ne $CACHE_DIR) { throw 'child escaped private cache root' }
     $legacyShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    Microsoft.PowerShell.Management\Start-Process -FilePath $legacyShell -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle $WindowStyle -PassThru | Out-Null
+    if (-not $script:privateChildCount) { $script:privateChildCount = 0 }
+    $script:privateChildCount += 1
+    $childOut=Join-Path $env:USERPROFILE ('private-child-'+$script:privateChildCount+'-stdout.txt')
+    $childErr=Join-Path $env:USERPROFILE ('private-child-'+$script:privateChildCount+'-stderr.txt')
+    $priorModules=$env:PSModulePath
+    try {
+        # The private transport always chooses PS5.1, even from a PS7 parent.
+        $env:PSModulePath=Join-Path (Split-Path $legacyShell -Parent) 'Modules'
+        Microsoft.PowerShell.Management\Start-Process -FilePath $legacyShell -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -WindowStyle $WindowStyle -RedirectStandardOutput $childOut -RedirectStandardError $childErr -PassThru | Out-Null
+    } finally { $env:PSModulePath=$priorModules }
 }
 function Start-Job { throw 'a shell job must not replace an independent child' }
 "#;
@@ -1532,6 +1582,10 @@ fn source_handoff_l51_actual_restart_defers_only_when_option_is_present() {
                 let mut body = MOCK_SERVICES.to_owned()
                     + r#"
 $script:scheduled = 0
+function Install-CollectorTask { return $true }
+function Register-ScheduledTask { throw 'defer-option test must not register a system task' }
+function New-ScheduledTaskAction { throw 'defer-option test must not create a task action' }
+function schtasks.exe { throw 'defer-option test must not reach the OS scheduler' }
 function Schedule-UpdaterRestart { $script:scheduled += 1 }
 function Get-TaskQuery { return @{exists=$true;error=''} }
 function Get-TaskStartIntent { return @{should_start=$true;confirmed_missing=$false} }
@@ -1610,6 +1664,27 @@ function Schedule-UpdaterRestart { Write-PrivateDispatch 'schedule-updater-resta
     }
 }
 
+fn private_child_diagnostics(home: &Path) -> String {
+    let mut details = Vec::new();
+    for entry in fs::read_dir(home).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("private-child-") && name.ends_with(".txt") {
+            if let Ok(bytes) = fs::read(entry.path()) {
+                details.push(format!(
+                    "{name}: {}",
+                    String::from_utf8_lossy(&bytes)
+                        .chars()
+                        .take(2000)
+                        .collect::<String>()
+                ));
+            }
+        }
+    }
+    details.sort();
+    details.join(" | ")
+}
+
 fn wait_for_private_native_records(path: &Path, count: usize, timeout: Duration) -> Vec<Value> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1630,8 +1705,9 @@ fn wait_for_private_native_records(path: &Path, count: usize, timeout: Duration)
         }
         assert!(
             Instant::now() < deadline,
-            "private native child produced no complete record: {}",
-            path.display()
+            "private native child produced no complete record: {} diagnostics={}",
+            path.display(),
+            private_child_diagnostics(path.parent().unwrap())
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -1848,7 +1924,9 @@ function Ensure-NodeModules { throw 'native ZIP bootstrap must not install node_
 function Get-PilotAsciiTempRoot { throw 'native ZIP bootstrap must preserve actual Unicode TEMP' }
 function tar.exe { throw 'native ZIP bootstrap must not route through ANSI tar.exe' }
 $PackageUrl=Join-Path $env:USERPROFILE 'native-input.zip'
+Set-PilotPrivateCaseStage 'native-zip-download-extract'
 Download-AndExtract
+Set-PilotPrivateCaseStage 'native-zip-extracted'
 @{source=$script:INSTALL_SRC;temporary=$script:TMP_DIR} | ConvertTo-Json -Compress |
     Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'archive-result.json') -Encoding UTF8
 "#,
@@ -2403,6 +2481,52 @@ if ($env:LOONGSUITE_PILOT_INSTALL_INPUT -ne 'prior input 研发') {throw 'cleanu
                     json!(["installer-helper", "cleanup-rollback-hermes", "--input-env"])
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn native_background_launcher_appends_separate_streams_to_literal_unicode_and_bracket_paths() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let output = fixture.data.join("logs/native stdout [保留].log");
+            let error = fixture.data.join("logs/native stderr [保留].log");
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            fs::write(&output, b"preserve stdout\n").unwrap();
+            fs::write(&error, b"preserve stderr\n").unwrap();
+            let mut body = PRIVATE_REAL_POWERSHELL_CHILD.to_owned();
+            body.push_str("$env:PILOT_FIXTURE_MODE='background-streams'\nEnsure-Dirs\n");
+            body.push_str(&format!(
+                "Start-BackgroundDaemon 'collector' (Resolve-PilotBinary) {} {}\n",
+                ps_single_quote(output.to_str().unwrap()),
+                ps_single_quote(error.to_str().unwrap())
+            ));
+            success(&fixture.invoke(&shell, &body, constrained));
+            let records = wait_for_private_native_records(
+                &fixture.home.join("invocations.jsonl"),
+                1,
+                Duration::from_secs(15),
+            );
+            assert_eq!(records[0]["args"], json!(["run"]));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (out, err) = loop {
+                let out = fs::read_to_string(&output).unwrap();
+                let err = fs::read_to_string(&error).unwrap();
+                if out.contains("private native stdout") && err.contains("private native stderr") {
+                    break (out, err);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "background streams not published: {}",
+                    private_child_diagnostics(&fixture.home)
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            };
+            assert!(out.starts_with("preserve stdout\n"));
+            assert!(err.starts_with("preserve stderr\n"));
+            assert!(!out.contains("private native stderr"));
+            assert!(!err.contains("private native stdout"));
         }
     }
 }

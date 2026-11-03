@@ -56,6 +56,11 @@ fn main() -> Result<()> {
                 .status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
+        Ok("background-streams") => {
+            println!("private native stdout");
+            eprintln!("private native stderr");
+            std::process::exit(7);
+        }
         Ok("restart-stderr") => {
             eprintln!("synthetic schtasks refusal");
             eprintln!();

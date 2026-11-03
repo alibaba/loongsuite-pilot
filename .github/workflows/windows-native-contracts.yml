@@ -68,6 +68,19 @@ jobs:
           cargo build --locked -p xtask --bin xtask
           cargo test --locked -p xtask --bin xtask --test windows_services --test jsonl_validate --test trace_validate --no-run
           cargo test --locked -p loongsuite-pilot --lib --test hooks_native --test installer_native --test cli_native --test interceptor_native --test upstream_context --test hook_timing --test claude_entry_history --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test qoder_native_wakeup --test qoder_native_transcript_input --test qoder_533_recovery_pipeline --test qoder_533_durability_pipeline --test qoder_ide_lag_history --test qoder_ide_retry_history --test cli_probe_error_contract --test intercept_token_reader_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --test host_plugin_native_projection_history --no-run
+      - name: Verify previously failing Windows paths before broad contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          failures=0
+          cargo test --locked -p loongsuite-pilot --lib migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source -- --test-threads=1 || failures=1
+          cargo test --locked -p loongsuite-pilot --lib resolves_directory_links_including_not_yet_created_descendants -- --test-threads=1 || failures=1
+          cargo test --locked -p loongsuite-pilot --lib actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry -- --test-threads=1 || failures=1
+          cargo test --locked -p loongsuite-pilot --test installer_native status_original_public_powershell_argument_and_writer_matrix_in_both_shells -- --test-threads=1 || failures=1
+          for filter in managed_init_type_with_wildcard source_handoff_ zip_bootstrap source_reap_l71_l78; do
+            cargo test --locked -p xtask --test windows_services "$filter" -- --test-threads=1 || failures=1
+          done
+          test "$failures" -eq 0
       - name: Generated Hook wrappers match production assets
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: ./target/debug/xtask.exe sync-hook-wrappers --check

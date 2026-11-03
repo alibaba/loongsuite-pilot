@@ -295,7 +295,13 @@ impl SettingsDocument {
         })
     }
 
-    fn apply_hook(&mut self, definition: &HookDefinition, remove: bool) -> Result<(), String> {
+    fn apply_hook(
+        &mut self,
+        definition: &HookDefinition,
+        remove: bool,
+        prune_empty_owned_hooks: bool,
+    ) -> Result<(), String> {
+        let previous = prune_empty_owned_hooks.then(|| self.raw.clone());
         let compatible;
         let definition = if cfg!(windows) {
             compatible = windows_hook_spelling_aliases(definition, &self.data);
@@ -305,6 +311,30 @@ impl SettingsDocument {
         };
         self.raw = HookManager::edit_hook(&self.raw, definition, remove)?;
         self.data = parse_json_document(&self.raw, self.syntax).map_err(|err| err.message)?;
+        if remove
+            && previous.as_ref().is_some_and(|raw| raw != &self.raw)
+            && definition.hook_json_path.len() == 2
+            && definition.hook_json_path[0] == "hooks"
+        {
+            let event = &definition.hook_json_path[1];
+            if self
+                .data
+                .get("hooks")
+                .and_then(|hooks| hooks.get(event))
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                self.set(&["hooks", event], None)?;
+            }
+            if self
+                .data
+                .get("hooks")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+            {
+                self.set(&["hooks"], None)?;
+            }
+        }
         Ok(())
     }
 
@@ -816,7 +846,7 @@ impl HookStrategy {
             }
         } else {
             for retired in &retired {
-                document.apply_hook(retired, true)?;
+                document.apply_hook(retired, true, uninstall && self.preserve_runtime_assets)?;
             }
             if !uninstall {
                 if let Some(env) = &hook.env {
@@ -828,7 +858,13 @@ impl HookStrategy {
                 .iter()
                 .chain(self.build_hook_definitions(def).iter())
             {
-                document.apply_hook(definition, uninstall)?;
+                // Whole-product uninstall owns the removed handlers' empty
+                // containers; ordinary per-agent Hook edits retain their format.
+                document.apply_hook(
+                    definition,
+                    uninstall,
+                    uninstall && self.preserve_runtime_assets,
+                )?;
             }
         }
         if let Some(cfg) = &hook.trust_toml {

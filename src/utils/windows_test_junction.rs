@@ -1,5 +1,6 @@
 //! Real Windows junction fixture with one fixed cmd template and scoped paths.
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,16 +24,14 @@ pub(crate) fn create(target: &Path, alias: &Path, timeout: Duration) {
     let mut stdout = tempfile::tempfile().unwrap();
     let mut stderr = tempfile::tempfile().unwrap();
     let mut command = Command::new(shell);
-    // The fixed ASCII input avoids cmd /c's separate command-line grammar.
-    // All paths stay in the scoped environment; delayed expansion is disabled.
-    let mut input = tempfile::tempfile().unwrap();
-    input.write_all(b"@echo off\r\nmklink /J \"%PILOT_TEST_JUNCTION_ALIAS%\" \"%PILOT_TEST_JUNCTION_TARGET%\"\r\nexit %errorlevel%\r\n").unwrap();
-    input.seek(SeekFrom::Start(0)).unwrap();
+    // cmd has its own command-line grammar. Keep the template literal and
+    // scoped paths in environment variables instead of CRT-quoting a command.
     command
-        .args(["/d", "/v:off", "/q"])
+        .args(["/d", "/v:off", "/c"])
+        .raw_arg(r#"mklink /J "%PILOT_TEST_JUNCTION_ALIAS%" "%PILOT_TEST_JUNCTION_TARGET%""#)
         .env("PILOT_TEST_JUNCTION_ALIAS", command_path(alias))
         .env("PILOT_TEST_JUNCTION_TARGET", command_path(target))
-        .stdin(Stdio::from(input))
+        .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().unwrap()))
         .stderr(Stdio::from(stderr.try_clone().unwrap()));
     let mut child = super::candidate_process::CandidateChild::spawn(&mut command).unwrap();

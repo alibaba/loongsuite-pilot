@@ -141,7 +141,7 @@ function Ensure-Dirs {
     }
 }
 
-# 安装边界内只接受普通目录和文件，拒绝符号链接与 junction/reparse point。
+# Accept only regular installation directories/files, never symlinks or reparse points.
 function Test-NativePath {
     param([string]$Path, [bool]$Directory = $false)
     try {
@@ -150,8 +150,8 @@ function Test-NativePath {
     } catch { return $false }
 }
 
-# 原生入口只从已校验的 current 指针解析，不探测 PATH 或外部运行时。
-# 指针以 UTF-8 读取并去除 BOM，兼容 Windows PowerShell 5.1 的写入编码。
+# Resolve the native entry only through the validated current pointer, never PATH.
+# Read pointers as UTF8 and strip the leading BOM emitted by PowerShell 5.1.
 function Resolve-PilotBinary {
     $root = Resolve-CurrentVersion
     if (-not $root) { return $null }
@@ -167,7 +167,7 @@ function Invoke-Pilot {
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     $nativeArgs = @($Arguments)
-    # 5.1/Legacy 不保留空参数和内嵌引号，显式生成 Windows CRT 参数。
+    # Legacy 5.1 needs explicit Windows CRT quoting for empty arguments and quotes.
     if (-not (Get-Variable PSNativeCommandArgumentPassing -ErrorAction SilentlyContinue) -or $PSNativeCommandArgumentPassing -eq "Legacy") {
         $nativeArgs = @()
         foreach ($argument in $Arguments) {
@@ -186,7 +186,7 @@ function Invoke-Pilot {
 }
 
 function Sync-BootstrapScripts {
-    # 原生进程直接使用不可变版本目录，不复制运行中可能被锁定的 exe。
+    # Run the immutable version binary directly; a running executable may be locked.
     return
 }
 
@@ -349,7 +349,7 @@ function Test-CollectorRunning {
 
 function Stop-PidFile {
     param([string]$pidFile)
-    # 身份未知时不删除 PID 文件，避免抹掉并发启动者或其他安装的状态。
+    # Preserve PID files while identity is unknown, including concurrent/foreign owners.
     if (-not (Test-PidRunning $pidFile)) { return }
     $pidVal = (Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue).Trim()
     $role = if ($pidFile -eq $UPDATER_PID_FILE) { "updater" } else { "collector" }
@@ -389,10 +389,10 @@ function Stop-OrphanProcesses {
     # re-register a single task (Install-CollectorTask / Install-UpdaterTask) pass a
     # narrow pattern so they only reap the daemon they are about to re-launch.
     #
-    # 同名 exe 可能属于其他用户或安装。原生 helper 同时核对版本目录、
-    # 实际 executable、完整角色参数及进程环境中的 data 目录，未知身份不停止。
+    # A matching executable name may belong to another user or installation.
+    # Verify actual executable, role arguments and data environment before stopping.
     param([string]$Match = "collector|updater")
-    # 一次 CIM 枚举候选，再按 PID 校验完整身份。
+    # Enumerate CIM candidates once, then verify full identity for each PID.
     Get-CimInstance Win32_Process -Filter "Name = 'loongsuite-pilot.exe'" -ErrorAction SilentlyContinue |
         ForEach-Object {
             foreach ($role in @("collector", "updater")) {
@@ -993,9 +993,9 @@ function Register-PilotTask {
     throw $lastErr
 }
 
-# wscript 是无控制台宿主；以隐藏窗口运行原生服务并等待退出。
-# Task Scheduler 的 Running 仅表示包装器还在，健康判断仍须校验原生 PID。
-# 路径写入 UTF-16 VBS，避免 Task Scheduler / wscript 多层参数转义。
+# wscript is a console-free host; launch the native service hidden and wait.
+# A Running task proves only wrapper liveness; health requires the native PID.
+# Write paths into UTF16 VBS to avoid nested scheduler/wscript argument quoting.
 function New-HiddenTaskAction {
     param([string]$vbsPath, [string]$pilotBin, [string]$role)
     if ($role -notin @("run", "run-updater")) { throw "无效的服务角色" }
@@ -1279,7 +1279,13 @@ function Start-BackgroundDaemon {
         "`$env:LOONGSUITE_PILOT_DATA_DIR = '$escapedDataDir'",
         "`$env:LOONGSUITE_PILOT_CACHE_DIR = '$escapedCacheDir'",
         "`$env:AGENT_DATA_COLLECTION_CONFIG = '$escapedConfig'",
-        "& '$escapedBinary' '$role' >> '$escapedOutput' 2>> '$escapedError'",
+        "& '$escapedBinary' '$role' 2>&1 | ForEach-Object {",
+        "    if (`$_ -is [System.Management.Automation.ErrorRecord]) {",
+        "        `$_ | Out-File -LiteralPath '$escapedError' -Append -Encoding UTF8",
+        "    } else {",
+        "        `$_ | Out-File -LiteralPath '$escapedOutput' -Append -Encoding UTF8",
+        "    }",
+        "}",
         "exit `$LASTEXITCODE"
     ) | Set-Content -LiteralPath $launcherPath -Encoding Unicode
 
@@ -1352,7 +1358,7 @@ function Cmd-StartCollector {
         }
     }
 
-    # 托管安装不能降级成脱离服务管理器的第二个进程。
+    # A managed installation must not fall back to a second unmanaged process.
     if ((Get-InitType) -notin @("background", "unknown", "")) {
         Write-Error "托管 collector 无法启动，已拒绝后台兜底"
         exit 1
@@ -1373,7 +1379,7 @@ function Schedule-UpdaterRestart {
     $escapedLog = ([string]$UPDATER_LOG_FILE).Replace("'", "''")
     @(
         "Start-Sleep -Seconds 10",
-        "& '$escapedBin' restart-updater *>> '$escapedLog'"
+        "& '$escapedBin' restart-updater *>&1 | Out-File -LiteralPath '$escapedLog' -Append -Encoding UTF8"
     ) | Set-Content -LiteralPath $handoffScript -Encoding Unicode
 
     # Start-Process creates an independent process instead of a PowerShell job owned by
@@ -1578,7 +1584,7 @@ function Cmd-RestartCollector {
                     exit 1
                 }
                 $errLog = Join-Path $LOG_DIR "loongsuite-pilot-service-err.log"
-                # PID 由原生 collector 自己发布，不记录 PowerShell 包装进程的 PID。
+                # The native collector publishes its own PID, never the PowerShell wrapper PID.
                 try {
                     Start-BackgroundDaemon "collector" $pilotBin $LOG_FILE $errLog
                 } catch {
@@ -1774,7 +1780,7 @@ function Cmd-RestartUpdater {
                     return
                 }
                 $updaterErrLog = Join-Path $LOG_DIR "loongsuite-pilot-updater-err.log"
-                # PID 由原生 updater 自己发布，不记录 PowerShell 包装进程的 PID。
+                # The native updater publishes its own PID, never the PowerShell wrapper PID.
                 try {
                     Start-BackgroundDaemon "updater" $pilotBin $UPDATER_LOG_FILE $updaterErrLog
                 } catch {

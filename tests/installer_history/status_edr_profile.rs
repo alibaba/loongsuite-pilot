@@ -249,6 +249,7 @@ fn status_original_public_powershell_argument_and_writer_matrix_in_both_shells()
         let f = Fixture::new();
         let source = include_str!("../../deploy/installer-opensource.ps1");
         let mut child = source
+            .trim_start_matches('\u{feff}')
             .split_once("# Resolve package URL")
             .unwrap()
             .0

@@ -452,7 +452,7 @@ async fn actual_native_manifest_worker_uses_the_same_real_adapter_without_node_o
             "global".into(),
             "managed-global".into(),
             state_dir(&f.data, &i.id),
-            bundle.join("sample-plugin").to_string_lossy().into_owned(),
+            format!("{}/sample-plugin", bundle.to_string_lossy()),
         ];
         f.wait(1, || {
             std::fs::read(&f.capture)
