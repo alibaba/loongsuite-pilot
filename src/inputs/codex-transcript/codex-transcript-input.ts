@@ -1510,6 +1510,9 @@ export class CodexTranscriptInput extends BaseInput {
     // without allocating an intermediate array or running a JSON serializer.
     const key = filePath + '\0' + sourceVersion(stat) + '\0' + endOffset;
     const previous = this.ownerOffsetProbes.get(key);
+    // Hits perform no content I/O. A same-size rewrite preserving both
+    // timestamps is indistinguishable and can retain stale owner state until
+    // another source-version component changes.
     // A shorter search cannot establish absence in the rest of the file, and
     // an owner found by a longer search may lie outside the requested prefix.
     if (previous !== undefined) return previous;
@@ -3454,7 +3457,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     !active
     || typeof active.turnId !== 'string'
     || !isNonNegativeSafeInteger(active.startOffset)
-    || typeof active.startedAtMs !== 'number'
+    || !isNonNegativeSafeInteger(active.startedAtMs)
   ) return null;
   const model = stringValue(active.model);
   const cwd = stringValue(active.cwd);
@@ -3463,7 +3466,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     turnId: active.turnId,
     startOffset: active.startOffset,
     startedAtMs: active.startedAtMs,
-    ...(typeof active.nextStepStartedAtMs === 'number'
+    ...(isNonNegativeSafeInteger(active.nextStepStartedAtMs)
       ? { nextStepStartedAtMs: active.nextStepStartedAtMs }
       : {}),
     ...(typeof active.lastCumulativeTokenTotal === 'number'
@@ -3496,7 +3499,7 @@ function parsePendingFusionChildren(value: unknown): CodexPendingFusionChild[] {
       !child
       || typeof child.parentToolCallId !== 'string'
       || typeof child.parentTraceId !== 'string'
-      || typeof child.spawnedAtMs !== 'number'
+      || !isNonNegativeSafeInteger(child.spawnedAtMs)
     ) continue;
     children.push({
       parentToolCallId: child.parentToolCallId,

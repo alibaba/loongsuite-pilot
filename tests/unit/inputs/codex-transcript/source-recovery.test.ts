@@ -673,11 +673,49 @@ it('accepts zero as a valid terminal boundary', async () => {
   const cp = checkpoint(f);
   cp.scanOffset = 0;
   cp.activeTurn!.startOffset = 0;
+  cp.activeTurn!.startedAtMs = 0;
+  cp.activeTurn!.nextStepStartedAtMs = 0;
+  cp.activeTurn!.subagentSpawns = [{ parentToolCallId: 'tool', parentTraceId: 'trace', spawnedAtMs: 0 }];
   cp.pendingTerminal!.terminalEndOffset = 0;
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   expect(f.probe.readCheckpoint(key(f)).pendingTerminal?.terminalEndOffset).toBe(0);
   expect(f.probe.readCheckpoint(key(f)).scanOffset).toBe(0);
+  expect(f.probe.readCheckpoint(key(f)).activeTurn).toMatchObject({ startedAtMs: 0, nextStepStartedAtMs: 0,
+    subagentSpawns: [{ spawnedAtMs: 0, parentToolCallId: 'tool', parentTraceId: 'trace' }] });
 });
+
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid required active/deferred timestamps %s and collects later work', async timestamp => {
+    const f = await pendingFixture(1024); const cp = checkpoint(f);
+    cp.activeTurn!.startedAtMs = timestamp;
+    cp.deferredTerminals = [{ activeTurn: { ...cp.activeTurn! }, pendingTerminal: { ...cp.pendingTerminal! } }];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.activeTurn).toBeNull();
+    expect(parsed.pendingTerminal).toBeNull();
+    expect(parsed.deferredTerminals ?? []).toEqual([]);
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'omits invalid optional active/deferred/spawn timestamps %s while keeping valid context', async timestamp => {
+    const f = await pendingFixture(1024); const cp = checkpoint(f);
+    cp.activeTurn!.nextStepStartedAtMs = timestamp;
+    cp.activeTurn!.subagentSpawns = [{ parentToolCallId: 'tool', parentTraceId: 'trace', spawnedAtMs: timestamp }];
+    cp.deferredTerminals = [{ activeTurn: { ...cp.activeTurn! }, pendingTerminal: { ...cp.pendingTerminal! } }];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    for (const active of [parsed.activeTurn, parsed.deferredTerminals[0].activeTurn]) {
+      expect(active).toMatchObject({ turnId: 'old', startedAtMs: cp.activeTurn!.startedAtMs });
+      expect(active).not.toHaveProperty('nextStepStartedAtMs');
+      expect(active.subagentSpawns).toEqual([]);
+    }
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
 
 it.each(['pending', 'deferred', 'legacy-pending'])(
   'rejects %s terminal boundaries beyond the persisted scan cursor', async location => {
