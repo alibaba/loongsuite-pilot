@@ -73,6 +73,16 @@ fn main() -> Result<()> {
             eprintln!();
             std::process::exit(7);
         }
+        Ok("build-edition") => {
+            if args != ["probe", "--build-edition"] {
+                bail!("unexpected fixture build-edition arguments");
+            }
+            print!(
+                "{}",
+                std::env::var("PILOT_FIXTURE_EDITION").unwrap_or_default()
+            );
+            return Ok(());
+        }
         Ok("exit") => return Ok(()),
         Ok("fail") => bail!("测试请求的激活失败"),
         Ok(other) => bail!("未知 fixture 模式：{other}"),

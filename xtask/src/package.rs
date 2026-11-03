@@ -805,4 +805,67 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn dashboard_shortcut_l99_six_native_packages_keep_real_icon_and_embedded_system_adapter() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let targets = [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
+        ];
+        let icon = fs::read(root.join("assets/dashboard-shortcut/AppIcon.icns")).unwrap();
+        assert!(icon.len() > 8);
+        assert_eq!(&icon[..4], b"icns");
+        assert_eq!(
+            u32::from_be_bytes(icon[4..8].try_into().unwrap()) as usize,
+            icon.len()
+        );
+        let native_source = fs::read_to_string(root.join("src/cli/dashboard_shortcut.rs")).unwrap();
+        assert!(
+            native_source.contains("include_str!(\"../../scripts/manage-dashboard-shortcut.js\")")
+        );
+        assert!(native_source.contains("/usr/bin/osascript"));
+        let adapter =
+            fs::read_to_string(root.join("scripts/manage-dashboard-shortcut.js")).unwrap();
+        assert!(adapter.contains("Application") && adapter.contains("ObjC.import"));
+        for target in targets {
+            assert!(SUPPORTED_TARGETS.contains(&target));
+            let files = runtime_files(root, target).unwrap();
+            let staged = tempfile::tempdir().unwrap();
+            for relative in &files {
+                copy(
+                    &resource_file(root, relative).unwrap(),
+                    &staged.path().join(relative),
+                )
+                .unwrap();
+            }
+            let platform_icon = staged.path().join("assets/dashboard-shortcut/AppIcon.icns");
+            if target.contains("apple") {
+                assert_eq!(fs::read(platform_icon).unwrap(), icon, "{target}");
+            } else {
+                assert!(!platform_icon.exists(), "{target}");
+            }
+            assert_eq!(
+                fs::read(staged.path().join("assets/dashboard/index.html")).unwrap(),
+                fs::read(root.join("assets/dashboard/index.html")).unwrap()
+            );
+            assert!(files.contains(if target.contains("windows") {
+                "scripts/loongsuite-pilot.ps1"
+            } else {
+                "scripts/loongsuite-pilot.sh"
+            }));
+            for retired in [
+                "scripts/dashboard-shortcut.mjs",
+                "scripts/dashboard-cli.mjs",
+                "scripts/manage-dashboard-shortcut.js",
+                "dist/index.js",
+                "node_modules",
+            ] {
+                assert!(!files.contains(retired), "{target}: {retired}");
+            }
+        }
+    }
 }

@@ -59,6 +59,16 @@ impl Fixture {
     }
 
     fn invoke(&self, shell: &Path, body: &str, constrained: bool) -> Output {
+        self.invoke_with_budget(shell, body, constrained, Duration::from_secs(30))
+    }
+
+    fn invoke_with_budget(
+        &self,
+        shell: &Path,
+        body: &str,
+        constrained: bool,
+        budget: Duration,
+    ) -> Output {
         let test = self.home.join("case.ps1");
         let mut prelude = String::from(
             "$env:PSModulePath = $PSHOME + '\\Modules'\n$ErrorActionPreference = 'Stop'\n",
@@ -143,13 +153,13 @@ impl Fixture {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
             }
-            if start.elapsed() > Duration::from_secs(30) {
+            if start.elapsed() > budget {
                 let _ = child.kill();
                 let _ = child.wait();
                 let phase = fs::read_to_string(&stage).unwrap_or_else(|_| "unavailable".into());
                 let stderr = fs::read(&err).unwrap_or_default();
                 let stdout = fs::read(&out).unwrap_or_default();
-                panic!("PowerShell acceptance exceeded unchanged 30s budget: shell={} stage={} stdout={} stderr={}",shell.display(),phase.trim_start_matches('\u{feff}').trim(),String::from_utf8_lossy(&stdout).chars().take(3000).collect::<String>(),String::from_utf8_lossy(&stderr).chars().take(3000).collect::<String>());
+                panic!("PowerShell acceptance exceeded unchanged {:?} budget: shell={} stage={} stdout={} stderr={}",budget,shell.display(),phase.trim_start_matches('\u{feff}').trim(),String::from_utf8_lossy(&stdout).chars().take(3000).collect::<String>(),String::from_utf8_lossy(&stderr).chars().take(3000).collect::<String>());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -2548,6 +2558,161 @@ fn native_background_launcher_appends_separate_streams_to_literal_unicode_and_br
             assert!(err.starts_with("preserve stderr\n"));
             assert!(!out.contains("private native stderr"));
             assert!(!err.contains("private native stdout"));
+        }
+    }
+}
+
+#[test]
+fn tokens_l69_both_aliases_dispatch_the_whole_script_with_default_and_separated_unicode_layouts() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for separated in [false, true] {
+                for alias in ["token-usage", "tokens"] {
+                    let fixture = Fixture::new();
+                    let (data, cache) = if separated {
+                        let layout = json!({"dataDir": fixture.data, "cacheDir": fixture.cache});
+                        fs::write(
+                            fixture.home.join("loongsuite-pilot-layout.json"),
+                            format!("\u{feff}{layout}"),
+                        )
+                        .unwrap();
+                        (fixture.data.clone(), fixture.cache.clone())
+                    } else {
+                        let default = fixture.home.join(".loongsuite-pilot");
+                        let version = default.join("versions/1.2.0");
+                        fs::create_dir_all(version.join("bin")).unwrap();
+                        fs::copy(&fixture.binary, version.join("bin/loongsuite-pilot.exe"))
+                            .unwrap();
+                        fs::write(version.join("runtime-manifest.json"), "{}").unwrap();
+                        fs::write(default.join("current"), "\u{feff}1.2.0\r\n").unwrap();
+                        (default.clone(), default)
+                    };
+                    let pin = format!(
+                        "\u{feff}{}\r\n",
+                        fixture.home.join("unused old Node.exe").display()
+                    );
+                    fs::write(cache.join("node-bin"), &pin).unwrap();
+                    let config = data.join("config.json");
+                    fs::write(
+                        &config,
+                        "private invalid config must not be read by wrapper",
+                    )
+                    .unwrap();
+                    let body = format!(
+                        r#"
+$env:LOONGSUITE_PILOT_DATA_DIR = ''
+$env:LOONGSUITE_PILOT_CACHE_DIR = ''
+$env:AGENT_DATA_COLLECTION_CONFIG = ''
+function Get-ScheduledTask {{ throw 'tokens must not query tasks' }}
+function Start-ScheduledTask {{ throw 'tokens must not start tasks' }}
+function Stop-ScheduledTask {{ throw 'tokens must not stop tasks' }}
+function Register-ScheduledTask {{ throw 'tokens must not register tasks' }}
+function Unregister-ScheduledTask {{ throw 'tokens must not remove tasks' }}
+function Get-CimInstance {{ throw 'tokens must not enumerate processes' }}
+function Stop-Process {{ throw 'tokens must not stop processes' }}
+function Start-Process {{ throw 'tokens must not start a background child' }}
+function schtasks.exe {{ throw 'tokens must not access scheduler' }}
+$forward = @('{alias}', '--range', '7d', '--no-color')
+& $env:PILOT_SCRIPT @forward
+"#
+                    );
+                    success(&fixture.invoke_with_budget(
+                        &shell,
+                        &body,
+                        constrained,
+                        Duration::from_secs(15),
+                    ));
+                    let records = fixture.records();
+                    assert_eq!(
+                        records.len(),
+                        1,
+                        "shell={} constrained={constrained} separated={separated} alias={alias}",
+                        shell.display()
+                    );
+                    assert_eq!(
+                        records[0]["args"],
+                        json!(["tokens", "--range", "7d", "--no-color"])
+                    );
+                    assert_eq!(records[0]["config"], config.to_str().unwrap());
+                    assert_eq!(records[0]["data"], data.to_str().unwrap());
+                    assert_eq!(records[0]["cache"], cache.to_str().unwrap());
+                    assert_eq!(fs::read(cache.join("node-bin")).unwrap(), pin.as_bytes());
+                    assert_eq!(
+                        fs::read(&config).unwrap(),
+                        b"private invalid config must not be read by wrapper"
+                    );
+                    for forbidden in [
+                        "loongsuite-pilot.pid",
+                        "loongsuite-pilot-updater.pid",
+                        "logs",
+                        "bin/collector-background.ps1",
+                        "bin/updater-background.ps1",
+                    ] {
+                        assert!(
+                            !data.join(forbidden).exists() && !cache.join(forbidden).exists(),
+                            "{forbidden}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn upgrade_l279_help_advertises_only_opensource_from_native_probe_in_both_shells_and_clm() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for edition in ["opensource", "proprietary", ""] {
+                let fixture = Fixture::new();
+                fs::write(
+                    fixture.data.join("config.json"),
+                    "invalid mutable config must not select edition",
+                )
+                .unwrap();
+                fs::write(
+                    fixture.cache.join("updater-config.json"),
+                    "{\"edition\":\"opposite\",\"packageUrl\":\"https://invalid.private\"}",
+                )
+                .unwrap();
+                let body = format!(
+                    r#"
+$env:PILOT_FIXTURE_MODE = 'build-edition'
+$env:PILOT_FIXTURE_EDITION = '{edition}'
+function Invoke-WebRequest {{ throw 'help must not download anything' }}
+function Start-Process {{ throw 'help must not start background children' }}
+function Get-ScheduledTask {{ throw 'help must not query tasks' }}
+function Start-ScheduledTask {{ throw 'help must not start tasks' }}
+function Register-ScheduledTask {{ throw 'help must not register tasks' }}
+& $env:PILOT_SCRIPT help
+"#
+                );
+                let out =
+                    fixture.invoke_with_budget(&shell, &body, constrained, Duration::from_secs(15));
+                success(&out);
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout).contains("upgrade [opts]"),
+                    edition == "opensource",
+                    "shell={} constrained={constrained} edition={edition}",
+                    shell.display()
+                );
+                let records = fixture.records();
+                assert!(!records.is_empty());
+                for record in records {
+                    assert_eq!(record["args"], json!(["probe", "--build-edition"]));
+                    assert_eq!(record["data"], fixture.data.to_str().unwrap());
+                    assert_eq!(record["cache"], fixture.cache.to_str().unwrap());
+                }
+                assert_eq!(
+                    fs::read(fixture.data.join("config.json")).unwrap(),
+                    b"invalid mutable config must not select edition"
+                );
+                assert_eq!(
+                    fs::read(fixture.cache.join("updater-config.json")).unwrap(),
+                    b"{\"edition\":\"opposite\",\"packageUrl\":\"https://invalid.private\"}"
+                );
+                assert!(!fixture.data.join("logs").exists());
+            }
         }
     }
 }

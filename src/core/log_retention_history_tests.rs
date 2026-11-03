@@ -827,3 +827,41 @@ fn calendar_retention_preserves_distinct_days_across_dst_boundaries() {
         assert_eq!(calendar_date_cutoff(date, 2), two_days_ago);
     }
 }
+
+#[tokio::test]
+async fn copilot_disk_stress_exact_three_giant_mirrors_and_128_today_closed_segments() {
+    let _large = large_files().await;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = Fixture::new();
+        let day = date(0);
+        let giant = 3 * 1024u64.pow(3) + 1;
+        let folders = ["logs/output", "logs/otlp-debug", "logs/otlp-failed"];
+        let paths =
+            folders.map(|folder| fixture.sized(&format!("{folder}/copilot-{day}.jsonl"), giant));
+        for index in 0..128 {
+            fixture.sized(
+                &format!("logs/output/copilot.part-{index:032x}-{day}.jsonl"),
+                32 * 1024 * 1024,
+            );
+        }
+        let mut options = config();
+        options.interval_ms = 21_600_000;
+        let (deleted, errors) = fixture.service(options).run_cleanup().await;
+        assert_eq!(errors, 0);
+        assert!(deleted >= 3);
+        for path in paths {
+            assert!(!path.exists(), "a >3GiB mirror was not reclaimed");
+        }
+        let mut output = tokio::fs::read_dir(fixture.path("logs/output"))
+            .await
+            .unwrap();
+        let mut bytes = 0;
+        while let Some(entry) = output.next_entry().await.unwrap() {
+            bytes += entry.metadata().await.unwrap().len();
+        }
+        assert!(bytes <= OUTPUT_RETENTION_MAX_TOTAL_BYTES);
+        // All sizes above are logical sparse sizes, never physical throughput.
+    })
+    .await
+    .expect("original60000ms sparse emergency fixture budget exceeded");
+}

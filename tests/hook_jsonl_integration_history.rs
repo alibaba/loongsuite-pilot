@@ -467,7 +467,9 @@ async fn l211_bound_qoder_shell_default_agent_native_processor_real_input_preser
     )
     .await;
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "{}");
+    assert_eq!(std::fs::read(history(&logs, "qoder")).unwrap(), b"");
     let rows = collect_native_qoder(&data, &transcript, store).await;
+    assert_eq!(std::fs::read(history(&logs, "qoder")).unwrap(), b"");
     let raw = rows
         .iter()
         .map(|row| serde_json::to_value(row).unwrap())

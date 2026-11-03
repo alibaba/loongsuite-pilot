@@ -45920,9 +45920,9 @@
     {
       "legacy": "tests/unit/scripts/dashboard-lifecycle.test.mjs",
       "source_hash": "4873983f342db078b809ad1072ad7eb42d48995c8ecd00eaeac80e5683f9d78e",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "This slice covers exactly the13 original browser static-page AST as retained host contracts. Remaining19 service/config AST are separate Native work, and this slice does not claim that the browser JS became Rust or default Cargo needs Node.",
+      "note": "This slice covers exactly the13 original browser static-page AST as retained host contracts. Remaining19 service/config AST are separate Native work, and this slice does not claim that the browser JS became Rust or default Cargo needs Node. Exactly first11 lifecycle AST; retained browser DOM13 and remaining config8 are separate slices. All11 active contracts,0retired.9 new GNU tests + existing identity1/probe core2/CLI1 actually pass, not11 individually new test names. No actual Mac/Windows runtime asserted. Exactly config8 original AST, complementing B25 lifecycle11 and B13 retained production DOM13 (total32). No original assert weakened or ignore/retirement introduced. Native/publicBash5 tests and related config23 unit tests actually pass; actual Windows public bridge matrix implemented/strict body checked but pending physical Windows.",
       "cases": [
         {
           "source": {
@@ -46286,6 +46286,525 @@
               "assets/dashboard/index.html"
             ],
             "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L21:C3",
+            "title": "does not expose the removed monitor command",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original help/dispatch policy keeps removed monitor start/stop commands absent.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l21_no_removed_monitor_dispatch_and_l27_cleanup_precedes_start_stop_restart_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L27:C3",
+            "title": "cleans legacy standalone processes on start, stop, and collector restart",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original first-four-lines source assertion keeps legacy monitor cleanup before start, stop and collector restart work; restart also keeps earlier breadcrumb clearing.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l21_no_removed_monitor_dispatch_and_l27_cleanup_precedes_start_stop_restart_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L34:C3",
+            "title": "validates a legacy PID command line before killing it",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Exact original cleanup UID, matching argv[1], count2, no pkill and pid removal policies remain. Real private ELF named node emulates legacy Node argv only: exact two-argument legacy entry is actually signalled; three reused/misleading argv variants stay alive. No Node runtime dependency introduced.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l34_legacy_identity_and_l47_reused_argv_are_checked_before_real_signal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L47:C3",
+            "title": "does not kill a reused legacy PID that only mentions the removed script",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual live private process with -e/code mentioning removed monitor script survives cleanup and stale pid file is removed; extra/mismatched entry variants also stay alive. Positive exact legacy argv process is separately signalled, preventing always-false matcher substitution.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l34_legacy_identity_and_l47_reused_argv_are_checked_before_real_signal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "repairs a stale collector PID only from the exact installed bootstrap path",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original procfs UID/cmdline/exact bootstrap/wrapper, one user-table scan, no broad pkill/pgrep, atomic PID repair policies preserved. Default Node bootstrap identity is replaced with installed Native executable + kernel /proc/exe + role/data environment; actual existing native process matrix and actual reused PID repair prove active replacement.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l74_native_pid_identity_preserves_exact_install_uid_argv_executable_and_atomic_repair_policy"
+              },
+              {
+                "file": "xtask/tests/services.rs",
+                "test": "process_identity_binds_executable_install_role_and_data_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L96:C3",
+            "title": "stops exact installed collector wrappers with a short retry",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original single process-table scan/revalidate before signal/five short attempts/stop target roles and no broad kill policies preserved. Actual own Native collector and exact installed Bash wrapper are stopped while another private install Native process survives. No system service invoked.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l96_stop_rechecks_exact_collectors_and_wrappers_for_five_short_attempts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L123:C3",
+            "title": "does not launch per-PID ps commands on the Linux procfs path",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux"
+          ],
+          "behavior": "Original procfs source branch checks preserved; additionally real current Native PID matches with ps function trapped to fail/write marker, and marker remains absent. This proves actual procfs path does not execute per-PID ps.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l123_actual_procfs_identity_never_spawns_per_pid_ps"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L136:C3",
+            "title": "provides a start-only updater recovery path without stop or process scans",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original public start-collector dispatch/start-only source policy remains. Actual loaded function executes both already-running and missing branches with stop/process-scan callbacks forbidden; underlying start records exactly once.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l136_start_only_recovery_never_stops_or_scans_processes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L149:C3",
+            "title": "rejects a reused PID and repairs it from the real Node argv entry",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux"
+          ],
+          "behavior": "Old Node argv default lifecycle is replaced with actual installed native run argv. Real extra-argument reused PID survives stop, is_running repairs pid file to real current Native PID and leaves no partial .tmp. Other-install/role/data/executable boundaries independently executed in existing services test.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l149_reused_pid_survives_and_native_current_pid_is_atomically_repaired"
+              },
+              {
+                "file": "xtask/tests/services.rs",
+                "test": "process_identity_binds_executable_install_role_and_data_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L196:C3",
+            "title": "generated init.d scripts do not signal a reused PID",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux"
+          ],
+          "behavior": "Both actual production init.d heredoc templates staged only into private paths; original initd identity env is set on a real misleading live process, status exits1 and stop succeeds without signalling it. Never install/start init.d or touch /etc. Native ELF named node emulates original negative process shape without Node.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l196_actual_generated_initd_status_and_stop_preserve_reused_pids_for_both_roles"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L252:C3",
+            "title": "probes the dashboard before printing its URL on Unix and Windows",
+            "suites": [
+              "dashboard service lifecycle"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Both actual shell sources delegate native dashboard probe. Actual complete Bash cmd_status availability true/false branches print live versus unavailable URL truthfully. Existing real native HEAD probe covers pending503/ready200, correct instance versus other data root, stopped listener and readonly CLI port/data-dir/available; 300ms/no-proxy/no-redirect source bounds preserved. Original Node HTTP embedding is replaced, not restored. PS is source-policy evidence; no physical Windows execution implied.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/dashboard_service_history.rs",
+                "test": "dashboard_l252_both_wrappers_delegate_readonly_probe_and_print_only_validated_url"
+              },
+              {
+                "file": "src/cli/dashboard_probe.rs",
+                "test": "real_head_probe_accepts_ready_and_pending_but_rejects_other_instances"
+              },
+              {
+                "file": "src/cli/dashboard_probe.rs",
+                "test": "port_validation_and_unicode_bom_config_are_read_only"
+              },
+              {
+                "file": "tests/cli_native.rs",
+                "test": "dashboard_probe_cli_is_read_only_and_checks_real_instance_headers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L354:C7",
+            "title": "defaults to 8765 without a configured port: %j",
+            "suites": [
+              "dashboard installer configuration",
+              "platform"
+            ],
+            "parameters": [
+              "['bash', 'powershell-js']",
+              "it.each([undefined, { dashboard: { extra: true } }])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Both original absent/default dashboard shapes run through actual native writer: missing config produces8765 and existing dashboard.extra survives with default8765. Actual full Bash parser/bridge repeats both shapes; previous embedded powershell-js writer business is replaced with same Rust helper. Real PS bridge full matrix implemented separately in L413, physical pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l354_l360_l367_real_native_writer_defaults_preserves_and_normalizes_all_original_ports"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L360:C7",
+            "title": "preserves an existing port and other config when the option is omitted",
+            "suites": [
+              "dashboard installer configuration",
+              "platform"
+            ],
+            "parameters": [
+              "['bash', 'powershell-js']"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual native write with omitted port keeps existing9010, dashboard.extra, logLevel and arbitrary Unicode/interiorBOM private extra. Actual public Bash repeats omission and real PS matrix is implemented under L413, physical pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l354_l360_l367_real_native_writer_defaults_preserves_and_normalizes_all_original_ports"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L367:C7",
+            "title": "writes %s as a numeric port without losing other config",
+            "suites": [
+              "dashboard installer configuration",
+              "platform"
+            ],
+            "parameters": [
+              "['bash', 'powershell-js']",
+              "it.each(['9000', '1', '65535', '08765'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "All four exact original strings9000/1/65535/08765 become integer JSON ports, preserving dashboard.extra/logLevel/private unknown fields. Native helper directly with PATH empty and actual Bash bridge both option forms execute; shared Rust helper replaces embedded JS body without restoring Node.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l354_l360_l367_real_native_writer_defaults_preserves_and_normalizes_all_original_ports"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L376:C3",
+            "title": "accepts the Bash --dashboard-port=9000 form",
+            "suites": [
+              "dashboard installer configuration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual public Bash prelude, confirm-config-overwrite and writer run with --dashboard-port=9000 and exact split/equal forms for all four original valid ports. Private candidate is actual production native binary, no fake config merge; runtime/downloader/service traps stay unused.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l354_l360_l367_l376_public_bash_parser_and_writer_cover_both_option_forms"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L382:C3",
+            "title": "shows a changed port in the overwrite prompt but ignores an unchanged numeric port",
+            "suites": [
+              "dashboard installer configuration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original exact prompt assert dashboard.port:8765 ->9000 preserved. Actual pre-fix public Bash/Native red showed generic redaction; minimal safe_diff_value exact dashboard.port allows only finite integral1..65535 numbers for both endpoints, matching existing configured_port semantics. Actual after passes original old/new prompt and unchanged08765 suppression. Separate real native CLI and direct unit regressions prove invalid old/new nested shapes and other numeric credentials stay hidden, config bytes+mtime unchanged.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l382_actual_public_overwrite_diff_distinguishes_changed_and_equal_numeric_ports"
+              },
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_port_diff_displays_only_checked_numeric_ports_and_hides_nested_or_other_numeric_secrets"
+              },
+              {
+                "file": "src/deployment/installer_config.rs",
+                "test": "dashboard_port_diff_requires_two_checked_ports_and_never_renders_other_numeric_fields"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L392:C3",
+            "title": "rejects invalid Bash port %j before changing existing config",
+            "suites": [
+              "dashboard installer configuration"
+            ],
+            "parameters": [
+              "it.each(['', '0', '-1', '65536', '1.5', 'abc', '0x2328', '9e3', '9000\\n', '99999999999999999999', \"9000';process.exit(0);//\"])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "All11 original invalid strings, including blank, negatives, overflow, fractional, hex/scientific, newline, huge and code-shaped input, run through actual public Bash parser in both split/equal forms (22 cases). Exact original error/status1, existing BOM config bytes unchanged and post-parser marker absent prove rejection before Native write.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l392_l404_every_original_invalid_or_missing_bash_port_stops_before_writer_and_preserves_bytes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L404:C3",
+            "title": "rejects a missing Bash port: %j",
+            "suites": [
+              "dashboard installer configuration"
+            ],
+            "parameters": [
+              "it.each([['--dashboard-port'], ['--dashboard-port', '--log-level', 'debug']])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Both exact original missing forms (--dashboard-port alone and followed by --log-level debug) exit1, mention option, create no config, reach no post-parser marker and do not use downloader/service/runtime.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l392_l404_every_original_invalid_or_missing_bash_port_stops_before_writer_and_preserves_bytes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L413:C3",
+            "title": "parses and validates the native PowerShell option before writing config",
+            "suites": [
+              "dashboard installer configuration"
+            ],
+            "parameters": [
+              "it.runIf(hasPowerShell)"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Real public PowerShell param prelude plus original actual Invoke-InstallerHelper/Get-InstallConfigJson/Write-Config invoke actual native PE. Both default shapes, omission, all4 valid ports, all original invalid/missing plus hex/scientific/code-shaped extras; exact Unicode roots and unrelated fields preserved. PS5/PS7 xFull/CLM, child CLM canary;12 invalid/missing cases each save exact before/after copies for Rust byte comparison, parser marker proves no writer reached. All original cases retained, per-phase15s (stricter than original30s AST budget). Rust body compiled strictly, physical Windows pending; no GNU PS execution claim.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_dashboard_history.rs",
+                "test": "dashboard_l413_public_powershell_parser_and_real_native_writer_preserve_full_original_matrix_in_both_shells_and_clm"
+              }
+            ]
           }
         }
       ]
@@ -47443,6 +47962,2508 @@
               {
                 "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
                 "test": "integration_opencode_watchdog_skips_missing_assets_without_repairing_config"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/windows-token-usage-cli.test.mjs",
+      "source_hash": "5940c3aa3fe63fb2000752502fa6959f949d24270371babf645ff9b3929e759d",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Two original AST preserve both public aliases, options, default profile config/roots, and environment forwarding. Native canonical internal command is tokens rather than former JS token-usage; no public alias is removed. Source policy executed on GNU; the real Windows full-file test is implemented/portable-body checked and pending physical Windows CI.",
+      "cases": [
+        {
+          "source": {
+            "id": "L12:C3",
+            "title": "advertises and dispatches token-usage and its alias",
+            "suites": [
+              "Windows token-usage CLI contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original source-policy matches actual Cmd-TokenUsage, both dispatcher aliases, native argv forwarding, exit propagation and AGENT_DATA_COLLECTION_CONFIG assignment. Native internal tokens canonicalization replaces old JS token-usage internal name; public names and options unchanged. Actual GNU source policy passed.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_tokens_source_history.rs",
+                "test": "tokens_l12_both_public_aliases_dispatch_native_tokens_with_config_environment"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "forwards %s and its options to the runtime CLI",
+            "suites": [],
+            "parameters": [
+              "test.each([\n    ['token-usage', 'token-usage'],\n    ['tokens', 'token-usage'],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual full production PS file is invoked with each token-usage/tokens alias and --range 7d --no-color. Default USERPROFILE/.loongsuite-pilot and BOM separate Unicode layout each checked in PS5/PS7 Full/CLM, exact native PE recorder args/config/data/cache, old pin/config bytes unchanged, no collector/updater/service work. Original 15 second per-call bound remains, existing unrelated fixture calls remain 30 seconds. Implemented and Rust body strict compiled; physical Windows execution pending, not counted as GNU passed.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "tokens_l69_both_aliases_dispatch_the_whole_script_with_default_and_separated_unicode_layouts"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/opensource-upgrade-cli.test.mjs",
+      "source_hash": "a0455be57b89175645eec7aa21ed12f7af2e018a731df2ec3a060aab482a3057",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All 12 original AST retained; no source expectation weakened, ignore added or retirement. Actual GNU7 tests plus actual production CLI default/allfeatures2 executions passed; PS source policies are real static tests, PS help real child matrix implemented but pending physical Windows. Private test-only fixture seam never enters product package, and real edition evidence is tested independently.",
+      "cases": [
+        {
+          "source": {
+            "id": "L148:C3",
+            "title": "reports the edition from the existing compile-time build flag",
+            "suites": [
+              "open-source upgrade build gate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual production CLI is independently compiled/run with default opensource and --all-features proprietary, asserts compile-feature expected stdout, PATH empty, malformed mutable config/updater state plus opposite edition env ignored, no other filesystem entries. This is actual CLI evidence, distinct from canned edition wrapper seam.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/cli_upgrade_history.rs",
+                "test": "upgrade_build_edition_uses_actual_compiled_feature_without_mutable_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L153:C3",
+            "title": "does not use mutable config or updater files as the edition signal",
+            "suites": [
+              "open-source upgrade build gate"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original two-shell source-policy gate inspects actual functions: native probe --build-edition and no config/packageUrl/updater script edition inference; actual native CLI poisoning negative control additionally passes in both compiled editions.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l153_edition_gates_ignore_mutable_config_and_updater_sources"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L174:C3",
+            "title": "shows the command only for open-source builds",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual full Bash script help advertises upgrade only for opensource; proprietary/empty reject upgrade with truthful unknown-command before any downloader/installer. Private ELF seam accepts only exact probe --build-edition, logs argv; no Node/service calls.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l174_help_and_l238_rejection_use_only_native_build_edition"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L187:C3",
+            "title": "downloads the fixed public installer and upgrades to latest",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual full Bash upgrade invokes private curl recorder with exact fixed public installer URL/-fsSL/-o private temp path and actual private generated installer child receives upgrade --data-dir exact default root. Temporary installer removed, config/updater bytes preserved. Network disabled; no real installer runs.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l187_l200_l228_fixed_public_installer_and_exact_latest_version_custom_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L200:C3",
+            "title": "forwards a requested version to the installer",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual full Bash dispatch preserves exact --version 1.6.0 after upgrade --data-dir; additional equals-form prerelease case also passes, installer child env receives exact data/cache; all temporary paths private/cleaned.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l187_l200_l228_fixed_public_installer_and_exact_latest_version_custom_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L210:C3",
+            "title": "rejects invalid versions before downloading",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Traversal version in split and equals forms, missing value and blank equals all exit 1 with truthful validation diagnostic before curl/installer, preserve config/updater bytes and do not create runtime state.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l210_invalid_versions_and_l219_custom_cache_fail_before_download"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L219:C3",
+            "title": "rejects a custom cache directory before downloading on Unix",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual custom-cache upgrade exits 1 with original unsupported-cache diagnostic before any private curl/installer execution; current state remains unchanged.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l210_invalid_versions_and_l219_custom_cache_fail_before_download"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L228:C3",
+            "title": "still supports a custom data directory when the cache directory is default",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual custom Unicode data with default cache succeeds; private installer sees exact upgrade --data-dir custom path and exact corresponding data/cache environment, no config/updater mutation or runtime service state.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l187_l200_l228_fixed_public_installer_and_exact_latest_version_custom_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L238:C3",
+            "title": "rejects the command for proprietary or unidentified builds",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Both proprietary and unidentified native edition results reject upgrade before download, with original unknown-command stdout and absent downloader/installer logs.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l174_help_and_l238_rejection_use_only_native_build_edition"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L251:C3",
+            "title": "uses the same build gate, fixed installer, and version forwarding",
+            "suites": [
+              "open-source upgrade PowerShell contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original static PowerShell gate/fixed URL/upgrade dispatcher/version args/data/cache environment assertions preserved on actual production source; static policy does not claim Windows download execution.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l251_powershell_keeps_build_gate_fixed_url_version_and_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "protects the initial download and preserves the installer exit result during cleanup",
+            "suites": [
+              "open-source upgrade PowerShell contract"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original actual-source TLS12 best effort/download failure/strict Remove-Item/cleanup warning checks preserved; also asserts native installer LASTEXITCODE captured before finally and propagated. Actual GNU download failure/exit7/cleanup is separately exercised; no physical Windows cleanup execution claim.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_l263_powershell_download_tls_and_finally_preserve_installer_result"
+              },
+              {
+                "file": "xtask/tests/upgrade_cli_history.rs",
+                "test": "upgrade_download_failure_and_real_installer_exit_seven_preserve_cleanup_and_status"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L279:C3",
+            "title": "shows the command only for open-source builds",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual whole public PS script help uses private native PE probe for opensource/proprietary/empty. PS5/PS7 xFull/CLM x3 editions (12 cases), original 15s per invocation; mutable config/updater unchanged, no downloader/background/service calls. Implemented and portable Rust body strict compiled; physical Windows pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "upgrade_l279_help_advertises_only_opensource_from_native_probe_in_both_shells_and_clm"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/dashboard-shortcut-shell.test.mjs",
+      "source_hash": "5aa4cf9a3877c7d0f1cf78edbcec07ddbebbb64875ff27873efc12a235d05d45",
+      "coverage": "complete",
+      "rust": [],
+      "note": "13 AST across the two files: 11 active native contracts and 2 narrow Node mechanism retirements. GNU real whole-file native-fixture routing and six-target resource collection/copy executed; no actual macOS desktop, Dock, or Windows shell execution is claimed. Original AST and hashes unchanged.",
+      "cases": [
+        {
+          "source": {
+            "id": "L16:C3",
+            "title": "dispatches to the current version with the pinned Node and exact config",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Current native pointer switches old/new and executes six real ELF children for three actions. The nonselected binary is made nonexecutable, proving selection; exact trimmed Unicode/quote config and separate data/cache argv survive. Node execution is forbidden and old node-bin bytes remain unchanged. Original pinned-Node launcher is replaced by native binding.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l16_l44_current_native_versions_and_exact_trimmed_unicode_config_ignore_old_node_pins"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C3",
+            "title": "uses a custom-directory Node pin with spaces without changing any pin",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Custom configuration-directory pin containing spaces stays byte identical; native selection does not execute it or rewrite a cache pin. Exact trimmed config, old/new current selection and unused data-directory absence are actual whole-file shell assertions. Node-pin lookup mechanism is retired; readonly custom config capability remains.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l16_l44_current_native_versions_and_exact_trimmed_unicode_config_ignore_old_node_pins"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L68:C3",
+            "title": "handles absent installation/runtime without starting a collector",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Missing native runtime, legacy-only JS package and corrupt current pointer all exit 1 with truthful missing-binary stderr before any child, collector/data state, config mutation or Node/service calls. Error wording now identifies native binary, replacing missing standalone JS shortcut wording.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l68_missing_native_entry_rejects_legacy_and_corrupt_pointers_without_creating_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "keeps Node resolution read-only for dashboard while preserving other commands",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original AST is solely the removed resolve_node(false) versus default resolve_node pin-writing implementation. Native dashboard routing resolves a validated installed native pointer and never discovers/pins Node. This narrowly retires Node resolution/pin-writing policy, not dashboard readonly config, path safety or other native command capability. Replacement real whole-file native routing verifies old pins and config unchanged; retired is not a native pass.",
+          "target": {
+            "kind": "retired",
+            "reason": "Original AST is solely the removed resolve_node(false) versus default resolve_node pin-writing implementation. Native dashboard routing resolves a validated installed native pointer and never discovers/pins Node. This narrowly retires Node resolution/pin-writing policy, not dashboard readonly config, path safety or other native command capability. Replacement real whole-file native routing verifies old pins and config unchanged; retired is not a native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l16_l44_current_native_versions_and_exact_trimmed_unicode_config_ignore_old_node_pins"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L89:C3",
+            "title": "never installs shortcuts or edits the Dock during install/upgrade/start",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original source-policy rule is applied to actual public installer, all native core/updater/deployment Rust files and actual shell cmd_start. No shortcut install, manager call or Dock mutation is present; only explicit native CLI calls dashboard_shortcut::run. This is a static automatic-deployment boundary, not macOS Dock execution.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l89_install_upgrade_and_collector_start_have_no_automatic_dock_or_shortcut_calls"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "ships source/icon/manager using the existing assets and scripts packaging",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Production runtime_files is called for each of six supported targets; every actual selected resource is copied to private staging. Real icns header+declared length and copied bytes match; both Apple targets receive icon, four others do not; real dashboard bytes and correct shell resource survive. Native adapter include_str and system osascript/JXA source are present, no standalone Node wrapper/source-dist dependency is packaged. Only old cp-r/scripts Node-wrapper packaging mechanism is retired.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/src/package.rs",
+                "test": "dashboard_shortcut_l99_six_native_packages_keep_real_icon_and_embedded_system_adapter"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L108:C3",
+            "title": "rejects old open/url commands before resolving a runtime or touching config",
+            "suites": [
+              "installer and shell integration"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Both removed open/url actions exit 2 with exact new usage before missing cache/runtime/config access; no native record, Node/service call or data directory appears.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l108_old_open_and_url_are_rejected_before_any_installation_runtime_or_config_access"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/menubar-cli.test.mjs",
+      "source_hash": "042e2c234167faf51c91a5c908dd4d51822302b11ebe7c63548e47d9cb0d9ce1",
+      "coverage": "complete",
+      "rust": [],
+      "note": "13 AST across the two files: 11 active native contracts and 2 narrow Node mechanism retirements. GNU real whole-file native-fixture routing and six-target resource collection/copy executed; no actual macOS desktop, Dock, or Windows shell execution is claimed. Original AST and hashes unchanged.",
+      "cases": [
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "forwards menubar %s and paths to the current installed version",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": [
+              "it.each(['start', 'stop'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Actual complete public shell on controlled Darwin routing forwards both start/stop to current native ELF, exact default data/config.json and separate Unicode data/cache; no collector/service operation or real macOS menu app executes.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l56_current_native_start_and_stop_forward_default_config_and_separated_roots"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "supports legacy package layouts and propagates command failure",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Native package layout without pointer still executes actual ELF and propagates nonzero 7 plus stderr unchanged. Legacy JS package implementation is removed, with separate missing-native/legacy negative control proving no JS/collector fallback. Native package compatibility and failure semantics remain.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l69_native_package_layout_propagates_real_child_exit"
+              },
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "shortcut_l68_missing_native_entry_rejects_legacy_and_corrupt_pointers_without_creating_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L74:C3",
+            "title": "uses the source build instead of forwarding a new command to an older installed runtime",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Original AST depends on reading old JS dist/index.js command-support text and preferring source JS over a pinned older JS runtime. That compatibility mechanism is removed: native installed pointer is authoritative; a valid compiled Cargo workspace fallback is available only with no installed pointer, while invalid pointers refuse fallback. This explicitly records changed development-runtime selection rather than claiming original source-over-installed precedence. No menu-bar product command is retired. Replacement tests execute actual compiled-source fallback and stale JS refusal; retired is not a native pass.",
+          "target": {
+            "kind": "retired",
+            "reason": "Original AST depends on reading old JS dist/index.js command-support text and preferring source JS over a pinned older JS runtime. That compatibility mechanism is removed: native installed pointer is authoritative; a valid compiled Cargo workspace fallback is available only with no installed pointer, while invalid pointers refuse fallback. This explicitly records changed development-runtime selection rather than claiming original source-over-installed precedence. No menu-bar product command is retired. Replacement tests execute actual compiled-source fallback and stale JS refusal; retired is not a native pass.",
+            "replacement": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l74_l85_native_source_build_is_used_only_without_installed_pointer_and_stale_js_never_runs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L85:C3",
+            "title": "rejects a stale source dist without starting the collector",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Real source-native child runs once only without an installed pointer. Corrupt current refuses workspace fallback; after removing compiled binary, stale source dist/package.json never executes or creates collector.lock and no second native record appears. Original stale JS command-text diagnostic is replaced by truthful missing native binary exit 1.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l74_l85_native_source_build_is_used_only_without_installed_pointer_and_stale_js_never_runs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C3",
+            "title": "rejects unsupported platforms before launching Node",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Controlled Linux uname path exits 1 with macOS-only error before cache/runtime/Node/service/collector work; no private data directory or child record. Platform routing is actual GNU shell behavior, not a macOS app execution.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l100_l107_unsupported_or_missing_runtime_exits_before_native_or_collector_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L107:C3",
+            "title": "explains a missing runtime without falling through to collector startup",
+            "suites": [
+              "menubar shell command"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "behavior": "Controlled Darwin uname with missing runtime exits 1 and truthful binary-not-found stderr before any native child/Node/service/collector state. Config bytes are not read by a child.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/desktop_shell_history.rs",
+                "test": "menubar_l100_l107_unsupported_or_missing_runtime_exits_before_native_or_collector_start"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/utils/config-path-from.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "五处声明含两组 each：双斜线风格两个场景、空覆盖三个场景；全部参数和断言复用 Rust 回归。系统 home 断言按 Windows USERPROFILE/POSIX HOME 区分。 Exact latest-main source re-inventoried. Reviewed ef8953..dae1582 diff: config afterEach braces, inferred spy type helper, and guarded-match optional chaining only; assertion behavior and product contracts unchanged. Execution receipt belongs to actual Rust validation, separately from this source provenance.",
+      "source_hash": "266c6c84003fa9662338085baef35a77aafb749fe5290e77e339a993c6ccd8ad",
+      "cases": [
+        {
+          "source": {
+            "id": "L10:C3",
+            "title": "expands Windows %s using USERPROFILE, not HOME",
+            "suites": [
+              "shared config path resolution"
+            ],
+            "parameters": [
+              "it.each(['~\\\\pilot\\\\config.json', '~/pilot/config.json'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "参数 ~\\pilot\\config.json 和 ~/pilot/config.json 均忽略错误 HOME，展开到 USERPROFILE 下的同一 Windows 配置路径",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/utils/data_dir.rs",
+                "test": "expands_windows_tilde_using_userprofile_not_home"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L14:C3",
+            "title": "uses system home when the platform home variable is absent",
+            "suites": [
+              "shared config path resolution"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Linux 无 HOME 回退 /system/user；Windows 只有错误 HOME、无 USERPROFILE 时回退 C:\\system",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/utils/data_dir.rs",
+                "test": "uses_system_home_when_the_platform_home_variable_is_absent"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L20:C3",
+            "title": "shares the default for empty overrides (%s)",
+            "suites": [
+              "shared config path resolution"
+            ],
+            "parameters": [
+              "it.each(['', '   ', undefined])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "空串、三个空格和未设置三个覆盖值都使用 /test 下默认配置",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/utils/data_dir.rs",
+                "test": "shares_the_default_for_empty_overrides"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L24:C3",
+            "title": "preserves absolute paths and resolves a bare tilde consistently",
+            "suites": [
+              "shared config path resolution"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "绝对配置路径去首尾空格；隔离 Linux 裸 ~ 展开 /test；进程裸 ~ 使用当前平台系统 home",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/utils/data_dir.rs",
+                "test": "preserves_absolute_paths_and_resolves_a_bare_tilde"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L29:C3",
+            "title": "uses exactly the same path as the live config loader",
+            "suites": [
+              "shared config path resolution"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "隔离子进程设置 ~/pilot/config.json，静态 helper、运行配置入口与 resolve_home 得到相同路径",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/utils/data_dir.rs",
+                "test": "uses_exactly_the_same_path_as_the_live_config_loader"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/utils/win-archive.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "七个旧 Node/tar.exe/node_modules 机制声明退役，不计作 Rust 迁移；同版本活跃目录保护由实际原生激活测试承接。替代断言直接测试生产解包/激活入口，不引用无 updater 消费者的 win_archive 旧 helper。Linux 已执行；Windows/macOS 平台结果另记，本批暂不提交该旧文件删除。 Exact latest-main source re-inventoried. Reviewed ef8953..dae1582 diff: config afterEach braces, inferred spy type helper, and guarded-match optional chaining only; assertion behavior and product contracts unchanged. Execution receipt belongs to actual Rust validation, separately from this source provenance.",
+      "source_hash": "55ffd3372c4246a15e78853ff5f155d59c8118f096e2fbbe7ef79afbc43e5645",
+      "cases": [
+        {
+          "source": {
+            "id": "L22:C3",
+            "title": "accepts printable ASCII and rejects anything else",
+            "suites": [
+              "isAsciiPath"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "不再需要用可打印 ASCII 判定 tar.exe 参数安全；保留安装路径可含中文/空格/emoji，以及归档危险路径拒绝",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "原生解包使用 flate2/tar/zip，不再向 tar.exe 传递文件路径；仅用于 ANSI 参数限制的 ASCII 分类已失去 updater 消费者。",
+            "replacement": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              },
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "rejects_unsafe_names_and_links_without_leaving_partial_directories"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L33:C3",
+            "title": "keeps an ASCII preference as-is, so the caller can still rename within one volume",
+            "suites": [
+              "makeTarStagingDir"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留 staging 位于指定父目录、可同卷 rename 的合同；原生实现使用独占 .unpack- 目录而非复用固定 download-tmp",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "固定 ASCII 临时目录机制改为目标 versions 内独占临时目录；替代测试逐字验证 staging 的父目录和清理后目录项。",
+            "replacement": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L44:C3",
+            "title": "redirects a non-ASCII preference to an ASCII root",
+            "suites": [
+              "makeTarStagingDir"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Unicode 父目录无需绕到系统 ASCII 根；两种格式都在原父目录解包，成功/截断失败都保留 current 且可重试",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "取消 tar.exe 后不再存在 ANSI 参数重编码，改在安装目录继承权限并保持同卷；不再测试重定向到全局 ASCII 根。",
+            "replacement": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "replaces an existing destination with the staged tree",
+            "suites": [
+              "replaceDirWith"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "node_modules 整树覆盖退役；原生新版本落唯一兄弟目录、没有旧独有文件，旧活跃树字节和二进制摘要保持不变",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "原生发行包不安装 node_modules，更新不再删除目标树再 rename；使用预检后的唯一版本目录与指针事务。",
+            "replacement": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "same_version_activation_preserves_live_tree_and_retries_failed_preflight"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "discards the tree and throws when the inherited ACL cannot be repaired",
+            "suites": [
+              "replaceDirWith ACL handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留不可用候选不得发布的合同：候选执行拒绝或 check 报错都返回错误，配置/指针/服务入口不变；解包错误不留残树，Unix staging 为 0700",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "跨根移动 node_modules 后执行 icacls /reset 的机制已取消；原生在目标 versions 内创建临时目录，并在发布前执行候选预检。拒绝结果用注入的执行错误验证，不宣称模拟了 Windows ACL。",
+            "replacement": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              },
+              {
+                "file": "src/updater/updater.rs",
+                "test": "same_version_activation_preserves_live_tree_and_retries_failed_preflight"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L101:C3",
+            "title": "the only caller turns that throw into an npm install fallback",
+            "suites": [
+              "replaceDirWith ACL handling"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "失败后可重试且不发布坏安装；原生只调用候选 --version/check，错误后同一候选可以再次预检并激活，不启动 npm",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "已取消 ensureNodeModules/npm install；原生包自包含，不静默下载依赖，失败由恢复原状态和后续重试接替。",
+            "replacement": [
+              {
+                "file": "src/updater/updater.rs",
+                "test": "same_version_activation_preserves_live_tree_and_retries_failed_preflight"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L112:C3",
+            "title": "routes every tar call through extractTarGz",
+            "suites": [
+              "updater tar ratchet"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留不受 PATH 中 GNU tar 或 Windows ANSI 参数影响的解包能力；两种归档都由实际原生 unpack 成功读取，危险条目与损坏包被拒绝",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "生产 download_and_deploy 直接调用 package_archive::unpack，无外部 tar 调用；旧 extractTarGz 次数下限是已移除机制的源码形状断言。",
+            "replacement": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              },
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "rejects_duplicate_case_paths_wrong_root_legacy_and_corrupt_gzip"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L128:C3",
+            "title": "stages tar input under an ASCII root and never deletes a live version dir in place",
+            "suites": [
+              "updater tar ratchet"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "ASCII staging 调用次数随原生解包退役；仍有效的活跃版本保护由真实 activate_staged 承接：同版本重复激活生成不同兄弟目录，旧文件/manifest/二进制摘要不变，失败/回滚恢复原指针，最后成功提交",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/package_archive.rs",
+                "test": "unicode_staging_extracts_both_formats_and_cleans_failed_candidates"
+              },
+              {
+                "file": "src/updater/updater.rs",
+                "test": "same_version_activation_preserves_live_tree_and_retries_failed_preflight"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/core/updater-watchdog.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "source_hash": "e3f68c232d56ab20ce179c6a0b79d79489114a6f2fa120c9e320d8dd19e403e5",
+      "note": "26/26精确源声明映射。14首批加12后批，后批3项Windows专属等待原生执行，Linux只执行其余9项，不把适用性当执行。L536实际默认90s；L564短真实timeout只是原60s cooldown合同的独立fixture。中央首批Windows冷启动readiness已调整20s，本批不改旧health helper，不回退中央改进。 Exact latest-main source re-inventoried. Reviewed ef8953..dae1582 diff: config afterEach braces, inferred spy type helper, and guarded-match optional chaining only; assertion behavior and product contracts unchanged. Execution receipt belongs to actual Rust validation, separately from this source provenance.",
+      "cases": [
+        {
+          "source": {
+            "id": "L130:C3",
+            "title": "reports healthy when updater pid, command, and heartbeat match",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "reports healthy when updater pid, command, and heartbeat match；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l125_matching_process_and_heartbeat"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "restarts and records service alarm when updater process is missing",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "restarts and records service alarm when updater process is missing；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l145_missing_process_restarts_and_service_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L170:C3",
+            "title": "does not alarm from an overlapping tick while restart-updater is still running",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not alarm from an overlapping tick while restart-updater is still running；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l165_overlapping_check_does_not_alarm_or_spawn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L211:C3",
+            "title": "uses startup grace before restarting for a missing updater process",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "uses startup grace before restarting for a missing updater process；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l206_constructor_startup_grace_missing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L233:C3",
+            "title": "uses startup grace before restarting for a command mismatch",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "uses startup grace before restarting for a command mismatch；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l228_constructor_startup_grace_mismatch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "uses sleep/wake grace before restarting for a missing updater process",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "uses sleep/wake grace before restarting for a missing updater process；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l258_real_sleep_wake_grace_missing_process"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L303:C3",
+            "title": "reports healthy when updater PID changed but process identity matches heartbeat",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "reports healthy when updater PID changed but process identity matches heartbeat；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l298_recovered_process_pid_matches_heartbeat"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L328:C3",
+            "title": "restarts when updater command does not look like the updater daemon",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "restarts when updater command does not look like the updater daemon；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l323_unrelated_command_restarts_with_failure_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L359:C3",
+            "title": "restarts when heartbeat is stale outside grace",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "restarts when heartbeat is stale outside grace；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l354_stale_heartbeat_outside_grace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L383:C3",
+            "title": "uses startup grace before restarting for stale heartbeat",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "uses startup grace before restarting for stale heartbeat；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l378_constructor_startup_grace_stale_heartbeat"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L400:C3",
+            "title": "uses sleep/wake grace before restarting for stale heartbeat",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "uses sleep/wake grace before restarting for stale heartbeat；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l395_real_sleep_wake_grace_stale_heartbeat"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L425:C3",
+            "title": "rate limits repeated restart attempts",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "rate limits repeated restart attempts；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l420_repeated_restarts_rate_limited"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L440:C3",
+            "title": "records updater failure alarm when restart command fails",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实隔离 .sh/.ps1 restart 子进程退出1，完整 UPDATER_FAILURE_ALARM/input_name/updater 和 restarted=false",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l435_real_failed_command_records_updater_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L462:C3",
+            "title": "enriches the failure alarm with the breadcrumb the script left behind",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "子进程实际写本次新鲜 BOM 面包屑，再用 stdout/stderr 分别写原始诊断；flat diag 与 PS5.1 Key/Value[] 两种实际文件都验证 stage/reason/init_type/definition_owner/exit/双流摘要，追加 task_state 带引号精确断言",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l457_fresh_bom_flat_and_ps51_array_diagnostics_and_both_streams"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L511:C3",
+            "title": "ignores a breadcrumb left by an earlier attempt",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实十分钟前面包屑 + 不存在的命令路径，实际 spawn/脚本加载错误不能取旧 register-denied/stale 作为本次原因，失败告警必须 stage=unknown",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l506_stale_prior_attempt_is_not_current_failure_evidence"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L541:C3",
+            "title": "reports a timeout kill as its own stage",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实生产默认 run_restart_command、restart_command=None、now_ms=None，90s 实际计时后杀死独立 hold child，检查 stage=timeout/killed=true/exit=ETIMEDOUT、新鲜持久文件和进程退出。源 Node mock 的 killed=true signal=SIGTERM 是 execFile 专有错误形状，原生 Tokio 跨平台以 killed=true+ETIMEDOUT 保持超时归因，不伪造信号或降低默认90s",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l536_default_ninety_second_timeout_kills_real_child_and_writes_stage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L569:C3",
+            "title": "attaches the timeout breadcrumb to cooldown SERVICE_NOT_RUNNING_ALARM",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "保留原60s cooldown，真实 hold 子进程超时后再 runCheck rate-limited，SERVICE_NOT_RUNNING_ALARM 附 last_restart_failure timeout；本项特意注入短 process timeout（Linux2s/Windows30s），不改变任何生产预算，不冒充默认90s证据。默认90s由 L536独立实际验证",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l564_real_timeout_breadcrumb_survives_original_sixty_second_cooldown"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L594:C3",
+            "title": "aborts an in-flight restart on stop without recording a failure alarm",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实默认90s命令启动后 stop，观察 child 真退出，pending 返回 restart-failed/aborted by stop/restarted=false，不能产生失败告警或timeout面包屑",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l589_stop_aborts_real_in_flight_child_without_failure_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L632:C3",
+            "title": "does not launch restart-updater after stop()",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "stop之后真实默认runCheck返回disabled/stopped，隔离命令调用文件不存在且无告警",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l627_stopped_watchdog_never_spawns_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L646:C3",
+            "title": "does not launch restart-updater if stop() raced during the health probe",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实 loopback TCP 健康探测I/O阻塞窗口里 stop，然后释放socket；保持 aborted/restarted=false/零实际restart子进程/零告警，不只计数虚拟callback",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l641_stop_during_real_health_socket_io_cannot_spawn"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L679:C3",
+            "title": "attaches the previous restart failure to the alarm raised before this restart",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "实际五分钟前 task-missing 面包屑在新restart之前富化 SERVICE_NOT_RUNNING_ALARM，仍调用真实成功子进程一次",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l674_previous_attempt_still_enriches_pre_restart_service_alarm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L705:C3",
+            "title": "defaults Windows pilot bin to loongsuite-pilot-service.ps1",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属：实际 default_pilot_bin 输出与 SystemRoot 已安装 PowerShell builder 完整程序/参数逐项核对，避免执行任何用户已安装服务；实际 PowerShell 调用由 L724独立隔离脚本验证。生产 CREATE_NO_WINDOW 保留，替代 Node windowsHide 机制",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l700_windows_default_service_script_and_installed_powershell_arguments"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L729:C3",
+            "title": "restarts through PowerShell on Windows",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属真实 PowerShell 运行带空格隔离路径脚本，必须只收 restart-updater 动作并生成实际PID调用记录，RestartAttempted，未mock执行平台/execFile",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l724_real_powershell_restarts_explicit_script_with_correct_action"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L759:C3",
+            "title": "does not require heartbeat pid to match pid file on Windows",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Windows专属实际 heartbeat/pid 文件不一致仍healthy，没有启动隔离restart子进程；liveness probe 是有意注入独立契约边界",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_failure_tests.rs",
+                "test": "failure_l754_windows_heartbeat_pid_mismatch_does_not_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L781:C3",
+            "title": "does nothing when disabled",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does nothing when disabled；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l776_disabled_checks_nothing"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L792:C3",
+            "title": "does not check or restart updater for an agentshell current version",
+            "suites": [
+              "UpdaterWatchdog"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not check or restart updater for an agentshell current version；真实时钟（now_ms=None）、真实独立heartbeat/current文件及隔离restart-updater脚本子进程，保留alarm类型/input_name和调用次数原断言。sleep/wake两项实际等待7秒；不降低生产90s命令预算。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/updater_watchdog_history_health_tests.rs",
+                "test": "health_l787_agentshell_checks_nothing"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/utils/uuid.test.ts",
+      "source_hash": "0a09eb7bd9b01abbf5343517e05027dbdf77ff3663c335510956c3cf8f0f1361",
+      "coverage": "complete",
+      "rust": [
+        "src/normalization/agent_input_dual_write.rs"
+      ],
+      "note": "Actual UUID-v5 implementation asserts exact RFC DNS namespace/name/result in addition to deterministic derived IDs. No new UUID algorithm or source-text surrogate.",
+      "cases": [
+        {
+          "source": {
+            "id": "L5:C3",
+            "title": "matches the RFC 4122 DNS example",
+            "suites": [
+              "uuidV5"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/normalization/agent_input_dual_write.rs",
+                "test": "derives_a_deterministic_uuid_v5_in_the_fixed_namespace"
+              }
+            ]
+          },
+          "behavior": "Actual UUID-v5 implementation asserts exact RFC DNS namespace/name/result in addition to deterministic derived IDs. No new UUID algorithm or source-text surrogate."
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/standard-event-validators.test.mjs",
+      "source_hash": "16171083e23a84e7fed8454231a09552dd776f1fb435bfeabcc33e7095ebc725",
+      "coverage": "complete",
+      "rust": [
+        "xtask/tests/field_coverage.rs"
+      ],
+      "note": "Actual compiled field-coverage CLI, PATH excludes runtimes, ten original event records with original fields and date; checks exact six table counts 2/2/2/2/1/1, successful exit and byte-identical input. No Node or copied classifier.",
+      "cases": [
+        {
+          "source": {
+            "id": "L15:C3",
+            "title": "combines model/tool aliases once per source record and reports both Agent events",
+            "suites": [
+              "standard event validation scripts"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/field_coverage.rs",
+                "test": "main_standard_event_l19_all_six_families_count_each_alias_once_and_leave_source_unchanged"
+              }
+            ]
+          },
+          "behavior": "Actual compiled field-coverage CLI, PATH excludes runtimes, ten original event records with original fields and date; checks exact six table counts 2/2/2/2/1/1, successful exit and byte-identical input. No Node or copied classifier."
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/hook-jsonl-flow.test.ts",
+      "source_hash": "808d519be8b9d152af27333cf4e637ef5c5270a584b12856e271aa2b4b7a8fd7",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae9. Six complete declaration bodies are byte-identical to EF; three differ only by enumerated genuine thin-Hook/collector plumbing, with all original fixture values/remaining assertions unchanged. The new empty-history assertion is explicitly executed in Native l211. Existing immutable literal transcript fixture remains unchanged. Actual Native Bash/collector boundaries replace old Node helper copying without retirement of product assertions. Linux actual execution and Unix-only shell applicability remain separate from Windows physical execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L83:C3",
+            "title": "should perform complete read → normalize → offset persist flow",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual QoderTrace input baselines empty real file, reads canonical call/result pair, checks event/agent/session/tool/status and external schema required fields, full byte offset+lastFile saved; same Store reread yields0. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l76_l161_real_qoder_hook_read_normalize_schema_persist_no_replay_and_incremental_appends"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L168:C3",
+            "title": "should handle incremental appends correctly",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual canonical appended waves collected by new QoderTrace objects same Store: exact single event, expected tool name and second event id retained. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l76_l161_real_qoder_hook_read_normalize_schema_persist_no_replay_and_incremental_appends"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L218:C3",
+            "title": "should consume transcript rows forwarded by qoder-loongsuite-pilot-hook without agent argument",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound current qoder shell with no agent argument -> native processor -> real JSONL -> actual QoderTraceInput; stdout exactly{}, legacy raw keys absent, exact worker Resource object/name preserved and synthetic token absent. Main explicitly moves transcript work out of the Hook into real Collector: retained raw fixture/body/identity/tool/turn assertions are byte-identical after reversing only enumerated collector plumbing. Shipping Rust shell publishes bounded notices and the existing contract executes actual QoderTraceInput, not an old JS Collector. Main L218 empty pre-existing history is now explicitly asserted both immediately after the real Hook and after real collector collection.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l211_bound_qoder_shell_default_agent_native_processor_real_input_preserves_worker_resource"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L351:C3",
+            "title": "keeps delayed IDE assistant text and tool_use in the same LLM step",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "AST-extracted original15-record delayed IDE transcript -> bound native shell; exact native username/email precedence without user.uid;3requests/3responses, equal step sets, Write/Bash on first/second respective LLM steps. Main explicitly moves transcript work out of the Hook into real Collector: retained raw fixture/body/identity/tool/turn assertions are byte-identical after reversing only enumerated collector plumbing. Shipping Rust shell publishes bounded notices and the existing contract executes actual QoderTraceInput, not an old JS Collector. Main L218 empty pre-existing history is now explicitly asserted both immediately after the real Hook and after real collector collection.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l344_bound_qoder_shell_retains_delayed_ide_tool_step_and_native_user_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L522:C3",
+            "title": "QoderTraceInput missing checkpoint: baselines existing history and reads later appends",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual three preexisting Qoder turns including original user prompts/latest labels baseline0, offsetexactEOF; later new request/response appended and both exactIDs emitted. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l514_missing_qoder_checkpoint_baselines_all_three_historical_turns_then_reads_new_pair"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L664:C3",
+            "title": "KiroCliLogInput cold start: only reports last turn when state is empty",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Kiro input fresh Store/real daily6records retains only exactlast kiro-latest pair, savescomplete offset+lastFile; recreated input emits0. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l656_real_kiro_cold_start_keeps_only_last_turn_and_advances_complete_byte_offset"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L721:C3",
+            "title": "should split multi-turn transcript into separate turns with correct user inputs",
+            "suites": [
+              "Hook JSONL integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "AST-extracted original3+4 record waves through two actual bound shell invocations and native transcript cursor; exactlytwo distinct human turn IDs and exact hello/Chinese prompt arrays. Main explicitly moves transcript work out of the Hook into real Collector: retained raw fixture/body/identity/tool/turn assertions are byte-identical after reversing only enumerated collector plumbing. Shipping Rust shell publishes bounded notices and the existing contract executes actual QoderTraceInput, not an old JS Collector. Main L218 empty pre-existing history is now explicitly asserted both immediately after the real Hook and after real collector collection.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l713_bound_qoder_shell_real_transcript_cursor_preserves_two_distinct_human_turns"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L865:C3",
+            "title": "should keep fail-open behavior for invalid json payload",
+            "suites": [
+              "Cursor hook script integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound Cursor shell malformedstdin returns0 and stdout{}, writesnohistory, exactlyone parse/invalid_json diagnostic with positive inputbytes and exact64lowerhex SHA256 syntax. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l856_bound_cursor_shell_bad_json_failopens_with_hashed_parse_diagnostic"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L883:C3",
+            "title": "should keep fail-open behavior when log path is not writable",
+            "suites": [
+              "Cursor hook script integration flow"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual bound Cursor shell points at real ordinary-file data path and retains success/stdout{} fail-open protocol. Main declaration CallExpression is byte-identical; only source position changed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/hook_jsonl_integration_history.rs",
+                "test": "l874_bound_cursor_shell_unwritable_data_path_retains_json_failopen_protocol"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/codex-sls-cancellation.test.ts",
+      "source_hash": "898753dda856b504d590341a871d40f89400aaf3d887d8908b84d6e4f361fa06",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source/AST; this full file is byte-identical at f84,2b24,346,Dae, but absent at EF. Full actual Native assertions were read and re-run, not accepted by title. Linux GNU/glibc2.34 is the actual execution platform; macOS/Windows applicability does not claim a physical run. Original explicit time/size thresholds are retained; no personal/remote SLS data or Node product runtime.",
+      "cases": [
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "destroys an in-flight %s request and releases abort listeners",
+            "suites": [
+              "Codex SLS stop cancellation through real transports"
+            ],
+            "parameters": [
+              "it.each(['ak', 'apiKey', 'webtracking'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual kernel loopback sends for all original3 modes(ak/apiKey/webtracking), actual InputManager.stop_input drops owned in-flight transport futures within original1000ms, peer observes disconnection, exactly1 request/no retry,0 backend acceptance and old disk checkpoint. A 60s transport timeout strengthens the control that success is cancellation, not natural timeout; the actual cancellation/readiness bound remains exactly1s. JS AbortSignal listener introspection has no ambient listener list in Rust: owned future destruction and actual socket closure prove the native replacement lifecycle; no Node handler is restored.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_ak_headers_and_preserves_source_checkpoint"
+              },
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_api_key_headers_and_preserves_source_checkpoint"
+              },
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_webtracking_headers_and_preserves_source_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L60:C3",
+            "title": "cancels a partial %s response body without abandoning its socket",
+            "suites": [
+              "Codex SLS stop cancellation through real transports"
+            ],
+            "parameters": [
+              "it.each(['ak', 'apiKey', 'webtracking'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All original3 real transports receive actual503 partial chunked body, then the manager cancels before body completion. Original1s cancellation and close bounds hold; exactly1 request, no later retry, old durable source offset and no accepted SLS entry. Native receiver phases are observed before cancellation, with no synthetic completed HTTP response used as a stand-in.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_ak_partial_response_body"
+              },
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_api_key_partial_response_body"
+              },
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_webtracking_partial_response_body"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "releases an unused successful webtracking response body before clearing its timeout",
+            "suites": [
+              "Codex SLS stop cancellation through real transports"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual WebTracking receives a successful200 response with an intentionally unfinished chunked body; real SlsFlusher completes within1s, increments out_entries exactly1 and closes that unused body/socket without waiting for the60s transport timeout. Exactly1 request. Future ownership replaces JS listener detachment and leaves no outstanding socket.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_successful_webtracking_releases_unused_body_without_waiting_for_timeout"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L87:C3",
+            "title": "InputManager.stopInput cancels the actual SLS send and keeps the source checkpoint before it",
+            "suites": [
+              "Codex SLS stop cancellation through real transports"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput collect advances only in-memory cursor to1; real InputManager and API-key SLS transport are pending on the loopback socket. stop_input within1s stops the source, aborts the actual request, gives exactly1 collect/request, freezes failed acceptance and keeps the file checkpoint at0. No explicit mock flusher/old Collector.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_sls_cancellation.rs",
+                "test": "native_codex_stop_cancels_api_key_headers_and_preserves_source_checkpoint"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/performance/copilot-disk-governance.perf.test.ts",
+      "source_hash": "e46cc4b79345c2d0e0a6156b571f3cb33880cc918ad4c28804d2f0da3baf8cbf",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source/AST; this full file is byte-identical at f84,2b24,346,Dae, but absent at EF. Full actual Native assertions were read and re-run, not accepted by title. Linux GNU/glibc2.34 is the actual execution platform; macOS/Windows applicability does not claim a physical run. Original explicit time/size thresholds are retained; no personal/remote SLS data or Node product runtime.",
+      "cases": [
+        {
+          "source": {
+            "id": "L91:C3",
+            "title": "rejects a large pre-adoption backlog and does not reopen it on restart/index rebuild",
+            "suites": [
+              "Copilot disk governance stress (opt in; all generated files are removed)"
+            ],
+            "parameters": [
+              "describe.skipIf(!enabled)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Real Copilot input/source-index SQLite→InputManager→real JSONL with exactly1024 historical64KiB interactions,40 old cycles,0 output and at most2 historical records; delete only private index/WAL/SHM,40 rebuilt cycles still0; append128 new16KiB turns to same session,140 cycles deliver exactly128 with positive output and every file<=1MiB. Original180s scope bound preserved and actual run is not skipped behind a JS opt-in flag.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/disk_governance_tests.rs",
+                "test": "backlog_of_1024_old_interactions_never_reopens_and_128_new_same_session_turns_are_delivered"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L124:C3",
+            "title": "keeps controlled post-boundary replay linear, segmented and duplicate-free at 128/256/512 turns",
+            "suites": [
+              "Copilot disk governance stress (opt in; all generated files are removed)"
+            ],
+            "parameters": [
+              "describe.skipIf(!enabled)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Original128/256/512 turns,16KiB payload, turns+8 cycles, exact delivered counts,0 duplicate event IDs and5 events per turn; every file<=1MiB; stop/restart+5 cycles leave exact file/byte state unchanged; each adjacent output ratio<2.05. Real input/index/manager/writer, original180s overall scope. V8 RSS/event-loop diagnostics were report-only, not product behavior or passing assertions; Native timing is reported separately without restoring Node.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/disk_governance_tests.rs",
+                "test": "replay_at_128_256_512_turns_is_segmented_duplicate_free_and_linear"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L155:C3",
+            "title": "preserves records under 64 concurrent producers and repeated rotation",
+            "suites": [
+              "Copilot disk governance stress (opt in; all generated files are removed)"
+            ],
+            "parameters": [
+              "describe.skipIf(!enabled)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Exactly64 real Tokio producers per wave send8192 records using2048 repetitions of Chinese character界 through actual JsonlFlusher with1MiB rotation. Read every physical output line, require8192 records/8192 unique IDs and every segment<=1MiB. Original180s bound; no mocked filesystem/writer or smaller stress fixture.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/disk_governance_tests.rs",
+                "test": "sixty_four_jsonl_producers_preserve_8192_utf8_records_through_repeated_rotation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L176:C3",
+            "title": "exports a 64-step tool interaction with exact native usage and bounded debug files",
+            "suites": [
+              "Copilot disk governance stress (opt in; all generated files are removed)"
+            ],
+            "parameters": [
+              "describe.skipIf(!enabled)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Original64 tool steps and63 tools from actual Native Copilot interaction parser, records>64*3, real OTLP flusher and default converter, only in-memory exporter sink. Exactly64 LLM spans/6400 native input tokens; actual debug files have positive bytes and each<=100MiB. Original180s bound; no fabricated usage inferred from text.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/disk_governance_tests.rs",
+                "test": "sixty_four_tool_steps_export_native_tokens_once_and_bound_debug_files"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L225:C3",
+            "title": "reclaims today closed segments and >3GiB legacy files using sparse boundary fixtures",
+            "suites": [
+              "Copilot disk governance stress (opt in; all generated files are removed)"
+            ],
+            "parameters": [
+              "describe.skipIf(!enabled)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Exact original sparse boundary fixture:3 copilot-today files in output/otlp-debug/otlp-failed each3GiB+1, plus128 today-closed output segments of32MiB each. Real LogRetentionService run_cleanup with original21600000ms interval/7-day options removes every giant mirror,0 errors and leaves total output<=production2GiB cap. Original60000ms budget. Windows uses official FSCTL_SET_SPARSE on private files; these are logical size boundaries, not claimed physical write throughput.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/log_retention_history_tests.rs",
+                "test": "copilot_disk_stress_exact_three_giant_mirrors_and_128_today_closed_segments"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/codex-http-recovery.test.ts",
+      "source_hash": "5b9ea8c753652d60db5781e17ba3d28700ab3073f3e89e29ac0f1e68116df0a2",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact5 Dae declarations, full file byte-identical at f84/2b24/346/Dae and absent at EF. Six actual nonignored Native functions expand both stop modes. The source is intentionally deterministic as in the original; network, checkpoint IO, manager, timer and both output backends are production. Actual Linux/glibc2.34 is separate from applicable macOS/Windows. No production changes or runtime/API/dependency test switch.",
+      "cases": [
+        {
+          "source": {
+            "id": "L101:C3",
+            "title": "automatically retries a 503 with stable identity and saves its checkpoint only after acknowledgement",
+            "suites": [
+              "Codex HTTP recovery through the input/checkpoint/output pipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual HostedInput collect/save, InputManager, real HttpFlusher25ms timer+100ms request timeout and real JSONL fanout. At least2 actual503 attempts keep identical event/invocation/peer payload, startup returns under1s while disk cursor remains0 and JSONL contains the event once. Merely flip the loopback receiver healthy, with no explicit flush/restart; the existing timer accepts exactly1 copy and a3s bounded save commits1. Later HTTP flush does not duplicate acceptance or JSONL.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_503_timer_retries_stable_identity_and_commits_only_after_acknowledgement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C3",
+            "title": "recovers after a real localhost connection refusal without freezing the shared checkpoint",
+            "suites": [
+              "Codex HTTP recovery through the input/checkpoint/output pipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual connection refusal against a released private loopback port completes while JSONL has the event and disk remains0; source save is not frozen. Rebind a real receiver on that same port; timer retry accepts the exact event once,3s bounded save commits1, JSONL remains single. No fake network error or always-running receiver.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_real_connection_refusal_recovers_without_freezing_shared_checkpoint"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "%s cancels an in-flight HTTP request and preserves the old cursor",
+            "suites": [
+              "Codex HTTP recovery through the input/checkpoint/output pipeline"
+            ],
+            "parameters": [
+              "it.each(['stopInput', 'stopAll'] as const)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Both original stopInput/stopAll modes each cancel an actually connected but unresponsive socket with60000ms natural request timeout. Original1000ms shutdown/readiness deadline remains, peer observes cancellation, source is not running, disk stays0 and later HTTP flush cannot retry that cancelled request. Exactly1 actual request per mode.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_stop_input_cancels_the_real_hung_socket_without_advancing_source"
+              },
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_stop_all_cancels_the_real_hung_socket_without_advancing_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L201:C3",
+            "title": "can stop another input waiting on the shared checkpoint while Codex HTTP recovery remains pending",
+            "suites": [
+              "Codex HTTP recovery through the input/checkpoint/output pipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual other Qoder HostedInput shares the StateStore with a Codex HTTP503 acceptance hold. Both startup calls return under1s; other in-memory cursor becomes1 but both disk cursors stay0. Stopping only the other input within1s leaves Codex running and its HTTP recovery owned, with both disks unchanged. Healthy receiver then accepts and3s bounded save commits both to1. Owned save/future lifecycle is exercised, not a private direct collector call.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_other_input_stop_releases_only_its_wait_and_leaves_codex_recovery_owned"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L255:C3",
+            "title": "refreshes the input cancellation signal when a successfully drained input starts again",
+            "suites": [
+              "Codex HTTP recovery through the input/checkpoint/output pipeline"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Same actual HostedInput/InputManager restarts after successful first delivery and stop. Fresh cancellation ownership permits both event-first-start and event-second-start exactly once across real HTTP and JSONL; disk cursor advances to2. Original1s startup/shutdown/save readiness controls remain. No old cancelled token or synthetic successful output future.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/codex_http_recovery_history.rs",
+                "test": "main_http_successful_stop_restart_renews_cancellation_for_both_new_batches"
               }
             ]
           }

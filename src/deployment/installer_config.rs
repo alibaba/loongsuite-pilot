@@ -449,10 +449,18 @@ fn merge_agents(config: &mut Map<String, Value>, options: &Options) -> Result<()
     Ok(())
 }
 
-// Render only fixed public enum values. Credentials, paths and unknown values
-// stay redacted even when an existing config contains malformed/user-defined data.
+// Render fixed public enums and validated Dashboard ports only. Credentials,
+// paths and malformed/user-defined values remain redacted.
 fn safe_diff_value(field: &str, value: &Value) -> Option<String> {
     let allowed: &[&str] = match field {
+        "dashboard.port" => {
+            return value
+                .as_f64()
+                .filter(|port| {
+                    port.is_finite() && port.fract() == 0.0 && *port >= 1.0 && *port <= 65535.0
+                })
+                .map(|port| (port as u16).to_string());
+        }
         "mask.mode" | "interceptor.mode" => &["all", "custom", "none"],
         "sls.mode" => &["ak", "apiKey", "webtracking"],
         "mask.replacementMode" => &["placeholder", "preview"],
@@ -479,7 +487,7 @@ fn safe_diff_value(field: &str, value: &Value) -> Option<String> {
 }
 
 pub(super) fn changed_fields(old: &Value, next: &Value) -> String {
-    // Only known enum/type values may be displayed; all other values stay hidden.
+    // Display only known enum/type values and checked ports; keep other values hidden.
     let fields = [
         "sls.endpoint",
         "sls.project",
@@ -692,6 +700,35 @@ mod tests {
         for secret in ["old-secret", "new-secret", "old-prefix", "evil"] {
             assert!(!diff.contains(secret));
         }
+    }
+    #[test]
+    fn dashboard_port_diff_requires_two_checked_ports_and_never_renders_other_numeric_fields() {
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(65536),
+            json!(1.5),
+            json!(1e100),
+            Value::Null,
+            json!(true),
+            json!("8765\nprivate-string-secret"),
+            json!([8765,{"secret":"private-array-secret"}]),
+            json!({"port":8765,"secret":"private-object-secret"}),
+        ] {
+            for (before, after) in [(json!(8765), value.clone()), (value, json!(9000))] {
+                let diff = changed_fields(
+                    &json!({"dashboard":{"port":before}}),
+                    &json!({"dashboard":{"port":after}}),
+                );
+                assert_eq!(diff, "dashboard.port: 已变更（值不显示）");
+            }
+        }
+        let before = json!({"dashboard":{"port":8765.0},"sls":{"accessKeySecret":12345}});
+        let after = json!({"dashboard":{"port":9000},"sls":{"accessKeySecret":23456}});
+        let diff = changed_fields(&before, &after);
+        assert!(diff.contains("dashboard.port: 8765 -> 9000"));
+        assert!(diff.contains("sls.accessKeySecret: 已变更（值不显示）"));
+        assert!(!diff.contains("12345") && !diff.contains("23456"));
     }
 }
 

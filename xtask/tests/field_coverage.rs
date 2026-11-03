@@ -285,3 +285,82 @@ fn native_field_cli_groups_aliases_and_reports_invocation_coverage_without_rewri
         contents
     );
 }
+
+/// Exact main/standard-event-validators contract: exercise the compiled CLI on all ten
+/// historical/standard names, including both invocation audit events.
+#[test]
+fn main_standard_event_l19_all_six_families_count_each_alias_once_and_leave_source_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let names = [
+        "llm.request",
+        "llm.response",
+        "tool.call",
+        "tool.result",
+        "gen_ai.model.request",
+        "gen_ai.model.response",
+        "gen_ai.tool.call",
+        "gen_ai.tool.result",
+        "gen_ai.agent.invoke",
+        "gen_ai.agent.result",
+    ];
+    let mut original = String::new();
+    for (index, name) in names.into_iter().enumerate() {
+        let event = json!({
+            "event.id": format!("event-{index}"), "event.name": name, "user.id": "test-user",
+            "gen_ai.agent.type": "codex", "gen_ai.session.id": "child-session",
+            "gen_ai.turn.id": "child-turn", "gen_ai.step.id": "child-step",
+            "gen_ai.provider.name": "openai", "gen_ai.request.model": "test-model",
+            "gen_ai.input.messages_delta": [{"role": "user", "parts": []}],
+            "gen_ai.response.id": "response", "gen_ai.response.model": "test-model",
+            "gen_ai.response.finish_reasons": ["stop"],
+            "gen_ai.output.messages": [{"role": "assistant", "parts": [{"type": "text", "content": "test"}]}],
+            "gen_ai.usage.input_tokens": 1, "gen_ai.usage.output_tokens": 1,
+            "gen_ai.tool.name": "test-tool", "gen_ai.tool.call.id": "call",
+            "gen_ai.tool.call.arguments": {}, "gen_ai.tool.call.duration": 1,
+            "gen_ai.agent.invocation.id": "outgoing", "gen_ai.agent.parent.invocation.id": "incoming",
+        });
+        original.push_str(&event.to_string());
+        original.push('\n');
+    }
+    let directory = root.path().join(".loongsuite-pilot/logs/output");
+    fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("codex-2026-10-16.jsonl");
+    fs::write(&source, &original).unwrap();
+    let output = invoke(
+        root.path(),
+        &[
+            "--agents",
+            "codex",
+            "--date",
+            "2026-10-16",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let tables = report["tables"].as_array().unwrap();
+    assert_eq!(tables.len(), 6);
+    let counts: std::collections::BTreeMap<_, _> = tables
+        .iter()
+        .map(|table| {
+            (
+                table["eventName"].as_str().unwrap(),
+                table["rows"][0]["total"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("llm.request", 2),
+            ("llm.response", 2),
+            ("tool.call", 2),
+            ("tool.result", 2),
+            ("gen_ai.agent.invoke", 1),
+            ("gen_ai.agent.result", 1),
+        ]
+        .into()
+    );
+    assert_eq!(fs::read(&source).unwrap(), original.as_bytes());
+}
