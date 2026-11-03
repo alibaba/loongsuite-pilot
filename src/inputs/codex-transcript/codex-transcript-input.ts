@@ -891,13 +891,15 @@ export class CodexTranscriptInput extends BaseInput {
 
           if (terminalTurnId && checkpoint.activeTurn.turnId === terminalTurnId) {
             if (recovered.kind === 'unparseable') {
+              const now = Date.now();
               const pending = newPendingTerminal(
                 terminalTurnId,
                 nextScanOffset,
                 recovered.diagnostics.sourceRecordCount,
+                now,
               );
               checkpoint.pendingTerminal = pending;
-              this.noteTerminalFailure(pending, stat);
+              this.noteTerminalFailure(pending, stat, now);
               const startOffset = checkpoint.activeTurn.startOffset;
               const deferred = this.deferPendingTerminal(checkpoint);
               this.logTerminalFailure(filePath, checkpoint, pending, { startOffset, phase: 'terminal', deferred });
@@ -1013,7 +1015,7 @@ export class CodexTranscriptInput extends BaseInput {
         lastAttemptAtMs: now,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
       };
-      this.noteTerminalFailure(checkpoint.pendingTerminal, stat);
+      this.noteTerminalFailure(checkpoint.pendingTerminal, stat, now);
       const failedPending = checkpoint.pendingTerminal;
       const startOffset = checkpoint.activeTurn.startOffset;
       const deferred = this.deferPendingTerminal(checkpoint);
@@ -1060,10 +1062,10 @@ export class CodexTranscriptInput extends BaseInput {
       && Date.now() >= pending.failure.retryAtMs);
   }
 
-  private noteTerminalFailure(pending: CodexPendingTerminalTurn, stat: fsSync.Stats): void {
+  private noteTerminalFailure(pending: CodexPendingTerminalTurn, stat: fsSync.Stats, now: number): void {
     const delayMs = Math.min(RECOVERY_RETRY_MAX_MS,
       Math.max(RECOVERY_RETRY_MIN_MS, (pending.failure?.delayMs ?? RECOVERY_RETRY_MIN_MS / 2) * 2));
-    pending.failure = { sourceVersion: sourceVersion(stat), delayMs, retryAtMs: Date.now() + delayMs };
+    pending.failure = { sourceVersion: sourceVersion(stat), delayMs, retryAtMs: now + delayMs };
   }
 
   private deferPendingTerminal(checkpoint: CodexTranscriptCheckpoint): boolean {
@@ -1094,7 +1096,7 @@ export class CodexTranscriptInput extends BaseInput {
         item.pendingTerminal.firstPendingAtMs ??= now;
         item.pendingTerminal.lastAttemptAtMs = now;
         item.pendingTerminal.sourceRecordCount = result.diagnostics.sourceRecordCount;
-        this.noteTerminalFailure(item.pendingTerminal, stat);
+        this.noteTerminalFailure(item.pendingTerminal, stat, now);
         this.logTerminalFailure(filePath, checkpoint, item.pendingTerminal,
           { startOffset: item.activeTurn.startOffset, phase: 'deferred', deferred: true });
       } else {
@@ -2516,7 +2518,8 @@ export class CodexTranscriptInput extends BaseInput {
       const active = parseActiveTranscriptTurn(item?.activeTurn);
       const pending = parsePendingTerminal(item?.pendingTerminal);
       if (active && pending && active.turnId === pending.turnId
-        && pending.terminalEndOffset >= active.startOffset) {
+        && pending.terminalEndOffset >= active.startOffset
+        && pending.terminalEndOffset <= value.scanOffset) {
         deferredTerminals.push({ activeTurn: active, pendingTerminal: pending });
       }
     }
@@ -2575,7 +2578,8 @@ export class CodexTranscriptInput extends BaseInput {
       pendingTerminal ??= parsePendingTerminal(newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0));
     }
     if (pendingTerminal && (!activeTurn || pendingTerminal.turnId !== activeTurn.turnId
-      || pendingTerminal.terminalEndOffset < activeTurn.startOffset)) pendingTerminal = null;
+      || pendingTerminal.terminalEndOffset < activeTurn.startOffset
+      || pendingTerminal.terminalEndOffset > value.scanOffset)) pendingTerminal = null;
     const bootstrapRecord = asRecord(value.forkBootstrap);
     const bootstrapTailCandidate = parseActiveTranscriptTurn(bootstrapRecord?.tailCandidate);
     const bootstrapState = bootstrapRecord?.state === 'baseline-tail'
@@ -3624,8 +3628,8 @@ function newPendingTerminal(
   turnId: string,
   terminalEndOffset: number,
   sourceRecordCount: number,
+  now = Date.now(),
 ): CodexPendingTerminalTurn {
-  const now = Date.now();
   return {
     turnId,
     terminalEndOffset,

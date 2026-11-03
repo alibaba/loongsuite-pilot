@@ -98,7 +98,9 @@ export interface CodexPendingTerminalTurn {
   /** A failed version is retried only after a source change and bounded backoff. */
   failure?: {
     sourceVersion: string;
+    /** Earliest retry time in epoch milliseconds; the source must also change. */
     retryAtMs: number;
+    /** Current exponential backoff delay in milliseconds (1,000–60,000). */
     delayMs: number;
   };
 }

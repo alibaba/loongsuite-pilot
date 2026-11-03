@@ -679,6 +679,55 @@ it('accepts zero as a valid terminal boundary', async () => {
   expect(f.probe.readCheckpoint(key(f)).scanOffset).toBe(0);
 });
 
+it.each(['pending', 'deferred', 'legacy-pending'])(
+  'rejects %s terminal boundaries beyond the persisted scan cursor', async location => {
+    const f = await pendingFixture(1024);
+    for (const end of [f.end + 1, Number.MAX_SAFE_INTEGER]) {
+      const cp = checkpoint(f);
+      const pending = { turnId: 'old', terminalEndOffset: end };
+      cp.pendingTerminal = location === 'pending' ? pending : null;
+      cp.deferredTerminals = location === 'deferred'
+        ? [{ activeTurn: { ...cp.activeTurn! }, pendingTerminal: pending }] : [];
+      // Older captured checkpoints migrate through the same pending validator.
+      cp.pendingSubagent = location === 'legacy-pending' ? pending as any : null;
+      f.state.update(key(f), { extra: { codexTranscript: cp } });
+      await f.state.save(); await f.state.load();
+      const parsed = f.probe.readCheckpoint(key(f));
+      expect(parsed.pendingTerminal).toBeNull();
+      expect(parsed.deferredTerminals ?? []).toEqual([]);
+      expect(parsed.activeTurn).toMatchObject({ turnId: 'old' });
+    }
+    const recover = vi.spyOn(f.probe, 'recoverTurnSegment');
+    await processFile(f);
+    expect(recover.mock.calls.every(call => (call[2] as number) <= (fsSync.statSync(f.file)).size)).toBe(true);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each(['terminal', 'pending', 'deferred'])(
+  'uses one failure timestamp for %s retry diagnostics and deadline', async phase => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f);
+    if (phase === 'deferred') {
+      cp.deferredTerminals = [{ activeTurn: cp.activeTurn!, pendingTerminal: cp.pendingTerminal! }];
+      cp.activeTurn = null; cp.pendingTerminal = null;
+    } else if (phase === 'terminal') {
+      cp.pendingTerminal = null;
+      // Exercise the normal terminal failure branch without relying on an
+      // incidental source shape to make conversion fail.
+      vi.spyOn(f.probe, 'recoverTurnSegment').mockResolvedValueOnce({
+        kind: 'unparseable', entries: [], diagnostics: { sourceRecordCount: 0 },
+      });
+    }
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => ++clock);
+    await processFile(f);
+    const pending = checkpoint(f).deferredTerminals![0]!.pendingTerminal;
+    expect(pending.firstPendingAtMs).toBe(pending.lastAttemptAtMs);
+    expect(pending.failure!.retryAtMs).toBe(pending.lastAttemptAtMs! + pending.failure!.delayMs);
+  },
+);
+
 it('recovers a valid legacy terminal directly without creating a deferred range', async () => {
   const f = await fixture(); const text = completed('normal'); await fs.writeFile(f.file, text);
   const stat = await fs.stat(f.file);
