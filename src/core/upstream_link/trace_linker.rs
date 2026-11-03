@@ -12,6 +12,8 @@ use super::super::{fields, logger};
 use super::correlation_store::{valid_content_hash, CorrelationStore};
 
 const TRACEPARENT_RE: &str = r"(?i)^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$";
+static TRACEPARENT_REGEX: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(TRACEPARENT_RE).ok());
 
 struct ResolveState {
     resolved: bool,
@@ -280,8 +282,7 @@ fn has_delegated_parent(entry: &AgentActivityEntry) -> bool {
 }
 
 fn parse_traceparent(value: &str) -> Option<(String, String)> {
-    let regex = regex::Regex::new(TRACEPARENT_RE).ok()?;
-    let caps = regex.captures(value.trim())?;
+    let caps = TRACEPARENT_REGEX.as_ref()?.captures(value.trim())?;
     let trace_id = caps.get(1)?.as_str().to_ascii_lowercase();
     let span_id = caps.get(2)?.as_str().to_ascii_lowercase();
     if trace_id.chars().all(|ch| ch == '0') || span_id.chars().all(|ch| ch == '0') {
