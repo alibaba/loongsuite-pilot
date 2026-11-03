@@ -13,6 +13,9 @@ if ([string]::IsNullOrWhiteSpace($target)) {
   throw "local worker directory path is empty"
 }
 
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+
 $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowedSids = @($currentSid, "S-1-5-18", "S-1-5-32-544") | Select-Object -Unique
 $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl

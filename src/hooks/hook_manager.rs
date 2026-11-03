@@ -1388,7 +1388,8 @@ mod tests {
 
         let qwen = &HookManager::build_qwen_work_cn_hooks(Some("/opt/loongsuite-pilot"))[0];
         assert_eq!(qwen.agent_id, "qwen-work-cn");
-        assert!(qwen.settings_path.contains(".qwenworkcn/settings.json"));
+        assert!(std::path::Path::new(&qwen.settings_path)
+            .ends_with(std::path::Path::new(".qwenworkcn").join("settings.json")));
         assert_eq!(
             qwen.hook_json_path,
             vec!["hooks".to_string(), "Stop".to_string()]

@@ -848,7 +848,7 @@ mod tests {
         let actual = (ops.read_command)(std::process::id()).unwrap();
         assert_eq!(
             std::fs::canonicalize(actual).unwrap(),
-            std::env::current_exe().unwrap()
+            std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
         assert!((ops.alive)(std::process::id()));
         assert!(!(ops.alive)(u32::MAX));
@@ -1037,7 +1037,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old = dir
             .path()
-            .join("cache/versions/old/app/macos-status-bar/bin/darwin-arm64")
+            .join("cache")
+            .join("versions")
+            .join("old")
+            .join("app")
+            .join("macos-status-bar")
+            .join("bin")
+            .join("darwin-arm64")
             .join(BINARY_NAME);
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         std::fs::write(&old, "old").unwrap();
@@ -1087,13 +1093,20 @@ mod tests {
     async fn force_stop_escalates_and_failed_stop_retains_record() {
         for reject_kill in [false, true] {
             let dir = tempfile::tempdir().unwrap();
+            let executable = dir
+                .path()
+                .join("owned")
+                .join("app")
+                .to_string_lossy()
+                .into_owned();
             let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let mut ops = ProcessOps::inert(true);
             let state = running.clone();
+            let read_executable = executable.clone();
             ops.read_command = Arc::new(move |_| {
                 state
                     .load(std::sync::atomic::Ordering::SeqCst)
-                    .then(|| "/owned/app".into())
+                    .then(|| read_executable.clone())
             });
             let state = running.clone();
             ops.alive = Arc::new(move |_| state.load(std::sync::atomic::Ordering::SeqCst));
@@ -1106,7 +1119,7 @@ mod tests {
                 }
             });
             let manager = packaged_manager(dir.path(), ops);
-            manager.record_process("/owned/app", 42).await.unwrap();
+            manager.record_process(&executable, 42).await.unwrap();
             let result = manager.stop("test").await;
             assert_eq!(result.is_err(), reject_kill);
             if reject_kill {

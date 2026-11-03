@@ -247,19 +247,20 @@ fn status_powershell_case_insensitive_values_reach_native_config_as_booleans() {
 fn status_original_public_powershell_argument_and_writer_matrix_in_both_shells() {
     for shell in windows_shells() {
         let f = Fixture::new();
-        let source = include_str!("../../deploy/installer-opensource.ps1");
+        let source = include_str!("../../deploy/installer-opensource.ps1").replace("\r\n", "\n");
         let mut child = source
-            .trim_start_matches('\u{feff}')
-            .split_once("# Resolve package URL")
-            .unwrap()
+            .split_once("\nfunction Detect-Lang {")
+            .expect("actual public initialization before Detect-Lang")
             .0
+            .trim_start_matches('\u{feff}')
             .to_string();
+        child.push('\n');
         for name in [
             "Invoke-InstallerHelper",
             "Get-InstallConfigJson",
             "Write-Config",
         ] {
-            child.push_str(&function(source, &format!("function {name} {{")));
+            child.push_str(&function(&source, &format!("function {name} {{")));
         }
         child.push_str(
             r#"

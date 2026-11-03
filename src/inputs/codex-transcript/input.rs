@@ -354,6 +354,9 @@ impl InputBody for CodexTranscriptBody {
     }
 
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        // A restart must baseline the actual directory generation before any
+        // output; equal directory timestamps do not prove equal inventories.
+        self.with_shared(|shared| shared.cached_default = None);
         self.engine().restore_delegation_state(rt);
         self.engine().discard_legacy_global_turn_registry(rt);
         let discovered = self.engine().discover_session_files().await;
@@ -450,6 +453,10 @@ impl InputBody for CodexTranscriptBody {
         let mut discovered;
         let mut skip = std::collections::HashSet::new();
         if plan.full {
+            // Full collection owns rediscovery. Coarse or restored directory
+            // clocks must not hide new rollouts; targeted wakeups retain the
+            // existing direct-path fast path and all owner/body caches.
+            self.with_shared(|shared| shared.cached_default = None);
             discovered = self.engine().discover_session_files().await;
             let paths: std::collections::HashSet<String> = discovered
                 .iter()

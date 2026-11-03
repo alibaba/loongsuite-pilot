@@ -382,7 +382,9 @@ async fn real_path_cache_revalidates_missing_files_and_changed_size_and_mtime() 
         .unwrap();
     let modified = std::fs::metadata(&path).unwrap().modified().unwrap() + Duration::from_secs(1);
     image(root.path(), "later.png", b"version-2-different-bytes");
-    std::fs::File::open(&path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(modified))
         .unwrap();

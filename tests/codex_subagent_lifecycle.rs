@@ -164,7 +164,8 @@ impl Harness {
     }
     async fn with_wire_endpoint(wire_endpoint: Option<String>) -> Self {
         let mut harness = Self {
-            root: tempfile::tempdir().unwrap(),
+            root: tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+                .unwrap(),
             spans: Arc::new(Mutex::new(Vec::new())),
             emitted: Arc::new(Mutex::new(Vec::new())),
             running: None,
@@ -297,7 +298,10 @@ impl Harness {
     async fn write(&self, session: &str, records: Vec<String>, initial_turn: Option<&str>) {
         let root = self.root.path();
         let file = root
-            .join("sessions/2026/08/07")
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("07")
             .join(format!("rollout-{session}.jsonl"));
         tokio::fs::create_dir_all(file.parent().unwrap())
             .await
@@ -335,9 +339,10 @@ impl Harness {
         bounded(running.state.save()).await.unwrap();
     }
     async fn logs(&self) -> Vec<Value> {
-        let raw = tokio::fs::read_to_string(self.root.path().join("output/codex-all.jsonl"))
-            .await
-            .unwrap();
+        let raw =
+            tokio::fs::read_to_string(self.root.path().join("output").join("codex-all.jsonl"))
+                .await
+                .unwrap();
         raw.lines()
             .filter(|s| !s.is_empty())
             .map(|s| serde_json::from_str(s).unwrap())

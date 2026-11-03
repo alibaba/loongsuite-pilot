@@ -540,9 +540,13 @@ fn actual_dsh_hook_marker_is_restored_after_later_native_pointer_failure() {
 
 #[test]
 fn actual_config_alias_of_a_resource_file_is_refused_before_any_resource_write() {
-    let mut cases = vec!["exact", "dotdot", "case"];
-    #[cfg(unix)]
-    cases.push("ancestor-link");
+    let cases = [
+        "exact",
+        "dotdot",
+        "case",
+        #[cfg(unix)]
+        "ancestor-link",
+    ];
     for case in cases {
         let f = Fixture::new();
         minimal_asset_package(&f, "reference\n");

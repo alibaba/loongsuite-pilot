@@ -1,4 +1,17 @@
 use super::*;
+
+#[cfg(windows)]
+fn public_powershell_parameter_prelude(source: &str) -> String {
+    let normalized = source.replace("\r\n", "\n");
+    // Argument validation and URL value defaults precede this real declaration.
+    // Actual package resolution and installation occur later in the public script.
+    normalized
+        .split_once("\nfunction Detect-Lang {")
+        .expect("actual public initialization before Detect-Lang")
+        .0
+        .trim_start_matches('\u{feff}')
+        .to_owned()
+}
 #[cfg(unix)]
 #[test]
 fn original_public_parser_rejects_invalid_flags_before_installation_side_effects() {
@@ -272,7 +285,7 @@ fn original_public_powershell_parser_checks_flags_before_resolving_packages_in_b
     for shell in windows_shells() {
         let f = Fixture::new();
         let source = include_str!("../../deploy/installer-opensource.ps1");
-        let prelude = source.split_once("# Resolve package URL").unwrap().0;
+        let prelude = public_powershell_parameter_prelude(source);
         let parse = f.root.path().join("public-parameter-prelude.ps1");
         fs::write(&parse, format!("{prelude}\n'PILOT_PARAMETER_PARSE_OK'\n")).unwrap();
         let mut script = windows_prelude(false);
@@ -413,7 +426,7 @@ fn original_multimodal_public_powershell_parser_checks_every_blank_tuple_in_both
     for shell in windows_shells() {
         let f = Fixture::new();
         let source = include_str!("../../deploy/installer-opensource.ps1");
-        let prelude = source.split_once("# Resolve package URL").unwrap().0;
+        let prelude = public_powershell_parameter_prelude(source);
         let parse = f.root.path().join("multimodal-public-parser.ps1");
         fs::write(&parse, format!("{prelude}\n'PILOT_MULTIMODAL_PARSE_OK'\n")).unwrap();
         let mut script = windows_prelude(false);
@@ -544,11 +557,8 @@ fn original_multimodal_public_powershell_writer_roundtrips_modes_and_aborts_nati
         let f = Fixture::new();
         fs::create_dir_all(&f.data).unwrap();
         let source = include_str!("../../deploy/installer-opensource.ps1");
-        let mut writer = source
-            .split_once("# Resolve package URL")
-            .unwrap()
-            .0
-            .to_owned();
+        let mut writer = public_powershell_parameter_prelude(source);
+        writer.push('\n');
         for name in [
             "Invoke-InstallerHelper",
             "Get-InstallConfigJson",
@@ -558,7 +568,7 @@ fn original_multimodal_public_powershell_writer_roundtrips_modes_and_aborts_nati
         }
         writer.push_str("\nfunction Msg {param($zh,$en)}\n$script:INSTALL_SRC=$env:TEST_CANDIDATE\n$script:PROBE_RESULT='[]'\nWrite-Config\n'NATIVE_WRITE_CONTINUED'\n");
         let writer_path = f.root.path().join("multimodal-public-writer.ps1");
-        fs::write(&writer_path, writer).unwrap();
+        fs::write(&writer_path, format!("\u{feff}{writer}")).unwrap();
         let mut script = windows_prelude(false);
         script.push_str(r#"
 foreach ($mode in @('all','none')) {

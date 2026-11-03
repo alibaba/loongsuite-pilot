@@ -383,7 +383,10 @@ if ($env:TEST_DASH_CLM -eq '1') {
             let mut script = String::from(
                 "\u{feff}$env:PSModulePath=$PSHOME+'\\Modules'\n$ErrorActionPreference='Stop'\n",
             );
-            for module in ["Utility", "Management"] {
+            // The public prelude imports these signed built-ins. Load their
+            // trusted bootstrap before enforcing the child CLM canary, as in
+            // the whole-installer contract; parser/writer calls stay in CLM.
+            for module in ["Utility", "Management", "Archive"] {
                 script.push_str(&format!("Import-Module -Name ($PSHOME+'\\Modules\\Microsoft.PowerShell.{module}\\Microsoft.PowerShell.{module}.psd1') -ErrorAction Stop\n"));
             }
             if constrained {

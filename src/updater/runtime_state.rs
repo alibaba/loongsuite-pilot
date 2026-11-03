@@ -36,12 +36,13 @@ pub fn updater_runtime_path(data_dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::updater_runtime_path;
+    use std::path::Path;
 
     #[test]
     fn runtime_file_lives_under_logs() {
         assert_eq!(
-            updater_runtime_path("/data"),
-            "/data/logs/updater-runtime.json"
+            Path::new(&updater_runtime_path("/data")),
+            Path::new("/data/logs/updater-runtime.json")
         );
     }
 }

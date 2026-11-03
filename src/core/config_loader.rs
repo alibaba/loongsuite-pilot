@@ -2872,7 +2872,19 @@ mod migration_config_advanced_tests {
     fn project_home(value: &mut Value) {
         match value {
             Value::String(text) if text.contains("$TEST_HOME") => {
-                *text = text.replace("$TEST_HOME", &std::env::var("HOME").unwrap_or_default());
+                let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+                let home = std::env::var(key).unwrap_or_default();
+                *text = if let Some(suffix) = text.strip_prefix("$TEST_HOME/") {
+                    suffix
+                        .split('/')
+                        .fold(std::path::PathBuf::from(&home), |path, part| {
+                            path.join(part)
+                        })
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    text.replace("$TEST_HOME", &home)
+                };
             }
             Value::Array(values) => {
                 for value in values {
@@ -3124,8 +3136,16 @@ mod migration_config_edge_tests {
             trace.span_enricher_paths.unwrap(),
             vec![
                 config_dir.join("skill.mjs").to_string_lossy().into_owned(),
-                resolve_home("~/home.mjs"),
-                data.join("plugins/skill.mjs")
+                std::path::PathBuf::from(
+                    std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap(),
+                )
+                .components()
+                .collect::<std::path::PathBuf>()
+                .join("home.mjs")
+                .to_string_lossy()
+                .into_owned(),
+                data.join("plugins")
+                    .join("skill.mjs")
                     .to_string_lossy()
                     .into_owned(),
             ]
@@ -3317,7 +3337,16 @@ mod doubao_listener_wiring_tests {
         );
         assert_eq!(
             built.listeners["doubao-work"].log_dir,
-            Some(resolve_home("~/pilot-fixture-log"))
+            Some(
+                std::path::PathBuf::from(
+                    std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap(),
+                )
+                .components()
+                .collect::<std::path::PathBuf>()
+                .join("pilot-fixture-log")
+                .to_string_lossy()
+                .into_owned()
+            )
         );
     }
 }

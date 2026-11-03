@@ -142,7 +142,10 @@ async fn a_path_read_cannot_enqueue_a_relative_uri_while_the_storage_origin_is_b
         })
     }));
     let owner = p.clone();
-    let roots = vec![root.path().to_string_lossy().into_owned()];
+    let roots = super::super::resolve::merge_allowed_root_paths(
+        &[root.path().to_string_lossy().into_owned()],
+        None,
+    );
     let read = tokio::spawn(async move {
         owner
             .path_to_uri(
@@ -155,7 +158,9 @@ async fn a_path_read_cannot_enqueue_a_relative_uri_while_the_storage_origin_is_b
             )
             .await
     });
-    ready.notified().await;
+    tokio::time::timeout(Duration::from_millis(1000), ready.notified())
+        .await
+        .expect("authorized fixture must reach the read barrier within its 1000ms path deadline");
     p.note_origin_mismatch();
     assert!(p.storage_base_path().is_none());
     gate.add_permits(1);

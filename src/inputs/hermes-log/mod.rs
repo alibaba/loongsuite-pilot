@@ -156,7 +156,12 @@ mod tests {
         let home = std::env::var("HOME").expect("HOME");
         assert_eq!(
             HermesLogInput::watch_paths(),
-            vec![format!("{home}/.loongsuite-pilot/logs/hermes-agent")]
+            vec![PathBuf::from(home)
+                .join(".loongsuite-pilot")
+                .join("logs")
+                .join("hermes-agent")
+                .to_string_lossy()
+                .into_owned()]
         );
     }
 

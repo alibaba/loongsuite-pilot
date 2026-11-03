@@ -8,19 +8,42 @@ use std::process::Stdio;
 use std::time::Duration;
 
 async fn powershell(script: &str, directory: &Path, token: &Path) -> String {
-    let output = tokio::time::timeout(
+    let phase = if script.contains("Read-AclSummary") {
+        "summary"
+    } else {
+        "setup"
+    };
+    let started = std::time::Instant::now();
+    eprintln!("acl-history phase={phase} stage=start elapsed_ms=0");
+    let script = format!(
+        r#"Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+{script}"#
+    );
+    let attempt = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
             .env("ACL_TEST_TARGET", directory)
             .env("ACL_TEST_TOKEN", token)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output(),
     )
-    .await
-    .expect("historical ACL PowerShell probe timed out")
-    .expect("historical ACL PowerShell probe did not start");
+    .await;
+    eprintln!(
+        "acl-history phase={phase} stage={} elapsed_ms={}",
+        if attempt.is_err() {
+            "timeout"
+        } else {
+            "returned"
+        },
+        started.elapsed().as_millis()
+    );
+    let output = attempt
+        .expect("historical ACL PowerShell probe timed out")
+        .expect("historical ACL PowerShell probe did not start");
     assert!(
         output.status.success(),
         "ACL probe {:?}: stdout={} stderr={}",
