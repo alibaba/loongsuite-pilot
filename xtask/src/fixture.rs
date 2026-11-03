@@ -32,6 +32,30 @@ fn main() -> Result<()> {
             std::thread::sleep(Duration::from_secs(60));
             return Ok(());
         }
+        Ok("hermes-rollback-delegate") => {
+            // Test-only transport: execute the actual built production CLI, never
+            // PATH, the installed user binary, or this fixture recursively.
+            if args != ["installer-helper", "cleanup-rollback-hermes", "--input-env"] {
+                bail!("unexpected native Hermes delegation arguments");
+            }
+            if std::env::var_os("PILOT_FIXTURE_DELEGATED").is_some() {
+                bail!("recursive native fixture delegation");
+            }
+            let helper = std::path::PathBuf::from(
+                std::env::var_os("PILOT_FIXTURE_NATIVE_HELPER")
+                    .context("missing explicit native Hermes helper")?,
+            );
+            if !helper.is_absolute()
+                || helper.canonicalize()? == std::env::current_exe()?.canonicalize()?
+            {
+                bail!("invalid native Hermes delegation executable");
+            }
+            let status = std::process::Command::new(helper)
+                .args(&args)
+                .env("PILOT_FIXTURE_DELEGATED", "1")
+                .status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
         Ok("restart-stderr") => {
             eprintln!("synthetic schtasks refusal");
             eprintln!();

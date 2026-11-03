@@ -1126,28 +1126,31 @@ mod tests {
     fn resolves_installed_binaries_from_a_separate_cache_directory() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
+        let ops = ProcessOps::inert(true);
+        let bundle = if ops.arch_x64 {
+            "darwin-x64"
+        } else {
+            "darwin-arm64"
+        };
         let version = cache
             .join("versions")
             .join("1.2.3_abc")
             .join("app")
             .join("macos-status-bar");
-        std::fs::create_dir_all(version.join("bin").join("darwin-x64")).unwrap();
+        std::fs::create_dir_all(version.join("bin").join(bundle)).unwrap();
         std::fs::write(version.join("Package.swift"), "").unwrap();
-        std::fs::write(
-            version.join("bin").join("darwin-x64").join(BINARY_NAME),
-            b"bin",
-        )
-        .unwrap();
+        std::fs::write(version.join("bin").join(bundle).join(BINARY_NAME), b"bin").unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("current"), "1.2.3_abc\n").unwrap();
-        let mut manager = StatusBarAppManager::new(
-            dir.path().join("data").to_str().unwrap(),
-            "1.2.3",
-            ProcessOps::inert(true),
-        );
+        let mut manager =
+            StatusBarAppManager::new(dir.path().join("data").to_str().unwrap(), "1.2.3", ops);
         manager.set_cache_dir(cache.to_str().unwrap());
         let resolved = manager.resolve_executable().unwrap();
-        assert!(resolved.contains("darwin-x64"));
+        assert!(resolved.contains(bundle));
+        assert_eq!(
+            Path::new(&resolved),
+            version.join("bin").join(bundle).join(BINARY_NAME)
+        );
         assert!(resolved.contains(BINARY_NAME));
     }
 }

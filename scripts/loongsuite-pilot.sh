@@ -1830,35 +1830,19 @@ cmd_upgrade() {
 
 cleanup_hermes_for_rollback() {
     local target_version_dir="$1"
-    [ -f "$target_version_dir/agents.d/hermes-agent.json" ] && return 0
-
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || return 0
-    "$node_bin" -e '
-const fs = require("fs");
-const path = require("path");
-const stateFile = process.argv[1];
-const fallback = path.join(process.env.HERMES_HOME || path.join(process.env.HOME || "", ".hermes"), "plugins", "loongsuite-pilot");
-let state = {};
-try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
-const recorded = state?.["hermes-agent"]?.targetDir;
-const target = typeof recorded === "string" && path.isAbsolute(recorded) ? recorded : fallback;
-const marker = path.join(target, ".loongsuite-pilot-managed.json");
-try {
-  const meta = JSON.parse(fs.readFileSync(marker, "utf8"));
-  if (meta.owner !== "loongsuite-pilot" || meta.agentId !== "hermes-agent") process.exit(0);
-  fs.rmSync(target, { recursive: true, force: true });
-  if (state && typeof state === "object" && state["hermes-agent"]) {
-    delete state["hermes-agent"];
-    const tmp = stateFile + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
-    fs.renameSync(tmp, stateFile);
-  }
-  process.stdout.write(target + "\n");
-} catch {}
-' "$DATA_DIR/deployed-agents.json" | while IFS= read -r removed; do
-        [ -n "$removed" ] && echo "   Removed Hermes plugin not supported by rollback target: $removed"
-    done
+    local helper_bin="" helper_root removed
+    if [ "$#" -ge 2 ]; then helper_bin="$2"; fi
+    if [ -z "$helper_bin" ]; then
+        helper_bin=$(resolve_pilot_bin) || return 1
+    fi
+    helper_root=$(dirname "$(dirname "$helper_bin")") || return 1
+    if ! removed=$(LP_DATA_DIR="$DATA_DIR" LP_CACHE_DIR="$CACHE_DIR" \
+        LP_HERMES_TARGET_DIR="$target_version_dir" LP_PILOT_DIR="$helper_root" \
+        "$helper_bin" installer-helper cleanup-rollback-hermes --from-env); then
+        echo "Hermes rollback cleanup failed; plugin files and state preserved for retry" >&2
+        return 1
+    fi
+    [ -z "$removed" ] || printf '   Removed Hermes plugin not supported by rollback target: %s\n' "$removed"
 }
 
 publish_rollback_version() {
@@ -1877,6 +1861,8 @@ cmd_rollback() {
         return 1
     }
     prev_dir="${prev_path##*/}"
+    local hermes_cleanup_helper
+    hermes_cleanup_helper=$(resolve_pilot_bin) || return 1
     # The current native helper validates the previous package/config first,
     # then publishes both pointers and service files in the durable transaction.
     # Never expose a legacy or unchecked current between a manual swap and sync.
@@ -1884,7 +1870,10 @@ cmd_rollback() {
         echo "❌ Failed to publish rollback target: $prev_dir; installation preserved"
         return 1
     fi
-    cleanup_hermes_for_rollback "$prev_path"
+    if ! cleanup_hermes_for_rollback "$prev_path" "$hermes_cleanup_helper"; then
+        echo "❌ Rollback publication committed but Hermes cleanup failed; files preserved"
+        return 1
+    fi
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
     cmd_restart

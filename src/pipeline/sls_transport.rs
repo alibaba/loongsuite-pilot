@@ -219,6 +219,8 @@ pub async fn persist_failed_logs(dir: &str, name: &str, context: &FailContext, e
     {
         use tokio::io::AsyncWriteExt;
         let _ = file.write_all(line.as_bytes()).await;
+        // Complete Tokio's buffered write before callers inspect failure metadata.
+        let _ = file.flush().await;
     }
 }
 

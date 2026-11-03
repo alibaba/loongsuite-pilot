@@ -179,22 +179,60 @@ async fn main_l61_timer_keeps_ordinary_queue_separate_and_retries_only_the_faile
     failed.reply.send(500).unwrap();
     retained(&writer).await;
     assert!(!task.is_finished());
-    let ordinary = server.request().await;
+    // Both requests start in the same timer wave. Independent TCP connections
+    // can arrive in either order; accepting ordinary data must not ACK Codex.
+    let first = server.request().await;
+    let second = server.request().await;
+    let (ordinary, retry) = if first.ids == ["ordinary-queued"] {
+        (first, second)
+    } else {
+        (second, first)
+    };
     assert_eq!(ordinary.ids, ["ordinary-queued"]);
-    ordinary.reply.send(200).unwrap();
-    let retry = server.request().await;
     assert_eq!(retry.ids, ["codex-retry"]);
+    ordinary.reply.send(200).unwrap();
+    assert!(!task.is_finished());
     retry.reply.send(200).unwrap();
     finish(task).await.unwrap();
     writer.flush().await.unwrap();
     writer.shutdown().await.unwrap();
+    let mut ids = server.ids();
+    assert_eq!(ids.remove(0), ["codex-retry"]);
+    ids.sort();
     assert_eq!(
-        server.ids(),
+        ids,
         [
             vec!["codex-retry".to_string()],
-            vec!["ordinary-queued".to_string()],
-            vec!["codex-retry".to_string()]
+            vec!["ordinary-queued".to_string()]
         ]
+    );
+}
+#[tokio::test]
+async fn retained_batch_without_start_retries_only_when_explicitly_flushed() {
+    let mut server = Server::new().await;
+    let writer = server.writer(10);
+    let send = writer.clone();
+    let task = tokio::spawn(async move { send.send(entry("retained", true), None).await });
+    server.request().await.reply.send(500).unwrap();
+    retained(&writer).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), server.rx.recv())
+            .await
+            .is_err()
+    );
+    assert!(!task.is_finished());
+    let flush = writer.clone();
+    let flushing = tokio::spawn(async move { flush.flush().await });
+    let retry = server.request().await;
+    assert_eq!(retry.ids, ["retained"]);
+    assert!(!task.is_finished());
+    retry.reply.send(200).unwrap();
+    finish(task).await.unwrap();
+    finish(flushing).await.unwrap();
+    writer.shutdown().await.unwrap();
+    assert_eq!(
+        server.ids(),
+        [vec!["retained".to_string()], vec!["retained".to_string()]]
     );
 }
 #[tokio::test]

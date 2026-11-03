@@ -2,6 +2,7 @@
 //! injected; process images, spawn, process groups, signals, locks and files are real.
 //! These do not claim execution of AppKit or of a macOS binary.
 use super::*;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -325,7 +326,12 @@ async fn native_exec_errors_and_immediate_exit_do_not_leave_runtime_or_lock() {
             std::fs::write(Path::new(&manager.data_dir).join("exit-immediately"), []).unwrap();
             assert!(manager.start().await.unwrap().is_none());
         } else {
-            std::fs::write(manager.resolve_executable().unwrap(), b"not an executable").unwrap();
+            let executable = manager.resolve_executable().unwrap();
+            std::fs::write(&executable, b"not an executable").unwrap();
+            // Darwin may successfully spawn a shell for executable plain text.
+            // A missing execute permission is a real kernel spawn failure on
+            // every supported Unix host, separate from the immediate-exit case.
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert!(manager.start().await.is_err());
         }
         assert!(!Path::new(&manager.runtime_record_path()).exists());

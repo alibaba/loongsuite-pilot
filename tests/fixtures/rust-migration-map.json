@@ -120923,7 +120923,7 @@
       "source_hash": "d95dd3142ee223e56585ccd4676015adee5bb4f8fb39e02cb5e4e479d73a6af1",
       "coverage": "partial",
       "rust": [],
-      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution.",
+      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent.",
       "cases": [
         {
           "source": {
@@ -121139,13 +121139,21 @@
           "platforms": [
             "windows"
           ],
-          "behavior": "Actual Remove-HermesPluginForRollback executes both shells Full/CLM on private Unicode+apostrophe+square-bracket paths and noBOM UTF8 deployed state, preserves nonHermes typed data including interiorBOM, validates ownedmarker, prunes exactly Hermes and accepts native leadingBOM reader. Drive absolute target, forbidden drive/rootrelative records and target-still-supports earlyreturn all verified by assertions. UNC input selection uses a controlled filesystem callback boundary with all network/file access to fake UNC prohibited; not actual SMB lifecycle. LiteralPath fixes prevent PowerShell wildcard interpretation of data/recorded paths. Windows actual execution pending CI.",
+          "behavior": "Native production helper owns JSON reading/writing; actual PS5.1/PS7 Full/CLM wrapper delegates via flat Unicode environment and restores prior input on success/failure. Authenticated two-package runtime manifests and real DirectoryPluginStrategy producer generate complete marker/sourceHash/dataDir, custom recorded target differs from independently current-owned default fallback. UTF8 state with/without leading BOM, Unicode/apostrophe/brackets/emoji paths, typed other-agent record and interior-BOM user file survive; while a record exists only that recorded current-owned Hermes target can be removed, supported target is byte-identical no-op; unknown/foreign no-op, dirty/drive-relative/root-relative stop and preserve all bytes. Cmd-Rollback captures outgoing helper before publication, cleanup after committed pointers, restart exactly once only on cleanup success. Windows actual execution pending CI; Linux backend probes are separately scoped.",
           "target": {
             "kind": "rust",
             "tests": [
               {
                 "file": "xtask/tests/windows_services.rs",
                 "test": "source_ps_json_l240_clm_l144_l172_hermes_rollback_keeps_unicode_state_and_safe_absolute_scope"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "native_hermes_ps_bridge_preserves_unknown_foreign_dirty_and_relative_records"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "native_ps_rollback_captures_outgoing_helper_before_private_publication_and_restarts_after_cleanup"
               }
             ]
           }
@@ -121157,7 +121165,7 @@
       "source_hash": "7d733ff95b4fe73e5c3c2356d369666f5a86e7da04395cdec6f71544363557a3",
       "coverage": "complete",
       "rust": [],
-      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution.",
+      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent.",
       "cases": [
         {
           "source": {
@@ -121252,13 +121260,17 @@
           "platforms": [
             "windows"
           ],
-          "behavior": "Actual Remove-HermesPluginForRollback executes both shells Full/CLM on private Unicode+apostrophe+square-bracket paths and noBOM UTF8 deployed state, preserves nonHermes typed data including interiorBOM, validates ownedmarker, prunes exactly Hermes and accepts native leadingBOM reader. Drive absolute target, forbidden drive/rootrelative records and target-still-supports earlyreturn all verified by assertions. UNC input selection uses a controlled filesystem callback boundary with all network/file access to fake UNC prohibited; not actual SMB lifecycle. LiteralPath fixes prevent PowerShell wildcard interpretation of data/recorded paths. Windows actual execution pending CI.",
+          "behavior": "Old PowerShell/Node Select-Object pruning mechanism is replaced by real native deployment-state serialization. Wrapper uses only CLM-safe flat hashtable env JSON, no PSObject mutation, and preserves nonHermes typed state plus arbitrary other-agent file bytes including interior BOM. Actual PS5.1/PS7 Full/CLM tests invoke production native helper rather than an empty fake fixture exit; successful removal and target-support no-op, unknown/foreign and dirty safety retained. Actual Windows runner pending.",
           "target": {
             "kind": "rust",
             "tests": [
               {
                 "file": "xtask/tests/windows_services.rs",
                 "test": "source_ps_json_l240_clm_l144_l172_hermes_rollback_keeps_unicode_state_and_safe_absolute_scope"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "native_hermes_ps_bridge_preserves_unknown_foreign_dirty_and_relative_records"
               }
             ]
           }
@@ -121332,7 +121344,7 @@
           "platforms": [
             "windows"
           ],
-          "behavior": "Actual Remove-HermesPluginForRollback executes both shells Full/CLM on private Unicode+apostrophe+square-bracket paths and noBOM UTF8 deployed state, preserves nonHermes typed data including interiorBOM, validates ownedmarker, prunes exactly Hermes and accepts native leadingBOM reader. Drive absolute target, forbidden drive/rootrelative records and target-still-supports earlyreturn all verified by assertions. UNC input selection uses a controlled filesystem callback boundary with all network/file access to fake UNC prohibited; not actual SMB lifecycle. LiteralPath fixes prevent PowerShell wildcard interpretation of data/recorded paths. Windows actual execution pending CI.",
+          "behavior": "Absolute-path policy lives in Native persisted-deployment target validation, rather than CLM-forbidden Path.IsPathRooted. Windows std::path syntax test accepts UNC and drive absolute and rejects drive/root relative; real PS wrapper drives actual native helper through recorded absolute positive plus drive/root-relative negative and checks default-fallback bytes untouched. Invalid relative state no longer authorizes deleting an independently owned fallback. No SMB mount, server lookup, or UNC filesystem deletion is claimed; only accepted UNC syntax is proven. Actual Windows runner pending.",
           "target": {
             "kind": "rust",
             "tests": [
@@ -121342,7 +121354,11 @@
               },
               {
                 "file": "xtask/tests/windows_services.rs",
-                "test": "source_ps_clm_l172_unc_record_uses_controlled_filesystem_boundary_including_clm"
+                "test": "native_hermes_ps_bridge_preserves_unknown_foreign_dirty_and_relative_records"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_ps_clm_l172_native_absolute_path_validation_keeps_unc_and_rejects_relative_targets"
               }
             ]
           }
@@ -126560,6 +126576,1251 @@
                 "test": "source_worker_l28_whole_native_dispatch_uses_layout_unicode_roots_and_preserves_separator_argv"
               }
             ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-openclaw-entry.test.ts",
+      "source_hash": "e22041b9d876b3994856eb549b2bbcd7d5e4554cf3c4fed09caaa74a6b19c4a4",
+      "coverage": "partial",
+      "rust": [],
+      "note": "10 exact AST / 32 original expanded (shell writer 16 + embedded-PowerShell-JS writer 16). Original EF 32 actually passed on Linux Node host. Native uses real Bash on Unix, real PS5.1/PS7 Full/CLM on Windows; Linux 10 parent business tests plus one child transport fixture actually passed. 9 AST mapped complete, recovery AST partial solely original writer old/new path notice intentionally redacted by Native privacy contract. Windows/macOS not yet execution-proven. No installer/service/bootstrap commands run.",
+      "cases": [
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "auto discovery -> install -> fresh service env -> idempotent injection (%s)",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])",
+              "it.each(['2026.3.8', '2026.6.10'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual public installer probe with AGENT_DATA_COLLECTION_CONFIG bound by production script; actual writer; fresh native process resolves persisted-entry and runs actual PluginInjectStrategy with authenticated package assets. Both OpenClaw 2026.3.8/2026.6.10, legacy/modern conversation capability, a second writer plus a separate fresh child needs-deploy false and byte/mtime idempotence. Linux Bash actually passed; Windows PS5.1/PS7 Full/CLM execution pending CI.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "auto_discovery_writer_fresh_native_service_and_idempotent_injection_for_both_host_generations"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "preserves previous enabled=%s and entry after an automatic discovery miss",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])",
+              "it.each([true, false, undefined])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Previous enabled true/false/absent, cliPath and captureMessageContent survive automatic miss; Codex remains enabled. Actual public Bash/PowerShell writers, all original parameters retained.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "automatic_miss_preserves_each_previous_enabled_shape_and_entry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C3",
+            "title": "still honors an explicit disable selection",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Explicit Codex-only selection disables previously enabled OpenClaw via actual public writer.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "explicit_selection_still_disables_an_existing_openclaw"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "persists an installer recovery and survives a fresh service (explicit=%s)",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])",
+              "it.each([false, true])"
+            ]
+          },
+          "coverage": "partial",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Recovery requires confirmed missing persisted entry and installer mode, probe is read-only, both explicit false/true preserve capture metadata, writer stores discovered entry and fresh native child resolves and deploys. Original writer-output assertion naming old and new paths is NOT met: native config-diff policy intentionally redacts paths. Actual probe reason still identifies replaced missing entry and has typed new openclawCliPath. This exact source AST remains partial; no Source expectation modified.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "installer_recovery_persists_entry_and_fresh_runtime_metadata_for_each_selection_mode"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "enables recovery only in the public installer probe invocation",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Actual runtime CLI probe cannot recover the missing persisted entry and leaves bytes unchanged; actual public installer probe --installer uses its production data config binding, succeeds, writer persists and fresh service child resolves. Legacy JS --config-path flag is replaced by explicit AGENT_DATA_COLLECTION_CONFIG and not restored.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "public_installer_probe_binding_allows_recovery_without_enabling_runtime_recovery"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C3",
+            "title": "installs the fixed child behind broken parent metadata (recover=%s)",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])",
+              "it.each([false, true])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Broken parent package metadata does not block its fixed child package. Both recover false/true keep probe read-only, retain auto-entry/recoveredFrom semantics, persist actual discovered child and fresh service resolves persisted-entry with conversationAccess false.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "broken_parent_metadata_keeps_fixed_child_discovery_readonly_until_the_writer"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L143:C3",
+            "title": "does not enable a missing OpenClaw on first installation",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "First-install discovery miss keeps OpenClaw disabled via actual public writer.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "first_install_miss_keeps_openclaw_disabled"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L146:C3",
+            "title": "round-trips entry paths with spaces, Unicode and shell metacharacters as data",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Literal entry containing spaces, Unicode, apostrophe, quote, dollar and backtick passes through environment data and actual native helper/writer unchanged; no inserted shell program.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "writer_roundtrips_quote_dollar_backtick_unicode_entry_as_data"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C3",
+            "title": "discovers even with explicit/all-agent selection (all=%s)",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])",
+              "it.each([false, true])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Both explicit selection and all-agent mode preserve discovered entry while enabled gates follow original selected/omitted rules, including unselected Codex.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "explicit_and_all_agent_selection_keep_detected_entry_and_their_gate_semantics"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "all-agent mode removes enable gates but not existing metadata on probe failure",
+            "suites": [
+              "%s OpenClaw installation state"
+            ],
+            "parameters": [
+              "describe.each(['shell', 'powershell'])"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "All-agent mode removes enabled gates from OpenClaw, Codex and unknown future agent while preserving cliPath, captureMessageContent and arbitrary future metadata despite empty probe.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/openclaw_entry.rs",
+                "test": "all_agent_miss_removes_only_enable_gates_and_preserves_future_agent_metadata"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-hold-tasks-during-deploy.test.mjs",
+      "source_hash": "b6e7540e6dd5c92b7743b5f9985474648e9f23d4735c6e85c3c7adf9f5591102",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact EF/f84/current-main AST/hash mapped. Original .ps1 deployment wrappers remain production code; historical mjs test runner replaced by Rust assertions and actual controlled PowerShell fixtures. GNU actually executes4 structure/call-flow tests covering all20 original static declarations. Two Windows-only Rust matrices implement PS5.1+7 private task backends and real private PS1/CMD children including Unicode/space/OBrien/bracket paths; they are not physically executed on GNU and remain Windows CI acceptance pending. No actual TaskScheduler, installed service, current binary, user config or foreign process is touched. No full real scheduler or Windows execution claim. Every independent Windows process probe retains original5s cap; no timeout increase.",
+      "cases": [
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "defines the hold/restore helpers",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Every present internal installer must have hold/restore block; at least one shipped installer block must exist; actual helper definitions call Disable/Enable-ScheduledTask.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "the block is byte-identical across the pinned .ps1 installers",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original pinned-set selection preserved: marked internal copies preferred, otherwise shipped open-source; complete marked block bytes including ending newline compare equal. Absent private mirrors not claimed executed.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C3",
+            "title": "disables both the collector and the updater task",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact current-user collector and updater task names are selected; Windows private task matrix verifies both enabled tasks held while missing or user-disabled tasks are untouched.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "the shared block tells callers to Disable before Stop",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original shared comment explicitly requires Disable BEFORE Stop-PilotService; actual current Cmd-Install/Cmd-Upgrade control flow and Windows private callbacks verify disable both before stop before deploy.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L93:C3",
+            "title": "does not abort the install when Disable is denied",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Denied Disable remains caught with visible cause, does not exit or abort deploy, and never adds denied task to held names. Private Windows mock denies only updater and proves collector remains independently held.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L103:C3",
+            "title": "re-enables only the tasks this deploy actually disabled",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Only successful disable appends held names. Private Windows task backend proves already-disabled, missing and denied tasks are never enabled by this deploy.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "keeps failed Enable names on the list for finally to retry",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Failed Enable retains only failed names in stillHeld; retry clears them on success. Private Windows direct retry and real Cmd-Install success/finally path with one transient failure verify no held name is silently forgotten.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l61_l75_l82_l88_l93_l103_l111_preserves_task_selection_and_retry_ownership"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "Cmd-Install disables, then stops, then deploys",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Cmd-Install try surrounds disable; both tasks disabled before Stop-PilotService before Deploy-Package; finally restores held names even a private deployment callback throws.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l121_l142_l156_l181_actual_install_upgrade_hold_before_stop_and_restore_in_finally"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L142:C3",
+            "title": "Cmd-Upgrade disables, then stops, then deploys",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Cmd-Upgrade disables both before stop/deploy; real current function with a private stop callback throwing still restores in finally without any start.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l121_l142_l156_l181_actual_install_upgrade_hold_before_stop_and_restore_in_finally"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L156:C3",
+            "title": "enables before start, and again in finally",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both real install/upgrade Enable before start prompt and again in finally; private current caller callbacks verify no start on failed deploy/stop and retry held names without enabling unrelated tasks.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l121_l142_l156_l181_actual_install_upgrade_hold_before_stop_and_restore_in_finally"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L181:C3",
+            "title": "does not hold tasks during uninstall",
+            "suites": [
+              "installers disable scheduled tasks for the duration of a deploy"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Every actual Cmd-Uninstall contains neither hold nor restore call: uninstall deletes tasks, so this lifecycle may not re-enable them.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_l121_l142_l156_l181_actual_install_upgrade_hold_before_stop_and_restore_in_finally"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "hold_actual_windows_powershell_helpers_and_real_install_upgrade_callers_use_only_private_tasks"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-restart-stale-collector.test.mjs",
+      "source_hash": "8fca4278239f2ea9bee34046123009fd12586277d351547497b48369a966fc11",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact EF/f84/current-main AST/hash mapped. Original .ps1 deployment wrappers remain production code; historical mjs test runner replaced by Rust assertions and actual controlled PowerShell fixtures. GNU actually executes4 structure/call-flow tests covering all20 original static declarations. Two Windows-only Rust matrices implement PS5.1+7 private task backends and real private PS1/CMD children including Unicode/space/OBrien/bracket paths; they are not physically executed on GNU and remain Windows CI acceptance pending. No actual TaskScheduler, installed service, current binary, user config or foreign process is touched. No full real scheduler or Windows execution claim. Every independent Windows process probe retains original5s cap; no timeout increase.",
+      "cases": [
+        {
+          "source": {
+            "id": "L50:C3",
+            "title": "defines Restart-StaleCollector",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Every present installer retains the real Restart-StaleCollector marked block and helper; the current real caller is Start-PilotAndWait, not a new same-name dormant API.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L59:C3",
+            "title": "the block is byte-identical across the .ps1 installers",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Complete stale-helper block bytes are compared across every present .ps1 installer; absent mirrors not claimed executed.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "uses restart-collector, not a bare restart",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Code calls only restart-collector, never bare restart/updater bounce. Windows private real PS1 and CMD child traces must contain exactly one restart-collector when required.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L76:C3",
+            "title": "does nothing on a fresh install",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Fresh install with empty priorVersion returns true without invoking a child, as do missing service entry cases. Windows matrix explicitly verifies no trace file is created.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "reports a failed displacement instead of swallowing it",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Native child exit7 remains false with actual stderr and restart-collector exit detail; exit0 with stderr progress remains success. Caller ErrorActionPreference is restored. No actual restart output is discarded.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "only bounces the collector when start found one already running",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Only captured start output containing already running triggers a bounce. Newly launched collector and fresh installation return true without child invocation.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L113:C3",
+            "title": "the line that gate reads is still the line start prints",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The gate is still coupled to the actual shipped service Write-Host already-running line; no changed diagnostic string silently disables displacement.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l50_l59_l67_l76_l84_l98_l113_preserves_collector_gates_and_truthful_diagnostics"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L120:C3",
+            "title": "every installer calls it with the prior version and the start output, after start",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Every actual source call captures three variable arguments, uses its own previously captured and displayed start output, and occurs after start. Current Start-PilotAndWait is physically invoked in Windows fixture with a private real service PS1 to verify start/restart/status order.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l120_l159_actual_callers_capture_start_output_and_return_the_displacement_verdict"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L159:C3",
+            "title": "no installer reports success when the displacement failed",
+            "suites": [
+              "installers displace a stale collector after re-installing"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Captured displacement verdict must gate or return success. Private Start-PilotAndWait with status reporting is running still returns false after a real child restart exit7; newly started collector returns true without redundant restart.",
+          "platforms": [
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_l120_l159_actual_callers_capture_start_output_and_return_the_displacement_verdict"
+              },
+              {
+                "file": "tests/installer_history/scheduled_tasks_and_stale.rs",
+                "test": "stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/dashboard-lifecycle.test.mjs",
+      "source_hash": "4873983f342db078b809ad1072ad7eb42d48995c8ecd00eaeac80e5683f9d78e",
+      "coverage": "partial",
+      "rust": [],
+      "note": "This slice covers exactly the13 original browser static-page AST as retained host contracts. Remaining19 service/config AST are separate Native work, and this slice does not claim that the browser JS became Rust or default Cargo needs Node.",
+      "cases": [
+        {
+          "source": {
+            "id": "L437:C3",
+            "title": "reads only metrics-summary.json and renders agentShares dynamically",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > reads only metrics-summary.json and renders agentShares dynamically"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L445:C3",
+            "title": "labels agent shares as event counts and renders a full-width empty state",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > labels agent shares as event counts and renders a full-width empty state"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L457:C3",
+            "title": "keeps complete matching Chinese and English message dictionaries",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > keeps complete matching Chinese and English message dictionaries"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L475:C3",
+            "title": "places a decorative language icon between the label text and select",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > places a decorative language icon between the label text and select"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L498:C3",
+            "title": "detects zh browser preferences and otherwise defaults to English",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > detects zh browser preferences and otherwise defaults to English"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L517:C3",
+            "title": "persists language safely and tolerates unavailable localStorage",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > persists language safely and tolerates unavailable localStorage"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L544:C3",
+            "title": "updates lang and immediately redraws the cached summary on language changes",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > updates lang and immediately redraws the cached summary on language changes"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L559:C3",
+            "title": "redraws loaded content immediately without fetching again when language changes",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > redraws loaded content immediately without fetching again when language changes"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L751:C3",
+            "title": "uses custom mouse and keyboard tooltips for trend values",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > uses custom mouse and keyboard tooltips for trend values"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L762:C3",
+            "title": "preserves focused trend days across refreshes",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > preserves focused trend days across refreshes"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L768:C3",
+            "title": "uses a full-column hit target and clamps custom tooltips",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > uses a full-column hit target and clamps custom tooltips"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L786:C3",
+            "title": "formats only token values compactly at explicit boundaries",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > formats only token values compactly at explicit boundaries"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
+          }
+        },
+        {
+          "source": {
+            "id": "L808:C3",
+            "title": "applies compact formatting to every token semantic but not other counts",
+            "suites": [
+              "dashboard static page"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Retained browser JavaScript contract, not Rust migration. Original exact assertion body executes against the actual current shipped assets/dashboard/index.html. Private explicit Node22.22.3/glibc2.34 host suite collected and passed on Linux; actual DOM facade/Intl/language/cache/escaping/tooltip behavior preserved. Platform enum expresses browser contract applicability; no physical Windows/macOS execution is claimed.",
+          "target": {
+            "kind": "retained",
+            "file": "tests/host/dashboard-static-page.test.mjs",
+            "names": [
+              "dashboard static page > applies compact formatting to every token semantic but not other counts"
+            ],
+            "resources": [
+              "assets/dashboard/index.html"
+            ],
+            "npm_script": "test:host:dashboard"
           }
         }
       ]

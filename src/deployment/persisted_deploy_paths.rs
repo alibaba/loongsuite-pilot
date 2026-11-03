@@ -169,6 +169,21 @@ pub fn apply_persisted_deploy_targets(
         }
         return Ok(next);
     }
+    if def.deploy_mode == crate::types::DeployMode::DirectoryPlugin {
+        if let Some(target) = record.target_dir.as_deref() {
+            if target.chars().any(char::is_control) {
+                return Err("Invalid persisted directory target".into());
+            }
+            let target = absolute_path(Some(target))
+                .ok_or("Persisted directory target must be a nonempty absolute path")?;
+            let config = next
+                .directory_plugin
+                .as_mut()
+                .ok_or("Directory plugin definition is incomplete")?;
+            config.target_dir = target;
+        }
+        return Ok(next);
+    }
     let preserve_hook = opts.is_some_and(|opts| opts.preserve_hook_settings);
     if let Some(path) = record
         .hook_settings_path
@@ -456,3 +471,7 @@ mod tests {
 #[cfg(test)]
 #[path = "persisted_deploy_paths_history_contract_tests.rs"]
 mod history_contract_tests;
+
+#[cfg(test)]
+#[path = "persisted_directory_history_contract_tests.rs"]
+mod directory_history_contract_tests;

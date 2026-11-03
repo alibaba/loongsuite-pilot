@@ -2032,66 +2032,31 @@ function Cmd-Upgrade {
 # CMD: rollback
 # ============================================================
 function Remove-HermesPluginForRollback {
-    param([string]$TargetVersionPath)
-
-    if (Test-Path -LiteralPath (Join-Path $TargetVersionPath "agents.d\hermes-agent.json")) { return }
-
-    $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
-    $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
-    $stateFile = Join-Path $DATA_DIR "deployed-agents.json"
-    $state = $null
-    if (Test-Path -LiteralPath $stateFile) {
-        try {
-            # -Encoding UTF8 on the read too: node writes this file as UTF-8 without a
-            # BOM, and 5.1's Get-Content falls back to the ANSI codepage when there is no
-            # BOM to sniff. Without it a non-ASCII targetDir comes back mangled and the
-            # plugin at that path goes uncleaned.
-            $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            $recorded = $state.'hermes-agent'.targetDir
-            # Regex instead of [System.IO.Path]::IsPathRooted: System.IO.Path is not a
-            # Constrained-Language core type, so the call throws under CLM (WDAC). The
-            # catch below would swallow it and reset $state, silently leaving a plugin
-            # installed at a custom targetDir uncleaned. Matches a drive-absolute path
-            # (C:\ or C:/) or a UNC share (\\server\share); deliberately rejects the
-            # drive-relative "C:dir" and root-relative "\dir" forms that IsPathRooted
-            # accepts, since neither is safe to use as an absolute delete target.
-            if ($recorded -and ([string]$recorded) -match '^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])') {
-                $pluginDir = [string]$recorded
-            }
-        } catch {
-            $state = $null
-        }
+    param([string]$TargetVersionDir, [string]$NativeHelper = "")
+    if (-not $NativeHelper) {
+        # Cleanup runs after publication: previous is the outgoing package.
+        $outgoing = Resolve-PreviousVersion
+        if (-not $outgoing) { throw "Cannot identify the outgoing Hermes cleanup helper" }
+        $NativeHelper = Join-Path $outgoing "bin\loongsuite-pilot.exe"
     }
-
-    $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
-    if (-not (Test-Path -LiteralPath $marker)) { return }
+    if (-not (Test-NativePath $NativeHelper)) { throw "Native Hermes cleanup helper is unavailable" }
+    $pilotDir = Split-Path (Split-Path $NativeHelper -Parent) -Parent
+    $previousInput = $env:LOONGSUITE_PILOT_INSTALL_INPUT
     try {
-        # Same as above: the marker is written by node (directory-plugin-strategy) as
-        # BOM-less UTF-8.
-        $meta = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") { return }
-        Remove-Item -LiteralPath $pluginDir -Recurse -Force
-        if ($state -and $state.'hermes-agent') {
-            # Select-Object -ExcludeProperty (a cmdlet) instead of
-            # $state.PSObject.Properties.Remove(): PSMemberInfoCollection is not a
-            # Constrained-Language core type, so the method call throws under CLM (WDAC)
-            # and the state file would keep a stale hermes-agent entry. -Property * is
-            # required alongside -ExcludeProperty on PowerShell 5.1.
-            $pruned = $state | Select-Object -Property * -ExcludeProperty 'hermes-agent'
-            $tmp = "$stateFile.tmp"
-            # -Encoding UTF8 is required: Set-Content on PowerShell 5.1 defaults to the
-            # ANSI codepage, while the node side reads and writes deployed-agents.json as
-            # UTF-8 (readJsonFile / writeJsonFile). A targetDir under a non-ASCII user
-            # profile would round-trip as mojibake. 5.1 has no utf8NoBOM, so this writes a
-            # BOM -- readJsonFile strips a leading BOM for exactly this reason. Without
-            # that strip JSON.parse throws, readJsonFile swallows it and returns null, and
-            # the whole deployment state silently resets to empty.
-            $pruned | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $tmp -Encoding UTF8
-            Move-Item -LiteralPath $tmp -Destination $stateFile -Force
+        $env:LOONGSUITE_PILOT_INSTALL_INPUT = @{
+            dataDir = $DATA_DIR
+            cacheDir = $CACHE_DIR
+            targetVersionDir = $TargetVersionDir
+            pilotDir = $pilotDir
+        } | ConvertTo-Json -Compress
+        $removed = Invoke-Pilot -Binary $NativeHelper -Arguments @("installer-helper", "cleanup-rollback-hermes", "--input-env")
+        if ($script:PilotExitCode -ne 0) {
+            throw "Native Hermes rollback cleanup refused (exit=$($script:PilotExitCode)); files and deployment state preserved"
         }
-        Write-Host "   Removed Hermes plugin not supported by rollback target: $pluginDir"
-    } catch {
-        Write-Warning "Failed to clean Hermes plugin during rollback: $pluginDir"
+        if ($removed) { Write-Host "Removed Hermes plugin during rollback" }
+    } finally {
+        if ($null -eq $previousInput) { Remove-Item Env:LOONGSUITE_PILOT_INSTALL_INPUT -ErrorAction SilentlyContinue }
+        else { $env:LOONGSUITE_PILOT_INSTALL_INPUT = $previousInput }
     }
 }
 
@@ -2122,13 +2087,15 @@ function Cmd-Rollback {
         exit 1
     }
     $prevDir = Split-Path $prevPath -Leaf
+    $hermesCleanupHelper = Resolve-PilotBinary
+    if (-not $hermesCleanupHelper) { throw "Cannot identify the outgoing native rollback helper" }
     # Validate and publish through the current helper's durable native transaction.
     # A rejected legacy artifact or failed service write cannot leave a pointer swap.
     if (-not (Publish-RollbackVersion $prevPath)) {
         Write-Error "Failed to publish rollback target: $prevDir; installation preserved"
         exit 1
     }
-    Remove-HermesPluginForRollback $prevPath
+    Remove-HermesPluginForRollback $prevPath -NativeHelper $hermesCleanupHelper
     Write-Host "Rolled back to version: $prevDir"
     Write-Host "   Restarting service..."
     Cmd-Restart

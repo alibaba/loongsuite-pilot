@@ -44,15 +44,20 @@ fn hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))[..32].to_owned()
 }
 fn infer_provider(model: &str) -> &'static str {
+    // Match the current main Copilot adapter's explicit model fallbacks.
     let model = model.to_lowercase();
-    if model.contains("claude") {
+    if model.is_empty() {
+        "unknown"
+    } else if model.starts_with("gpt") || model.contains("openai") {
+        "openai"
+    } else if model.starts_with("claude") || model.contains("anthropic") {
         "anthropic"
     } else if model.contains("gemini") {
         "google"
-    } else if model.contains("gpt") || model.starts_with('o') {
-        "openai"
+    } else if model.contains("qwen") {
+        "alibaba"
     } else {
-        "unknown"
+        "openai"
     }
 }
 fn parts(data: &Value) -> Vec<Value> {
@@ -360,6 +365,16 @@ pub fn parse_interactions(
                 .iter()
                 .flat_map(|message| parts(&message["data"]))
                 .collect();
+            let reasoning = call
+                .messages
+                .iter()
+                .filter_map(|message| message["data"].get("reasoningText").and_then(Value::as_str))
+                .filter(|chunk| !chunk.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !reasoning.is_empty() {
+                response.insert("gen_ai.llm.reasoning.text".into(), json!(reasoning));
+            }
             if !output.is_empty() {
                 response.insert(
                     "gen_ai.output.messages".into(),
@@ -455,6 +470,26 @@ pub fn parse_interactions(
             let (Some(begin), Some(end)) = (begin, end) else {
                 continue;
             };
+            let resolved_model = messages
+                .iter()
+                .find(|message| message["data"].get("turnId") == start["data"].get("turnId"))
+                .map(|message| text(&message["data"], "model"))
+                .unwrap_or_default();
+            let call_model = text(&start["data"], "model");
+            let call_model = if call_model.is_empty() {
+                resolved_model
+            } else {
+                call_model
+            };
+            let result_model = [
+                text(&start["data"], "model"),
+                complete
+                    .map(|event| text(&event["data"], "model"))
+                    .unwrap_or_default(),
+            ]
+            .into_iter()
+            .find(|model| !model.is_empty())
+            .unwrap_or(resolved_model);
             let mut call = base(
                 session_id,
                 &turn,
@@ -462,6 +497,10 @@ pub fn parse_interactions(
                 text(start, "id"),
                 "tool.call",
                 begin,
+            );
+            call.insert(
+                "gen_ai.provider.name".into(),
+                json!(infer_provider(call_model)),
             );
             call.insert("gen_ai.step.id".into(), start["data"]["turnId"].clone());
             call.insert("gen_ai.tool.name".into(), start["data"]["toolName"].clone());
@@ -471,6 +510,10 @@ pub fn parse_interactions(
                 call.insert("gen_ai.tool.call.arguments".into(), args.clone());
             }
             let mut result = call.clone();
+            result.insert(
+                "gen_ai.provider.name".into(),
+                json!(infer_provider(result_model)),
+            );
             result.insert("event.name".into(), json!("tool.result"));
             result.insert(
                 "event.id".into(),
@@ -506,17 +549,21 @@ pub fn parse_interactions(
                     }
                 }
             }
-            if tool.is_some_and(|span| span["status"]["code"] == 2) {
+            let native_tool_failed = tool.is_some_and(|span| span["status"]["code"] == 2);
+            if native_tool_failed {
                 result.insert("gen_ai.tool.success".into(), json!(false));
                 result.insert("tool.result.status".into(), json!("failure"));
             }
             if result.get("gen_ai.tool.success") == Some(&json!(false)) {
-                result.insert(
-                    "error.type".into(),
+                let error_type = if native_tool_failed {
                     tool.and_then(|span| span["attributes"].get("error.type"))
-                        .cloned()
-                        .unwrap_or(json!("tool_error")),
-                );
+                } else {
+                    result.get("error.code")
+                }
+                .filter(|value| value.as_str().is_some_and(|value| !value.is_empty()))
+                .cloned()
+                .unwrap_or(json!("tool_error"));
+                result.insert("error.type".into(), error_type);
             }
             if let Some(permission) = history.iter().find(|event| {
                 event["type"] == "permission.completed"
@@ -754,3 +801,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "copilot_interaction_main_contract_tests.rs"]
+mod current_main_contract_tests;
+
+#[cfg(test)]
+#[path = "copilot_captured_transcript_main_contract_tests.rs"]
+mod captured_transcript_main_contract_tests;

@@ -3321,3 +3321,7 @@ mod doubao_listener_wiring_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_loader_main_listener_history.rs"]
+mod main_listener_history;

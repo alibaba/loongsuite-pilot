@@ -322,6 +322,17 @@ impl DirectoryPluginStrategy {
         transaction.commit()
     }
 
+    pub(crate) async fn owns_directory(&self, def: &AgentDefinition) -> Result<bool, String> {
+        let config = def
+            .directory_plugin
+            .as_ref()
+            .ok_or("missing directoryPlugin config")?;
+        Ok(matches!(
+            self.inspect(config, &def.id).await?,
+            TargetState::Managed(_)
+        ))
+    }
+
     pub async fn remove_directory(&self, def: &AgentDefinition) -> bool {
         let Some(config) = &def.directory_plugin else {
             return false;
@@ -355,7 +366,21 @@ impl DirectoryPluginStrategy {
             .await
         {
             Ok(TargetState::Missing) => true,
-            Ok(TargetState::Managed(_)) => {
+            Ok(TargetState::Managed(marker)) => {
+                let unmodified = |marker: &Marker| {
+                    let expected = marker.source_hash.clone();
+                    let target = config.target_dir.clone();
+                    let source = config.source_dir.clone();
+                    let marker_file = marker_file.clone();
+                    async move {
+                        hash_directory(&target, &marker_file, Some(&source))
+                            .await
+                            .is_ok_and(|actual| actual == expected)
+                    }
+                };
+                if !unmodified(&marker).await {
+                    return false;
+                }
                 if let Some(activation) = config.activation.as_ref().filter(|activation| {
                     activation
                         .disable_args
@@ -371,10 +396,13 @@ impl DirectoryPluginStrategy {
                     }
                     if !matches!(
                         self.inspect(config, &def.id).await,
-                        Ok(TargetState::Managed(_))
+                        Ok(TargetState::Managed(ref current)) if current == &marker
                     ) {
                         return false;
                     }
+                }
+                if !unmodified(&marker).await {
+                    return false;
                 }
                 tokio::fs::remove_dir_all(node_resolve(&config.target_dir))
                     .await
@@ -1253,3 +1281,7 @@ mod history_contract_tests;
 #[cfg(test)]
 #[path = "directory_plugin_history_test_hooks.rs"]
 mod history_test_hooks;
+
+#[cfg(test)]
+#[path = "directory_plugin_removal_history_contract_tests.rs"]
+mod removal_history_contract_tests;

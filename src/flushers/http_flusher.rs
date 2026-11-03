@@ -71,12 +71,12 @@ impl BaseFlusher for HttpFlusher {
         self.inner.stopped.store(false, Ordering::SeqCst);
         let interval = self.inner.config.flush_interval_ms.max(1);
         let inner = Arc::clone(&self.inner);
+        let mut ticker = tokio::time::interval(Duration::from_millis(interval));
+        ticker.tick().await;
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(interval));
-            ticker.tick().await;
             loop {
                 ticker.tick().await;
-                inner.flush_buffer().await;
+                tokio::join!(inner.flush_buffer(), inner.flush_tracked());
             }
         });
         *self
@@ -251,7 +251,6 @@ impl HttpInner {
                 biased;
                 _=stopped=>return Err(FlushError::output_durability(owner, "HTTP")),
                 _=&mut retry_requested=>{},
-                _=tokio::time::sleep(Duration::from_millis(self.config.flush_interval_ms.max(1)))=>{},
             }
             self.tracked_waiting_retry.store(false, Ordering::SeqCst);
         }

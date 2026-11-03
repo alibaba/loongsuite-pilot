@@ -487,3 +487,112 @@ async fn same_name_real_publication_refreshes_coalesced_metadata_without_any_dur
         }
     }
 }
+
+// Model a real coarse-filesystem hint collision without changing default
+// platform admission, cached contexts, inventory, receipts, or transcript data.
+// The consumer still reads real source/notice files through its ordinary path.
+async fn match_cached_directory_clock_hints(f: &Fixture, events: &Path) {
+    let current = directory_version(events, false).unwrap();
+    let mut collector = f.source.inner.lock().await;
+    let cached = collector
+        .metadata
+        .get_mut(events.parent().unwrap())
+        .unwrap();
+    cached.version.modified = current.modified;
+    cached.version.changed = current.changed;
+}
+
+fn restore_directory_mtime(events: &Path, modified: std::time::SystemTime) {
+    #[cfg(unix)]
+    let directory = std::fs::File::open(events).unwrap();
+    #[cfg(windows)]
+    let directory = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .access_mode(0x100)
+            .custom_flags(0x0200_0000)
+            .open(events)
+            .unwrap()
+    };
+    directory
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn default_cache_hint_collision_cannot_hide_recreated_directory_and_transcript_generation() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&closed_turn(0, false));
+        f.wake("Stop", json!({}));
+        assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+        f.collect().await;
+        let events = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("events");
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        let modified = std::fs::metadata(&events).unwrap().modified().unwrap();
+
+        std::fs::remove_dir(&events).unwrap();
+        std::fs::create_dir(&events).unwrap();
+        let replacement = f.file.with_extension("replacement");
+        std::fs::write(&replacement, jsonl(&closed_turn(1, false))).unwrap();
+        std::fs::rename(replacement, &f.file).unwrap();
+        f.wake("Stop", json!({}));
+        restore_directory_mtime(&events, modified);
+        match_cached_directory_clock_hints(&f, &events).await;
+
+        assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
+        f.collect().await;
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        f.restart().await;
+        assert!(f.collect().await.records.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn default_cache_hint_collision_preserves_unsaved_ack_gate_and_saved_notice_reclamation() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut rows = turn(0, false);
+        rows.pop();
+        rows.last_mut().unwrap()["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("stop_reason");
+        f.write(&rows);
+        f.wake("PreToolUse", json!({}));
+        assert!(f.collect().await.records.is_empty());
+        f.collect().await;
+        let events = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("events");
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 1);
+        f.append(&[progress("Stop", 400)]);
+        f.wake("Stop", json!({}));
+        match_cached_directory_clock_hints(&f, &events).await;
+
+        assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+        let saved = f.state.clone();
+        let before = std::fs::read_dir(&events).unwrap().count();
+        let blocked = f.source.read(Some(&saved), false).await.unwrap();
+        assert_eq!(blocked.state, saved);
+        assert!(!blocked.changed);
+        assert!(blocked.records.is_empty());
+        assert_eq!(blocked.metrics.bytes_read, 0);
+        assert!(blocked.metrics.reads.is_empty());
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), before);
+        f.collect().await;
+        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert!(events.parent().unwrap().join("source.json").exists());
+        assert!(f.collect().await.records.is_empty());
+    }
+}

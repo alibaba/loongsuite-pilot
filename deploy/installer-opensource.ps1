@@ -1410,7 +1410,7 @@ function Restart-StaleCollector {
     $script:PILOT_LAST_RESTART_ERR = ""
     if (-not $priorVersion) { return $true }
     if (-not $serviceEntry) { return $true }
-    if (-not (Test-Path $serviceEntry)) { return $true }
+    if (-not (Test-Path -LiteralPath $serviceEntry)) { return $true }
     if (($startOutput | Out-String) -notmatch "already running") { return $true }
     # Locally forced to Continue: with 2>&1 in effect a caller left on Stop turns the first
     # stderr line into a NativeCommandError, which would report a successful restart as a

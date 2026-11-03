@@ -2633,6 +2633,9 @@ fn first_native_install_publishes_command_before_owned_legacy_cleanup_and_preser
 #[path = "native_contracts/cross_version_upgrade.rs"]
 mod cross_version_upgrade;
 
+#[path = "installer_history/openclaw_entry.rs"]
+mod installer_openclaw_entry_history;
+
 #[path = "installer_history/config_bridge.rs"]
 mod installer_config_bridge_history;
 
@@ -2644,3 +2647,9 @@ mod installer_status_edr_profile_history;
 
 #[path = "installer_history/stop_for_deploy.rs"]
 mod installer_stop_history;
+
+#[path = "installer_history/scheduled_tasks_and_stale.rs"]
+mod installer_scheduled_tasks_history;
+
+#[path = "installer_history/hermes_rollback.rs"]
+mod installer_hermes_rollback_history;

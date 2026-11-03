@@ -117,7 +117,8 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
         // directory generation when last-write timestamps happen to be equal.
         (metadata, (info.ChangeTime, 0))
     };
-    // NTFS directory timestamps are hints. Native publication coalesces the
+    // Directory clocks are hints on every filesystem; coarse clocks or restored
+    // mtimes can identify different generations equally. Publication coalesces the
     // same watermark/context into one filename, so both its bounded inventory
     // and notice attribute generations must participate even before any ACK.
     let mut notice_versions = None;
@@ -347,7 +348,7 @@ impl QoderTranscriptSource {
                 #[cfg(test)]
                 owner_pid_probe: None,
                 #[cfg(test)]
-                directory_inventory: cfg!(windows),
+                directory_inventory: true,
                 resolver,
                 last: None,
                 scan_bytes: scanner::SCAN_BYTES,
@@ -495,11 +496,12 @@ impl Collector {
     fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Value, Vec<Value>)> {
         let events = dir.join("events");
         #[cfg(not(test))]
-        let inspect_inventory = cfg!(windows);
+        let inspect_inventory = true;
         #[cfg(test)]
         let inspect_inventory = self.directory_inventory;
         let version = directory_version(&events, inspect_inventory)?;
-        // Preserve the upstream mtime + ctime cache generation contract.
+        // Names and notice attributes disambiguate equal mtime/ctime hints within
+        // the existing bounded metadata budget; no transcript body is read here.
         if let Some(m) = self.metadata.get(dir) {
             if m.version == version {
                 return Ok((m.source.clone(), m.contexts.clone()));

@@ -1047,103 +1047,30 @@ $script:controlledClock = '{timestamp}'
 fn source_ps_json_l240_clm_l144_l172_hermes_rollback_keeps_unicode_state_and_safe_absolute_scope() {
     for shell in shells() {
         for constrained in [false, true] {
-            for mode in [
-                "absolute",
-                "drive-relative",
-                "root-relative",
-                "target-still-supports",
-            ] {
-                let fixture = Fixture::new();
-                let default = fixture.home.join("default-hermes/plugins/loongsuite-pilot");
-                let custom = fixture.home.join("自定义 Hermes [插件]/loongsuite-pilot");
-                for path in [&default, &custom] {
-                    fs::create_dir_all(path).unwrap();
-                    fs::write(path.join(".loongsuite-pilot-managed.json"), serde_json::to_vec(
-                        &json!({"owner":"loongsuite-pilot","agentId":"hermes-agent","label":"研发"})
-                    ).unwrap()).unwrap();
-                    fs::write(path.join("owned-plugin.txt"), b"private owned fixture").unwrap();
-                }
-                let recorded = match mode {
-                    "drive-relative" => "C:unsafe-drive-relative".to_owned(),
-                    "root-relative" => "\\unsafe-root-relative".to_owned(),
-                    _ => custom.to_str().unwrap().to_owned(),
-                };
-                let other = json!({"targetDir":"保留\u{feff}字符串","enabled":true});
-                let state = json!({
-                    "hermes-agent":{"targetDir":recorded,"label":"研发"},
-                    "cursor":other
-                });
-                let state_path = fixture.data.join("deployed-agents.json");
-                let before = serde_json::to_vec(&state).unwrap();
-                fs::write(&state_path, &before).unwrap();
-                let target = fixture.cache.join("versions/rollback-without-hermes");
-                fs::create_dir_all(&target).unwrap();
-                if mode == "target-still-supports" {
-                    fs::create_dir_all(target.join("agents.d")).unwrap();
-                    fs::write(target.join("agents.d/hermes-agent.json"), b"{}").unwrap();
-                }
-                let body = r#"
-$env:HERMES_HOME = Join-Path $env:HOME 'default-hermes'
-$script:encodingReads = 0
-function Get-Content {
-    param([string]$Path,[string]$LiteralPath,[switch]$Raw,[string]$Encoding)
-    if ($Encoding -ne 'UTF8') { throw 'rollback JSON read did not explicitly request UTF8' }
-    $script:encodingReads += 1
-    Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
-}
-Remove-HermesPluginForRollback (Join-Path $CACHE_DIR 'versions\rollback-without-hermes')
-if ($script:encodingReads -ne __READS__) { throw 'rollback UTF8 read boundary was bypassed' }
-"#
-                .replace(
-                    "__READS__",
-                    if mode == "target-still-supports" {
-                        "0"
-                    } else {
-                        "2"
-                    },
-                );
-                success(&fixture.invoke(&shell, &body, constrained));
-                let actual: Value = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(loongsuite_pilot::utils::read_json_file(
-                        state_path.to_str().unwrap(),
-                    ))
-                    .unwrap();
-                if mode == "target-still-supports" {
-                    assert_eq!(fs::read(&state_path).unwrap(), before);
-                    assert_eq!(actual, state);
-                    assert!(default.is_dir() && custom.is_dir());
+            for (supports, bom_state) in [(false, false), (false, true), (true, false)] {
+                let h = NativeHermesBridgeFixture::new(supports, "current", bom_state);
+                let before = fs::read(h.fixture.data.join("deployed-agents.json")).unwrap();
+                let cursor = h.state()["cursor-cli"].clone();
+                let other = fs::read(&h.other_hook).unwrap();
+                let fallback = fs::read(h.fallback.join("__init__.py")).unwrap();
+                let mut body = h.ps();
+                body.push_str("$env:LOONGSUITE_PILOT_INSTALL_INPUT='prior input 研发'\n");
+                body.push_str(&h.direct_call());
+                body.push_str("if ($env:LOONGSUITE_PILOT_INSTALL_INPUT -ne 'prior input 研发') {throw 'cleanup leaked input environment'}\n");
+                success(&h.fixture.invoke(&shell, &body, constrained));
+                if supports {
+                    assert_eq!(
+                        fs::read(h.fixture.data.join("deployed-agents.json")).unwrap(),
+                        before
+                    );
+                    assert!(h.plugin.join("__init__.py").is_file());
                 } else {
-                    assert_eq!(actual, json!({"cursor":other}));
-                    if mode == "absolute" {
-                        assert!(
-                            !custom.exists(),
-                            "Unicode absolute target must be read as UTF8"
-                        );
-                        assert!(
-                            default.is_dir(),
-                            "custom cleanup must not touch default plugin"
-                        );
-                    } else {
-                        assert!(!default.exists());
-                        assert!(
-                            custom.is_dir(),
-                            "unsafe relative state must not select another delete root"
-                        );
-                    }
-                    if shell
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case("powershell.exe")
-                    {
-                        assert!(fs::read(&state_path)
-                            .unwrap()
-                            .starts_with(&[0xef, 0xbb, 0xbf]));
-                    }
+                    assert!(!h.plugin.exists());
+                    assert!(h.state().get("hermes-agent").is_none());
+                    assert_eq!(h.state()["cursor-cli"], cursor);
                 }
+                assert_eq!(fs::read(h.fallback.join("__init__.py")).unwrap(), fallback);
+                assert_eq!(fs::read(&h.other_hook).unwrap(), other);
             }
         }
     }
@@ -1178,70 +1105,6 @@ Cmd-SpanAttr
                     "wrapper must forward to native CLI, not parse/write JSON itself"
                 );
             }
-        }
-    }
-}
-
-#[test]
-fn source_ps_clm_l172_unc_record_uses_controlled_filesystem_boundary_including_clm() {
-    for shell in shells() {
-        for constrained in [false, true] {
-            let fixture = Fixture::new();
-            let unc = r"\\private-fixture-server\share\owned-plugin";
-            let state_path = fixture.data.join("deployed-agents.json");
-            fs::write(
-                &state_path,
-                serde_json::to_vec(&json!({
-                    "hermes-agent":{"targetDir":unc},"cursor":{"label":"保留研发"}
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-            fs::create_dir_all(fixture.cache.join("versions/rollback-without-hermes")).unwrap();
-            let body = r#"
-$script:unc = '\\private-fixture-server\share\owned-plugin'
-$script:deleted = ''
-function Join-Path {
-    param([string]$Path,[string]$ChildPath)
-    if ($Path -eq $script:unc) { return ($Path + '\' + $ChildPath) }
-    Microsoft.PowerShell.Management\Join-Path @PSBoundParameters
-}
-function Test-Path {
-    param([string]$LiteralPath,[string]$Path)
-    $value = if ($LiteralPath) { $LiteralPath } else { $Path }
-    if ($value -eq ($script:unc + '\.loongsuite-pilot-managed.json')) { return $true }
-    if ($value.StartsWith('\\private-fixture-server\')) { throw 'unexpected UNC filesystem probe' }
-    Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
-}
-function Get-Content {
-    param([string]$LiteralPath,[string]$Path,[switch]$Raw,[string]$Encoding)
-    if ($Encoding -ne 'UTF8') { throw 'JSON reader lost UTF8' }
-    $value = if ($LiteralPath) { $LiteralPath } else { $Path }
-    if ($value -eq ($script:unc + '\.loongsuite-pilot-managed.json')) {
-        return '{"owner":"loongsuite-pilot","agentId":"hermes-agent"}'
-    }
-    if ($value.StartsWith('\\private-fixture-server\')) { throw 'unexpected UNC read' }
-    Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
-}
-function Remove-Item {
-    param([string]$LiteralPath,[string]$Path,[switch]$Recurse,[switch]$Force)
-    $value = if ($LiteralPath) { $LiteralPath } else { $Path }
-    if ($value -ne $script:unc) { throw 'unexpected delete boundary' }
-    $script:deleted = $value
-}
-Remove-HermesPluginForRollback (Join-Path $CACHE_DIR 'versions\rollback-without-hermes')
-if ($script:deleted -ne $script:unc) { throw 'valid UNC record was rejected by actual path selection' }
-"#;
-            success(&fixture.invoke(&shell, body, constrained));
-            let state: Value = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(loongsuite_pilot::utils::read_json_file(
-                    state_path.to_str().unwrap(),
-                ))
-                .unwrap();
-            assert_eq!(state, json!({"cursor":{"label":"保留研发"}}));
         }
     }
 }
@@ -2224,6 +2087,322 @@ $forward = @('worker','connect','--runtime','fake-runtime','--json','--','--runt
                 fs::read(fixture.cache.join("node-bin")).unwrap(),
                 pin.as_bytes()
             );
+        }
+    }
+}
+
+struct NativeHermesBridgeFixture {
+    fixture: Fixture,
+    outgoing: PathBuf,
+    target: PathBuf,
+    plugin: PathBuf,
+    fallback: PathBuf,
+    other_hook: PathBuf,
+}
+impl NativeHermesBridgeFixture {
+    fn new(supports: bool, owner: &str, bom_state: bool) -> Self {
+        use loongsuite_pilot::deployment::DirectoryPluginStrategy;
+        use loongsuite_pilot::types::AgentDefinition;
+        let fixture = Fixture::new();
+        let source = fixture.home.join("source 插件 [原生]");
+        let plugin = fixture
+            .home
+            .join("Hermes O'Brien [插件]🚀/plugins/loongsuite-pilot");
+        let fallback = fixture.home.join(".hermes/plugins/loongsuite-pilot");
+        let other_hook = fixture.home.join("cursor-settings-保留\u{feff}.json");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("__init__.py"), "fixture = '原生'\n").unwrap();
+        fs::write(
+            &other_hook,
+            r#"{"keep":true,"value":"保留﻿值","array":[false,1]}"#,
+        )
+        .unwrap();
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../agents.d/hermes-agent.json")).unwrap();
+        definition["directoryPlugin"]["sourceDir"] = json!(source);
+        definition["directoryPlugin"]["targetDir"] = json!(fallback);
+        definition["directoryPlugin"]["activation"] = Value::Null;
+        let outgoing = fixture.cache.join("versions/outgoing");
+        let target = fixture.cache.join("versions/rollback-target");
+        for (root, include_hermes) in [(&outgoing, true), (&target, supports)] {
+            for dir in ["bin", "agents.d", "assets", "scripts"] {
+                fs::create_dir_all(root.join(dir)).unwrap();
+            }
+            let binary = if cfg!(windows) {
+                "bin/loongsuite-pilot.exe"
+            } else {
+                "bin/loongsuite-pilot"
+            };
+            fs::copy(&fixture.binary, root.join(binary)).unwrap();
+            fs::write(
+                root.join("VERSION"),
+                format!("version=1.2.0\ngit_commit={}\n", "a".repeat(40)),
+            )
+            .unwrap();
+            fs::write(root.join("LICENSE"), "private native fixture").unwrap();
+            fs::write(root.join("assets/fixture"), "private native resource").unwrap();
+            fs::write(
+                root.join("scripts/loongsuite-pilot.ps1"),
+                include_bytes!("../../scripts/loongsuite-pilot.ps1"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("scripts/loongsuite-pilot.sh"),
+                include_bytes!("../../scripts/loongsuite-pilot.sh"),
+            )
+            .unwrap();
+            fs::write(
+                root.join("agents.d/cursor-cli.json"),
+                include_bytes!("../../agents.d/cursor-cli.json"),
+            )
+            .unwrap();
+            if include_hermes {
+                fs::write(
+                    root.join("agents.d/hermes-agent.json"),
+                    definition.to_string(),
+                )
+                .unwrap();
+            }
+            use loongsuite_pilot::utils::runtime_paths::{
+                build_edition, build_target, sha256_file,
+            };
+            let resources = walkdir::WalkDir::new(root).into_iter().map(Result::unwrap)
+                .filter(|entry|entry.file_type().is_file()).map(|entry|json!({
+                    "path":entry.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\',"/"),
+                    "sha256":sha256_file(entry.path()).unwrap()
+                })).collect::<Vec<_>>();
+            fs::write(root.join("runtime-manifest.json"), json!({
+                "schema":1,"runtime":"rust","version":"1.2.0","gitCommit":"a".repeat(40),
+                "target":build_target(),"edition":build_edition(),"binary":binary,"resources":resources
+            }).to_string()).unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fallback_def: AgentDefinition = serde_json::from_value(definition.clone()).unwrap();
+        let strategy =
+            DirectoryPluginStrategy::new(Some(fixture.data.to_string_lossy().into_owned()));
+        assert!(
+            runtime
+                .block_on(strategy.deploy_directory(&fallback_def))
+                .success
+        );
+        let mut recorded = definition;
+        recorded["directoryPlugin"]["targetDir"] = json!(plugin);
+        let recorded: AgentDefinition = serde_json::from_value(recorded).unwrap();
+        if owner != "missing" {
+            let data = if owner == "foreign" {
+                fixture.home.join("other-install")
+            } else {
+                fixture.data.clone()
+            };
+            let strategy = DirectoryPluginStrategy::new(Some(data.to_string_lossy().into_owned()));
+            assert!(
+                runtime
+                    .block_on(strategy.deploy_directory(&recorded))
+                    .success
+            );
+            if owner == "unknown" {
+                fs::write(
+                    plugin.join(".loongsuite-pilot-managed.json"),
+                    r#"{"owner":"loongsuite-pilot","agentId":"hermes-agent"}"#,
+                )
+                .unwrap();
+            }
+        }
+        let state = json!({
+            "hermes-agent":{"deployMode":"directory-plugin","deployedAt":"2026-11-03T00:00:00.000Z","targetDir":plugin},
+            "cursor-cli":{"deployMode":"hook","deployedAt":"2026-11-03T00:00:00.000Z","hookSettingsPaths":[other_hook]}
+        });
+        fs::write(
+            fixture.data.join("deployed-agents.json"),
+            format!("{}{state}", if bom_state { "\u{feff}" } else { "" }),
+        )
+        .unwrap();
+        fs::write(fixture.cache.join("current"), "rollback-target\n").unwrap();
+        fs::write(fixture.cache.join("previous"), "outgoing\n").unwrap();
+        Self {
+            fixture,
+            outgoing,
+            target,
+            plugin,
+            fallback,
+            other_hook,
+        }
+    }
+    fn helper(&self) -> PathBuf {
+        self.outgoing.join(if cfg!(windows) {
+            "bin/loongsuite-pilot.exe"
+        } else {
+            "bin/loongsuite-pilot"
+        })
+    }
+    fn state(&self) -> Value {
+        serde_json::from_str(
+            fs::read_to_string(self.fixture.data.join("deployed-agents.json"))
+                .unwrap()
+                .trim_start_matches('\u{feff}'),
+        )
+        .unwrap()
+    }
+    fn ps(&self) -> String {
+        let helper = std::env::var_os("PILOT_TEST_REAL_NATIVE_HELPER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_BIN_EXE_pilot-fixture"))
+                    .parent()
+                    .unwrap()
+                    .join("loongsuite-pilot.exe")
+            });
+        assert!(
+            helper.is_absolute() && helper.is_file(),
+            "build the real native CLI before Windows bridge acceptance"
+        );
+        format!("$env:PILOT_FIXTURE_MODE = 'hermes-rollback-delegate'\n$env:PILOT_FIXTURE_NATIVE_HELPER = {}\n",
+            ps_single_quote(helper.to_str().unwrap()))
+    }
+    fn direct_call(&self) -> String {
+        format!(
+            "Remove-HermesPluginForRollback {} -NativeHelper {}\n",
+            ps_single_quote(self.target.to_str().unwrap()),
+            ps_single_quote(self.helper().to_str().unwrap())
+        )
+    }
+}
+
+#[test]
+fn source_ps_clm_l172_native_absolute_path_validation_keeps_unc_and_rejects_relative_targets() {
+    for path in [
+        r"\\pilot-private-provider\isolated-share\Hermes",
+        r"C:\Users\private\Hermes",
+        r"C:/Users/private/Hermes",
+    ] {
+        assert!(Path::new(path).is_absolute(), "{path}");
+    }
+    for path in [r"C:drive-relative", r"\root-relative", "relative"] {
+        assert!(!Path::new(path).is_absolute(), "{path}");
+    }
+    // Native filesystem syntax only. No SMB mount, lookup or deletion is made.
+}
+
+#[test]
+fn native_hermes_ps_bridge_preserves_unknown_foreign_dirty_and_relative_records() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for scenario in [
+                "foreign",
+                "unknown",
+                "dirty",
+                "drive-relative",
+                "root-relative",
+            ] {
+                let owner = if scenario == "foreign" {
+                    "foreign"
+                } else if scenario == "unknown" {
+                    "unknown"
+                } else {
+                    "current"
+                };
+                let h = NativeHermesBridgeFixture::new(false, owner, false);
+                if scenario == "dirty" {
+                    fs::write(h.plugin.join("__init__.py"), "user = 'keep'\n").unwrap();
+                } else if scenario == "drive-relative" || scenario == "root-relative" {
+                    let mut state = h.state();
+                    state["hermes-agent"]["targetDir"] = json!(if scenario == "drive-relative" {
+                        "C:unsafe-relative"
+                    } else {
+                        r"\unsafe-root-relative"
+                    });
+                    fs::write(
+                        h.fixture.data.join("deployed-agents.json"),
+                        state.to_string(),
+                    )
+                    .unwrap();
+                }
+                let state = fs::read(h.fixture.data.join("deployed-agents.json")).unwrap();
+                let plugin = fs::read(h.plugin.join("__init__.py")).unwrap();
+                let fallback = fs::read(h.fallback.join("__init__.py")).unwrap();
+                let other = fs::read(&h.other_hook).unwrap();
+                let mut body = h.ps();
+                body.push_str("$env:LOONGSUITE_PILOT_INSTALL_INPUT='prior input 研发'\n$refused=$false\ntry {\n");
+                body.push_str(&h.direct_call());
+                body.push_str("} catch { $refused=$true }\nif ($env:LOONGSUITE_PILOT_INSTALL_INPUT -ne 'prior input 研发') {throw 'failed cleanup leaked input environment'}\n");
+                if matches!(scenario, "dirty" | "drive-relative" | "root-relative") {
+                    body.push_str("if (-not $refused) {throw 'unsafe recorded resources must stop rollback'}\n");
+                } else {
+                    body.push_str("if ($refused) {throw 'unknown or foreign ownership must be a successful no-op'}\n");
+                }
+                success(&h.fixture.invoke(&shell, &body, constrained));
+                assert_eq!(
+                    fs::read(h.fixture.data.join("deployed-agents.json")).unwrap(),
+                    state
+                );
+                assert_eq!(fs::read(h.plugin.join("__init__.py")).unwrap(), plugin);
+                assert_eq!(fs::read(h.fallback.join("__init__.py")).unwrap(), fallback);
+                assert_eq!(fs::read(&h.other_hook).unwrap(), other);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_ps_rollback_captures_outgoing_helper_before_private_publication_and_restarts_after_cleanup(
+) {
+    for shell in shells() {
+        for constrained in [false, true] {
+            for dirty in [false, true] {
+                let h = NativeHermesBridgeFixture::new(false, "current", false);
+                fs::write(h.fixture.cache.join("current"), "outgoing\n").unwrap();
+                fs::write(h.fixture.cache.join("previous"), "rollback-target\n").unwrap();
+                if dirty {
+                    fs::write(h.plugin.join("__init__.py"), "user = 'keep'\n").unwrap();
+                }
+                let before = fs::read(h.fixture.data.join("deployed-agents.json")).unwrap();
+                let plugin = fs::read(h.plugin.join("__init__.py")).unwrap();
+                let mut body = h.ps();
+                body.push_str(r#"
+$script:published=0
+$script:restarted=0
+function Publish-RollbackVersion {
+    param($Target)
+    if ((Split-Path $Target -Leaf) -ne 'rollback-target') {throw 'wrong rollback target'}
+    Set-Content -LiteralPath $CURRENT_FILE -Value 'rollback-target' -Encoding UTF8
+    Set-Content -LiteralPath $PREVIOUS_FILE -Value 'outgoing' -Encoding UTF8
+    $script:published += 1
+    return $true
+}
+function Cmd-Restart { $script:restarted += 1 }
+$env:LOONGSUITE_PILOT_INSTALL_INPUT='prior input 研发'
+$refused=$false
+try { Cmd-Rollback } catch { $refused=$true }
+if ($script:published -ne 1) {throw 'publication must precede native cleanup'}
+if ($env:LOONGSUITE_PILOT_INSTALL_INPUT -ne 'prior input 研发') {throw 'cleanup leaked input environment'}
+"#);
+                body.push_str(if dirty {
+                    "if (-not $refused -or $script:restarted -ne 0) {throw 'failed cleanup must propagate before service restart'}\n"
+                } else {
+                    "if ($refused -or $script:restarted -ne 1) {throw 'successful cleanup must permit exactly one service restart'}\n"
+                });
+                success(&h.fixture.invoke(&shell, &body, constrained));
+                if dirty {
+                    assert_eq!(
+                        fs::read(h.fixture.data.join("deployed-agents.json")).unwrap(),
+                        before
+                    );
+                    assert_eq!(fs::read(h.plugin.join("__init__.py")).unwrap(), plugin);
+                } else {
+                    assert!(!h.plugin.exists());
+                    assert!(h.state().get("hermes-agent").is_none());
+                }
+                assert!(h.fallback.join("__init__.py").is_file());
+                let calls = h.fixture.records();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0]["args"],
+                    json!(["installer-helper", "cleanup-rollback-hermes", "--input-env"])
+                );
+            }
         }
     }
 }

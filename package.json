@@ -57,7 +57,8 @@
     "test:host:openclaw-flow": "vitest run --config vitest.host-openclaw-flow.config.mjs tests/unit/hooks/openclaw/build-context.test.mjs tests/unit/hooks/openclaw/e2e-assertions.test.mjs tests/unit/hooks/openclaw/legacy.test.mjs tests/unit/hooks/openclaw/session-key-e2e.test.mjs tests/unit/hooks/openclaw/plugin.test.mjs",
     "test:host:qoder-runtime": "vitest run tests/unit/hooks/qodercli-runtime-wrapper.test.mjs tests/unit/hooks/qodercli-token-intercept.test.mjs tests/unit/hooks/qoderwork-runtime-wrapper.test.mjs --cache=false",
     "test:host:qwen-wrapper": "vitest run tests/unit/hooks/qwen-work-cn-wrapper-path.test.mjs --cache=false --testNamePattern='derives diagnostics output from the runtime wrapper location'",
-    "test:host:dsh": "vitest run tests/unit/inputs/dsh-log/dsh-plugin.test.ts --cache=false"
+    "test:host:dsh": "vitest run tests/unit/inputs/dsh-log/dsh-plugin.test.ts --cache=false",
+    "test:host:dashboard": "vitest run --config vitest.host-dashboard-history.config.mjs tests/host/dashboard-static-page.test.mjs --cache=false"
   },
   "dependencies": {
     "@alicloud/log": "^1.2.6",
