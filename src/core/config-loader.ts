@@ -13,7 +13,6 @@ import type {
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
-  ListenerConfig,
   LogRetentionConfig,
   MaskConfig,
   MaskReplacementMode,
