@@ -303,6 +303,7 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
     pendingTerminal: { turnId: `deferred-${index}`, terminalEndOffset: f.end,
       failure: { sourceVersion: [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':'), retryAtMs: 0, delayMs: 1000 } },
   }));
+  cp.deferredTerminals[0]!.pendingTerminal.failure!.sourceVersion = 'previous-version';
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   await processFile(f); await f.state.save();
   expect(await pendingRecovery.mock.results[0]!.value).toMatchObject({ blocked: true, processedTerminalCount: 1 });
@@ -311,8 +312,15 @@ it('retains all failed ranges and the blocking cursor when the deferred capacity
   expect(checkpoint(f).scanOffset).toBe(f.end);
   expect(responses(f, 'later')).toHaveLength(0);
   expect(warn).toHaveBeenCalledWith(
-    'pending Codex terminal turn could not be parsed; retained until source changes and backoff expires',
-    expect.objectContaining({ deferred: false, deferredRanges: 4, deferredLimit: 4, retryDelayMs: 1000 }),
+    'Codex terminal turn could not be parsed; retained until source changes and backoff expires',
+    expect.objectContaining({ recoveryPhase: 'pending', deferred: false, blocked: true,
+      deferredRanges: 4, deferredLimit: 4, retryDelayMs: 1000 }),
+  );
+  expect(warn).toHaveBeenCalledWith(
+    'Codex terminal turn could not be parsed; retained until source changes and backoff expires',
+    expect.objectContaining({ recoveryPhase: 'deferred', turnId: 'deferred-0', deferred: true, blocked: true,
+      blockingTurnId: 'old', range: { startOffset: Buffer.byteLength(f.header), endOffset: f.end },
+      deferredRanges: 4, deferredLimit: 4 }),
   );
   const update = vi.spyOn(f.state, 'update');
   expect((await processFile(f)).rawReadBytes).toBe(0);
@@ -481,8 +489,10 @@ it('initially probes a deferred range without failure metadata once and persists
   await f.state.save(); await f.state.load();
   const restarted = await fixture(f.root, f.state);
   const restartedRecover = vi.spyOn(restarted.probe, 'recoverTurnSegment');
+  const retryWarn = vi.spyOn(restarted.probe.logger, 'warn');
   await processFile(restarted);
   expect(restartedRecover).not.toHaveBeenCalled();
+  expect(retryWarn).not.toHaveBeenCalled();
   expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal.retryCount).toBe(1);
   await fs.appendFile(f.file, diagnostic());
   await processFile(restarted);
@@ -490,6 +500,12 @@ it('initially probes a deferred range without failure metadata once and persists
   expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal).toMatchObject({
     firstPendingAtMs: firstFailureAt, lastAttemptAtMs: clock, retryCount: 2,
   });
+  expect(retryWarn).toHaveBeenCalledWith(
+    'Codex terminal turn could not be parsed; retained until source changes and backoff expires',
+    expect.objectContaining({ recoveryPhase: 'deferred', deferred: true, blocked: false,
+      range: { startOffset: Buffer.byteLength(f.header), endOffset: f.end },
+      deferredRanges: 1, deferredLimit: 4, firstPendingAtMs: firstFailureAt, lastAttemptAtMs: clock }),
+  );
   await f.state.save(); await f.state.load();
   expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal.firstPendingAtMs).toBe(firstFailureAt);
 });
@@ -587,13 +603,80 @@ it.each(['pending', 'deferred'])('keeps a maximum persisted retry counter safe d
   expect((await processFile(f)).rawReadBytes).toBe(0);
 });
 
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid scan offset %s and collects subsequent new work', async offset => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f); cp.scanOffset = offset;
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    expect(f.probe.readCheckpoint(key(f))).toBeNull();
+    await processFile(f);
+    expect(Number.isSafeInteger(checkpoint(f).scanOffset)).toBe(true);
+    expect(checkpoint(f).scanOffset).toBeGreaterThanOrEqual(0);
+    await fs.appendFile(f.file, completed('after-invalid-cursor', false));
+    await processFile(f);
+    expect(responses(f, 'after-invalid-cursor')).toHaveLength(1);
+  },
+);
+
+function legacyRecoveryState(cp: CodexTranscriptCheckpoint, end: number) {
+  cp.pendingFusion = { turnId: 'old', parentThreadId: 'parent', parentTraceId: 'a'.repeat(32),
+    terminalEndOffset: end, children: [{ parentToolCallId: 'tool', parentTraceId: 'a'.repeat(32), spawnedAtMs: 0 }] };
+  cp.pendingSubagent = { turnId: 'old', parentThreadId: 'parent', parentTurnId: 'parent-turn',
+    parentTraceId: 'a'.repeat(32), parentToolCallId: 'tool', confidence: 'explicit_id',
+    terminalEndOffset: end, activeTurn: { ...cp.activeTurn! } };
+  cp.forkBootstrap = { state: 'live-pending', searchOffset: 0 };
+}
+
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid owner/legacy recovery byte offsets %s without blocking later work', async offset => {
+    const f = await pendingFixture(1024); const cp = checkpoint(f);
+    legacyRecoveryState(cp, f.end);
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const valid = f.probe.readCheckpoint(key(f));
+    expect(valid.pendingFusion).not.toBeNull();
+    expect(valid.pendingSubagent).not.toBeNull();
+    expect(valid.forkBootstrap?.searchOffset).toBe(0);
+    cp.pendingTerminal = null; cp.ownerSessionMetaOffset = offset;
+    cp.pendingFusion!.terminalEndOffset = offset;
+    cp.pendingSubagent!.terminalEndOffset = offset;
+    cp.forkBootstrap!.searchOffset = offset;
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.ownerSessionMetaOffset).toBeNull();
+    expect(parsed.pendingFusion).toBeNull();
+    expect(parsed.pendingSubagent).toBeNull();
+    expect(parsed.pendingTerminal).toBeNull();
+    expect(parsed.forkBootstrap).toBeUndefined();
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each(['mismatched-turn', 'reversed-range'])(
+  'rejects inconsistent captured legacy recovery (%s)', async mode => {
+    const f = await pendingFixture(1024); const cp = checkpoint(f);
+    legacyRecoveryState(cp, f.end);
+    cp.pendingFusion = null; cp.forkBootstrap = undefined; cp.pendingTerminal = null;
+    if (mode === 'mismatched-turn') cp.pendingSubagent!.turnId = 'different';
+    else cp.pendingSubagent!.terminalEndOffset = 0;
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.pendingSubagent).toBeNull();
+    expect(parsed.pendingTerminal).toBeNull();
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
 it('accepts zero as a valid terminal boundary', async () => {
   const f = await pendingFixture(1024);
   const cp = checkpoint(f);
+  cp.scanOffset = 0;
   cp.activeTurn!.startOffset = 0;
   cp.pendingTerminal!.terminalEndOffset = 0;
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   expect(f.probe.readCheckpoint(key(f)).pendingTerminal?.terminalEndOffset).toBe(0);
+  expect(f.probe.readCheckpoint(key(f)).scanOffset).toBe(0);
 });
 
 it('recovers a valid legacy terminal directly without creating a deferred range', async () => {
