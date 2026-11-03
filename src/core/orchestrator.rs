@@ -2864,6 +2864,7 @@ impl Orchestrator {
         let inputs = Arc::clone(&self.inputs);
         let sls = self.sls.lock().expect("sls").clone();
         let otlp = self.otlp.lock().expect("otlp").clone();
+        let trace_otlp = otlp.clone();
         MetricsWriter::new(MetricsWriterOptions {
             data_dir: self.data_dir.clone(),
             version: version.to_string(),
@@ -2876,7 +2877,18 @@ impl Orchestrator {
                 .map(|policy| policy.as_str().to_string())
                 .unwrap_or_default(),
             get_snapshot: Arc::new(move || Ok(snapshot_from(&inputs, sls.clone(), otlp.clone()))),
-            get_trace_runtime_snapshot: None,
+            get_trace_runtime_snapshot: Some(Arc::new(move || {
+                Ok(trace_otlp
+                    .as_ref()
+                    .map(|flusher| {
+                        flusher
+                            .trace_runtime_snapshot()
+                            .into_iter()
+                            .map(Into::into)
+                            .collect()
+                    })
+                    .unwrap_or_default())
+            })),
             alarm_manager: None,
             agents_config: self.config.agents.clone(),
             sls_endpoints: self
@@ -5566,3 +5578,7 @@ mod privacy_wiring_contracts;
 #[cfg(test)]
 #[path = "orchestrator_deployment_history_contract_tests.rs"]
 mod deployment_history_contract_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_trace_runtime_main541_tests.rs"]
+mod trace_runtime_main541_tests;

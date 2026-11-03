@@ -607,3 +607,34 @@ mod tests {
 }
 
 include!("activation_resource_history_tests.rs");
+
+#[cfg(test)]
+mod newly_created_parent_binding_contract {
+    use super::*;
+    #[test]
+    fn native_begin_freezes_missing_data_parent_then_restores_both_report_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("New DATA 用户 [report]🚀");
+        let cache = data.join(".hook-report");
+        let targets = BTreeMap::from([
+            ("report".to_owned(), data.join("last-hook-install.json")),
+            ("signal".to_owned(), data.join("hook-install.signal")),
+        ]);
+        assert!(!data.exists());
+        let mut tx = ActivationTransaction::begin(&cache, targets.clone()).unwrap();
+        for path in tx.journal.targets.values() {
+            binding::ensure_bound(path).unwrap();
+        }
+        tx.write("report", b"pending report", 0o600).unwrap();
+        tx.write("signal", b"pending signal", 0o600).unwrap();
+        assert_eq!(
+            fs::read(targets.get("report").unwrap()).unwrap(),
+            b"pending report"
+        );
+        tx.finished = true;
+        drop(tx);
+        ActivationTransaction::recover(&cache, targets.clone()).unwrap();
+        assert!(targets.values().all(|path| !path.exists()));
+        assert!(!cache.join("update-recovery.json").exists());
+    }
+}

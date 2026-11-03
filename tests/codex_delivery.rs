@@ -171,7 +171,7 @@ async fn native_codex_http_acceptance_blocks_disk_progress_and_restart_does_not_
         .unwrap();
     let receiver = Receiver::new(false).await;
     let path = root.path().join("state.json");
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
     let store = Arc::new(StateStore::new(&path));
     store.set_offset(&key, 0.0);
@@ -252,7 +252,7 @@ async fn native_codex_hung_http_is_cancelled_and_failed_checkpoint_replays_after
         .unwrap();
     let hanging = Receiver::new(true).await;
     let path = root.path().join("state.json");
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
     let store = Arc::new(StateStore::new(&path));
     store.set_offset(&key, 0.0);
@@ -727,7 +727,7 @@ async fn native_codex_fresh_source_without_any_disk_key_replays_after_http_cance
         .unwrap();
     let hanging = Receiver::new(true).await;
     let path = root.path().join("state.json");
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
     let store = Arc::new(StateStore::new(&path));
     // Persist only an unrelated source. The rollout has never had a durable key,
@@ -819,7 +819,7 @@ async fn native_codex_first_install_keeps_existing_history_baselined() {
     tokio::fs::create_dir(root.path().join("sessions"))
         .await
         .unwrap();
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     tokio::fs::write(&rollout, completed_turn()).await.unwrap();
     let path = root.path().join("state.json");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
@@ -853,7 +853,7 @@ async fn native_codex_source_ownership_recovers_checkpoint_loss_without_promotin
         .await
         .unwrap();
     let path = root.path().join("state.json");
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
     let receiver = Receiver::new(false).await;
     receiver.healthy.store(true, Ordering::SeqCst);
@@ -914,7 +914,7 @@ async fn native_codex_cannot_emit_when_durable_source_ownership_cannot_be_writte
         .await
         .unwrap();
     let path = root.path().join("state.json");
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let key = format!("codex-transcript:{}", rollout.to_string_lossy());
     let store = Arc::new(StateStore::new(&path));
     let receiver = Receiver::new(false).await;
@@ -961,7 +961,7 @@ async fn native_codex_historical_floor_recovers_checkpoint_loss_and_replays_only
     tokio::fs::create_dir(root.path().join("sessions"))
         .await
         .unwrap();
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let history = synthetic_history();
     tokio::fs::write(&rollout, &history).await.unwrap();
     let path = root.path().join("state.json");
@@ -1095,7 +1095,7 @@ async fn native_codex_initial_history_cannot_start_without_durable_exclusion_flo
     tokio::fs::write(root.path().join("wakeups/source-owners"), b"blocked")
         .await
         .unwrap();
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     tokio::fs::write(&rollout, synthetic_history())
         .await
         .unwrap();
@@ -1121,7 +1121,7 @@ async fn native_codex_checkpoint_loss_floor_does_not_follow_a_replaced_source_id
     tokio::fs::create_dir(root.path().join("sessions"))
         .await
         .unwrap();
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let history = synthetic_history();
     tokio::fs::write(&rollout, &history).await.unwrap();
     let path = root.path().join("state.json");
@@ -1177,7 +1177,7 @@ async fn native_codex_copied_checkpoint_loss_rebuild_keeps_initial_floor_and_uno
     tokio::fs::create_dir(root.path().join("sessions"))
         .await
         .unwrap();
-    let rollout = root.path().join("sessions/rollout-session-1.jsonl");
+    let rollout = root.path().join("sessions").join("rollout-session-1.jsonl");
     let mut records: Vec<Value> = synthetic_history()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

@@ -465,6 +465,7 @@ pub fn select_owner_session_meta_offset(
 pub struct TurnStart {
     pub start_offset: Option<i64>,
     pub next_offset: i64,
+    pub incomplete_tail: Option<IncompleteJsonlTail>,
 }
 
 pub fn bounded_search_offset(value: i64, file_size: i64) -> i64 {
@@ -488,7 +489,7 @@ pub async fn find_turn_start_offset(
     let safe_start = bounded_search_offset(start_offset, file_size);
     let scan_end = file_size.min(safe_start.saturating_add(16 * 1024 * 1024));
     let owner_timestamp = uuid_v7_timestamp_ms(owner_thread_id);
-    let stats = scan_json_lines(file_path, safe_start, scan_end, runtime, |line| {
+    let mut process = |line: JsonLine| {
         let Some(payload) = line
             .record
             .get("payload")
@@ -519,11 +520,19 @@ pub async fn find_turn_start_offset(
             return false;
         }
         true
-    })
-    .await?;
+    };
+    let mut stats = scan_json_lines(file_path, safe_start, scan_end, runtime, &mut process).await?;
+    if stats.next_offset == safe_start && scan_end < file_size {
+        stats = scan_json_lines(file_path, safe_start, file_size, runtime, |line| {
+            process(line);
+            false
+        })
+        .await?;
+    }
     Ok(TurnStart {
         start_offset: turn_start,
         next_offset: stats.next_offset,
+        incomplete_tail: stats.incomplete_tail,
     })
 }
 

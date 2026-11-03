@@ -289,6 +289,8 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     pub async fn discover_session_files(&self) -> Vec<DiscoveredSessionFile> {
+        #[cfg(test)]
+        self.body.with_shared(|s| s.main541_discoveries += 1);
         let canonical_default = canonical_directory_path(&self.body.session_dir).await;
         let default_files = self.list_default_rollout_files().await;
         let mut discovered: IndexMap<String, DiscoveredSessionFile> = IndexMap::new();
@@ -440,6 +442,9 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     pub async fn process_file(&self, rt: &InputRuntime, file_path: &str) -> anyhow::Result<usize> {
+        #[cfg(test)]
+        self.body
+            .with_shared(|s| s.main541_visits.push(file_path.to_owned()));
         let stat = match file_meta_snapshot(file_path).await {
             Ok((ino, size, mtime_ms)) => Some(RolloutStat {
                 ino,
@@ -580,7 +585,11 @@ impl<'a> CodexTranscriptEngine<'a> {
                     .await?;
                 changed |= prepared.changed;
                 if !prepared.ready {
-                    self.save_checkpoint(rt, &key, &checkpoint);
+                    if changed {
+                        self.save_checkpoint(rt, &key, &checkpoint);
+                    } else {
+                        self.save_delegation_state(rt);
+                    }
                     return Ok(0);
                 }
             }
@@ -2157,6 +2166,7 @@ impl<'a> CodexTranscriptEngine<'a> {
         owner_meta: &CodexTranscriptMeta,
         checkpoint: &mut CodexTranscriptCheckpoint,
     ) -> anyhow::Result<Prepared> {
+        let previous_bootstrap = checkpoint.fork_bootstrap.clone();
         if checkpoint.scan_offset == 0 && checkpoint.fork_bootstrap.is_none() {
             checkpoint.fork_bootstrap = Some(CodexForkBootstrap {
                 state: ForkBootstrapState::LivePending,
@@ -2178,7 +2188,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 .await?;
             return Ok(Prepared {
                 ready: rebuilt,
-                changed: true,
+                changed: rebuilt || previous_bootstrap != checkpoint.fork_bootstrap,
             });
         }
         let marker = self
@@ -2224,6 +2234,17 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
         checkpoint.fork_bootstrap = Some(bootstrap.clone());
         let searched_new = bootstrap.search_offset < file_size;
+        let search_stat = scan::file_version_snapshot(file_path).await?;
+        if search_stat.size != file_size
+            || !self
+                .incomplete_tail_ready(rt, file_path, bootstrap.search_offset)
+                .await?
+        {
+            return Ok(Prepared {
+                ready: false,
+                changed: previous_bootstrap != checkpoint.fork_bootstrap,
+            });
+        }
         let located = find_turn_start_offset(
             file_path,
             &owner_meta.thread_id,
@@ -2234,6 +2255,14 @@ impl<'a> CodexTranscriptEngine<'a> {
             Some(rt),
         )
         .await?;
+        if let Some(tail) = located
+            .incomplete_tail
+            .filter(|tail| tail.end_offset == file_size)
+        {
+            if scan::file_version_snapshot(file_path).await? == search_stat {
+                self.remember_incomplete_tail(file_path, tail);
+            }
+        }
         let Some(start) = located.start_offset else {
             checkpoint.fork_bootstrap = Some(CodexForkBootstrap {
                 state: bootstrap.state,
@@ -2260,7 +2289,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             }
             return Ok(Prepared {
                 ready: false,
-                changed: true,
+                changed: previous_bootstrap != checkpoint.fork_bootstrap,
             });
         };
         let previous = checkpoint.scan_offset;
@@ -2277,7 +2306,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 .await?;
             return Ok(Prepared {
                 ready: rebuilt,
-                changed: true,
+                changed: rebuilt || previous_bootstrap != checkpoint.fork_bootstrap,
             });
         }
         checkpoint.scan_offset = previous.max(start);
@@ -2765,8 +2794,36 @@ impl<'a> CodexTranscriptEngine<'a> {
         files: &[DiscoveredSessionFile],
         skip: Option<&HashSet<String>>,
     ) -> anyhow::Result<()> {
+        self.index_transcript_owners(rt, files, skip, false).await
+    }
+
+    pub async fn index_targeted_transcript_owners(
+        &self,
+        rt: &InputRuntime,
+        files: &[DiscoveredSessionFile],
+    ) -> anyhow::Result<()> {
+        self.index_transcript_owners(rt, files, None, true).await
+    }
+
+    async fn index_transcript_owners(
+        &self,
+        rt: &InputRuntime,
+        files: &[DiscoveredSessionFile],
+        skip: Option<&HashSet<String>>,
+        targeted: bool,
+    ) -> anyhow::Result<()> {
+        let discovered: HashSet<String> = files.iter().map(|file| file.file_path.clone()).collect();
         let kept = self.body.with_shared(|shared| {
             let mut kept = Vec::new();
+            if targeted {
+                kept.extend(
+                    shared
+                        .meta_by_path
+                        .iter()
+                        .filter(|(path, _)| !discovered.contains(*path))
+                        .map(|(path, meta)| (path.clone(), meta.clone())),
+                );
+            }
             if let Some(skip) = skip {
                 for path in skip {
                     if let Some(meta) = shared.meta_by_path.get(path).cloned() {
@@ -2778,8 +2835,9 @@ impl<'a> CodexTranscriptEngine<'a> {
             shared.path_by_thread.clear();
             kept
         });
-        let discovered: HashSet<String> = files.iter().map(|file| file.file_path.clone()).collect();
-        self.prune_absent_meta_cache(&discovered, now_ms() as i64);
+        if !targeted {
+            self.prune_absent_meta_cache(&discovered, now_ms() as i64);
+        }
         for (path, meta) in kept {
             self.publish_transcript_owner_meta(&path, meta);
         }
@@ -3200,12 +3258,45 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
     }
 
-    fn save_delegation_state(&self, rt: &InputRuntime) {
+    pub(super) fn save_delegation_state(&self, rt: &InputRuntime) {
         let extra = self.body.with_shared(|shared| json!({
             "codexDelegations": shared.linker.serialize(),
             "codexResultInvocations": shared.delivered_invocations,
             "codexPendingAgentResults": shared.pending_agent_results.values().collect::<Vec<_>>(),
         }));
+        let previous = rt.state_store.get("codex-transcript").extra();
+        let empty_delegations = [
+            "spawns",
+            "children",
+            "bindings",
+            "completedWorkResults",
+            "workTerminals",
+        ]
+        .iter()
+        .all(|key| {
+            extra["codexDelegations"][*key]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        });
+        let same = [
+            "codexDelegations",
+            "codexResultInvocations",
+            "codexPendingAgentResults",
+        ]
+        .iter()
+        .all(|key| {
+            let before = previous.as_ref().and_then(|p| p.get(*key));
+            before == Some(&extra[*key])
+                || (before.is_none()
+                    && if *key == "codexDelegations" {
+                        empty_delegations
+                    } else {
+                        extra[*key].as_array().is_some_and(Vec::is_empty)
+                    })
+        });
+        if same {
+            return;
+        }
         rt.state_store.update(
             "codex-transcript",
             InputStatePatch {
@@ -3216,6 +3307,8 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     pub async fn retry_pending_agent_results(&self, rt: &InputRuntime) -> anyhow::Result<usize> {
+        #[cfg(test)]
+        self.body.with_shared(|s| s.main541_retries += 1);
         let pending = self.body.with_shared(|shared| {
             shared
                 .pending_agent_results

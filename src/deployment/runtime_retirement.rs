@@ -144,6 +144,17 @@ impl Backend for Native {
                 command.creation_flags(0x0800_0000);
             }
             let execute = async move {
+                #[cfg(windows)]
+                if spec.program == "reg.exe" && spec.args.first().is_some_and(|arg| arg == "query")
+                {
+                    // Read Unicode directly: an OEM/ANSI console conversion can
+                    // irreversibly replace an owned path before stdout is decoded.
+                    return tokio::task::spawn_blocking(move || {
+                        registry_unicode::query(&spec.args)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                }
                 let mut child = command.spawn().map_err(|e| e.to_string())?;
                 let stdout = child.stdout.take().unwrap();
                 let stderr = child.stderr.take().unwrap();
@@ -475,3 +486,7 @@ pub(crate) fn parse_windows_user_env(output: &str, env_name: &str) -> String {
 #[cfg(test)]
 #[path = "runtime_retirement_installer_tests.rs"]
 mod installer_history_tests;
+
+#[cfg(any(windows, test))]
+#[path = "runtime_retirement_registry.rs"]
+mod registry_unicode;

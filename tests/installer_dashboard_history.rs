@@ -344,9 +344,11 @@ fn windows_shells() -> Vec<PathBuf> {
 fn dashboard_l413_public_powershell_parser_and_real_native_writer_preserve_full_original_matrix_in_both_shells_and_clm(
 ) {
     let source = include_str!("../deploy/installer-opensource.ps1").replace("\r\n", "\n");
+    // Stop at a real helper declaration. URL-default comments are editorial;
+    // the retained initialization only assigns values and performs no download.
     let prelude = source
-        .split_once("# Resolve package URL")
-        .unwrap()
+        .split_once("\nfunction Detect-Lang {")
+        .expect("actual public initialization before Detect-Lang")
         .0
         .trim_start_matches('\u{feff}');
     let end = prelude

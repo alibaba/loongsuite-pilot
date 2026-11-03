@@ -5311,3 +5311,6 @@ mod main346_contracts;
 
 #[path = "discovery_cache_main_tests.rs"]
 mod discovery_cache_main_tests;
+
+#[path = "engine_main541_history.rs"]
+mod main541_contracts;

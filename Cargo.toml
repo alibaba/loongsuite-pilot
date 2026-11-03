@@ -38,6 +38,7 @@ hmac = "0.12"
 icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
 indexmap = { version = "2", features = ["serde"] }
 hostname = "0.4"
+notify = "=8.2.1"
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
 prost = "0.14"
 regex = "1"

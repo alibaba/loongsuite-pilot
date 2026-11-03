@@ -197,7 +197,7 @@ async fn main_l54_both_startup_and_rehydrate_apply_current_workspace_exclusion_w
         if rehydrate {
             let key = codex_turn_journal_group_key(&source[0]);
             h.f.inner
-                .replay_journal(journal.load(Some(&key)).await.unwrap())
+                .replay_journal(journal.load_batches(Some(&key)).await.unwrap())
                 .await
                 .unwrap();
         } else {
@@ -495,4 +495,40 @@ async fn main_l230_unknown_upstream_keeps_independent_entry_and_audit_only_deliv
     h.f.flush().await.unwrap();
     assert_eq!(h.spans().len(), count);
     h.f.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn main_541_preflights_late_workspace_evidence_across_streamed_batches_before_accepting_earlier_records(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(root.path());
+        let manager = Arc::new(InputManager::new());
+        let excluded = root.path().join("codex-private");
+        manager.set_workspace_policy(
+            WorkspacePolicy::new(&[excluded.to_string_lossy().into_owned()], None).unwrap(),
+        );
+        let mut source = records("child", "late-policy", &"a".repeat(32), 0, Some("I"));
+        source[0].input_messages = Some(serde_json::json!("x".repeat(2 * 1024 * 1024)));
+        source.last_mut().unwrap().workspace_path = Some(excluded.to_string_lossy().into_owned());
+        journal.append(&source).await.unwrap();
+        // Confirm that the policy evidence is actually later than an indivisible
+        // oversized first batch, rather than accidentally testing one in-memory turn.
+        let mut replay = journal.load_batches(None).await.unwrap();
+        let first = replay.next_batch().await.unwrap().unwrap();
+        assert_eq!(first.entries.as_slice(), &source[..1]);
+        assert!(!first.last);
+        let final_batch = replay.next_batch().await.unwrap().unwrap();
+        assert!(final_batch.last);
+        assert_eq!(final_batch.entries.last(), source.last());
+        assert!(replay.next_batch().await.unwrap().is_none());
+        let h = Harness::new(root.path(), Some(journal.clone()), false, Some(manager));
+        h.f.start().await.unwrap();
+        assert!(h.spans().is_empty());
+        assert!(!journal.is_acknowledged(&source[0]).await.unwrap());
+        assert!(read(&journal).await.is_empty());
+        h.f.shutdown().await.unwrap();
+    })
+    .await
+    .expect("source main 15s late-workspace replay budget");
 }

@@ -16,7 +16,7 @@ impl World {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().to_owned();
         let data = root.join("pilot-data");
-        let settings = root.join(".pi/agent/settings.json");
+        let settings = root.join(".pi").join("agent").join("settings.json");
         Self {
             _temp: temp,
             root,

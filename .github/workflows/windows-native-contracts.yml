@@ -87,6 +87,8 @@ jobs:
           }
           check cargo test --locked -p loongsuite-pilot --lib migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source -- --test-threads=1
           check cargo test --locked -p loongsuite-pilot --lib resolves_directory_links_including_not_yet_created_descendants -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib private_directory:: -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --test local_worker_acl_history windows_private_worker_removes_inherited_access_and_is_idempotent -- --exact --test-threads=1
           check cargo test --locked -p loongsuite-pilot --lib actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry -- --test-threads=1
           for filter in installer_openclaw_entry_history:: installer_probe_transport_history:: installer_hermes_rollback_history:: installer_uninstall_public_entry_history:: stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts; do
             check cargo test --locked -p loongsuite-pilot --test installer_native "$filter" -- --test-threads=1

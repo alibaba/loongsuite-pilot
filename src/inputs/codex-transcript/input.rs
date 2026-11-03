@@ -8,11 +8,11 @@
 
 mod engine;
 mod source_ownership;
+mod wakeup;
+use wakeup::{WakeupState, WakeupWatcher};
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
-#[cfg(target_os = "linux")]
-use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -94,6 +94,13 @@ pub(super) struct Shared {
     pub incomplete_tails: IndexMap<String, super::scan::IncompleteJsonlTail>,
     pub last_historical_stat_at: i64,
     pub cached_default: Option<CachedDefault>,
+    wakeup: WakeupState,
+    #[cfg(test)]
+    pub main541_discoveries: usize,
+    #[cfg(test)]
+    pub main541_visits: Vec<String>,
+    #[cfg(test)]
+    pub main541_retries: usize,
 }
 
 #[cfg(test)]
@@ -115,6 +122,7 @@ pub struct CodexTranscriptBody {
     batch_handlers: Mutex<Vec<BatchHandler>>,
     host: Mutex<Option<Weak<HostedInput<CodexTranscriptBody>>>>,
     watcher_stop: Mutex<Option<WakeupWatcher>>,
+    wakeup_signal: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     initialization_wait: Mutex<Option<CodexInitializationWait>>,
 }
@@ -169,10 +177,18 @@ impl CodexTranscriptInput {
                 incomplete_tails: IndexMap::new(),
                 last_historical_stat_at: 0,
                 cached_default: None,
+                wakeup: WakeupState::default(),
+                #[cfg(test)]
+                main541_discoveries: 0,
+                #[cfg(test)]
+                main541_visits: Vec::new(),
+                #[cfg(test)]
+                main541_retries: 0,
             }),
             batch_handlers: Mutex::new(Vec::new()),
             host: Mutex::new(None),
             watcher_stop: Mutex::new(None),
+            wakeup_signal: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             initialization_wait: Mutex::new(None),
         };
@@ -415,6 +431,7 @@ impl InputBody for CodexTranscriptBody {
             cache.clear();
         }
         self.with_shared(|shared| {
+            shared.wakeup = WakeupState::default();
             shared.meta_cache.clear();
             shared.incomplete_tails.clear();
             shared.meta_cache_bytes = 0;
@@ -424,19 +441,67 @@ impl InputBody for CodexTranscriptBody {
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
         let now = super::utils::now_ms() as i64;
-        self.engine().cleanup_expired_span_contexts(rt, now).await;
-        let mut discovered = self.engine().discover_session_files().await;
-        let paths: std::collections::HashSet<String> = discovered
-            .iter()
-            .map(|file| file.file_path.clone())
-            .collect();
-        self.with_shared(|shared| {
-            shared.idle.retain(|path, _| paths.contains(path));
+        let plan = self.with_shared(|shared| {
+            shared
+                .wakeup
+                .take(tokio::time::Instant::now(), rt.poll_interval_ms())
         });
-        let skip = self.engine().historical_skip_paths(&discovered, now);
-        self.engine()
-            .index_discovered_transcript_owners(rt, &discovered, Some(&skip))
-            .await?;
+        self.engine().cleanup_expired_span_contexts(rt, now).await;
+        let mut discovered;
+        let mut skip = std::collections::HashSet::new();
+        if plan.full {
+            discovered = self.engine().discover_session_files().await;
+            let paths: std::collections::HashSet<String> = discovered
+                .iter()
+                .map(|file| file.file_path.clone())
+                .collect();
+            self.with_shared(|shared| {
+                shared.wakeup.last_full_scan_at = Some(tokio::time::Instant::now());
+                shared.idle.retain(|path, _| paths.contains(path));
+            });
+            skip = self.engine().historical_skip_paths(&discovered, now);
+            if self.with_shared(|shared| shared.wakeup.discovery_pending) {
+                skip.clear();
+            }
+            for path in &plan.targeted {
+                skip.remove(path);
+            }
+            self.engine()
+                .index_discovered_transcript_owners(rt, &discovered, Some(&skip))
+                .await?;
+            self.with_shared(|shared| {
+                shared.wakeup.paths.clear();
+                for file in &discovered {
+                    if let Some(meta) = shared.meta_by_path.get(&file.file_path) {
+                        let marker = format!(
+                            "{}.json",
+                            super::discovery::safe_wakeup_session_part(&meta.thread_id)
+                        );
+                        shared
+                            .wakeup
+                            .paths
+                            .entry(marker)
+                            .or_default()
+                            .insert(file.file_path.clone());
+                    }
+                }
+                if shared.wakeup.discovery_revision == plan.revision {
+                    shared.wakeup.discovery_pending = false;
+                }
+            });
+        } else {
+            discovered = plan
+                .targeted
+                .into_iter()
+                .map(|file_path| super::discovery::DiscoveredSessionFile {
+                    file_path,
+                    baseline_on_start: false,
+                })
+                .collect();
+            self.engine()
+                .index_targeted_transcript_owners(rt, &discovered)
+                .await?;
+        }
         discovered.sort_by(|left, right| {
             let left_depth = self.with_shared(|shared| {
                 shared
@@ -463,7 +528,10 @@ impl InputBody for CodexTranscriptBody {
             }
             emitted += self.engine().process_file(rt, &file.file_path).await?;
         }
-        emitted += self.engine().retry_pending_agent_results(rt).await?;
+        if plan.full {
+            emitted += self.engine().retry_pending_agent_results(rt).await?;
+        }
+        self.engine().save_delegation_state(rt);
         self.engine().report_subagent_links(rt);
         if emitted > 0 {
             let meta = json!({ "count": emitted });
@@ -518,7 +586,7 @@ impl CodexTranscriptBody {
         else {
             return;
         };
-        match spawn_wakeup_watcher(&self.wakeup_dir, host) {
+        match wakeup::spawn_wakeup_watcher(&self.wakeup_dir, host, self.wakeup_signal.clone()) {
             Some(stop) => {
                 *self
                     .watcher_stop
@@ -565,169 +633,6 @@ fn flush_batch(
     *emitted += batch.len();
     batch.clear();
     *batch_bytes = 0;
-}
-
-struct WakeupWatcher {
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl WakeupWatcher {
-    async fn stop(mut self) {
-        // abort 唤醒空闲的 readable 等待；等待任务回收以保证描述符已释放。
-        self.task.abort();
-        let _ = (&mut self.task).await;
-    }
-}
-
-impl Drop for WakeupWatcher {
-    fn drop(&mut self) {
-        // 输入被直接丢弃或停止 Future 被取消时也不能留下脱离生命周期的监听。
-        self.task.abort();
-    }
-}
-
-fn spawn_wakeup_watcher(
-    dir: &str,
-    host: Weak<HostedInput<CodexTranscriptBody>>,
-) -> Option<WakeupWatcher> {
-    #[cfg(target_os = "linux")]
-    {
-        spawn_inotify_watcher(dir, move || {
-            if let Some(host) = host.upgrade() {
-                host.request_collection();
-            }
-        })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (dir, host);
-        None
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn spawn_inotify_watcher(
-    dir: &str,
-    on_change: impl Fn() + Send + 'static,
-) -> Option<WakeupWatcher> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    let path = CString::new(dir).ok()?;
-    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-    if fd < 0 {
-        return None;
-    }
-    // 描述符自创建起由 OwnedFd 唯一持有；后续任意失败出口自动关闭。
-    let file = unsafe { OwnedFd::from_raw_fd(fd) };
-    let watch = unsafe {
-        libc::inotify_add_watch(
-            file.as_raw_fd(),
-            path.as_ptr(),
-            libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_CLOSE_WRITE | libc::IN_MODIFY,
-        )
-    };
-    if watch < 0 {
-        return None;
-    }
-    // 安全性：OwnedFd 在 AsyncFd 的整个生命周期内既不替换也不提前关闭。
-    let async_fd = unsafe {
-        tokio::io::unix::AsyncFd::register_with_interest(file, tokio::io::Interest::READABLE)
-    }
-    .ok()?;
-    let task = tokio::spawn(async move {
-        loop {
-            let mut guard = match async_fd.readable().await {
-                Ok(guard) => guard,
-                Err(_) => break,
-            };
-            let mut buf = [0u8; 4096];
-            let result = guard.try_io(|fd| {
-                let n = unsafe {
-                    libc::read(fd.get_ref().as_raw_fd(), buf.as_mut_ptr().cast(), buf.len())
-                };
-                if n < 0 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(n)
-                }
-            });
-            // 只在 WouldBlock 时清除就绪；否则队列超过一个缓冲区时会丢失后续唤醒。
-            match result {
-                Ok(Ok(0)) => break,
-                Ok(Ok(_)) => on_change(),
-                Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Ok(Err(_)) => break,
-                Err(_) => continue,
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    });
-    Some(WakeupWatcher { task })
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod watcher_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn idle_watcher_stops_and_drop_reaps_without_another_filesystem_event() {
-        let root = tempfile::tempdir().unwrap();
-        let watcher = spawn_inotify_watcher(root.path().to_str().unwrap(), || {}).unwrap();
-        let task = watcher.task.abort_handle();
-        tokio::task::yield_now().await;
-        tokio::time::timeout(Duration::from_secs(2), watcher.stop())
-            .await
-            .unwrap();
-        assert!(task.is_finished());
-        let watcher = spawn_inotify_watcher(root.path().to_str().unwrap(), || {}).unwrap();
-        let task = watcher.task.abort_handle();
-        tokio::task::yield_now().await;
-        drop(watcher);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !task.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn watcher_drains_bursts_and_can_restart_on_the_same_unicode_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("唤醒 空格 🐉");
-        std::fs::create_dir(&dir).unwrap();
-        for round in 0..2 {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let watcher = spawn_inotify_watcher(dir.to_str().unwrap(), move || {
-                let _ = tx.send(());
-            })
-            .unwrap();
-            // 每个独立名称产生不同事件，队列总量超过一次 4096 字节读取。
-            for index in 0..160 {
-                std::fs::write(dir.join(format!("marker-{round}-{index}.json")), "{}").unwrap();
-            }
-            tokio::time::timeout(Duration::from_secs(2), async {
-                for _ in 0..2 {
-                    rx.recv().await.unwrap();
-                }
-            })
-            .await
-            .unwrap();
-            watcher.stop().await;
-            while rx.try_recv().is_ok() {}
-            assert!(rx.recv().await.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn invalid_wakeup_directory_does_not_create_a_task() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(
-            spawn_inotify_watcher(root.path().join("missing").to_str().unwrap(), || {}).is_none()
-        );
-        assert!(spawn_inotify_watcher("bad\0path", || {}).is_none());
-    }
 }
 
 #[allow(dead_code)]

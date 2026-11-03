@@ -107,6 +107,10 @@ pub struct TraceRuntimeSnapshot {
     pub largest_buffer_turn_id: Option<String>,
     pub largest_buffer_session_id: Option<String>,
     pub oldest_buffer_age_ms: u64,
+    pub resident_records: Option<u64>,
+    pub resident_payload_bytes: Option<u64>,
+    pub spilled_buffers: Option<u64>,
+    pub spilled_records: Option<u64>,
 }
 
 impl TraceRuntimeSnapshot {

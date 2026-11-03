@@ -29,7 +29,10 @@ pub use base_flusher::{
     BaseFlusher, FlushError, FlushErrorKind, TraceRuntimeCounters, TraceRuntimeSnapshot,
 };
 pub use codex_turn_converter::convert_codex_turn;
-pub use codex_turn_journal::{codex_turn_journal_group_key, CodexJournalReplay, CodexTurnJournal};
+pub use codex_turn_journal::{
+    codex_turn_journal_group_key, is_journaled_codex_entry, CodexJournalBatch,
+    CodexJournalBatchReplay, CodexJournalReplay, CodexTurnJournal,
+};
 pub use delegated_turn_converter::convert_delegated_turn;
 pub use doubao_turn_journal::{
     doubao_turn_journal_group_key, DoubaoJournalReplay, DoubaoTurnJournal,

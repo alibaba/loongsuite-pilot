@@ -8,10 +8,12 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, Take};
 use tokio::sync::Mutex;
 
 const MAX_ACKNOWLEDGED_TURNS: usize = 10_000;
+const JOURNAL_BATCH_BYTES: usize = 1024 * 1024;
+const JOURNAL_SCAN_BYTES: usize = 64 * 1024;
 
 pub fn codex_turn_journal_group_key(entry: &AgentActivityEntry) -> String {
     let parts = (&entry.user_id, &entry.session_id, entry.turn_id.as_deref());
@@ -20,7 +22,7 @@ pub fn codex_turn_journal_group_key(entry: &AgentActivityEntry) -> String {
     ))
 }
 
-fn valid_entry(entry: &AgentActivityEntry) -> bool {
+pub fn is_journaled_codex_entry(entry: &AgentActivityEntry) -> bool {
     entry.agent_type == "codex"
         && !entry.session_id.is_empty()
         && entry
@@ -48,9 +50,30 @@ pub struct CodexTurnJournal {
     state: Mutex<JournalState>,
 }
 
+/// Compatibility reader for callers that need a complete turn for conversion.
 pub struct CodexJournalReplay {
+    batches: CodexJournalBatchReplay,
+}
+
+/// One bounded batch from a retained turn. A single oversized event is indivisible.
+#[derive(Debug)]
+pub struct CodexJournalBatch {
+    pub key: String,
+    pub entries: Vec<AgentActivityEntry>,
+    pub last: bool,
+}
+
+pub struct CodexJournalBatchReplay {
     journal: Arc<CodexTurnJournal>,
     files: VecDeque<(String, PathBuf)>,
+    active: Option<PendingTurnReader>,
+}
+
+struct PendingTurnReader {
+    key: String,
+    reader: BufReader<Take<tokio::fs::File>>,
+    seen: HashSet<String>,
+    pending: Option<(AgentActivityEntry, usize)>,
 }
 
 impl CodexTurnJournal {
@@ -115,7 +138,10 @@ impl CodexTurnJournal {
         let mut state = self.state.lock().await;
         self.load_acknowledgements(&mut state).await?;
         let mut groups: IndexMap<String, Vec<&AgentActivityEntry>> = IndexMap::new();
-        for entry in entries.iter().filter(|entry| valid_entry(entry)) {
+        for entry in entries
+            .iter()
+            .filter(|entry| is_journaled_codex_entry(entry))
+        {
             let key = codex_turn_journal_group_key(entry);
             if !state
                 .acknowledgements
@@ -166,6 +192,17 @@ impl CodexTurnJournal {
     }
 
     pub async fn load(self: &Arc<Self>, key: Option<&str>) -> Result<CodexJournalReplay> {
+        Ok(CodexJournalReplay {
+            batches: self.load_batches(key).await?,
+        })
+    }
+
+    /// Read retained turns without materializing all their JSON text or events.
+    /// Reopening a key creates an independent reader, including for policy preflight.
+    pub async fn load_batches(
+        self: &Arc<Self>,
+        key: Option<&str>,
+    ) -> Result<CodexJournalBatchReplay> {
         let mut state = self.state.lock().await;
         self.load_acknowledgements(&mut state).await?;
         let mut files = Vec::new();
@@ -196,14 +233,15 @@ impl CodexTurnJournal {
             }
         }
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(CodexJournalReplay {
+        Ok(CodexJournalBatchReplay {
             journal: Arc::clone(self),
             files: files.into(),
+            active: None,
         })
     }
 
     pub async fn is_acknowledged(&self, entry: &AgentActivityEntry) -> Result<bool> {
-        if !valid_entry(entry) {
+        if !is_journaled_codex_entry(entry) {
             return Ok(false);
         }
         let mut state = self.state.lock().await;
@@ -220,7 +258,7 @@ impl CodexTurnJournal {
         self.load_acknowledgements(&mut state).await?;
         let keys: IndexSet<_> = entries
             .iter()
-            .filter(|entry| valid_entry(entry))
+            .filter(|entry| is_journaled_codex_entry(entry))
             .map(codex_turn_journal_group_key)
             .collect();
         if keys.is_empty() {
@@ -278,7 +316,7 @@ impl CodexTurnJournal {
     pub async fn remove_entries(&self, entries: &[AgentActivityEntry]) -> Result<()> {
         let keys: IndexSet<_> = entries
             .iter()
-            .filter(|entry| valid_entry(entry))
+            .filter(|entry| is_journaled_codex_entry(entry))
             .map(codex_turn_journal_group_key)
             .collect();
         let mut state = self.state.lock().await;
@@ -326,45 +364,101 @@ impl CodexTurnJournal {
 
 impl CodexJournalReplay {
     pub async fn next_group(&mut self) -> Result<Option<Vec<AgentActivityEntry>>> {
-        let mut state = self.journal.state.lock().await;
-        self.journal.load_acknowledgements(&mut state).await?;
-        while let Some((key, file)) = self.files.pop_front() {
-            if state
-                .acknowledgements
-                .as_ref()
-                .expect("loaded")
-                .contains_key(&key)
-            {
-                continue;
-            }
-            let bytes = match tokio::fs::read(&file).await {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let complete = bytes
-                .iter()
-                .rposition(|b| *b == b'\n')
-                .map_or(0, |index| index + 1);
-            let text = String::from_utf8_lossy(&bytes[..complete]);
-            let mut seen = HashSet::new();
-            let mut unique = Vec::new();
-            for line in text.lines() {
-                let Ok(entry) = serde_json::from_str::<AgentActivityEntry>(line) else {
-                    continue;
-                };
-                if valid_entry(&entry)
-                    && codex_turn_journal_group_key(&entry) == key
-                    && seen.insert(entry.event_id.clone())
-                {
-                    unique.push(entry);
-                }
-            }
-            if !unique.is_empty() {
-                return Ok(Some(unique));
+        let mut group = Vec::new();
+        while let Some(batch) = self.batches.next_batch().await? {
+            group.extend(batch.entries);
+            if batch.last && !group.is_empty() {
+                return Ok(Some(group));
             }
         }
         Ok(None)
+    }
+}
+
+impl CodexJournalBatchReplay {
+    pub async fn next_batch(&mut self) -> Result<Option<CodexJournalBatch>> {
+        let mut state = self.journal.state.lock().await;
+        self.journal.load_acknowledgements(&mut state).await?;
+        loop {
+            if self.active.is_none() {
+                let Some((key, path)) = self.files.pop_front() else {
+                    return Ok(None);
+                };
+                if state
+                    .acknowledgements
+                    .as_ref()
+                    .expect("loaded")
+                    .contains_key(&key)
+                {
+                    continue;
+                }
+                let mut file = match tokio::fs::File::open(&path).await {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let length = complete_length(&mut file).await?;
+                if length == 0 {
+                    continue;
+                }
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                self.active = Some(PendingTurnReader {
+                    key,
+                    reader: BufReader::new(file.take(length)),
+                    seen: HashSet::new(),
+                    pending: None,
+                });
+            }
+            let active = self.active.as_mut().expect("active turn");
+            let mut entries = Vec::new();
+            let mut bytes = 0;
+            loop {
+                let (entry, size) = match active.pending.take() {
+                    Some(pending) => pending,
+                    None => {
+                        let mut line = Vec::new();
+                        if active.reader.read_until(b'\n', &mut line).await? == 0 {
+                            let key = active.key.clone();
+                            self.active = None;
+                            return Ok(Some(CodexJournalBatch {
+                                key,
+                                entries,
+                                last: true,
+                            }));
+                        }
+                        // The committed-length bound excludes an incomplete tail.
+                        // Also reject a file externally truncated during this read.
+                        if line.pop() != Some(b'\n') {
+                            continue;
+                        }
+                        if line.last() == Some(&b'\r') {
+                            line.pop();
+                        }
+                        let text = String::from_utf8_lossy(&line);
+                        let Ok(entry) = serde_json::from_str::<AgentActivityEntry>(&text) else {
+                            continue;
+                        };
+                        if !is_journaled_codex_entry(&entry)
+                            || codex_turn_journal_group_key(&entry) != active.key
+                            || !active.seen.insert(entry.event_id.clone())
+                        {
+                            continue;
+                        }
+                        (entry, text.len())
+                    }
+                };
+                if !entries.is_empty() && bytes + size > JOURNAL_BATCH_BYTES {
+                    active.pending = Some((entry, size));
+                    return Ok(Some(CodexJournalBatch {
+                        key: active.key.clone(),
+                        entries,
+                        last: false,
+                    }));
+                }
+                entries.push(entry);
+                bytes += size;
+            }
+        }
     }
 }
 
@@ -395,6 +489,23 @@ async fn private_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Locate the last committed newline with bounded backward reads.
+async fn complete_length(file: &mut tokio::fs::File) -> Result<u64> {
+    let mut end = file.metadata().await?.len();
+    let mut buffer = vec![0u8; JOURNAL_SCAN_BYTES];
+    while end > 0 {
+        let start = end.saturating_sub(buffer.len() as u64);
+        let length = (end - start) as usize;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+        file.read_exact(&mut buffer[..length]).await?;
+        if let Some(index) = buffer[..length].iter().rposition(|b| *b == b'\n') {
+            return Ok(start + index as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
+}
+
 async fn repair_tail(path: &Path) -> Result<()> {
     let mut file = match tokio::fs::OpenOptions::new()
         .read(true)
@@ -406,30 +517,10 @@ async fn repair_tail(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let size = file.metadata().await?.len();
-    if size == 0 {
-        return Ok(());
+    let length = complete_length(&mut file).await?;
+    if length != file.metadata().await?.len() {
+        file.set_len(length).await?;
     }
-    file.seek(std::io::SeekFrom::End(-1)).await?;
-    let mut last = [0u8; 1];
-    file.read_exact(&mut last).await?;
-    if last[0] == b'\n' {
-        return Ok(());
-    }
-    let mut end = size;
-    let mut buffer = [0u8; 8192];
-    while end > 0 {
-        let start = end.saturating_sub(buffer.len() as u64);
-        let length = (end - start) as usize;
-        file.seek(std::io::SeekFrom::Start(start)).await?;
-        file.read_exact(&mut buffer[..length]).await?;
-        if let Some(index) = buffer[..length].iter().rposition(|b| *b == b'\n') {
-            file.set_len(start + index as u64 + 1).await?;
-            return Ok(());
-        }
-        end = start;
-    }
-    file.set_len(0).await?;
     Ok(())
 }
 
@@ -996,3 +1087,7 @@ mod tests {
 #[cfg(test)]
 #[path = "codex_turn_journal_main_tests.rs"]
 mod main_tests;
+
+#[cfg(test)]
+#[path = "codex_turn_journal_stream_tests.rs"]
+mod stream_tests;

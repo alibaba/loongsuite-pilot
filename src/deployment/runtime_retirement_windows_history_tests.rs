@@ -361,6 +361,20 @@ async fn windows_native_registry_unicode_cleanup_uses_only_private_key_and_never
                 .await
                 .unwrap();
         }
+        for def in WIN_DEFS {
+            let observed = Native
+                .run(Command::windows(
+                    "reg.exe",
+                    &["query", &key.path, "/v", def.env_name],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                parse_windows_user_env(&observed, def.env_name),
+                value,
+                "private native query must return the exact Unicode registry value"
+            );
+        }
         let context = Context {
             host: Host::Windows,
             home: home.clone(),
@@ -482,4 +496,103 @@ async fn windows_native_install_and_upgrade_retire_only_after_publication_before
         Path::new(&f.wrapper()).is_file(),
         "retirement leaves the old wrapper resource available"
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_native_registry_foreign_unicode_expand_and_non_string_values_remain_private_and_untouched(
+) {
+    let run =
+        async {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("用户 O'Brien [foreign]🚀");
+            let data = home.join("current data");
+            for (index, (kind, value)) in [
+                (
+                    "REG_SZ",
+                    root.path()
+                        .join("foreign 用户🚀/runtime.mjs")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                (
+                    "REG_EXPAND_SZ",
+                    r"%USERPROFILE%\loongsuite-pilot\runtime.mjs".to_owned(),
+                ),
+                ("REG_DWORD", "17".to_owned()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let key = Arc::new(PrivateKey::new(&format!(
+                    "{}-negative-{index}",
+                    root.path().file_name().unwrap().to_str().unwrap()
+                )));
+                let backend = Arc::new(PrivateNative {
+                    key: key.clone(),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                    broadcasts: std::sync::atomic::AtomicUsize::new(0),
+                });
+                for def in WIN_DEFS {
+                    Native
+                        .run(Command::windows(
+                            "reg.exe",
+                            &[
+                                "add",
+                                &key.path,
+                                "/v",
+                                def.env_name,
+                                "/t",
+                                kind,
+                                "/d",
+                                &value,
+                                "/f",
+                            ],
+                        ))
+                        .await
+                        .unwrap();
+                }
+                let context = Context {
+                    host: Host::Windows,
+                    home: home.clone(),
+                    backend: backend.clone(),
+                };
+                cleanup_all(&data.to_string_lossy(), &context)
+                    .await
+                    .unwrap();
+                let calls = backend.calls.lock().unwrap().clone();
+                assert_eq!(calls.len(), 2);
+                assert!(calls.iter().all(|command| command.program == "reg.exe"
+                    && command.args[0] == "query"
+                    && command.args[1] == r"HKCU\Environment"));
+                assert_eq!(
+                    backend.broadcasts.load(std::sync::atomic::Ordering::SeqCst),
+                    0
+                );
+                for def in WIN_DEFS {
+                    let observed = Native
+                        .run(Command::windows(
+                            "reg.exe",
+                            &["query", &key.path, "/v", def.env_name],
+                        ))
+                        .await;
+                    if kind == "REG_DWORD" {
+                        assert!(
+                            observed.is_err(),
+                            "non-string registry data must never become an owned path"
+                        );
+                    } else {
+                        assert_eq!(parse_windows_user_env(&observed.unwrap(),def.env_name),value,
+                        "foreign Unicode and unexpanded literals must remain exact after cleanup");
+                    }
+                }
+            }
+            assert!(
+                !home.exists(),
+                "registry-only refusal must not create or remove wrappers"
+            );
+        };
+    tokio::time::timeout(std::time::Duration::from_secs(15), run)
+        .await
+        .expect("original historical15s budget");
 }

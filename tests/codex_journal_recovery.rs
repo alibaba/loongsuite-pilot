@@ -169,10 +169,20 @@ async fn native_codex_journal_acks_only_after_every_endpoint_and_replays_using_c
     let restored = Arc::new(CodexTurnJournal::new(&dir));
     let preparation = Arc::new(AtomicUsize::new(0));
     let calls = Arc::clone(&preparation);
+    let before_export_a = Arc::clone(&accepted_a.received);
+    let before_export_b = Arc::clone(&accepted_b.received);
     let second = OtlpTraceFlusher::new(config(root.path(), &[&accepted_a, &accepted_b]))
         .unwrap()
         .with_codex_journal(Arc::clone(&restored), move |mut group| {
             calls.fetch_add(1, Ordering::SeqCst);
+            // Whole-key preflight and streamed admission each receive the
+            // original journal facts, before either endpoint can export.
+            assert_eq!(group.len(), 3);
+            assert!(serde_json::to_string(&group)
+                .unwrap()
+                .contains("SYNTHETIC_JOURNAL_SECRET"));
+            assert!(before_export_a.lock().unwrap().is_empty());
+            assert!(before_export_b.lock().unwrap().is_empty());
             for entry in &mut group {
                 entry.input_messages = None;
                 entry.input_messages_delta = None;
@@ -184,7 +194,11 @@ async fn native_codex_journal_acks_only_after_every_endpoint_and_replays_using_c
             Ok(group)
         });
     bounded(second.start()).await.unwrap();
-    assert_eq!(preparation.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        preparation.load(Ordering::SeqCst),
+        2,
+        "preflight then admission"
+    );
     assert_eq!(accepted_a.count(), 1);
     assert_eq!(accepted_b.count(), 1);
     for receiver in [&accepted_a, &accepted_b] {
@@ -233,16 +247,19 @@ async fn native_codex_journal_obeys_current_workspace_filter_during_restart() {
     let receiver = Receiver::new(200).await;
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
+    let before_export = Arc::clone(&receiver.received);
     let flusher = OtlpTraceFlusher::new(config(root.path(), &[&receiver]))
         .unwrap()
         .with_codex_journal(Arc::clone(&journal), move |group| {
             observed.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(group.len(), 3);
             assert_eq!(group[0].session_id, "now-excluded-workspace");
+            assert!(before_export.lock().unwrap().is_empty());
             Ok(Vec::new())
         });
     bounded(flusher.start()).await.unwrap();
     bounded(flusher.shutdown()).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "preflight then admission");
     assert_eq!(receiver.count(), 0, "excluded workspace reached exporter");
     assert!(pending(&journal).await.is_empty());
     assert!(

@@ -1,9 +1,10 @@
 //! Port of `src/local-workers/private-directory.ts`.
 
-use std::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 pub const WINDOWS_ACL_COMMAND_TIMEOUT_MS: u64 = 15_000;
+const WINDOWS_ACL_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 pub const WINDOWS_ACL_PROTECT: &str = r#"
 $ErrorActionPreference = "Stop"
@@ -80,10 +81,16 @@ pub async fn prepare_private_local_worker_directory_on(
     directory: &str,
     platform: WorkerPlatform,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    #[cfg(test)]
+    trace_acl_stage(started, "directory-create");
     tokio::fs::create_dir_all(directory)
         .await
         .map_err(|err| err.to_string())?;
     chmod_dir(directory, 0o700)?;
+    #[cfg(test)]
+    trace_acl_stage(started, "directory-ready");
     if platform != WorkerPlatform::Win32 {
         return Ok(());
     }
@@ -96,8 +103,33 @@ pub async fn prepare_private_local_worker_directory_on(
             WINDOWS_ACL_PROTECT,
         ])
         .env("LOONGSUITE_WORKER_ACL_TARGET", directory);
-    let child = command.output();
-    let _ = Duration::from_millis(WINDOWS_ACL_COMMAND_TIMEOUT_MS);
+    execute_windows_acl_command(
+        &mut command,
+        Duration::from_millis(WINDOWS_ACL_COMMAND_TIMEOUT_MS),
+    )
+    .await
+}
+
+async fn execute_windows_acl_command(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<(), String> {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    #[cfg(test)]
+    trace_acl_stage(started, "command-start");
+    let child =
+        crate::utils::candidate_process::output(command, timeout, WINDOWS_ACL_OUTPUT_LIMIT).await;
+    #[cfg(test)]
+    trace_acl_stage(
+        started,
+        match &child {
+            Ok(output) if output.status.success() => "command-success",
+            Ok(_) => "command-rejected",
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => "command-timeout",
+            Err(_) => "command-error",
+        },
+    );
     match child {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
@@ -113,6 +145,14 @@ pub async fn prepare_private_local_worker_directory_on(
         }
         Err(err) => Err(format!("LocalWorkerDirectoryAclUnsafe: {err}")),
     }
+}
+
+#[cfg(test)]
+fn trace_acl_stage(started: std::time::Instant, stage: &str) {
+    eprintln!(
+        "native-worker acl stage={stage} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
 }
 
 pub fn windows_acl_argv() -> (&'static str, Vec<&'static str>) {
@@ -171,3 +211,7 @@ mod tests {
         assert!(args[3].contains("D:P(A;OICI;FA;;;$currentSid)"));
     }
 }
+
+#[cfg(test)]
+#[path = "private_directory_candidate_tests.rs"]
+mod candidate_tests;

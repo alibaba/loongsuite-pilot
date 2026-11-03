@@ -221,6 +221,16 @@ impl InputRuntime {
         f(&mut policy)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_read_accumulator_for_test(&self) -> InputRuntimeDelta {
+        self.accumulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(InputRuntimeAccumulator::new())
+            .unwrap_or_default()
+            .finish(0.0)
+    }
+
     pub fn with_accumulator(&self, f: impl FnOnce(&mut InputRuntimeAccumulator)) {
         if let Some(acc) = self
             .accumulator

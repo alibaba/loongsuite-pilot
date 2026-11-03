@@ -45,6 +45,10 @@ const VALID_TRACE_ID: &str = "^[0-9a-f]{32}$";
 const MAX_TURN_BUFFERS: usize = 64;
 const MAX_RUNTIME_AGENTS: usize = 64;
 const MAX_CONVERT_STATES: usize = 64;
+// Only payload waiting for native terminal evidence is bounded here. Conversion
+// rehydrates one complete durable turn at a time.
+const MAX_CODEX_TURN_RESIDENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CODEX_RESIDENT_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_EXPORT_BATCH_BYTES: u64 = 10 * 1024 * 1024;
 const ARMS_TRACE_LOGSTORE: &str = "logstore-tracing";
 
@@ -121,6 +125,11 @@ struct TurnBuffer {
     session_id: Option<String>,
     records: Vec<AgentActivityEntry>,
     record_index: HashMap<String, usize>,
+    journal_key: Option<String>,
+    spillable: bool,
+    spilled_records: usize,
+    spilled_event_ids: Option<HashSet<String>>,
+    resident_bytes: usize,
     completed: bool,
     last_activity_ms: i64,
     logical_bytes: f64,
@@ -315,6 +324,15 @@ type TestCodexPreparation = Arc<
         + Sync,
 >;
 
+#[cfg(test)]
+type TestCodexExport = Arc<
+    dyn Fn(
+            Vec<AgentActivityEntry>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
+
 struct OtlpInner {
     ordinary_flushes: std::sync::Weak<OrdinaryFlushScope>,
     #[cfg(test)]
@@ -326,6 +344,9 @@ struct OtlpInner {
     doubao_restore: tokio::sync::OnceCell<()>,
     journal_restore: tokio::sync::OnceCell<()>,
     acceptance: tokio::sync::Mutex<()>,
+    codex_flush: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    test_codex_export: Mutex<Option<TestCodexExport>>,
     cfg: OtlpTraceFlusherConfig,
     endpoints: Vec<ResolvedEndpoint>,
     state: Mutex<OtlpState>,
@@ -444,6 +465,9 @@ impl OtlpTraceFlusher {
             doubao_restore: tokio::sync::OnceCell::new(),
             journal_restore: tokio::sync::OnceCell::new(),
             acceptance: tokio::sync::Mutex::new(()),
+            codex_flush: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            test_codex_export: Mutex::new(None),
             #[cfg(test)]
             test_codex_preparation: Mutex::new(None),
             #[cfg(test)]
@@ -798,7 +822,7 @@ impl OtlpInner {
                 }
                 let replay = context
                     .journal
-                    .load(None)
+                    .load_batches(None)
                     .await
                     .map_err(FlushError::codex_journal)?;
                 self.replay_journal(replay).await
@@ -809,31 +833,146 @@ impl OtlpInner {
 
     async fn replay_journal(
         self: &Arc<Self>,
-        mut replay: super::CodexJournalReplay,
+        mut replay: super::codex_turn_journal::CodexJournalBatchReplay,
     ) -> Result<(), FlushError> {
         let context = self.codex_context().expect("journal replay context");
-        while let Some(group) = replay
-            .next_group()
+        while let Some(batch) = replay
+            .next_batch()
             .await
             .map_err(FlushError::codex_journal)?
         {
-            let prepared = (context.prepare)(group.clone()).map_err(FlushError::codex_journal)?;
-            if prepared.is_empty() {
-                context
-                    .journal
-                    .remove_entries(&group)
-                    .await
-                    .map_err(FlushError::codex_journal)?;
+            // Workspace/privacy evidence can occur in the final batch. Prime
+            // the complete turn before accepting any of its prefix.
+            (context.prepare)(batch.entries).map_err(FlushError::codex_journal)?;
+            if !batch.last {
                 continue;
             }
-            let batch = OtlpBatch::new(self);
-            for entry in prepared {
-                self.send_entry(entry, None).await?;
+            let mut prepared = context
+                .journal
+                .load_batches(Some(&batch.key))
+                .await
+                .map_err(FlushError::codex_journal)?;
+            let guard = OtlpBatch::new(self);
+            let mut accepted = false;
+            while let Some(part) = prepared
+                .next_batch()
+                .await
+                .map_err(FlushError::codex_journal)?
+            {
+                for entry in (context.prepare)(part.entries).map_err(FlushError::codex_journal)? {
+                    accepted = true;
+                    self.send_entry(entry, None).await?;
+                }
             }
-            drop(batch);
+            if !accepted {
+                context
+                    .journal
+                    .remove_key(&batch.key)
+                    .await
+                    .map_err(FlushError::codex_journal)?;
+            }
+            drop(guard);
             self.finish_batch().await?;
         }
         Ok(())
+    }
+
+    async fn rehydrate_codex_turn(&self, buffer: &mut TurnBuffer) -> Result<(), FlushError> {
+        if buffer.spilled_records == 0 {
+            return Ok(());
+        }
+        let context = self.codex_context().expect("durable Codex spill context");
+        let key = buffer
+            .journal_key
+            .as_ref()
+            .expect("durable Codex spill key");
+        let ids = buffer
+            .spilled_event_ids
+            .as_ref()
+            .expect("durable Codex spill ids");
+        let mut prime = context
+            .journal
+            .load_batches(Some(key))
+            .await
+            .map_err(FlushError::codex_journal)?;
+        while let Some(batch) = prime
+            .next_batch()
+            .await
+            .map_err(FlushError::codex_journal)?
+        {
+            (context.prepare)(batch.entries).map_err(FlushError::codex_journal)?;
+        }
+        let mut replay = context
+            .journal
+            .load_batches(Some(key))
+            .await
+            .map_err(FlushError::codex_journal)?;
+        let mut restored = Vec::new();
+        while let Some(batch) = replay
+            .next_batch()
+            .await
+            .map_err(FlushError::codex_journal)?
+        {
+            restored.extend(
+                (context.prepare)(batch.entries)
+                    .map_err(FlushError::codex_journal)?
+                    .into_iter()
+                    .filter(|entry| ids.contains(&entry.event_id)),
+            );
+        }
+        // A public batch is persisted before admission. Never pull a future
+        // terminal suffix ahead of an unpersistable continuation.
+        if restored.is_empty() {
+            return Err(FlushError::codex_journal(
+                "spilled turn has no accepted journal records; refusing ACK",
+            ));
+        }
+        let bytes = restored
+            .iter()
+            .try_fold(0usize, |total, entry| {
+                serde_json::to_vec(entry).map(|bytes| total.saturating_add(bytes.len()))
+            })
+            .map_err(FlushError::codex_journal)?;
+        buffer.records = restored;
+        buffer.resident_bytes = bytes;
+        buffer.spilled_records = 0;
+        buffer.spilled_event_ids = None;
+        Ok(())
+    }
+
+    fn spill_codex_payloads(state: &mut OtlpState) {
+        let mut candidates: Vec<_> = state
+            .buffers
+            .iter()
+            .filter(|(_, buffer)| {
+                buffer.agent_type == "codex" && buffer.spillable && buffer.spilled_records == 0
+            })
+            .map(|(key, buffer)| (key.clone(), buffer.resident_bytes))
+            .collect();
+        let mut resident: usize = candidates.iter().map(|(_, bytes)| *bytes).sum();
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
+        for (key, bytes) in candidates {
+            if bytes <= MAX_CODEX_TURN_RESIDENT_BYTES && resident <= MAX_CODEX_RESIDENT_BYTES {
+                continue;
+            }
+            let buffer = state
+                .buffers
+                .get_mut(&key)
+                .expect("resident spill candidate");
+            buffer.spilled_records = buffer.records.len();
+            buffer.spilled_event_ids = Some(
+                buffer
+                    .records
+                    .iter()
+                    .map(|entry| entry.event_id.clone())
+                    .collect(),
+            );
+            buffer.records.clear();
+            buffer.records.shrink_to_fit();
+            buffer.resident_bytes = 0;
+            buffer.record_index.clear();
+            resident = resident.saturating_sub(bytes);
+        }
     }
 
     async fn persist_codex_entries(
@@ -888,7 +1027,7 @@ impl OtlpInner {
             let group = super::codex_turn_journal_group_key(entry);
             let replay = context
                 .journal
-                .load(Some(&group))
+                .load_batches(Some(&group))
                 .await
                 .map_err(FlushError::codex_journal)?;
             self.replay_journal(replay).await?;
@@ -1099,6 +1238,43 @@ impl OtlpInner {
                 .await;
             return Ok(());
         }
+        let durable_codex = self.codex_context().is_some()
+            && super::codex_turn_journal::is_journaled_codex_entry(&entry);
+        let resident_bytes = if agent_type == "codex" && self.codex_context().is_some() {
+            serde_json::to_vec(&entry)
+                .map_err(FlushError::codex_journal)?
+                .len()
+        } else {
+            0
+        };
+        let logical_bytes =
+            logical_bytes.or_else(|| durable_codex.then_some(resident_bytes as f64));
+        if agent_type == "codex" && !durable_codex {
+            let displaced = {
+                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                if state
+                    .buffers
+                    .get(&key)
+                    .is_some_and(|buffer| buffer.spilled_records > 0)
+                {
+                    state.buffers.shift_remove_full(&key)
+                } else {
+                    None
+                }
+            };
+            if let Some((index, key, mut buffer)) = displaced {
+                let result = {
+                    let _serial = self.codex_flush.lock().await;
+                    self.rehydrate_codex_turn(&mut buffer).await
+                };
+                {
+                    let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                    let index = index.min(state.buffers.len());
+                    state.buffers.shift_insert(index, key, buffer);
+                }
+                result?;
+            }
+        }
         let incoming_session = nonempty(entry_str(&entry, "gen_ai.session.id"));
         let preempted = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
@@ -1164,6 +1340,12 @@ impl OtlpInner {
                         session_id: incoming_session.clone(),
                         records: Vec::new(),
                         record_index: HashMap::new(),
+                        journal_key: durable_codex
+                            .then(|| super::codex_turn_journal_group_key(&entry)),
+                        spillable: durable_codex,
+                        spilled_records: 0,
+                        spilled_event_ids: None,
+                        resident_bytes: 0,
                         completed: false,
                         last_activity_ms: now,
                         logical_bytes: 0.0,
@@ -1173,6 +1355,9 @@ impl OtlpInner {
                     });
                 if buffer.session_id.is_none() {
                     buffer.session_id = incoming_session;
+                }
+                if !durable_codex && agent_type == "codex" {
+                    buffer.spillable = false;
                 }
                 let duplicate_doubao = agent_type == "doubao-work"
                     && !entry.event_id.is_empty()
@@ -1207,8 +1392,18 @@ impl OtlpInner {
                             .insert(entry.event_id.clone(), buffer.records.len());
                         buffer.records.push(entry.clone());
                     }
+                } else if buffer.spilled_records > 0 && durable_codex {
+                    buffer.spilled_records += 1;
+                    buffer
+                        .spilled_event_ids
+                        .as_mut()
+                        .expect("spilled event ids")
+                        .insert(entry.event_id.clone());
                 } else {
                     buffer.records.push(entry.clone());
+                }
+                if buffer.spilled_records == 0 {
+                    buffer.resident_bytes = buffer.resident_bytes.saturating_add(resident_bytes);
                 }
                 buffer.last_activity_ms = now;
                 if !duplicate_doubao {
@@ -1224,6 +1419,7 @@ impl OtlpInner {
                     buffer.completed = true;
                 }
             }
+            Self::spill_codex_payloads(&mut state);
             let defer = state.batch_depth > 0;
             let should_flush = state
                 .buffers
@@ -1311,9 +1507,15 @@ impl OtlpInner {
 
     async fn finish_buffer(
         self: &Arc<Self>,
-        buffer: TurnBuffer,
+        mut buffer: TurnBuffer,
         mark_flushed: bool,
     ) -> Result<(), FlushError> {
+        let _serial = if buffer.agent_type == "codex" && self.codex_context().is_some() {
+            Some(self.codex_flush.lock().await)
+        } else {
+            None
+        };
+        self.rehydrate_codex_turn(&mut buffer).await?;
         let buffer = self.prepare_buffer_export(buffer, mark_flushed);
         self.export_buffer(buffer).await
     }
@@ -1487,6 +1689,13 @@ impl OtlpInner {
     ) -> bool {
         if records.is_empty() {
             return true;
+        }
+        #[cfg(test)]
+        if agent_type == "codex" {
+            let hook = self.test_codex_export.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                return hook(records.to_vec()).await;
+            }
         }
         let projected = collect_resource_attributes(self, records);
         let (system, framework) = resource_identity(agent_type, records);
@@ -1897,6 +2106,7 @@ impl OtlpInner {
     }
 
     fn snapshot_at(&self, now: Option<Instant>) -> Vec<TraceRuntimeSnapshot> {
+        let journaled = self.codex_context().is_some();
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let now = now.unwrap_or_else(Instant::now);
         let mut rows: IndexMap<String, TraceRuntimeSnapshot> = IndexMap::new();
@@ -1906,19 +2116,37 @@ impl OtlpInner {
                 TraceRuntimeSnapshot::from_counters(agent_type, counters),
             );
         }
+        if journaled {
+            if let Some(row) = rows.get_mut("codex") {
+                row.resident_records = Some(0);
+                row.resident_payload_bytes = Some(0);
+                row.spilled_buffers = Some(0);
+                row.spilled_records = Some(0);
+            }
+        }
         for buffer in state.buffers.values() {
             let Some(row) = rows.get_mut(&buffer.agent_type) else {
                 continue;
             };
             let age = now.saturating_duration_since(buffer.opened_at).as_millis() as u64;
             row.pending_buffers += 1;
-            row.pending_records += buffer.records.len() as u64;
+            let records = (buffer.records.len() + buffer.spilled_records) as u64;
+            row.pending_records += records;
+            if journaled && buffer.agent_type == "codex" {
+                *row.resident_records.as_mut().expect("Codex gauge") += buffer.records.len() as u64;
+                *row.resident_payload_bytes.as_mut().expect("Codex gauge") +=
+                    buffer.resident_bytes as u64;
+                *row.spilled_buffers.as_mut().expect("Codex gauge") +=
+                    u64::from(buffer.spilled_records > 0);
+                *row.spilled_records.as_mut().expect("Codex gauge") +=
+                    buffer.spilled_records as u64;
+            }
             row.pending_logical_bytes += buffer.logical_bytes;
             row.pending_unmeasured_records += buffer.unmeasured_records;
             row.oldest_buffer_age_ms = row.oldest_buffer_age_ms.max(age);
             if row.pending_buffers == 1 || buffer.logical_bytes > row.largest_buffer_logical_bytes {
                 row.largest_buffer_logical_bytes = buffer.logical_bytes;
-                row.largest_buffer_records = buffer.records.len() as u64;
+                row.largest_buffer_records = records;
                 row.largest_buffer_age_ms = age;
                 row.largest_buffer_turn_id = if buffer.key_source == KeySource::TurnId {
                     Some(buffer.key_value.clone())
@@ -7890,3 +8118,7 @@ mod runtime_main_tests;
 #[cfg(test)]
 #[path = "otlp_dedup_main_tests.rs"]
 mod dedup_main_tests;
+
+#[cfg(test)]
+#[path = "otlp_codex_spill_main541_tests.rs"]
+mod codex_spill_main541_tests;

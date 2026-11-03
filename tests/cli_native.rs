@@ -1194,11 +1194,18 @@ fn packaged_hook_report_or_signal_failure_is_visible_and_retryable() {
     pending["agents"][0]["id"] = serde_json::json!("uncommitted-agent");
     fs::write(&report_path, serde_json::to_vec(&pending).unwrap()).unwrap();
     let journal = data.join(".hook-report/update-recovery.json");
+    // begin() freezes the canonical parent while preserving the file leaf.
+    // Windows Temp may contain an 8.3 RUNNER~1 ancestor spelling.
+    let bound_target = |path: &Path| {
+        fs::canonicalize(path.parent().unwrap())
+            .unwrap()
+            .join(path.file_name().unwrap())
+    };
     fs::write(
         &journal,
         serde_json::to_vec(&serde_json::json!({
             "schema": 2, "committed": false,
-            "targets": {"report": report_path, "signal": signal},
+            "targets": {"report": bound_target(&report_path), "signal": bound_target(&signal)},
             "changes": {
                 "report": {"original": original_report, "intended": state_of(&report_path)},
                 "signal": {"original": original_signal, "intended": null}
