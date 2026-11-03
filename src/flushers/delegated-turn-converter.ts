@@ -11,17 +11,23 @@ type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]>;
  * converter, making only the child's virtual ENTRY transparent (as Qwen does).
  * No parent waiting, timestamp stretching, replay or token aggregation. */
 export function convertDelegatedTurn(records: EventLogRecord[], options: Options & { handler: ExtendedTelemetryHandler }) {
+  const prepared = prepareDelegatedTurn(records, options.handler);
+  const result = convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler });
+  return { ...result, spanCount: result.spanCount - prepared.removedEntryCount };
+}
+
+/** Share the transparent child ENTRY contract with incremental conversion. */
+export function prepareDelegatedTurn(records: EventLogRecord[], handler: ExtendedTelemetryHandler) {
   const marker = records.find(r => r['gen_ai.agent.scope'] === 'subagent' && r['parent_span_id']);
   if (!marker || !/^[0-9a-f]{32}$/.test(String(marker.trace_id))
     || !/^[0-9a-f]{16}$/.test(String(marker.parent_span_id))
     || /^0+$/.test(String(marker.trace_id)) || /^0+$/.test(String(marker.parent_span_id))
     || records.some(r => r.trace_id !== marker.trace_id || r.parent_span_id !== marker.parent_span_id)) {
-    return convertEventLogToTrace(records, options);
+    return { records, handler, removedEntryCount: 0 };
   }
   const parentContext = trace.setSpanContext(ROOT_CONTEXT, {
     traceId: String(marker.trace_id), spanId: String(marker.parent_span_id), traceFlags: TraceFlags.SAMPLED,
   });
-  const handler = options.handler;
   let entries = 0;
   const wrapped = new Proxy(handler, {
     get(target, key) {
@@ -45,6 +51,5 @@ export function convertDelegatedTurn(records: EventLogRecord[], options: Options
     delete copy['gen_ai.agent.scope']; // do not treat a standalone child as an inline child group
     return copy;
   });
-  const result = convertEventLogToTrace(local, { ...options, handler: wrapped });
-  return { ...result, spanCount: result.spanCount - entries };
+  return { records: local, handler: wrapped, get removedEntryCount() { return entries; } };
 }

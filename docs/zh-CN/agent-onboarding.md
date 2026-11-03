@@ -403,6 +403,14 @@ worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的�
 
 只有通过以下全部适用门禁，Agent 集成才能标记为 ready。
 
+### 长 turn 的转换资源
+
+OpenClaw 的规范长 turn（至少 32 个 step，每步一次模型请求、模型响应顺序一致）在收口后按完整 step 使用流式转换，并等待当前 Span 完成导出后继续。ENTRY/AGENT 仍各只有一个，消息增量、逐调用 usage 和整轮聚合保持完整；不通过截断正文或提前结束 turn 降低内存。完整分组也保留晚到的工具记录，独立委派的子 turn 继续复用其真实父上下文。
+
+内联子树、无 step 或响应顺序不适用的输入保留原整轮转换语义。该路径限制累计消息快照和已结束 Span 的同时驻留，不是任意大文件、单条记录或所有输入的固定 RSS 上限；原始事件和运行中的消息历史仍随输入体积增长。验收须比较同一载荷的内存峰值、真实接收端的唯一 Span/调用 ID、逐 LLM 和 AGENT Token，以及重启后的重复量，不能只检查进程没有退出。
+
+`npm run perf:openclaw-turn` 在老生代上限为 256 MiB 的独立 Node 子进程中运行合成长 turn，核对唯一 Span、模型调用数和 Token 汇总；可通过 `PILOT_PERF_CALLS` 调整调用数。它是转换资源回归，不替代真实 collector 进程与后端回读。
+
 ### 字段质量
 
 - [输出事件 Schema](output-event-schema.md) 中的 Required 字段填充率必须为 100%；条件成立时，Conditionally Required 字段填充率必须为 100%。

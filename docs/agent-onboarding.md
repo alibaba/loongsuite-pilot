@@ -461,6 +461,28 @@ If your integration follows an existing hook or plugin record shape, keep the co
 
 An integration is ready only after all applicable gates below pass.
 
+### Conversion resources for long turns
+
+Canonical long OpenClaw turns (at least 32 steps, one model request per step,
+with model responses in step order) convert complete step groups incrementally
+after the turn closes, awaiting export before proceeding. One ENTRY/AGENT pair,
+complete message deltas, per-call usage and turn aggregates are preserved. No
+content is truncated and no turn is closed early to reduce memory. Grouping
+complete steps retains late tool records; independent delegated turns retain
+their real upstream context.
+
+Inline child trees, missing steps and incompatible response order retain the
+batch conversion path. This bounds simultaneous accumulated message snapshots
+and completed spans, not RSS for arbitrary files, records or all inputs: source
+events and running input history still grow with input size. Compare peak
+memory on identical payloads, unique received Span/call IDs, per-LLM and AGENT
+tokens, and duplicates after restart; process survival alone is insufficient.
+
+`npm run perf:openclaw-turn` runs a synthetic long turn in a separate Node
+process with a 256 MiB old-space limit, checking unique spans, model calls and token
+aggregates. Set `PILOT_PERF_CALLS` to vary its size. This conversion resource
+regression does not replace a real collector process and backend readback.
+
 ### Field quality
 
 - Fields marked Required in the [Output Event Schema](output-event-schema.md) must have 100% coverage. Conditionally Required fields must have 100% coverage whenever their condition applies.
