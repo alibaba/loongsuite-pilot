@@ -157,6 +157,23 @@ it('bounds probe metadata and clears it on stop', async () => {
   await f.probe.onStop(); expect(f.probe.ownerOffsetProbes.size).toBe(0);
 });
 
+it.each([false, true])('keeps a recently used owner probe resident under cache churn (has owner: %s)', async hasOwner => {
+  const f = await fixture();
+  await fs.writeFile(f.file, (hasOwner ? meta() : '') + diagnostic());
+  const stat = await fs.stat(f.file);
+  const expected = hasOwner ? 0 : null;
+  expect(await f.probe.findOwnerOffset(f.file, stat)).toBe(expected);
+  // Fill the rest of the metadata cache without creating thousands of files.
+  for (let i = 0; i < 2047; i++) f.probe.ownerOffsetProbes.set(`cold-${i}`, { version: 'old', endOffset: 0, offset: null });
+  expect((await measure(f, () => f.probe.findOwnerOffset(f.file, stat))).rawReadBytes).toBe(0);
+  const added = path.join(f.root, 'sessions', 'rollout-added.jsonl');
+  await fs.writeFile(added, diagnostic());
+  await f.probe.findOwnerOffset(added, await fs.stat(added));
+  expect((await measure(f, () => f.probe.findOwnerOffset(f.file, stat))).rawReadBytes).toBe(0);
+  expect(f.probe.ownerOffsetProbes.has('cold-0')).toBe(false);
+  expect(f.probe.ownerOffsetProbes.size).toBe(2048);
+});
+
 async function pendingFixture(size = 2 * 1024 * 1024) {
   const f = await fixture();
   const header = meta();
@@ -457,6 +474,64 @@ it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
     expect(responses(f, 'later')).toHaveLength(1);
   },
 );
+
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'drops malformed optional recovery metadata %s while retaining recoverable ranges', async value => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f);
+    Object.assign(cp.pendingTerminal!, { retryCount: value, firstPendingAtMs: value,
+      lastAttemptAtMs: value, sourceRecordCount: value });
+    cp.deferredTerminals = [{ activeTurn: { ...cp.activeTurn!, turnId: 'retained' },
+      pendingTerminal: { ...cp.pendingTerminal!, turnId: 'retained' } }];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    for (const pending of [parsed.pendingTerminal, parsed.deferredTerminals[0].pendingTerminal]) {
+      expect(pending.terminalEndOffset).toBe(f.end);
+      for (const field of ['retryCount', 'firstPendingAtMs', 'lastAttemptAtMs', 'sourceRecordCount']) {
+        expect(pending).not.toHaveProperty(field);
+      }
+    }
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+    expect(checkpoint(f).deferredTerminals).toHaveLength(2);
+    for (const item of checkpoint(f).deferredTerminals!) expect(item.pendingTerminal.retryCount).toBe(1);
+  },
+);
+
+it('rejects invalid retry deadlines and fractional delays while keeping valid zero-valued metadata', async () => {
+  const f = await pendingFixture(1024);
+  const cp = checkpoint(f);
+  const pending = cp.pendingTerminal!;
+  Object.assign(pending, { retryCount: 0, firstPendingAtMs: 0, lastAttemptAtMs: 0, sourceRecordCount: 0 });
+  pending.failure = { sourceVersion: 'old-version', retryAtMs: 0, delayMs: 1000 };
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  expect(f.probe.readCheckpoint(key(f)).pendingTerminal).toEqual(pending);
+  for (const invalid of [-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    pending.failure.retryAtMs = invalid;
+    expect(f.probe.readCheckpoint(key(f)).pendingTerminal.failure).toBeUndefined();
+  }
+  pending.failure.retryAtMs = 0;
+  pending.failure.delayMs = 1000.5;
+  expect(f.probe.readCheckpoint(key(f)).pendingTerminal.failure).toBeUndefined();
+  await processFile(f);
+  expect(responses(f, 'later')).toHaveLength(1);
+  expect(checkpoint(f).deferredTerminals![0]!.pendingTerminal.failure?.delayMs).toBe(1000);
+});
+
+it.each(['pending', 'deferred'])('keeps a maximum persisted retry counter safe during %s recovery', async location => {
+  const f = await pendingFixture(1024);
+  const cp = checkpoint(f);
+  cp.pendingTerminal!.retryCount = Number.MAX_SAFE_INTEGER;
+  if (location === 'deferred') {
+    cp.deferredTerminals = [{ activeTurn: cp.activeTurn!, pendingTerminal: cp.pendingTerminal! }];
+    cp.activeTurn = null; cp.pendingTerminal = null; cp.scanOffset = (await fs.stat(f.file)).size;
+  }
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  await processFile(f);
+  expect(checkpoint(f).deferredTerminals![0]!.pendingTerminal.retryCount).toBe(Number.MAX_SAFE_INTEGER);
+  await f.state.save(); await f.state.load();
+  expect((await processFile(f)).rawReadBytes).toBe(0);
+});
 
 it('accepts zero as a valid terminal boundary', async () => {
   const f = await pendingFixture(1024);

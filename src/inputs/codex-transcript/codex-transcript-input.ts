@@ -221,7 +221,7 @@ export class CodexTranscriptInput extends BaseInput {
   /** Partial-replay uri cache. */
   private readonly multimodalUriCache = new LruMap<UriResult>(MULTIMODAL_LRU_LIMIT);
   private readonly incompleteTails = new Map<string, CachedIncompleteJsonlTail>();
-  private readonly ownerOffsetProbes = new Map<string, { version: string; endOffset: number; offset: number | null }>();
+  private readonly ownerOffsetProbes = new LruMap<{ version: string; endOffset: number; offset: number | null }>(MAX_OWNER_OFFSET_PROBES);
   private wakeupWatcher: FSWatcher | null = null;
   private wakeupTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly dirtyWakeupMarkers = new Set<string>();
@@ -1018,7 +1018,7 @@ export class CodexTranscriptInput extends BaseInput {
       const now = Date.now();
       checkpoint.pendingTerminal = {
         ...pending,
-        retryCount: (pending.retryCount ?? 0) + 1,
+        retryCount: Math.min(Number.MAX_SAFE_INTEGER, (pending.retryCount ?? 0) + 1),
         firstPendingAtMs: pending.firstPendingAtMs ?? now,
         lastAttemptAtMs: now,
         sourceRecordCount: recovered.diagnostics.sourceRecordCount,
@@ -1084,7 +1084,7 @@ export class CodexTranscriptInput extends BaseInput {
       const recovery = { ...checkpoint, activeTurn: item.activeTurn, pendingTerminal: item.pendingTerminal };
       const result = await this.recoverTurnSegment(filePath, recovery, item.pendingTerminal.terminalEndOffset, true);
       if (result.kind === 'unparseable') {
-        item.pendingTerminal.retryCount = (item.pendingTerminal.retryCount ?? 0) + 1;
+        item.pendingTerminal.retryCount = Math.min(Number.MAX_SAFE_INTEGER, (item.pendingTerminal.retryCount ?? 0) + 1);
         item.pendingTerminal.lastAttemptAtMs = Date.now();
         item.pendingTerminal.sourceRecordCount = result.diagnostics.sourceRecordCount;
         this.noteTerminalFailure(item.pendingTerminal, stat);
@@ -1511,11 +1511,7 @@ export class CodexTranscriptInput extends BaseInput {
     } catch {
       return null;
     }
-    this.ownerOffsetProbes.delete(filePath);
     this.ownerOffsetProbes.set(filePath, { version, endOffset, offset });
-    if (this.ownerOffsetProbes.size > MAX_OWNER_OFFSET_PROBES) {
-      this.ownerOffsetProbes.delete(this.ownerOffsetProbes.keys().next().value!);
-    }
     return offset;
   }
 
@@ -3202,21 +3198,24 @@ function sourceVersion(stat: fsSync.Stats): string {
   return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
 function parsePendingTerminal(raw: unknown): CodexPendingTerminalTurn | null {
   const value = asRecord(raw);
-  if (!value || typeof value.turnId !== 'string' || typeof value.terminalEndOffset !== 'number'
-    || !Number.isSafeInteger(value.terminalEndOffset) || value.terminalEndOffset < 0) return null;
+  if (!value || typeof value.turnId !== 'string' || !isNonNegativeSafeInteger(value.terminalEndOffset)) return null;
   const failure = asRecord(value.failure);
   const validFailure = failure && typeof failure.sourceVersion === 'string'
-    && typeof failure.retryAtMs === 'number' && Number.isFinite(failure.retryAtMs)
-    && typeof failure.delayMs === 'number' && Number.isFinite(failure.delayMs)
+    && isNonNegativeSafeInteger(failure.retryAtMs)
+    && isNonNegativeSafeInteger(failure.delayMs)
     && failure.delayMs >= RECOVERY_RETRY_MIN_MS && failure.delayMs <= RECOVERY_RETRY_MAX_MS;
   return {
     turnId: value.turnId, terminalEndOffset: value.terminalEndOffset,
-    ...(typeof value.retryCount === 'number' ? { retryCount: value.retryCount } : {}),
-    ...(typeof value.firstPendingAtMs === 'number' ? { firstPendingAtMs: value.firstPendingAtMs } : {}),
-    ...(typeof value.lastAttemptAtMs === 'number' ? { lastAttemptAtMs: value.lastAttemptAtMs } : {}),
-    ...(typeof value.sourceRecordCount === 'number' ? { sourceRecordCount: value.sourceRecordCount } : {}),
+    ...(isNonNegativeSafeInteger(value.retryCount) ? { retryCount: value.retryCount } : {}),
+    ...(isNonNegativeSafeInteger(value.firstPendingAtMs) ? { firstPendingAtMs: value.firstPendingAtMs } : {}),
+    ...(isNonNegativeSafeInteger(value.lastAttemptAtMs) ? { lastAttemptAtMs: value.lastAttemptAtMs } : {}),
+    ...(isNonNegativeSafeInteger(value.sourceRecordCount) ? { sourceRecordCount: value.sourceRecordCount } : {}),
     ...(validFailure ? { failure: {
       sourceVersion: failure.sourceVersion as string,
       retryAtMs: failure.retryAtMs as number,
@@ -3443,9 +3442,7 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
   if (
     !active
     || typeof active.turnId !== 'string'
-    || typeof active.startOffset !== 'number'
-    || !Number.isSafeInteger(active.startOffset)
-    || active.startOffset < 0
+    || !isNonNegativeSafeInteger(active.startOffset)
     || typeof active.startedAtMs !== 'number'
   ) return null;
   const model = stringValue(active.model);
