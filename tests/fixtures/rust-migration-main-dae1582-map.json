@@ -7186,7 +7186,7 @@
       "source_hash": "d95dd3142ee223e56585ccd4676015adee5bb4f8fb39e02cb5e4e479d73a6af1",
       "coverage": "partial",
       "rust": [],
-      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent.",
+      "note": "15/17 exact original AST declarations mapped: 11 original source-policy/matcher guards implemented by Rust dev tests, 3 CLI rollback contracts in Batch04 and 1 public-only Native installer transport replacement. 14 whole declarations complete at implementation level, L212 partial because its two absent internal variants remain original skips. L177/L231 original internal-only boundaries not mapped as passes. Windows execution pending CI; sourceProvenance checker never proves execution. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Hermes-specific declarations now use the Native rollback API with full producer ownership; the removed fake UNC filesystem helper is replaced by Native absolute-path grammar tests. Platform execution remains independent. Exactly the two formerly unmapped internal-source AST are narrowly retired; existing eight source cases and the prior L212 partial slice remain separately accounted. No original assertions edited and no extra ignore introduced.",
       "cases": [
         {
           "source": {
@@ -7417,6 +7417,81 @@
               {
                 "file": "xtask/tests/windows_services.rs",
                 "test": "native_ps_rollback_captures_outgoing_helper_before_private_publication_and_restarts_after_cleanup"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L177:C3",
+            "title": "leaves the codex config.toml read unstripped",
+            "suites": [
+              "ps1 <-> node JSON interchange is explicitly UTF-8"
+            ],
+            "parameters": [
+              "it.skipIf(!existsSync(INNER))"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact internal-Node source policy retirement with real baseline absence and current public Native transport/call-graph proof; not a claim that a skipped original internal runtime was tested.",
+          "target": {
+            "kind": "retired",
+            "reason": "These exact original AST only inspect unshipped internal Node installer source: deploy/installer-inner.ps1 for L177; deploy/installer.ps1 and deploy/installer-inner.ps1 for L231. Git object existence was checked separately in all three real baselines; none is tracked. Original skip alone is not the retirement reason: default Native installer call graph replaces embedded Node config writes/stdin JSON with checked Rust helper/environment Unicode transport, and no private JS installer is packaged. This retires only the cancelled implementation-specific source rule, not Unicode preservation, TOML safety, internal edition capability, or a published product feature. Retired AST are not counted as newly executed Native passes.",
+            "replacement": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_json_l189_l199_pipe_detector_bans_json_to_node_and_retains_original_counterexamples"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "official_helper_handles_bom_stdin_environment_secrets_and_invalid_config"
+              },
+              {
+                "file": "tests/installer_history/config_bridge.rs",
+                "test": "original_powershell_config_bridge_preserves_omission_and_explicit_paths_in_both_shells_and_clm"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L231:C5",
+            "title": "`${file} bumps $OutputEncoding to UTF-8 in a try/catch`",
+            "suites": [
+              "ps1 <-> node JSON interchange is explicitly UTF-8"
+            ],
+            "parameters": [
+              "OUTPUT_ENCODING_VARIANTS",
+              "it.skipIf(!existsSync(file))"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact internal-Node source policy retirement with real baseline absence and current public Native transport/call-graph proof; not a claim that a skipped original internal runtime was tested.",
+          "target": {
+            "kind": "retired",
+            "reason": "These exact original AST only inspect unshipped internal Node installer source: deploy/installer-inner.ps1 for L177; deploy/installer.ps1 and deploy/installer-inner.ps1 for L231. Git object existence was checked separately in all three real baselines; none is tracked. Original skip alone is not the retirement reason: default Native installer call graph replaces embedded Node config writes/stdin JSON with checked Rust helper/environment Unicode transport, and no private JS installer is packaged. This retires only the cancelled implementation-specific source rule, not Unicode preservation, TOML safety, internal edition capability, or a published product feature. Retired AST are not counted as newly executed Native passes.",
+            "replacement": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_json_l189_l199_pipe_detector_bans_json_to_node_and_retains_original_counterexamples"
+              },
+              {
+                "file": "tests/installer_native.rs",
+                "test": "official_helper_handles_bom_stdin_environment_secrets_and_invalid_config"
+              },
+              {
+                "file": "tests/installer_history/config_bridge.rs",
+                "test": "original_powershell_config_bridge_preserves_omission_and_explicit_paths_in_both_shells_and_clm"
               }
             ]
           }
@@ -23421,6 +23496,1037 @@
               {
                 "file": "xtask/tests/powershell_ascii_comment_history.rs",
                 "test": "source_ascii_l73_requires_bom_for_every_nonascii_byte_outside_original_exceptions"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/cursor-react-assembler.test.ts",
+      "source_hash": "4b371d7f5006e9e550df6d35525bbb71ea0f9df6888cc9c5e4fcdb3ece75c13f",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All19 exact EF/main declarations now have actual nonignored Native contracts. Formerly skipped L1372 is implemented through the real shipping hook/journal/history boundary and is not retired. Eighteen existing mappings remain verbatim. Linux actual results and injected Windows transcript-path proof are separate from physical platform execution; no Node runtime is restored.",
+      "cases": [
+        {
+          "source": {
+            "id": "L17:C3",
+            "title": "propagates Cursor CLI workspace roots to every parent record",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l17_cli_workspace_roots_reach_every_parent_record"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L49:C3",
+            "title": "derives LLM and tool span timing from hook captured time and duration",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l49_hook_capture_and_duration_produce_exact_original_timestamps_and_provenance"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L195:C3",
+            "title": "deduplicates exact base/suffixed afterAgentThought pairs without a timing window",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l195_exact_base_suffixed_thought_pairs_deduplicate_without_window"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L283:C3",
+            "title": "does not deduplicate identical base afterAgentThought events without a suffixed pair",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l283_identical_unsuffixed_thoughts_are_not_deduplicated"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L327:C3",
+            "title": "does not open a new step while a synchronous tool is still active",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l327_synchronous_tool_keeps_original_reasoning_in_current_step"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L423:C3",
+            "title": "recovers the next step when a synchronous tool completion hook is missing",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l423_missing_synchronous_completion_recovers_without_fabricated_tool_history"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L533:C3",
+            "title": "drains active synchronous tools on postToolUseFailure",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l533_failure_drains_active_sync_tool_and_preserves_error_response"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L614:C3",
+            "title": "falls back to tool name when a completion hook omits tool_use_id",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l614_completion_without_id_uses_tool_name_and_opens_the_next_step"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L672:C3",
+            "title": "only pairs tool calls and results when both have non-empty ids",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l672_tool_pairing_keeps_nonempty_and_missing_identifiers_separate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L704:C3",
+            "title": "guards LLM spans by moving start before the earliest buffered tool call",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l704_request_starts_before_earliest_buffered_tool_and_keeps_provenance"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L772:C3",
+            "title": "marks the final tool step response as stop when the turn ends without another LLM step",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l772_terminal_tool_step_uses_stop_on_response_and_output_message"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L828:C3",
+            "title": "prefers synthesized Subagent result over duplicate Cursor postToolUse result",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l828_synthesized_child_result_wins_once_and_preserves_complete_history"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L954:C3",
+            "title": "does not consume a pre-collected Subagent result before its endTs",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l954_child_end_time_gates_consumption_and_clamps_next_request"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1085:C3",
+            "title": "keeps parallel Task calls from a duplicated thought in the same parent step",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l1085_parallel_task_calls_share_step_and_keep_one_assistant_then_two_results"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1275:C3",
+            "title": "uses Cursor postToolUse as Subagent result fallback when no child result exists",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l1275_no_child_result_falls_back_to_cursor_completion_with_full_history"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1372:C3",
+            "title": "isolates assembly to the stopping generation when two generations share a conversation",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": [
+              "it.skip"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Original eight literal events/options are unchanged and statically re-evaluated from pinned source. Actual Rust hook run, locked physical journal and JSONL history prove the original eight assertions: B prompt/turn/only-B records, one exact B call/result, B rows consumed, A rows byte-equivalent and parent conversation retained. Rust uses scoped rewrite snapshots rather than recreating JS temporary cleanup Sets. Additional real runtime guards cover CLI/deferred/unknown/duplicate stops, resource ownership, legacy untagged prompts, SDK thought suffixes and retention of unclaimed children/transcript facts. Existing 3s lock and2s stale bounds, output-before-cleanup and concurrent append merge are unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "legacy_l1372_actual_hook_isolates_stopping_generation_and_only_reclaims_owned_rows"
+              },
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "generation_cli_stop_and_deferred_response_use_matching_generation_guards_and_resources"
+              },
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "unknown_generation_stop_never_steals_another_generations_prompt_or_history"
+              },
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "deferred_response_never_borrows_another_generations_stop"
+              },
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "untagged_legacy_prompts_and_suffixed_thoughts_keep_their_supported_fallbacks"
+              },
+              {
+                "file": "src/hook_process/cursor_generation_isolation_contract_tests.rs",
+                "test": "mixed_generations_do_not_borrow_an_unowned_transcript_or_consume_unclaimed_child_rows"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1483:C3",
+            "title": "starts s2 LLM request at the last buffered tool result (composer ReAct split)",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": [
+              "it.skip"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l1483_existing_legacy_skipped_composer_split_has_exact_latest_tool_end_start"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1582:C3",
+            "title": "emits assistant tool-call history before the matching result in raw events and the final LLM span",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l1582_raw_and_real_native_llm_inputs_keep_call_then_result_and_independent_history"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L1714:C3",
+            "title": "opens a final s2 for afterAgentResponse when no afterAgentThought is emitted (composer-2.5-fast)",
+            "suites": [
+              "Cursor react assembler"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Exact original assertions run through production Native assemble_parent_turn with statically extracted original event/options/file literals; no old assembler/Collector executes as migration test. Keeps exact i128 capture/duration/causality bounds, IDs, provenance, role order, typed content, missing-vs-null keys, child result precedence, real default GenAI projection and actual returned-record clone isolation. L1483 was originally skipped but original production really passes and is migrated here rather than retired.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/cursor_react_history_contract_tests.rs",
+                "test": "cursor_react_l1714_final_response_without_thought_opens_second_step_and_retains_both_tools"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/daemon-cache-dir.test.mjs",
+      "source_hash": "312e9a3f54df52aba475c4eb77e184180589a4693e0eb14952ad461ffb64853f",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Two original cache-resolution contracts remain active and are carried by native installed-pointer/role routing; JS bootstrap mechanism is gone from the default path. Actual Unix Native matrix passed and its full test source plus five producer functions match current central byte-for-byte. Windows equivalent actual detached-role test is implemented, awaiting B15 physical CI.",
+      "cases": [
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "collector-daemon resolves current version from LOONGSUITE_PILOT_CACHE_DIR",
+            "suites": [
+              "bootstrap daemons"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Native current pointer from custom LOONGSUITE_PILOT_CACHE_DIR selects installed binary while HOME has no default installation; actual foreground run and run-updater native fixture processes see exact separated Unicode data/cache/config. Unexported-shell-cache repetition also passes. No node pin or collector-daemon.js is created. Both original EF JS cases actually passed independently. Windows counterpart uses actual generated background Native roles and remains physical-CI pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/services.rs",
+                "test": "unix::foreground_roles_forward_explicit_paths_without_runtime_probes"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_handoff_l37_actual_background_files_execute_native_roles_with_escaped_unicode_paths"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L64:C3",
+            "title": "updater-daemon resolves current version from LOONGSUITE_PILOT_CACHE_DIR",
+            "suites": [
+              "bootstrap daemons"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Native current pointer from custom LOONGSUITE_PILOT_CACHE_DIR selects installed binary while HOME has no default installation; actual foreground run and run-updater native fixture processes see exact separated Unicode data/cache/config. Unexported-shell-cache repetition also passes. No node pin or collector-daemon.js is created. Both original EF JS cases actually passed independently. Windows counterpart uses actual generated background Native roles and remains physical-CI pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/services.rs",
+                "test": "unix::foreground_roles_forward_explicit_paths_without_runtime_probes"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_handoff_l37_actual_background_files_execute_native_roles_with_escaped_unicode_paths"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/scripts/interceptor-service.test.mjs",
+      "source_hash": "c330e5b28aaecde7b5c0a6bc5efb32426879e3b9ef2baac13f16316fa76b438a",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All seven original AST are source-policy contracts. They remain actual source checks in Rust; the changed native Cmd-Run/quoted-argv mechanisms are explicitly evidenced. Seven policies plus actual Qwen shell routing passed on Linux, and existing real native CLI stopped-server/no-autostart test independently passed. No physical Windows execution is implied by enum applicability.",
+      "cases": [
+        {
+          "source": {
+            "id": "L9:C3",
+            "title": "does not register or command a separate Unix interceptor service",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l9_unix_service_registry_has_no_standalone_interceptor_or_daemon_command"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L25:C3",
+            "title": "does not deploy a separate interceptor daemon",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l25_every_installer_and_service_entry_keeps_interceptor_in_process"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L39:C3",
+            "title": "does not let the hook CLI start the daemon",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained. Additional actual native CLI with PATH empty connects to a private stopped server, fails open, keeps runtime bytes identical and emits no prompt/block/secret; it never starts a daemon.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l39_hook_cli_has_no_daemon_ensure_or_spawn_dispatch"
+              },
+              {
+                "file": "tests/interceptor_native.rs",
+                "test": "native_hook_empty_config_and_stopped_server_fail_open_without_runtimes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L46:C3",
+            "title": "does not register interceptor as a Windows scheduled task",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained. Legacy shell Ensure-Dirs site is replaced by the actual Cmd-Run delegation to native run; source absence and native entry dispatch are checked, rather than resurrecting a wrapper-only initialization mechanism. This is source policy, not physical Windows Task Scheduler execution.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l46_powershell_has_no_standalone_task_or_restart_dispatch"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "pins QwenWork interceptor scripts to --agent qwen-work-cn, not qoder-auto",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained. Bareword Node string syntax is now quoted native argv arrays. Both actual asset declarations require exact interceptor/hook/--agent/qwen-work-cn and no qoder-auto; real complete shell hook executes an absolute pinned native fixture with PATH containing no runtimes, preserving exact agent/event/space/Unicode extra args and ignoring a foreign cache pointer. This is real wrapper-routing evidence, not a fake collector or normalization test.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l58_qwen_hook_assets_use_the_exact_surface_in_both_shells"
+              },
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "actual_qwen_interceptor_shell_wrapper_forwards_agent_and_extra_args_to_pinned_native_program"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L67:C3",
+            "title": "declares QwenWork interceptor command hooks separately from collection Stop",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l67_qwen_declaration_separates_stop_collection_and_head_interception"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L75:C3",
+            "title": "keeps the reference autostart library on collector and updater only",
+            "suites": [
+              "interceptor inside the collector process"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Exact original source-policy checks against actual Unix/PowerShell service and installer sources, hook assets/declaration or reference autostart. No standalone interceptor daemon/task or restart/start CLI is restored; current native embedded lifecycle is retained.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/interceptor_service_history.rs",
+                "test": "source_interceptor_l75_reference_autostart_keeps_collector_updater_only"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/updater-flow.test.ts",
+      "source_hash": "eaec514ecb7ffd52a06727b3fb4344b7771813186bebf89800da19c466a6b07b",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Eight exact immutable declarations. Five active integration contracts use actual Native updater files, pin state, network/exec boundary and health lifecycle; three strictly bounded Node distribution/runtime mechanisms are retired with explicit Native safety replacements. Native package metadata/archives replace the old fake JS directory, without inventing a runtime Node requirement. Platform applicability is distinct from actual execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L205:C3",
+            "title": "does NOT update pointer when npm install fails",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does NOT update pointer when npm install fails; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Only npm provisioning of a Node distribution is retired by the Native artifact format. No runtime npm install is added. Existing-current/previous pointer preservation and no-restart on a rejected candidate remain verified by the Native upgrade regression.",
+            "replacement": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "history_upgrade_rejection_preserves_existing_current_previous_and_never_restarts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L225:C3",
+            "title": "does NOT update pointers or restart collector when the node:sqlite probe fails",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does NOT update pointers or restart collector when the node:sqlite probe fails; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Only the Node-specific require(node:sqlite) child is retired: Native preflight and embedded SQLite replace that runtime mechanism. Rejected Native preflight preserves both existing pointers and never restarts.",
+            "replacement": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "history_upgrade_rejection_preserves_existing_current_previous_and_never_restarts"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "download_http_checksum_preflight_and_missing_sha_failures_never_publish_or_leak_temporary_roots"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L263:C3",
+            "title": "does NOT update pointer when SHA-256 does not match",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does NOT update pointer when SHA-256 does not match; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "history_upgrade_rejection_preserves_existing_current_previous_and_never_restarts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L283:C3",
+            "title": "does NOT downgrade when remote version is older",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does NOT downgrade when remote version is older; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "history_older_remote_manifest_fetches_once_without_download_restart_or_pointer_change"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L305:C3",
+            "title": "recovers the collector on an already-current version before clearing failure state",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "recovers the collector on an already-current version before clearing failure state; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "already_current_recovery_handoff_waits_for_success_bookkeeping_and_is_best_effort"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L335:C3",
+            "title": "GC removes old versions but keeps current and previous",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "GC removes old versions but keeps current and previous; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "real_gc_preserves_current_previous_and_removes_exactly_the_oldest_owned_version"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "already_current_success_fetches_only_manifest_clears_backoff_and_runs_real_gc"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L373:C3",
+            "title": "falls back to legacy package/ dir when no current pointer",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "falls back to legacy package/ dir when no current pointer; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "The former package/dist Node version/execution fallback is intentionally excluded from the Native updater resolver. This does not retire Native version lookup or the separately tested explicit cross-version installer migration.",
+            "replacement": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "current_version_resolution_uses_real_pointer_and_explicitly_refuses_node_legacy_fallback"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L397:C3",
+            "title": "recovers a timed-out collector restart through start-only and verifies runtime health",
+            "suites": [
+              "Updater integration (real filesystem)"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "recovers a timed-out collector restart through start-only and verifies runtime health; preserves its still-active pointer, download, GC or recovery assertions through the real Native updater. Node-only mechanisms are explicitly delimited in retired target reasons.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "current_collector_recovery_handles_missing_wrong_version_wrong_commit_and_failed_health"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "public_start_only_recovery_api_keeps_ordered_structured_diagnostics"
+              },
+              {
+                "file": "src/updater/updater_contract_tests.rs",
+                "test": "start_only_recovery_retains_the_full_default_thirty_second_health_window"
               }
             ]
           }

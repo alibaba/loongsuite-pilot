@@ -156,6 +156,18 @@ struct StepBuilder {
     synthesized: HashSet<String>,
 }
 
+pub(super) fn matches_generation(event: &Value, generation: &str) -> bool {
+    let Some(observed) = event.get("generation_id").and_then(Value::as_str) else {
+        return false;
+    };
+    observed == generation
+        || (hook_name(event) == "afterAgentThought"
+            && THOUGHT_SUFFIX_RE
+                .captures(observed)
+                .and_then(|captures| captures.get(1))
+                .is_some_and(|base| base.as_str() == generation))
+}
+
 pub(super) fn windows_context(env: &Env, path_hint: &str) -> bool {
     cfg!(windows) || env_says_windows(env) || path_says_windows(path_hint)
 }

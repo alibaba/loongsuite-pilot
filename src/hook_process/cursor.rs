@@ -13,6 +13,7 @@ use super::common::{
     put_str, sha256_hex, write_empty, Env, HookRequest, Obj,
 };
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -468,12 +469,78 @@ fn non_empty_object(value: Option<&Value>) -> bool {
         .is_some_and(|map| !map.is_empty())
 }
 
+/// Restrict both assembly and its rewrite snapshot to the requested generation.
+/// The journal's existing snapshot merge then preserves every unselected row,
+/// including another generation in the same conversation and concurrent appends.
+fn generation_snapshot<'a>(
+    events: &'a [Value],
+    conversation_id: &str,
+    generation_id: &str,
+) -> (Cow<'a, [Value]>, bool) {
+    if generation_id.is_empty() {
+        return (Cow::Borrowed(events), false);
+    }
+    let prompts = events
+        .iter()
+        .filter(|event| {
+            event.get("hook_event").and_then(Value::as_str) == Some("beforeSubmitPrompt")
+                && event.get("conversation_id").and_then(Value::as_str) == Some(conversation_id)
+        })
+        .collect::<Vec<_>>();
+    let exact_prompt = prompts
+        .iter()
+        .any(|event| assemble::matches_generation(event, generation_id));
+    let tagged_prompt = prompts.iter().any(|event| {
+        event
+            .get("generation_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    });
+    // Older Cursor hooks did not tag prompts. Preserve their existing
+    // conversation fallback when no competing tagged prompt exists.
+    if !exact_prompt && !tagged_prompt {
+        return (Cow::Borrowed(events), false);
+    }
+    let mixed = prompts
+        .iter()
+        .any(|event| !assemble::matches_generation(event, generation_id));
+    let keep = |event: &Value| {
+        if event.get("conversation_id").and_then(Value::as_str) == Some(conversation_id) {
+            assemble::matches_generation(event, generation_id)
+                || (!mixed
+                    && event
+                        .get("generation_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| id.is_empty()))
+        } else {
+            // An overlapping parent generation cannot establish ownership of
+            // other conversations from a shared transcript directory. Leave
+            // those rows outside this rewrite snapshot, rather than consume
+            // an unrelated child. Single-generation nesting is unchanged.
+            !mixed
+        }
+    };
+    if events.iter().all(&keep) {
+        (Cow::Borrowed(events), mixed)
+    } else {
+        (
+            Cow::Owned(events.iter().filter(|event| keep(event)).cloned().collect()),
+            mixed,
+        )
+    }
+}
+
 fn assemble_stop(root: &Path, env: &Env, journal: &Journal, event: &Obj) -> Result<(), String> {
-    let events = journal.read_all()?;
+    let snapshot = journal.read_all()?;
     let conversation_id = event
         .get("conversation_id")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let (events, mixed) = generation_snapshot(
+        &snapshot,
+        conversation_id,
+        text(event, "generation_id").unwrap_or(""),
+    );
     let pending = events.iter().any(|item| {
         item.get("hook_event").and_then(Value::as_str) == Some("beforeSubmitPrompt")
             && item.get("conversation_id").and_then(Value::as_str) == Some(conversation_id)
@@ -501,10 +568,16 @@ fn assemble_stop(root: &Path, env: &Env, journal: &Journal, event: &Obj) -> Resu
     if variant == "cursor-cli" && !has_response {
         return Ok(());
     }
-    let transcript_path = event
-        .get("transcript_path")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    // A shared transcript has no generation proof. For overlapping prompts
+    // use the selected hook evidence and retain all unclaimed journal rows.
+    let transcript_path = if mixed {
+        ""
+    } else {
+        event
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
     finish_assembly(
         root,
         env,
@@ -517,11 +590,16 @@ fn assemble_stop(root: &Path, env: &Env, journal: &Journal, event: &Obj) -> Resu
 }
 
 fn assemble_deferred(root: &Path, env: &Env, journal: &Journal, event: &Obj) -> Result<(), String> {
-    let events = journal.read_all()?;
+    let snapshot = journal.read_all()?;
     let conversation_id = event
         .get("conversation_id")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let (events, _) = generation_snapshot(
+        &snapshot,
+        conversation_id,
+        text(event, "generation_id").unwrap_or(""),
+    );
     let has_stop = events.iter().any(|item| {
         item.get("hook_event").and_then(Value::as_str) == Some("stop")
             && item.get("conversation_id").and_then(Value::as_str) == Some(conversation_id)
@@ -626,6 +704,8 @@ fn finish_assembly(
             append_batch(&path, &records)?;
         }
     }
+    // The snapshot contains only this assembly's ownership scope. Rewriting
+    // it cannot globally consume another generation sharing the conversation.
     journal.rewrite(&compact_remaining(events, &consumed), Some(events))
 }
 
@@ -1163,3 +1243,7 @@ mod workspace_history_contracts {
         assert_eq!(records, original);
     }
 }
+
+#[cfg(test)]
+#[path = "cursor_generation_isolation_contract_tests.rs"]
+mod generation_isolation_contract_tests;

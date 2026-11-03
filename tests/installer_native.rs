@@ -2656,3 +2656,6 @@ mod installer_hermes_rollback_history;
 
 #[path = "installer_history/empty_hooks.rs"]
 mod installer_empty_hooks_history;
+
+#[path = "installer_history/uninstall_contracts.rs"]
+mod installer_uninstall_contracts_history;

@@ -1762,4 +1762,92 @@ mod migration_contract_tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn history_upgrade_rejection_preserves_existing_current_previous_and_never_restarts() {
+        for mode in ["checksum", "preflight"] {
+            let root = tempfile::tempdir().unwrap();
+            let (body, mut manifest) = cached_candidate_archive();
+            if mode == "checksum" {
+                manifest.assets.get_mut(build_target()).unwrap().sha256 = "f".repeat(64);
+            }
+            let execs = if mode == "preflight" {
+                vec![Err(CommandFailure::message("native preflight rejected"))]
+            } else {
+                vec![]
+            };
+            let net = ScriptedNet::new(
+                vec![
+                    Ok(manifest_response(&manifest)),
+                    Ok(FetchResponse {
+                        status: 200,
+                        status_text: "synthetic archive".into(),
+                        body,
+                    }),
+                ],
+                execs,
+            );
+            let updater = scoped_updater(base_config(), root.path().to_str(), net.clone());
+            let current = format!("1.0.1_{}", "a".repeat(40));
+            let previous = format!("1.0.0_{}", "c".repeat(40));
+            component_current(&updater, "1.0.1", &"a".repeat(40), &current);
+            native_package_version_for_test(
+                &Path::new(&updater.paths.versions_dir).join(&previous),
+                "1.0.0",
+                &"c".repeat(40),
+                Some(&crate::utils::native_binary::fixture_binary(build_target())),
+            );
+            std::fs::write(&updater.paths.previous_file, format!("{previous}\n")).unwrap();
+            let current_before = std::fs::read(&updater.paths.current_file).unwrap();
+            let previous_before = std::fs::read(&updater.paths.previous_file).unwrap();
+            let error = updater.check().await.unwrap_err();
+            assert!(error.contains(if mode == "checksum" {
+                "SHA-256 mismatch"
+            } else {
+                "native preflight rejected"
+            }));
+            assert_eq!(
+                std::fs::read(&updater.paths.current_file).unwrap(),
+                current_before
+            );
+            assert_eq!(
+                std::fs::read(&updater.paths.previous_file).unwrap(),
+                previous_before
+            );
+            assert!(service_commands(&net).is_empty());
+            for retained in [current, previous] {
+                assert!(Path::new(&updater.paths.versions_dir)
+                    .join(retained)
+                    .is_dir());
+            }
+            assert!(std::fs::read_dir(&updater.paths.versions_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".unpack-")));
+            assert_eq!(net.fetch_log.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_older_remote_manifest_fetches_once_without_download_restart_or_pointer_change()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let net = ScriptedNet::new(vec![Ok(manifest_body("1.0.1", "aaa"))], vec![]);
+        let mut updater = scoped_updater(base_config(), root.path().to_str(), net.clone());
+        let commit = "b".repeat(40);
+        let current = format!("1.0.2_{commit}");
+        component_current(&updater, "1.0.2", &commit, &current);
+        let local = super::super::super::release_manifest::fixture("1.0.2", &commit);
+        healthy_for(&updater.paths, &local, std::process::id());
+        updater.set_pid_alive(Arc::new(|_| true));
+        let before = std::fs::read(&updater.paths.current_file).unwrap();
+        updater.check().await.unwrap();
+        assert_eq!(net.fetch_log.lock().unwrap().len(), 1);
+        assert!(net.exec_log.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(&updater.paths.current_file).unwrap(), before);
+        assert!(!Path::new(&updater.paths.previous_file).exists());
+    }
 }
