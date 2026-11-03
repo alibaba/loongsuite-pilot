@@ -1250,8 +1250,8 @@ print_summary() {
 # Overlay `install` used to SIGTERM only the collector pid file. The updater
 # stayed up, and gcOldVersions() deletes any versions/<dir> that is not
 # current/previous -- including the directory this deploy just copied, before
-# current is published. installer-opensource.sh writes current after
-# node_modules + postinstall, so that window is minutes. `loongsuite-pilot stop`
+# current is published. Native staging validates the complete package before
+# publish-package commits current and the installed hooks. `loongsuite-pilot stop`
 # unloads LaunchAgent / disables systemd (autostart_remove) so neither process
 # comes back mid-deploy. That is the Unix counterpart of Disable-ScheduledTask.
 #
@@ -1284,23 +1284,12 @@ run_pilot_cli() {
 
 stop_one_pilot_pid_file() {
     local pid_file="$1"
-    [ -f "$pid_file" ] || return 0
-    local old_pid
-    old_pid=$(cat "$pid_file")
-    if kill -0 "$old_pid" 2>/dev/null; then
-        kill "$old_pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$old_pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$old_pid" 2>/dev/null; then
-            kill -9 "$old_pid" 2>/dev/null || true
-        fi
-        rm -f "$pid_file"
-    else
-        rm -f "$pid_file"
-    fi
+    [ -e "$pid_file" ] || [ -L "$pid_file" ] || return 0
+    local cache_dir="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    # The already validated candidate supplies the native identity probe and
+    # targeted stop. A PID number alone never authorizes a signal or file removal.
+    LP_PID_FILE="$pid_file" LP_DATA_DIR="$DATA_DIR" LP_CACHE_DIR="$cache_dir" \
+        native_installer_helper stop-deploy-process --from-env
 }
 
 stop_pilot_for_deploy() {
@@ -1308,7 +1297,8 @@ stop_pilot_for_deploy() {
     local cli
     cli="$(resolve_pilot_cli)"
 
-    if [ -z "$cli" ] && [ ! -f "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -f "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
+    if [ -z "$cli" ] && [ ! -e "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -L "$DATA_DIR/loongsuite-pilot.pid" ] &&
+        [ ! -e "$DATA_DIR/loongsuite-pilot-updater.pid" ] && [ ! -L "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
         return 0
     fi
 
@@ -1321,8 +1311,14 @@ stop_pilot_for_deploy() {
         fi
     fi
     # Leftovers: no CLI on PATH, or an updater the CLI did not track.
-    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid"
-    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid"
+    local fallback_failed=0
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid" || fallback_failed=1
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid" || fallback_failed=1
+    if [ "$fallback_failed" -ne 0 ]; then
+        msg "    ⚠️  无法确认剩余进程归属，已保留进程及 PID 文件，停止覆盖安装" \
+            "    ⚠️  Could not verify remaining process ownership; processes and PID files preserved, overlay stopped"
+        return 1
+    fi
     echo ""
 }
 

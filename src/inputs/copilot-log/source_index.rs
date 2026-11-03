@@ -415,8 +415,10 @@ impl CopilotSourceIndex {
                             if kind == "event" {
                                 active.clear();
                             }
-                            crate::utils::create_logger("CopilotSourceIndex")
-                                .warn("Skipping malformed complete Copilot record", None);
+                            crate::utils::create_logger("CopilotSourceIndex").warn(
+                                "Skipping malformed complete Copilot record",
+                                serde_json::json!({"file":name,"offset":offset}).as_object(),
+                            );
                         }
                         None => {}
                     }
@@ -1051,3 +1053,7 @@ mod tests {
         assert_eq!(index.pending().unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "source_index_history_contract_tests.rs"]
+mod source_index_history_contract_tests;

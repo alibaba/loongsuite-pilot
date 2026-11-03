@@ -241,6 +241,16 @@ fn collect_sources(
     wakeup_dir: &Path,
     grace: u64,
 ) -> Result<(Vec<String>, Vec<AgentActivityEntry>)> {
+    collect_sources_at(index, session_dir, otel_dir, wakeup_dir, grace, None)
+}
+fn collect_sources_at(
+    index: &CopilotSourceIndex,
+    session_dir: &Path,
+    otel_dir: &Path,
+    wakeup_dir: &Path,
+    grace: u64,
+    fixed_now: Option<i64>,
+) -> Result<(Vec<String>, Vec<AgentActivityEntry>)> {
     let files = match list_sources(session_dir) {
         Ok(files) => files,
         Err(_) => return Ok((Vec::new(), Vec::new())),
@@ -324,7 +334,7 @@ fn collect_sources(
                 || index.awaiting_native(
                     &pending.session,
                     &pending.id,
-                    chrono::Utc::now().timestamp_millis(),
+                    fixed_now.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
                     i64::try_from(grace).unwrap_or(i64::MAX),
                 )?
                 || index.has_unread_source()?

@@ -41,6 +41,14 @@ pub(crate) fn command() -> Command {
             }),
         )
         .subcommands(["probe-count", "probe-detected"].map(input_command))
+        .subcommand(
+            input_command("stop-deploy-process").arg(
+                Arg::new("from-env")
+                    .long("from-env")
+                    .action(ArgAction::SetTrue)
+                    .conflicts_with("input-env"),
+            ),
+        )
         .subcommands(
             [
                 "stage-package",
@@ -172,6 +180,24 @@ fn options(args: &ArgMatches) -> Result<Options> {
 pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
     let (name, args) = args.subcommand().context("缺少安装辅助操作")?;
     let output = match name {
+        "stop-deploy-process" => {
+            let value = if args.get_flag("from-env") {
+                let mut values = serde_json::Map::new();
+                for (key, env) in [
+                    ("dataDir", "LP_DATA_DIR"),
+                    ("cacheDir", "LP_CACHE_DIR"),
+                    ("pidFile", "LP_PID_FILE"),
+                ] {
+                    if let Ok(value) = std::env::var(env) {
+                        values.insert(key.into(), json!(value));
+                    }
+                }
+                Value::Object(values)
+            } else {
+                input(args)?
+            };
+            super::native_installer_stop::run(value).await?
+        }
         "cleanup-agents" => {
             let value = if let Some(data) = args.get_one::<String>("data-dir") {
                 let mut value = json!({"dataDir":data,"purge":args.get_flag("purge"),"checkOnly":args.get_flag("check-only")});

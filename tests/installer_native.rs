@@ -2641,3 +2641,6 @@ mod installer_version_hook_history;
 
 #[path = "installer_history/status_edr_profile.rs"]
 mod installer_status_edr_profile_history;
+
+#[path = "installer_history/stop_for_deploy.rs"]
+mod installer_stop_history;

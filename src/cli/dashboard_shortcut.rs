@@ -490,3 +490,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "dashboard_shortcut_macos_contract_tests.rs"]
+mod physical_macos_contract_tests;

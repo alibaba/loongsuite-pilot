@@ -50,6 +50,15 @@ impl Fixture {
     fn count(&self, sql: &str) -> i64 {
         self.db().query_row(sql, [], |r| r.get(0)).unwrap()
     }
+    fn strings(&self, sql: &str) -> Vec<String> {
+        let db = self.db();
+        let mut statement = db.prepare(sql).unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
     async fn sources(&self, fixture: &Value) {
         tokio::fs::write(&self.events, lines(&fixture["events"]))
             .await
@@ -168,6 +177,16 @@ async fn adoption_rejects_old_work_then_collects_a_new_interaction_in_the_same_s
         x.count("SELECT count(*) FROM records WHERE kind='event'"),
         1
     );
+    let policy: Value = serde_json::from_slice(&std::fs::read(&x.policy).unwrap()).unwrap();
+    assert_eq!(policy["historyStartTimeMs"], BASE + 5000);
+    assert_eq!(
+        x.strings("SELECT id FROM ignored_interactions"),
+        ["interaction-a"]
+    );
+    assert_eq!(
+        x.strings("SELECT type FROM records WHERE kind='event'"),
+        ["session.start"]
+    );
     let next = conversation("interaction-b", 10000);
     x.append(&x.events, &next["events"].as_array().unwrap()[1..]);
     x.append(&x.native, next["spans"].as_array().unwrap());
@@ -209,6 +228,14 @@ async fn upgrade_applies_adoption_to_indexed_pending_work_and_preserves_delivere
         1
     );
     assert_eq!(x.count("SELECT count(*) FROM ignored_interactions"), 1);
+    assert_eq!(
+        x.strings("SELECT key FROM delivered"),
+        ["copilot:previous-session:already-delivered"]
+    );
+    assert_eq!(
+        x.strings("SELECT id FROM ignored_interactions"),
+        ["interaction-a"]
+    );
     stop(&input).await;
 }
 
@@ -431,6 +458,10 @@ async fn source_replacement_and_confirmed_session_deletion_clear_native_locators
         x.count("SELECT count(*) FROM deferred_spans WHERE id LIKE 'interaction-b-%'"),
         2
     );
+    assert_eq!(
+        x.strings("SELECT id FROM deferred_spans ORDER BY id"),
+        ["interaction-b-chat", "interaction-b-root"]
+    );
     tokio::fs::remove_dir_all(x.sessions.join("session-test"))
         .await
         .unwrap();
@@ -571,6 +602,10 @@ async fn invalid_user_timestamp_never_authorizes_an_interaction() {
         x.count("SELECT count(*) FROM ignored_interactions WHERE reason='invalid-event-time'"),
         1
     );
+    assert_eq!(
+        x.strings("SELECT reason FROM ignored_interactions"),
+        ["invalid-event-time"]
+    );
     stop(&input).await;
 }
 
@@ -690,3 +725,6 @@ async fn skewed_native_before_user_is_restored_from_byte_locators_without_rewind
     );
     stop(&input).await;
 }
+
+#[path = "collector_history_contract_tests.rs"]
+mod collector_history_contract_tests;

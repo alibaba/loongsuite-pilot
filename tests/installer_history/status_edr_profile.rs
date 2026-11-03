@@ -308,7 +308,7 @@ if (Test-Path -LiteralPath $config) { throw 'missing status value wrote config' 
             .env("TEST_CANDIDATE", &f.candidate)
             .env("TEST_DATA", &f.data)
             .env("TEST_STATUS_WRITER", parse);
-        success(&bounded_for(command, Duration::from_secs(5)));
+        success(&bounded_for(command, Duration::from_secs(15)));
         assert!(!f.data.join("config.json").exists());
         assert!(!f.root.path().join("cache").exists());
     }

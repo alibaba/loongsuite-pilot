@@ -30,6 +30,7 @@ pub(crate) mod installer_helper;
 mod legacy_cli_cleanup;
 mod legacy_uninstall;
 pub(crate) mod native_install;
+mod native_installer_stop;
 mod native_uninstall;
 mod openclaw_compat;
 mod openclaw_version_resolver;

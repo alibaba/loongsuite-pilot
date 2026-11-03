@@ -1,0 +1,87 @@
+name: macOS Native Contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [loongsuite-pilot-rust]
+    paths: [.github/workflows/macos-native-contracts.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-native-contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  native:
+    name: Native contracts (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {os: macos-26-intel, target: x86_64-apple-darwin, ui_arch: x64, build_jobs: 2}
+          - {os: macos-26, target: aarch64-apple-darwin, ui_arch: arm64, build_jobs: 1}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1-${{ matrix.target }}
+      CARGO_BUILD_JOBS: ${{ matrix.build_jobs }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install pinned native Rust
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -vV
+          test "$(rustc --version | cut -d' ' -f2)" = 1.99.1
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-native-macos-v1
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+      - name: Isolate HOME while retaining toolchain paths
+        run: |
+          set -euo pipefail
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/pilot-native-home"
+          echo "HOME=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+          echo "USERPROFILE=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+      - name: Compile native contracts without packaging
+        id: compile
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-features --locked --bins
+          cargo test -p loongsuite-pilot --all-features --locked --lib --test cli_native --no-run
+      - name: Real owned processes, shared locks and lifecycle budgets
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          test "$(cargo test -p loongsuite-pilot --all-features --locked --lib status_bar::status_bar_app_manager:: -- --list | grep -c ': test$')" -gt 0
+          cargo test -p loongsuite-pilot --all-features --locked --lib status_bar::status_bar_app_manager:: -- --test-threads=1 --nocapture
+      - name: Six real Foundation AppKit and JXA contracts in private domains
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          test "$(cargo test -p loongsuite-pilot --all-features --locked --lib physical_macos_contract_tests:: -- --list | grep -c ': test$')" -eq 6
+          cargo test -p loongsuite-pilot --all-features --locked --lib physical_macos_contract_tests:: -- --test-threads=1 --nocapture
+      - name: Shipped CLI safe help and parameter rejection
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test -p loongsuite-pilot --all-features --locked --test cli_native help_version_and_argument_errors_do_not_touch_home_or_load_config -- --exact --nocapture
+      - name: Build precompiled Swift UI and run its tests without launching it
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: ./target/debug/xtask build-status-bar --arch "${{ matrix.ui_arch }}" --output "$RUNNER_TEMP/pilot-native-statusbar/LoongSuitePilotMenuBarApp"

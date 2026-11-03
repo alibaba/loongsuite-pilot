@@ -36122,6 +36122,2702 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/inputs/copilot-log/copilot-history-policy.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐AST/源字节哈希与真实执行分离；实际执行计数见独立收据，不把46AST当作46个Rust测试。仅LinuxGLIBC2.34实跑，Windows/macOS适用未实跑。原预算/ACK保留；Source Index日志补足file/offset，Base在emit/ACK前检查共享冻结并收拢外部queue callback拒绝。",
+      "source_hash": "306f3a9118131d79fe1bfb4f23f6d48b46ba3df4ddff139a4dd8bec4bb98e6ff",
+      "cases": [
+        {
+          "source": {
+            "id": "L38:C3",
+            "title": "does not replay pre-activation history, then accepts a new interaction appended to the same old session",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "adoption_rejects_old_work_then_collects_a_new_interaction_in_the_same_session"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "applies adoption to already-indexed old pending work on upgrade without clearing delivered keys",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "upgrade_applies_adoption_to_indexed_pending_work_and_preserves_delivered_keys"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L70:C3",
+            "title": "retains the original floor across restart and recovers post-adoption unqueued work",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "restart_recovers_unqueued_work_and_never_moves_the_original_floor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L82:C3",
+            "title": "keeps the floor when SQLite is rebuilt and restores a missing policy file from SQLite",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "index_rebuild_and_missing_policy_restore_keep_the_original_floor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C3",
+            "title": "allows an explicit replay floor, including a boundary exactly at activation",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "explicit_replay_includes_the_exact_activation_boundary_and_persists_it"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "captures the default boundary on activation rather than while a disabled input is constructed",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "default_history_floor_is_captured_on_activation_after_input_construction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L115:C3",
+            "title": "keeps a valid new user interaction when native timestamps are older than the boundary",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "authoritative_new_user_retains_original_skewed_native_clock_and_usage"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L129:C3",
+            "title": "does not tombstone a valid new user after malformed native evidence, then accepts a corrected span",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "malformed_native_evidence_does_not_tombstone_user_and_corrected_span_recovers"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L139:C3",
+            "title": "recovers skewed native evidence that precedes its user by a poll using byte locators",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "skewed_native_before_user_is_restored_from_byte_locators_without_rewinding_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L160:C3",
+            "title": "does not let one new user authorize unrelated historical native root/tool bodies in the same session",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "one_new_user_cannot_authorize_unrelated_historical_native_trace_bodies"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L179:C3",
+            "title": "persists native locators across restart and retries after temporary native-file unavailability",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "native_locators_survive_restart_and_temporary_source_unavailability"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L196:C3",
+            "title": "clears native locators on source replacement and confirmed session deletion",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "source_replacement_and_confirmed_session_deletion_clear_native_locators"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L208:C3",
+            "title": "does not let unavailable deferred traces starve a later restorable interaction",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "unavailable_deferred_traces_cannot_starve_the_ninth_restorable_interaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L229:C3",
+            "title": "rotates unavailable locators within a trace larger than one restore page",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "unavailable_first_locator_page_cannot_starve_later_chat_and_root_in_same_trace"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L251:C3",
+            "title": "reconsiders provisional legacy-native exclusions when an authoritative new user arrives later",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "provisional_legacy_native_exclusion_is_reconsidered_after_authoritative_user_arrives"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L266:C3",
+            "title": "refuses corrupt policy rather than silently enabling a historical replay",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "corrupt_policy_cannot_silently_enable_replay"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L273:C3",
+            "title": "does not emit interactions with invalid user timestamp evidence",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "invalid_user_timestamp_never_authorizes_an_interaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L280:C3",
+            "title": "uses shutdown time for summary eligibility without reopening historical interactions",
+            "suites": [
+              "Copilot first-adoption history boundary"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "shutdown_time_authorizes_summary_without_reopening_historical_interactions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L291:C1",
+            "title": "reclaims legacy native-only bodies with an existing policy and rebuilds locators across bounded polls and restart",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "legacy_native_body_reclamation_is_bounded_resumable_and_preserves_delivered_keys"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/copilot-log/copilot-log-input.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐AST/源字节哈希与真实执行分离；实际执行计数见独立收据，不把46AST当作46个Rust测试。仅LinuxGLIBC2.34实跑，Windows/macOS适用未实跑。原预算/ACK保留；Source Index日志补足file/offset，Base在emit/ACK前检查共享冻结并收拢外部queue callback拒绝。",
+      "source_hash": "299d218d2798cc4753aed2fb720a7d7d6e7c538599040b8e0a3f92957ddb164f",
+      "cases": [
+        {
+          "source": {
+            "id": "L25:C2",
+            "title": "degrades unknown old-shell sessions after a durable grace window, regardless of global installation",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l25_unknown_shell_grace_is_durable_and_reapplies_to_each_interaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L41:C2",
+            "title": "accepts delayed native data within grace with exact per-call usage",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l41_delayed_native_arrival_within_grace_uses_exact_per_call_tokens"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L48:C2",
+            "title": "uses explicit per-session no-exporter evidence without waiting and keeps known exporters pending",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l48_explicit_no_exporter_avoids_grace_while_known_exporter_waits"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L56:C2",
+            "title": "falls back to polling after an asynchronous watcher error",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。 Native异步listener任务终止后真实10ms normal poll仍能采集；任务句柄由Rust生命周期在stop清理，不复刻JS EventEmitter/undefined表征。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l56_normal_polling_survives_an_asynchronously_terminated_wakeup_listener"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L63:C2",
+            "title": "uses a valid configured polling interval and defaults invalid values",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。 Rust构造参数为u64，负值/NaN/Infinity不可表示；实际执行None/0/1234和真实隔离env优先级，不冒称动态JS无效数字子场景执行了。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l63_l72_constructor_and_unified_poll_intervals_are_used_by_real_native_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L72:C2",
+            "title": "lets the unified polling interval override the Copilot default and listener value",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。 Rust构造参数为u64，负值/NaN/Infinity不可表示；实际执行None/0/1234和真实隔离env优先级，不冒称动态JS无效数字子场景执行了。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l63_l72_constructor_and_unified_poll_intervals_are_used_by_real_native_inputs"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L79:C2",
+            "title": "reconstructs read-but-not-queued data after restart",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/history_policy_tests.rs",
+                "test": "restart_recovers_unqueued_work_and_never_moves_the_original_floor"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L86:C2",
+            "title": "does not emit a pending interaction before native root arrival",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l86_pending_interaction_waits_for_native_root_across_recreated_input"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C2",
+            "title": "appends only the next interaction and then a separate shutdown summary",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l90_only_appended_interaction_and_separate_summary_are_emitted_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L95:C2",
+            "title": "retains state across missing directory and partial line",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l95_missing_session_directory_and_partial_line_keep_delivery_state"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L100:C2",
+            "title": "handles replaced native files without replaying queued interactions",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l100_replaced_native_source_does_not_replay_queued_interactions"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L104:C2",
+            "title": "drains a source above 64 MiB and emits completed interactions before a partial EOF",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l104_events_above_sixty_four_mib_drain_complete_interaction_before_partial_eof"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L119:C2",
+            "title": "drains native OTel above 64 MiB, resumes persisted offsets and ignores an unfinished tail",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l119_native_above_sixty_four_mib_resumes_four_mib_budget_after_restart"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L138:C2",
+            "title": "accepts a complete JSON record larger than the cycle budget",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l138_five_mib_complete_json_record_crosses_cycle_budget_without_content_loss"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L144:C2",
+            "title": "does not let old pending interactions starve a later complete interaction",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l144_twelve_old_pending_interactions_cannot_starve_later_complete_work"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L150:C2",
+            "title": "imports v2 delivered keys without replay, then survives transcript truncation",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l150_v2_delivered_keys_import_without_replay_after_transcript_truncation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L158:C2",
+            "title": "replays a batch rejected when another input freezes the shared checkpoint during collect",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。 真实共享生命周期失败不输出/不ACK，原event IDs完整重放且同Input可重试；外部callback拒绝使用Rust panic边界，不吞内部collect panic，不格式化原始payload/凭据。 另有真实disk/restart负控：全局hold仍pending时拒绝批次，自身staged StateStore cursor=99不能被旧save在外部hold成功解除后刷盘；重载仍0、ledger未ACK、相同event IDs完整重放并成功接受。SQLite读取定位按原设计可持久化，不能误称delivery/自身未接收cursor已接受。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l158_real_shared_lifecycle_replays_a_batch_frozen_during_native_collection"
+              },
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "rejected_progress_cannot_leak_through_an_older_save_when_another_global_hold_accepts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C2",
+            "title": "commits only after queue acceptance through the shared input lifecycle",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。 真实共享生命周期失败不输出/不ACK，原event IDs完整重放且同Input可重试；外部callback拒绝使用Rust panic边界，不吞内部collect panic，不格式化原始payload/凭据。 另有真实disk/restart负控：全局hold仍pending时拒绝批次，自身staged StateStore cursor=99不能被旧save在外部hold成功解除后刷盘；重载仍0、ledger未ACK、相同event IDs完整重放并成功接受。SQLite读取定位按原设计可持久化，不能误称delivery/自身未接收cursor已接受。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l175_real_shared_lifecycle_commits_only_after_synchronous_queue_acceptance"
+              },
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "rejected_progress_cannot_leak_through_an_older_save_when_another_global_hold_accepts"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L184:C2",
+            "title": "detects copy-truncate followed by regrowth past the old offset",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l184_copy_truncate_regrowth_past_old_offset_delivers_only_new_interaction"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L191:C2",
+            "title": "prunes a confirmed deleted session without deleting native source files",
+            "suites": [
+              "Copilot incremental recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native collect/StateStore/SQLite/文件或HostedInput→InputManager→测试Flusher。原30s grace精确时钟、65MiB源、4MiB读取/partial进度、5MiB完整记录、12 pending/4轮、ledger/重启/截断/queue reject合同保留；不执行旧Collector副本。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/collector_history_contract_tests.rs",
+                "test": "input_l191_confirmed_deleted_session_prunes_facts_and_delivery_but_keeps_native_files"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/copilot-log/copilot-output-growth.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐AST/源字节哈希与真实执行分离；实际执行计数见独立收据，不把46AST当作46个Rust测试。仅LinuxGLIBC2.34实跑，Windows/macOS适用未实跑。原预算/ACK保留；Source Index日志补足file/offset，Base在emit/ACK前检查共享冻结并收拢外部queue callback拒绝。",
+      "source_hash": "9b6df3e572dfa0507c91e2f52c168c8a3d7a7ae86d6f645297abbf3dbc3669cf",
+      "cases": [
+        {
+          "source": {
+            "id": "L12:C1",
+            "title": "measures real collector-to-JSONL growth and finite history drain using synthetic pre-existing sessions",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "已读旧草稿、当前main完整源与Native真实断言；source字节与旧04d草稿完全相同。history floor/locators/privacy/SQLite恢复或真实InputManager→JSONL增长采用实际Native管道，非仅函数同名映射；补强ignored ID/records类型/policy floor/明确source-ID等原精确断言。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/disk_governance_tests.rs",
+                "test": "collector_to_jsonl_growth_is_linear_and_stops_after_finite_history_drain"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/inputs/copilot-log/source-index.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "逐AST/源字节哈希与真实执行分离；实际执行计数见独立收据，不把46AST当作46个Rust测试。仅LinuxGLIBC2.34实跑，Windows/macOS适用未实跑。原预算/ACK保留；Source Index日志补足file/offset，Base在emit/ACK前检查共享冻结并收拢外部queue callback拒绝。",
+      "source_hash": "c3ced201ea3efba00d871794ab60136f93f0609183b23831ed12c95bdaffa7f2",
+      "cases": [
+        {
+          "source": {
+            "id": "L19:C3",
+            "title": "isolates malformed complete records and resumes from an explicit interaction boundary",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l19_malformed_complete_records_report_exact_source_byte_offsets_only_once"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L31:C3",
+            "title": "does not guess the identity when the session start is corrupt",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l31_corrupt_session_start_never_fabricates_source_identity"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L35:C3",
+            "title": "persists bounded partial-line progress across restart, without re-reading unchanged EOF",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l35_partial_ten_mib_line_keeps_four_mib_progress_across_restart_and_unchanged_eof"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L52:C3",
+            "title": "discards old fragments after copy-truncate and accepts the replacement",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l52_copy_truncate_discards_prior_fragments_and_accepts_five_complete_events"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L58:C3",
+            "title": "rolls back both source progress and fragment writes on a database failure",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l58_database_failure_rolls_back_records_cursor_and_fragments_then_retries"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L69:C3",
+            "title": "closes a failed initialization and retries schema initialization",
+            "suites": [
+              "Copilot source index failure recovery"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "真实Native SourceIndex+SQLite+源文件：2条malformed完整记录仅报一次并精确file/offset；10MiB partial按4MiB跨restart/unchanged EOF；copy-truncate/DB事务回滚；失败Native构造无半开实例且真实rename后可重建。未复刻旧JS db=undefined对象内部机制。",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/inputs/copilot-log/source_index_history_contract_tests.rs",
+                "test": "index_l69_failed_schema_initialization_releases_connection_and_retries_cleanly"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/status-bar/status-bar-app-manager.test.ts",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact EF/main source bytes and 24 AST declarations. Linux GNU/glibc2.34 executes actual native subprocesses/files for eight contracts, with only the Darwin admission flag injected; no claim of physical macOS execution. Existing 14 native tests are distinguished from real-process additions. One runtime Swift-build mechanism is retired with packaging replacement evidence; no Node runtime is restored.",
+      "source_hash": "d3ecba5e42ff6fa645033e5bfa38f7e7f90242893e1cc0ccbdae399ff49fd43b",
+      "cases": [
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "skips on non-darwin platforms",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing Native no-op/missing-packaged-UI/cache resolution assertion is run on Linux; deterministic platform/operation injection is explicit and is not physical macOS process execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "skips_non_darwin_and_removes_the_runtime_record_on_stop"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L106:C3",
+            "title": "stop removes runtime record if it exists",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_spawn_is_detached_records_data_and_restarts_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L131:C3",
+            "title": "syncDesiredState(false) calls stop",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_shared_lock_serializes_launch_stop_and_releases_on_cancellation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L156:C3",
+            "title": "starts a detached app, records its PID, and does not duplicate a second start",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_spawn_is_detached_records_data_and_restarts_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L172:C3",
+            "title": "relaunches after the recorded app exited",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_spawn_is_detached_records_data_and_restarts_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L182:C3",
+            "title": "adopts an existing app when its runtime record is missing",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_orphans_are_adopted_then_upgraded_and_foreign_images_are_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L193:C3",
+            "title": "matches process command %j against executable %j as %j",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": [
+              "it.each([\n    ['/managed/LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', true],\n    ['/managed/LoongSuitePilotMenuBarApp --flag', '/managed/LoongSuitePilotMenuBarApp', true],\n    ['LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', false],\n    ['/old/LoongSuitePilotMenuBarApp', '/managed/LoongSuitePilotMenuBarApp', false],\n    ['/old/LoongSuitePilotMenuBarApp', '/old/LoongSuitePilotMenuBarApp', true],\n  ])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "All five original command-prefix table rows are preserved as compatibility helper assertions; the actual Native process adapter reads the executable image rather than parsing argv, and separately validates its real current process image.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "command_match_and_swiftc_args"
+              },
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "native_adapter_reads_actual_executable_without_shell"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L206:C3",
+            "title": "refuses to spawn beside a same-named process outside this installation",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_orphans_are_adopted_then_upgraded_and_foreign_images_are_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L216:C3",
+            "title": "serializes collector and CLI launches with a shared lock",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_shared_lock_serializes_launch_stop_and_releases_on_cancellation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L227:C3",
+            "title": "reports asynchronous spawn errors without writing a successful runtime record",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_exec_errors_and_immediate_exit_do_not_leave_runtime_or_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L241:C3",
+            "title": "does not report success if the app immediately exits",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_exec_errors_and_immediate_exit_do_not_leave_runtime_or_lock"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L249:C3",
+            "title": "returns unavailable when the binary is missing and cannot be built",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing Native no-op/missing-packaged-UI/cache resolution assertion is run on Linux; deterministic platform/operation injection is explicit and is not physical macOS process execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "missing_packaged_ui_never_creates_a_build_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L258:C3",
+            "title": "does not hold the lifecycle lock while building a missing executable",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Retire runtime Swift compilation while preserving missing-UI safety. Supported macOS packages precompile and carry the UI through xtask build-status-bar and --status-bar-binary; runtime never starts a compiler or waits while owning the lifecycle lock.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "The Rust distribution builds and packages the Swift OS UI before installation. Restoring a runtime buildExecutable promise to satisfy the TS mock would reintroduce an obsolete build dependency. Missing UI is unavailable and leaves no build directory/control lock; packaging includes the UI binary.",
+            "replacement": [
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "missing_packaged_ui_never_creates_a_build_directory"
+              },
+              {
+                "file": "xtask/src/swift.rs",
+                "test": "architecture_and_unicode_arguments_are_not_shell_strings"
+              },
+              {
+                "file": "xtask/src/swift.rs",
+                "test": "staging_uses_cargo_version_without_mutating_source"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L273:C3",
+            "title": "resolves installed binaries from a cache directory separate from the data directory",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing Native no-op/missing-packaged-UI/cache resolution assertion is run on Linux; deterministic platform/operation injection is explicit and is not physical macOS process execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "resolves_installed_binaries_from_a_separate_cache_directory"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L282:C3",
+            "title": "finds the source package independently of the terminal working directory",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_spawn_is_detached_records_data_and_restarts_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L288:C3",
+            "title": "stops a recorded app once and succeeds on a repeated stop",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_spawn_is_detached_records_data_and_restarts_without_duplicates"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L299:C3",
+            "title": "stops matching orphans without signaling another installation",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_orphans_are_adopted_then_upgraded_and_foreign_images_are_preserved"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L309:C3",
+            "title": "stops an orphan from a retained old installed version after the runtime record is lost",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_retained_version_orphans_are_stopped_before_replacement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L324:C3",
+            "title": "replaces an orphan from a retained old version instead of spawning a duplicate",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_retained_version_orphans_are_stopped_before_replacement"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L343:C3",
+            "title": "does not signal a reused PID that no longer matches the recorded executable",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_pid_record_reuse_never_signals_an_unrelated_executable"
+              },
+              {
+                "file": "src/status-bar/status_bar_app_manager.rs",
+                "test": "pid_reused_after_term_is_never_force_killed"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L352:C3",
+            "title": "force stops an app that ignores graceful termination",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_term_ignoring_child_is_force_stopped_at_the_original_deadline"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L363:C3",
+            "title": "keeps the runtime record and reports failure when the process cannot be stopped",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_rejected_signals_keep_the_live_process_record_for_retry"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L374:C3",
+            "title": "lets stop wait briefly for an in-progress launch and then clean it up",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_shared_lock_serializes_launch_stop_and_releases_on_cancellation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L387:C3",
+            "title": "can replace an old version while holding the lifecycle lock",
+            "suites": [
+              "StatusBarAppManager"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual Native process ownership, executable image, runtime file and shared lifecycle lock; original 3000/1500/5000ms deadlines are unchanged. Linux admission injection is not macOS execution.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/status-bar/status_bar_native_process_contract_tests.rs",
+                "test": "native_orphans_are_adopted_then_upgraded_and_foreign_images_are_preserved"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/dashboard-shortcut-macos.test.mjs",
+      "coverage": "partial",
+      "rust": [],
+      "note": "Exact EF/main six macOS AST declarations. New macOS-only tests invoke real Foundation/AppKit/defaults/osascript/xattr against a disposable preferences domain and private home, preserve the original 30s/15s per-case budgets and never modify the active Dock/browser/user Trash. Linux type/lint proof and portable tests are not physical macOS execution; that remains pending actual macOS CI. L118 maps Native request/adapter/rendering behavior, not a claim that the old shipped Node launcher still executes.",
+      "source_hash": "02e786ea011204eda7d6d95b8a4dfa131a6aaeed1465ac4679e6310e8df5dac1",
+      "cases": [
+        {
+          "source": {
+            "id": "L65:C3",
+            "title": "round-trips native plist data, installs a real custom icon, updates port and uninstalls",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Physical macOS-only production adapter contract using actual system processes plus private preferences/home. Not executed on Linux; actual macOS CI is required before reporting physical acceptance.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_roundtrips_plists_icons_ports_and_private_trash"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L90:C3",
+            "title": "preserves unrelated files and symbolic-link parent directories",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Physical macOS-only production adapter contract using actual system processes plus private preferences/home. Not executed on Linux; actual macOS CI is required before reporting physical acceptance.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_preserves_foreign_files_and_symlink_parent_directories"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L105:C3",
+            "title": "allows read-only status but refuses mutations on a locked Dock",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Physical macOS-only production adapter contract using actual system processes plus private preferences/home. Not executed on Linux; actual macOS CI is required before reporting physical acceptance.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_locked_dock_allows_status_and_refuses_mutation"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L111:C3",
+            "title": "restores only the previous files-area layout when post-write verification fails",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Physical macOS-only production adapter contract using actual system processes plus private preferences/home. Not executed on Linux; actual macOS CI is required before reporting physical acceptance.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_failed_post_write_verification_restores_files_area_and_unlocks"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L118:C3",
+            "title": "runs the shipped scripts without build output or dependencies and updates the stored port only on install",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "partial",
+          "behavior": "Replace the old Node CLI wrapper with Native build_request/run_adapter/display behavior: BOM/odd config paths, install-only port refresh, status/uninstall with missing config/icon and no Node build/dependency trees. The test exercises the actual JXA system host; actual shipped Native CLI --help/invalid arguments are separately executed with isolated HOME and no-runtime PATH. Full shipped install/status/uninstall actions remain partial and unexecuted; neither the old Node wrapper nor full Native CLI actions are claimed.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_native_requests_work_without_node_build_output_or_dependencies"
+              },
+              {
+                "file": "tests/cli_native.rs",
+                "test": "help_version_and_argument_errors_do_not_touch_home_or_load_config"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "refuses an existing operation lock without touching the shortcut or Dock",
+            "suites": [
+              "native macOS shortcut adapter"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform !== 'darwin')"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Physical macOS-only production adapter contract using actual system processes plus private preferences/home. Not executed on Linux; actual macOS CI is required before reporting physical acceptance.",
+          "platforms": [
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/cli/dashboard_shortcut_macos_contract_tests.rs",
+                "test": "physical_macos_foreign_operation_lock_and_owner_are_preserved"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-stop-for-deploy.test.mjs",
+      "source_hash": "18b16b09c2c685418d3b5df585b5c6dd622ec38e9b3c9b767059e445492f35b2",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact EF/f84/current-main9 AST declarations and hash preserved. Unix installer lifecycle behavior retained through actual production Shell and Native helper; obsolete Node installation syntax is explicitly retired, not counted as Native execution. New bare-PID safety gate is a real red-to-green production fix. Current GNU Linux/glibc2.34 Rust1.99.1 execution only; macOS process metadata support is implemented but not physically executed here; this historical .sh contract does not claim Windows process execution. Only private owned process fixtures, no real installed service or binary modification.",
+      "cases": [
+        {
+          "source": {
+            "id": "L45:C3",
+            "title": "defines stop_pilot_for_deploy",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The shipped Unix installer contains and actually invokes stop_pilot_for_deploy. Exact stop block presence is verified, and real Shell execution with a private CLI protocol fixture exercises the actual resolver, data/cache environment, CLI stop warning and EXIT restoration.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_shell_overlay_failure_restores_with_the_original_data_and_cache_only_on_host"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L55:C3",
+            "title": "the block is byte-identical across the patched .sh installers",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Inventory all present installer.sh/installer-inner.sh/installer-opensource.sh files; every marked stop block is compared byte-for-byte after the original comment/blank-line normalization. At least one block must exist. Only installer-opensource.sh is currently shipped in this checkout; absent internal mirrors are not claimed to be executed.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L61:C3",
+            "title": "calls loongsuite-pilot stop, not a collector-only kill",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual installer first calls the service CLI stop and retains fallbacks for both collector/updater PID paths. The old bare-PID kill was genuinely red against a real foreign sleep child. New actual CLI fallback requires current-user OS identity/start timestamp, exact native package/current-or-previous pointer, immutable manifest, role and explicit selected dataDir. Existing NativeProcesses supplies safe kernel signals/pidfd identity. Real owned collector/updater protocol processes stop; foreign process/data/role, missing explicit data, unpublished or modified package, invalid/symlink/replaced PID files are preserved. SIGTERM grace stays10s with force after9s; PID files always remain owner-managed. Native fallback does not guess old Node process ownership or remove unknown PID files: such leftovers visibly stop overlay for manual resolution.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l61_native_fallback_stops_real_owned_collector_and_updater_without_deleting_pid_files"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_installer_pid_fallback_never_signals_a_live_foreign_process_or_removes_its_pid_file"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "native_fallback_force_phase_still_targets_the_original_real_identity_and_retains_the_file"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "native_fallback_never_force_kills_after_the_pid_file_is_replaced"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "passes the installer data dir into every CLI verb after stop",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The actual run_pilot_cli prefixes LOONGSUITE_PILOT_DATA_DIR without overriding cache. Real Shell stop/start commands observe the private selected Unicode/OBrien dataDir and separate existing cache, both unchanged; upgrade rollback remains through run_pilot_cli.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_shell_overlay_failure_restores_with_the_original_data_and_cache_only_on_host"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L84:C3",
+            "title": "sets PILOT_HELD_FOR_DEPLOY before stop, so a killed stop still restores",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The real installer holds PILOT_HELD_FOR_DEPLOY before stop, and both install/upgrade arm EXIT restoration before the actual call line. A real Shell CLI stop failure is followed by held-state assertion and controlled overlay failure; the EXIT trap performs host restoration.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_shell_overlay_failure_restores_with_the_original_data_and_cache_only_on_host"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L97:C3",
+            "title": "restores autostart after a failed overlay, except in container mode",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real Shell overlay failure exits with its original code23. Host mode calls start through the original selected data/cache and visibly reports restoration failure; container mode calls stop but never starts a daemon. The fixture is private and does not touch installed services.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_shell_overlay_failure_restores_with_the_original_data_and_cache_only_on_host"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L112:C3",
+            "title": "deploy_package publishes current only after postinstall",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Node dependency installation/postinstall is retired as a language mechanism. Native publish validates the installed manifest, invokes real candidate hook install, and writes current only after Hook success. Actual publish-package tests from batch26 verify immutable live versions, outgoing previous, installed-CWD-independent Hook deployment and no pointer publication on required Hook asset failure. The shipped deploy_package returns on publish failure before its success message.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/version_and_hook_entry.rs",
+                "test": "version_l44_l54_l63_l71_real_native_entry_uses_fresh_siblings_and_preserves_pointer_history"
+              },
+              {
+                "file": "tests/installer_history/version_and_hook_entry.rs",
+                "test": "postinstall_l16_actual_installed_native_hook_entry_ignores_caller_cwd_and_decoy_postinstall"
+              },
+              {
+                "file": "tests/installer_history/version_and_hook_entry.rs",
+                "test": "postinstall_l25_missing_required_native_hook_assets_fails_without_success_or_pointer_publication"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L132:C3",
+            "title": "cmd_install and cmd_upgrade both call it before deploy_package",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Both actual cmd_install/cmd_upgrade call stop before deploy, arm restore trap before the exact noncomment stop call, start via the dataDir-aware CLI, and preserve upgrade rollback plus start-after-failure control flow. Real Shell failure/EXIT restoration independently verifies the stop/restore wiring.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              },
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "actual_shell_overlay_failure_restores_with_the_original_data_and_cache_only_on_host"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L190:C3",
+            "title": "AGENTS.md still names the helper when this repo documents the rule",
+            "suites": [
+              "sh overlay install stops updater, not just the collector pid"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "The original conditional documentation assertion is preserved: when AGENTS.md contains the pilot-stop-for-deploy rule it must still name the historical test path. No assertion that an absent documentation section is present is invented.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/installer_history/stop_for_deploy.rs",
+                "test": "source_l45_l55_l73_l84_l97_l112_l132_l190_real_installer_wiring_holds_before_stop_and_preserves_restore"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/installer-short-path.test.mjs",
+      "source_hash": "9066607974f0f187babb2da30f1397a878512ecc85f487bdcf6cf4073c3694e5",
+      "coverage": "complete",
+      "rust": [],
+      "note": "11 exact AST accounted:9 native/source-policy implementation declarations,2 narrowly retired Node/ASCII-tar/internal7zip mechanisms. Original public execution registered10 tests, all passed; internal7zip never registered, not counted as execution. Actual NTFS8dot3 aliases are not generated: controlled provider alias with actual private Windows filesystem/binder contracts is explicit. Actual Windows runtime pending next head; Linux source policies16 actual pass.",
+      "cases": [
+        {
+          "source": {
+            "id": "L157:C3",
+            "title": "finds the installers to check",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original present-installer nonvacuity and public/internal selection guard retained in real tracked native source policy; public source present and short-path block nonempty. Portable source test actually ran on Linux, not three-platform runtime.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l157_l168_l175_l182_present_installers_keep_one_shared_short_path_block"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L168:C3",
+            "title": "every present internal installer carries the short-path block",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Original conditional internal-installer policy preserved: every internal installer present must carry block. Both internal files are absent in all three original/public baselines, so no internal runtime/capability pass is claimed. This is the same development source-policy condition, not newly implemented internal installers.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l157_l168_l175_l182_present_installers_keep_one_shared_short_path_block"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L175:C3",
+            "title": "the public installer carries the block when it is the only variant",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Public installer when sole variant must retain actual marked short-path helper block; development source-policy scope nonempty. It protects active Native temporary cleanup despite canceled Node staging.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l157_l168_l175_l182_present_installers_keep_one_shared_short_path_block"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L182:C3",
+            "title": "all variants that carry the helper share one byte-identical block",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "behavior": "Every present helper block remains byte-identical, with original withBlock nonempty guard; current public-only baseline is explicit. Development source policy is portable; no new platform execution inferred.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l157_l168_l175_l182_present_installers_keep_one_shared_short_path_block"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L193:C5",
+            "title": "`${f} normalises short paths through Get-Item .FullName`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Original Get-Item LiteralPath/FullName + missing-leaf parent expansion, no Convert/ResolvePath/noncore IO methods retained as source guard. Actual production helper then executes both existing alias and missing leaf/provider fallback paths under two shells Full/CLM, controlled synthetic short-alias provider maps into real private Unicode/square-bracket files. No real NTFS8dot3 alias-generation acceptance is claimed; actual private filesystem cleanup and path identities are asserted. Windows runtime pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l193_l208_actual_helpers_keep_clm_safe_fullname_and_catch_binding_failures"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L208:C5",
+            "title": "`${f} cleanup deletes cannot raise`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual Remove-PilotPathQuietly receives provider alias and deletes only real private owned directory through guarded actual module Remove-Item. A second cleanup triggers an actual cmdlet null-argument binding exception before filesystem action; helper must swallow it, preserve blocked private bytes and avoid masking original in-flight operation exception. Source guard retains LiteralPath, recursive Force/SilentlyContinue and try/catch. Windows runtime pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l193_l208_actual_helpers_keep_clm_safe_fullname_and_catch_binding_failures"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L217:C5",
+            "title": "`${f} deletes nothing on disk from inside a finally`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Native policy strips complete here-string bodies and whole comments before balanced finally scan, rejects every disk Remove/Move inside finally except Env: operations. Positive forbidden-finally and embedded-JS/comment negatives make matcher nonvacuous. Actual private finally invokes real quiet helper with real binder failure and original exception survives. Windows runtime pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l217_l232_l244_finally_and_temp_taint_keep_original_cleanup_boundaries"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L232:C5",
+            "title": "`${f} never hands a possibly-short path to Remove-Item or Move-Item raw`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Original temp taint propagates through Join/Split/GetChildItem and aliases to fixedpoint for same8passes, covering all five destructive/location cmdlets and quiet helper. Original legacy floor4 remains while optional Ensure-NodeModules implementation exists. Retired default Node staging is replaced by actual Native ZIP/cleanup contracts rather than a lower legacy floor; genuine multi-hop counterexample is found, embedded payload is ignored. Regex compilation caching changes no matching semantics/pass budget. Linux source guard actual passed; Windows actual cleanup pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l217_l232_l244_finally_and_temp_taint_keep_original_cleanup_boundaries"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_nonascii_l233_l259_actual_native_zip_bootstrap_keeps_unicode_temp_and_resource_bytes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L244:C5",
+            "title": "`${f} keeps no bare best-effort recursive delete`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Every present installer with helper block has no bare best-effort recursive delete after here-string/comment exclusion. Original source rule unchanged and real quiet-helper parameter-binding failure is tested rather than depending on ErrorAction suppression. Linux source policy passed; Windows helper execution pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_l217_l232_l244_finally_and_temp_taint_keep_original_cleanup_boundaries"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L259:C7",
+            "title": "`${f} Get-PilotAsciiTempRoot expands an ASCII 8.3 TEMP only when the long name stays ASCII`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Retired old transport/staging mechanism, not a new Native pass. Public Native local ZIP and private traversal tests exist; Windows actual execution remains pending. Original10 expanded cases passed unchanged while this internal-only seventh-Zip branch was never registered.",
+          "target": {
+            "kind": "retired",
+            "reason": "原NodeModules/ANSI tar要求ASCII8.3 TEMP机制已按Native迁移范围取消；default bootstrap用真实ZIP/Expand-Archive保留Unicode TEMP，无中间tar/Node安装。旧legacy helper源码规则可保留，但不把它当default runtime。",
+            "replacement": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_retired_ascii_and_seven_zip_mechanisms_have_no_public_native_bootstrap_path"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_nonascii_l233_l259_actual_native_zip_bootstrap_keeps_unicode_temp_and_resource_bytes"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "actual_native_zip_bootstrap_never_extracts_traversal_outside_its_private_staging_root"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L274:C7",
+            "title": "`${f} 7-Zip fallback cleans the intermediate .tar quietly`",
+            "suites": [
+              "installers survive an 8.3 short %TEMP%"
+            ],
+            "parameters": [
+              "withBlock"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Retired old transport/staging mechanism, not a new Native pass. Public Native local ZIP and private traversal tests exist; Windows actual execution remains pending. Original10 expanded cases passed unchanged while this internal-only seventh-Zip branch was never registered.",
+          "target": {
+            "kind": "retired",
+            "reason": "原公开三基线仅installer-opensource；此case仅内部variant分支，原测试实际从未注册。内部Node/tar/七Zip fallback不属于公开发布能力，且Node runtime机制已明确取消；不恢复七Zip/Node以凑覆盖数。Native ZIP解压及无中间tar默认调用图是真实替代契约，退休不计Native执行通过。",
+            "replacement": [
+              {
+                "file": "xtask/tests/powershell_source_policy_history.rs",
+                "test": "source_short_retired_ascii_and_seven_zip_mechanisms_have_no_public_native_bootstrap_path"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_nonascii_l233_l259_actual_native_zip_bootstrap_keeps_unicode_temp_and_resource_bytes"
+              },
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "actual_native_zip_bootstrap_never_extracts_traversal_outside_its_private_staging_root"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/deploy/windows-worker-cli-wrapper.test.mjs",
+      "source_hash": "ba91dd1d22e0fcfbfbccfa18843322f2a9721c1f1a1071e2bda4deeee1ef2de5",
+      "coverage": "complete",
+      "rust": [],
+      "note": "2 exact AST accounted:1 old Node pin mechanism retired,1 actual full-file Native worker/layout/argv contract implemented. Original unchanged Linux reference1pass/1 original win32 skip; do not count that skip as a Windows pass. New Rust body typechecked only on Linux; next physical Windows CI must establish execution.",
+      "cases": [
+        {
+          "source": {
+            "id": "L17:C3",
+            "title": "pins the installer Node runtime for both worker and deployed Hooks",
+            "suites": [
+              "Windows worker CLI wrapper"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Old installer Node pin transport is narrowly retired, not counted as a Native execution pass. Real Native current-pointer/installed layout worker and actual hook-binding contracts replace that shared-runtime mechanism, including adversarial valid private legacy pin + invalid Native pointer fail-closed. Windows actual new worker runtime remains pending.",
+          "target": {
+            "kind": "retired",
+            "reason": "默认Node runtime及node-bin双写机制已由用户批准的Native迁移取消；worker与Hook应共同绑定本安装不可变Native版本/current pointer，不能为通过旧pin-token断言恢复Node前置依赖。保留legacy pin不改/不执行，完整Native argv/layout与已存在Hook binding实测为真实替代；retired不算Native通过。",
+            "replacement": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_worker_l28_whole_native_dispatch_uses_layout_unicode_roots_and_preserves_separator_argv"
+              },
+              {
+                "file": "tests/hooks_native.rs",
+                "test": "powershell_native_binding_ignores_legacy_node_pins_and_keeps_shared_home_timing"
+              },
+              {
+                "file": "xtask/tests/services.rs",
+                "test": "windows_service_entry_has_no_external_runtime_or_script_daemon"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L28:C3",
+            "title": "uses separate Unicode data/cache dirs and forwards worker argv unchanged",
+            "suites": [
+              "Windows worker CLI wrapper"
+            ],
+            "parameters": [
+              "it.runIf(process.platform === 'win32')"
+            ]
+          },
+          "coverage": "complete",
+          "platforms": [
+            "windows"
+          ],
+          "behavior": "Actual complete shipped PS file is invoked through the real dispatcher with worker connect --runtime fake-runtime --json -- --runtime-command C:\\Program Files\\Fake Runtime\\runtime.cmd. Original installed-layout branch is retained: data/cache/config env are empty, private BOM JSON layout supplies distinct Unicode/apostrophe/square-bracket data/cache roots and default data/config.json. Actual private native fixture records exact8 argv including separator and spaced Windows command path; no dispatcher/worker function replacement. Valid old pins at both roots are byte-preserved; invalid Native pointer then must fail without a second native/legacy-decoy invocation. Scheduler/process builtins trapped, no real runtime/service/network action. Both PS5.1/PS7 Full/CLM implementation; Windows runtime pending.",
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "xtask/tests/windows_services.rs",
+                "test": "source_worker_l28_whole_native_dispatch_uses_layout_unicode_roots_and_preserves_separator_argv"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

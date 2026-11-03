@@ -2045,3 +2045,185 @@ fn actual_native_zip_bootstrap_never_extracts_traversal_outside_its_private_stag
         }
     }
 }
+
+#[test]
+fn source_short_l193_l208_l217_real_helpers_expand_provider_aliases_and_preserve_finally_error() {
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let actual = fixture.home.join("zhang.wang/Temp/实际 [清理]🚀");
+            let blocked = fixture.home.join("zhang.wang/Temp/保护 [保留]");
+            fs::create_dir_all(&actual).unwrap();
+            fs::create_dir_all(&blocked).unwrap();
+            fs::write(actual.join("existing.txt"), b"owned private cleanup").unwrap();
+            fs::write(blocked.join("keep.txt"), b"preserve on binding failure").unwrap();
+            let mut body = public_installer_function("Get-PilotLongPath");
+            body.push_str(&public_installer_function("Remove-PilotPathQuietly"));
+            body.push_str(r#"
+$script:privateBase = (Microsoft.PowerShell.Management\Get-Item -LiteralPath $env:USERPROFILE -Force).FullName
+$script:longRoot = (Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $env:USERPROFILE 'zhang.wang\Temp\实际 [清理]🚀') -Force).FullName
+$script:blockedRoot = (Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $env:USERPROFILE 'zhang.wang\Temp\保护 [保留]') -Force).FullName
+# Controlled provider alias; no filesystem access to this synthetic C: root.
+$script:aliasRoot = 'C:\pilot-private-provider\ZHANG~1.WAN\Temp'
+$script:deleteCalls = 0
+$script:blockDelete = $false
+$script:bindingReached = $false
+$script:bindingReturned = $false
+function Get-Item {
+    [CmdletBinding()] param($LiteralPath,[switch]$Force)
+    if ($LiteralPath -eq $script:aliasRoot) { return @{FullName=$script:longRoot} }
+    if ($LiteralPath -eq (Join-Path $script:aliasRoot 'existing.txt')) { return @{FullName=(Join-Path $script:longRoot 'existing.txt')} }
+    if ([string]$LiteralPath -eq (Join-Path $script:aliasRoot 'future.txt')) { throw 'private missing leaf' }
+    if (([string]$LiteralPath).StartsWith($script:privateBase)) {
+        return Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -Force:$Force -ErrorAction Stop
+    }
+    throw 'private provider has no mapping for that path'
+}
+function Remove-Item {
+    [CmdletBinding()] param($LiteralPath,[switch]$Recurse,[switch]$Force)
+    if ($LiteralPath -ne $script:longRoot -and $LiteralPath -ne $script:blockedRoot) {
+        throw 'cleanup never reaches a non-private path or raw short alias'
+    }
+    $script:deleteCalls += 1
+    if ($script:blockDelete) {
+        $script:bindingReached = $true
+        # Actual cmdlet parameter-binding failure, before any filesystem action.
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $null -Recurse -Force -ErrorAction SilentlyContinue
+        $script:bindingReturned = $true
+        return
+    }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -ErrorAction SilentlyContinue
+}
+$existing = Get-PilotLongPath (Join-Path $script:aliasRoot 'existing.txt')
+$future = Get-PilotLongPath (Join-Path $script:aliasRoot 'future.txt')
+$unknown = Get-PilotLongPath 'C:\pilot-private-provider\missing\leaf.txt'
+Remove-PilotPathQuietly $script:aliasRoot
+$script:blockDelete = $true
+$original = ''
+try {
+    try { throw 'original operation failure must survive finally' }
+    finally { Remove-PilotPathQuietly $script:blockedRoot }
+} catch { $original = [string]$_.Exception.Message }
+@{existing=$existing;future=$future;unknown=$unknown;original=$original;deletes=$script:deleteCalls;binder=$script:bindingReached;binderReturned=$script:bindingReturned} |
+    ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE 'short-result.json') -Encoding UTF8
+"#);
+            success(&fixture.invoke(&shell, &body, constrained));
+            let result = ps_private_result(&fixture, "short-result.json");
+            let existing = PathBuf::from(result["existing"].as_str().unwrap());
+            let future = PathBuf::from(result["future"].as_str().unwrap());
+            assert_eq!(existing.file_name().unwrap(), "existing.txt");
+            assert_eq!(future.file_name().unwrap(), "future.txt");
+            // The directories have just been removed, so compare their resolved
+            // output with each other rather than canonicalizing deleted entries.
+            assert_eq!(existing.parent(), future.parent());
+            let resolved_root = existing.parent().unwrap();
+            assert_eq!(resolved_root.file_name(), actual.file_name());
+            assert_eq!(
+                fs::canonicalize(resolved_root.parent().unwrap()).unwrap(),
+                fs::canonicalize(actual.parent().unwrap()).unwrap()
+            );
+            assert_eq!(
+                result["unknown"],
+                r"C:\pilot-private-provider\missing\leaf.txt"
+            );
+            assert_eq!(result["deletes"], 2);
+            assert_eq!(result["binder"], true);
+            assert_eq!(result["binderReturned"], false);
+            assert_eq!(
+                result["original"],
+                "original operation failure must survive finally"
+            );
+            assert!(!actual.exists());
+            assert_eq!(
+                fs::read(blocked.join("keep.txt")).unwrap(),
+                b"preserve on binding failure"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_worker_l28_whole_native_dispatch_uses_layout_unicode_roots_and_preserves_separator_argv()
+{
+    let expected = json!([
+        "worker",
+        "connect",
+        "--runtime",
+        "fake-runtime",
+        "--json",
+        "--",
+        "--runtime-command",
+        r"C:\Program Files\Fake Runtime\runtime.cmd"
+    ]);
+    for shell in shells() {
+        for constrained in [false, true] {
+            let fixture = Fixture::new();
+            let layout = json!({"dataDir":fixture.data,"cacheDir":fixture.cache});
+            fs::write(
+                fixture.home.join("loongsuite-pilot-layout.json"),
+                format!("\u{feff}{layout}"),
+            )
+            .unwrap();
+            let decoy = fixture.home.join("旧 Node 运行时.exe");
+            fs::copy(env!("CARGO_BIN_EXE_pilot-fixture"), &decoy).unwrap();
+            let pin = format!("\u{feff}{}\r\n", decoy.display());
+            fs::write(fixture.data.join("node-bin"), &pin).unwrap();
+            fs::write(fixture.cache.join("node-bin"), &pin).unwrap();
+            let body = r#"
+# The original contract uses installed layout when data/cache env is empty.
+$env:LOONGSUITE_PILOT_DATA_DIR = ''
+$env:LOONGSUITE_PILOT_CACHE_DIR = ''
+$env:AGENT_DATA_COLLECTION_CONFIG = ''
+function Get-ScheduledTask { throw 'worker CLI must not query tasks' }
+function Start-ScheduledTask { throw 'worker CLI must not start tasks' }
+function Stop-ScheduledTask { throw 'worker CLI must not stop tasks' }
+function Register-ScheduledTask { throw 'worker CLI must not register tasks' }
+function Unregister-ScheduledTask { throw 'worker CLI must not unregister tasks' }
+function Get-CimInstance { throw 'worker CLI must not enumerate processes' }
+function Stop-Process { throw 'worker CLI must not stop processes' }
+function Start-Process { throw 'wrapper must not launch a host runtime itself' }
+function schtasks.exe { throw 'worker CLI must not access scheduler' }
+$forward = @('worker','connect','--runtime','fake-runtime','--json','--','--runtime-command','C:\Program Files\Fake Runtime\runtime.cmd')
+& $env:PILOT_SCRIPT @forward
+"#;
+            success(&fixture.invoke(&shell, body, constrained));
+            let records = fixture.records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["args"], expected);
+            assert_eq!(records[0]["data"], fixture.data.to_str().unwrap());
+            assert_eq!(records[0]["cache"], fixture.cache.to_str().unwrap());
+            assert_eq!(
+                records[0]["config"],
+                fixture.data.join("config.json").to_str().unwrap()
+            );
+            assert_eq!(
+                fs::read(fixture.data.join("node-bin")).unwrap(),
+                pin.as_bytes()
+            );
+            assert_eq!(
+                fs::read(fixture.cache.join("node-bin")).unwrap(),
+                pin.as_bytes()
+            );
+
+            // A valid old Node pin cannot authorize a fallback around an invalid
+            // Native version pointer. The decoy is private and only records args.
+            fs::write(fixture.cache.join("current"), "../foreign").unwrap();
+            let failed = fixture.invoke(&shell, body, constrained);
+            assert!(!failed.status.success());
+            assert_eq!(fixture.records().len(), 1);
+            assert_eq!(
+                fs::read_to_string(fixture.cache.join("current")).unwrap(),
+                "../foreign"
+            );
+            assert_eq!(
+                fs::read(fixture.data.join("node-bin")).unwrap(),
+                pin.as_bytes()
+            );
+            assert_eq!(
+                fs::read(fixture.cache.join("node-bin")).unwrap(),
+                pin.as_bytes()
+            );
+        }
+    }
+}

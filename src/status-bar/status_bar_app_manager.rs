@@ -798,13 +798,42 @@ mod tests {
 
     #[test]
     fn command_match_and_swiftc_args() {
-        assert!(command_matches_executable(Some("/bin/app"), "/bin/app"));
-        assert!(command_matches_executable(
-            Some("/bin/app --flag"),
-            "/bin/app"
+        for (command, executable, expected) in [
+            (
+                "/managed/LoongSuitePilotMenuBarApp",
+                "/managed/LoongSuitePilotMenuBarApp",
+                true,
+            ),
+            (
+                "/managed/LoongSuitePilotMenuBarApp --flag",
+                "/managed/LoongSuitePilotMenuBarApp",
+                true,
+            ),
+            (
+                "LoongSuitePilotMenuBarApp",
+                "/managed/LoongSuitePilotMenuBarApp",
+                false,
+            ),
+            (
+                "/old/LoongSuitePilotMenuBarApp",
+                "/managed/LoongSuitePilotMenuBarApp",
+                false,
+            ),
+            (
+                "/old/LoongSuitePilotMenuBarApp",
+                "/old/LoongSuitePilotMenuBarApp",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                command_matches_executable(Some(command), executable),
+                expected
+            );
+        }
+        assert!(!command_matches_executable(
+            None,
+            "/managed/LoongSuitePilotMenuBarApp"
         ));
-        assert!(!command_matches_executable(Some("/bin/other"), "/bin/app"));
-        assert!(!command_matches_executable(None, "/bin/app"));
         let args = StatusBarAppManager::swiftc_args("/sdk", "/out", false, &["A.swift".into()]);
         assert!(args
             .windows(2)
@@ -1122,3 +1151,7 @@ mod tests {
         assert!(resolved.contains(BINARY_NAME));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "status_bar_native_process_contract_tests.rs"]
+mod native_process_contract_tests;

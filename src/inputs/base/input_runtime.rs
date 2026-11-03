@@ -846,6 +846,11 @@ impl<T: InputBody> HostedInput<T> {
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .collect_finished = true;
+            // Another input can freeze shared progress while this collect
+            // awaits IO. Reject before output or source acknowledgement.
+            if self.runtime.state_store.save_failed() {
+                anyhow::bail!("input checkpoint is frozen after output failure");
+            }
             let filtered = self.runtime.with_workspace_policy(|policy| {
                 policy.filter_entries(&entries, self.runtime.agent_type)
             });
@@ -856,7 +861,14 @@ impl<T: InputBody> HostedInput<T> {
                     .unwrap_or_else(|err| err.into_inner())
                     .clone();
                 for handler in handlers {
-                    handler(&filtered);
+                    // This boundary covers externally supplied queue callbacks
+                    // only; internal collection/normalization panics propagate.
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&filtered)))
+                        .is_err()
+                    {
+                        // Never format a callback payload or panic value here.
+                        anyhow::bail!("entry queue callback rejected the batch");
+                    }
                 }
                 self.runtime.logger.debug(
                     "cycle produced entries",

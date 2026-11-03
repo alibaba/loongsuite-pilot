@@ -553,3 +553,263 @@ fn source_nonascii_l165_all_present_task_tag_assignments_use_the_shared_identity
         }
     }
 }
+
+fn ps_lines_without_here_strings(text: &str) -> Vec<String> {
+    let opener = rx(r#"@(["'])\s*$"#);
+    let mut closer: Option<String> = None;
+    text.split('\n')
+        .map(|line| {
+            if let Some(close) = &closer {
+                if line.starts_with(close) {
+                    closer = None;
+                }
+                return String::new();
+            }
+            if let Some(c) = opener.captures(line) {
+                closer = Some(if &c[1] == "\"" { "\"@" } else { "'@" }.to_owned());
+                return String::new();
+            }
+            if line.trim_start().starts_with('#') {
+                String::new()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect()
+}
+fn finally_bodies(text: &str) -> Vec<String> {
+    let src = ps_lines_without_here_strings(text).join("\n");
+    let bytes = src.as_bytes();
+    rx(r"\bfinally\s*\{")
+        .find_iter(&src)
+        .map(|m| {
+            let mut depth = 1;
+            let mut end = m.end();
+            while end < bytes.len() && depth > 0 {
+                if bytes[end] == b'{' {
+                    depth += 1;
+                } else if bytes[end] == b'}' {
+                    depth -= 1;
+                }
+                end += 1;
+            }
+            assert_eq!(depth, 0, "unclosed finally block");
+            src[m.end()..end - 1].to_owned()
+        })
+        .collect()
+}
+fn temp_hazard_sites(text: &str) -> Vec<String> {
+    let rows = ps_lines_without_here_strings(text);
+    let assignment = rx(r"\$(?:script:)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$");
+    let bindings = rows
+        .iter()
+        .filter_map(|l| {
+            assignment
+                .captures(l)
+                .map(|c| (c[1].to_owned(), c[2].to_owned()))
+        })
+        .collect::<Vec<_>>();
+    let seed = rx(r"Get-PilotTempRoot|Get-PilotAsciiTempRoot|\$env:TEMP\b|\$env:TMP\b|GetTempPath");
+    let mut vars = bindings
+        .iter()
+        .filter(|(_, rhs)| seed.is_match(rhs))
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    let derived = rx(r"\b(?:Join-Path|Split-Path|Get-ChildItem)\b");
+    let alias = rx(r"^\$(?:script:)?[A-Za-z_][A-Za-z0-9_]*\s*$");
+    let names = bindings
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    let patterns = names
+        .into_iter()
+        .map(|name| {
+            let pattern = rx(&format!(r"\$(?:script:)?{}\b", regex::escape(&name)));
+            (name, pattern)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for _ in 0..8 {
+        let before = vars.len();
+        for (name, rhs) in &bindings {
+            if !derived.is_match(rhs) && !alias.is_match(rhs) {
+                continue;
+            }
+            if vars.iter().any(|v| patterns[v].is_match(rhs)) {
+                vars.insert(name.clone());
+            }
+        }
+        if vars.len() == before {
+            break;
+        }
+    }
+    let vars = vars.iter().map(|v| &patterns[v]).collect::<Vec<_>>();
+    let hazardous = rx(
+        r"\b(?:Remove-Item|Move-Item|Rename-Item|Set-Location|Push-Location|Remove-PilotPathQuietly)\b",
+    );
+    rows.into_iter()
+        .filter(|line| hazardous.is_match(line) && vars.iter().any(|v| v.is_match(line)))
+        .collect()
+}
+#[test]
+fn source_short_l157_l168_l175_l182_present_installers_keep_one_shared_short_path_block() {
+    let present = [
+        "deploy/installer.ps1",
+        "deploy/installer-inner.ps1",
+        "deploy/installer-opensource.ps1",
+    ]
+    .into_iter()
+    .filter(|p| root().join(p).is_file())
+    .collect::<Vec<_>>();
+    assert!(!present.is_empty());
+    assert!(
+        present.contains(&"deploy/installer.ps1")
+            || present.contains(&"deploy/installer-opensource.ps1")
+    );
+    let mut blocks = Vec::new();
+    for path in present {
+        let text = source(path);
+        if path != "deploy/installer-opensource.ps1"
+            || !root().join("deploy/installer.ps1").is_file()
+        {
+            assert!(marked_block(&text, "pilot-short-path").is_some(), "{path}");
+        }
+        if let Some(block) = marked_block(&text, "pilot-short-path") {
+            blocks.push(block.to_owned());
+        }
+    }
+    assert!(!blocks.is_empty());
+    for block in &blocks {
+        assert_eq!(block, &blocks[0]);
+    }
+}
+#[test]
+fn source_short_l193_l208_actual_helpers_keep_clm_safe_fullname_and_catch_binding_failures() {
+    for path in [
+        "deploy/installer.ps1",
+        "deploy/installer-inner.ps1",
+        "deploy/installer-opensource.ps1",
+    ] {
+        if !root().join(path).is_file() {
+            continue;
+        }
+        let text = source(path);
+        if marked_block(&text, "pilot-short-path").is_none() {
+            continue;
+        }
+        let fns = functions(&text);
+        let long = fns
+            .iter()
+            .find(|(name, _)| *name == "Get-PilotLongPath")
+            .unwrap()
+            .1;
+        for expected in [
+            "Get-Item -LiteralPath $Path -Force -ErrorAction Stop",
+            "$item.FullName",
+            "Split-Path -Parent $Path",
+            "$parentItem.FullName",
+        ] {
+            assert!(long.contains(expected), "{path}: {expected}");
+        }
+        assert!(
+            !rx(r"Convert-Path|Resolve-Path|\[(?:System\.)?IO\.|New-Object|Add-Type")
+                .is_match(long),
+            "{path}"
+        );
+        let quiet = fns
+            .iter()
+            .find(|(name, _)| *name == "Remove-PilotPathQuietly")
+            .unwrap()
+            .1;
+        assert!(quiet.contains("Remove-Item -LiteralPath (Get-PilotLongPath $Path) -Recurse -Force -ErrorAction SilentlyContinue"),"{path}");
+        assert!(rx(r"(?s)try \{.*\} catch \{").is_match(quiet), "{path}");
+    }
+}
+#[test]
+fn source_short_l217_l232_l244_finally_and_temp_taint_keep_original_cleanup_boundaries() {
+    let sample="$tmp = Join-Path $env:TEMP 'fixture'\n$stage = Join-Path $tmp 'stage'\n$alias = $stage\nRemove-Item $alias -Recurse -Force -ErrorAction SilentlyContinue";
+    assert_eq!(temp_hazard_sites(sample).len(), 1);
+    assert_eq!(
+        finally_bodies("try { } finally { Remove-Item $path }").len(),
+        1
+    );
+    let embedded="$payload = @'\ntry {} finally { Remove-Item $tmp }\n'@\n# finally { Move-Item $tmp $dest }\n";
+    assert!(finally_bodies(embedded).is_empty());
+    assert!(temp_hazard_sites(embedded).is_empty());
+    let cmdlet = rx(r"\b(?:Remove-Item|Move-Item)\b");
+    for path in [
+        "deploy/installer.ps1",
+        "deploy/installer-inner.ps1",
+        "deploy/installer-opensource.ps1",
+    ] {
+        if !root().join(path).is_file() {
+            continue;
+        }
+        let text = source(path);
+        if marked_block(&text, "pilot-short-path").is_none() {
+            continue;
+        }
+        for body in finally_bodies(&text) {
+            for line in body.lines() {
+                assert!(
+                    !cmdlet.is_match(line) || rx(r"\bEnv:").is_match(line),
+                    "{path}: direct disk cleanup inside finally: {line}"
+                );
+            }
+        }
+        let sites = temp_hazard_sites(&text);
+        // The original >=4 floor named two Node staging dirs, node_modules move
+        // and npm log. Preserve it while that optional legacy implementation
+        // exists; retired default Node paths instead have real native ZIP and
+        // cleanup contracts, not a weakened legacy floor.
+        if functions(&text)
+            .iter()
+            .any(|(name, _)| *name == "Ensure-NodeModules")
+        {
+            assert!(sites.len() >= 4, "{path}: original legacy floor4");
+        }
+        for line in sites {
+            assert!(
+                line.contains("Get-PilotLongPath") || line.contains("Remove-PilotPathQuietly"),
+                "{path}: raw possibly-short cleanup: {line}"
+            );
+        }
+        for line in ps_lines_without_here_strings(&text) {
+            assert!(
+                !(rx(r"Remove-Item\s+[^-\n]").is_match(&line)
+                    && line.contains("-Recurse")
+                    && line.contains("SilentlyContinue")),
+                "{path}: bare recursive delete: {line}"
+            );
+        }
+    }
+}
+#[test]
+fn source_short_retired_ascii_and_seven_zip_mechanisms_have_no_public_native_bootstrap_path() {
+    let text = source("deploy/installer-opensource.ps1");
+    let fns = functions(&text);
+    let body = code(
+        fns.iter()
+            .find(|(name, _)| *name == "Download-AndExtract")
+            .unwrap()
+            .1,
+    );
+    assert!(
+        body.contains("Expand-Archive"),
+        "native ZIP extraction entry disappeared"
+    );
+    for retired in [
+        "Ensure-NodeModules",
+        "Ensure-ManagedNode",
+        "Expand-PilotTarGz",
+        "Get-PilotAsciiTempRoot",
+        "$tarFile",
+        "$tarPath",
+        "7z.exe",
+        "7za.exe",
+    ] {
+        assert!(
+            !body.contains(retired),
+            "native bootstrap restored retired runtime mechanism: {retired}"
+        );
+    }
+}
