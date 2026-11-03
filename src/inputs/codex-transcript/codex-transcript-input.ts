@@ -720,6 +720,7 @@ export class CodexTranscriptInput extends BaseInput {
     const deferredResult = await this.recoverDeferredTerminals(filePath, checkpoint, stat);
     checkpointChanged ||= deferredResult.changed;
     emittedCount += deferredResult.emittedCount;
+    processedTerminalCount += deferredResult.processedTerminalCount;
     const priorPending = checkpoint.pendingTerminal;
     const pendingResult = await this.recoverPendingTerminal(filePath, checkpoint, stat);
     checkpointChanged ||= checkpoint.pendingTerminal !== priorPending;
@@ -1048,6 +1049,8 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   private terminalRetryReady(pending: CodexPendingTerminalTurn, stat: fsSync.Stats): boolean {
+    // Allow an initial attempt for legacy checkpoints. An unparseable result
+    // records failure before saving, so later cycles/restarts remain gated.
     return !pending.failure || (pending.failure.sourceVersion !== sourceVersion(stat)
       && Date.now() >= pending.failure.retryAtMs);
   }
@@ -1072,9 +1075,9 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async recoverDeferredTerminals(
     filePath: string, checkpoint: CodexTranscriptCheckpoint, stat: fsSync.Stats,
-  ): Promise<{ changed: boolean; emittedCount: number }> {
+  ): Promise<{ changed: boolean; emittedCount: number; processedTerminalCount: number }> {
     const deferred = checkpoint.deferredTerminals;
-    if (!deferred?.length) return { changed: false, emittedCount: 0 };
+    if (!deferred?.length) return { changed: false, emittedCount: 0, processedTerminalCount: 0 };
     for (let i = 0; i < deferred.length; i++) {
       const item = deferred[i]!;
       if (!this.terminalRetryReady(item.pendingTerminal, stat)) continue;
@@ -1097,10 +1100,11 @@ export class CodexTranscriptInput extends BaseInput {
       }
       // At most one deferred range is materialized per file/cycle. Do not let
       // several failed histories accumulate simultaneous parsed body arrays.
-      return { changed: true, emittedCount: result.kind === 'unparseable'
+      // Failed attempts also spend one slot in the shared terminal budget.
+      return { changed: true, processedTerminalCount: 1, emittedCount: result.kind === 'unparseable'
         ? 0 : this.emitEntryBatches(result.entries) };
     }
-    return { changed: false, emittedCount: 0 };
+    return { changed: false, emittedCount: 0, processedTerminalCount: 0 };
   }
 
   private async recoverTurnSegment(
@@ -2563,8 +2567,10 @@ export class CodexTranscriptInput extends BaseInput {
       // Older pendingSubagent checkpoints blocked the child file and retained
       // the active turn at the top level. They have no reliable spawn identity,
       // so recover them through the normal independent terminal path.
-      pendingTerminal ??= newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0);
+      pendingTerminal ??= parsePendingTerminal(newPendingTerminal(subagent.turnId, subagent.terminalEndOffset, 0));
     }
+    if (pendingTerminal && (!activeTurn || pendingTerminal.turnId !== activeTurn.turnId
+      || pendingTerminal.terminalEndOffset < activeTurn.startOffset)) pendingTerminal = null;
     const bootstrapRecord = asRecord(value.forkBootstrap);
     const bootstrapTailCandidate = parseActiveTranscriptTurn(bootstrapRecord?.tailCandidate);
     const bootstrapState = bootstrapRecord?.state === 'baseline-tail'
@@ -3438,6 +3444,8 @@ function parseActiveTranscriptTurn(value: unknown): CodexActiveTranscriptTurn | 
     !active
     || typeof active.turnId !== 'string'
     || typeof active.startOffset !== 'number'
+    || !Number.isSafeInteger(active.startOffset)
+    || active.startOffset < 0
     || typeof active.startedAtMs !== 'number'
   ) return null;
   const model = stringValue(active.model);

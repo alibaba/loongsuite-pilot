@@ -378,9 +378,90 @@ it('rejects an overflowing JSON offset after loading a persisted checkpoint', as
   expect(responses(f, 'later')).toHaveLength(1);
 });
 
+it.each(['processed', 'unparseable'])('counts a %s deferred recovery towards the file terminal budget', async mode => {
+  const f = await fixture();
+  const initial = mode === 'processed' ? completed('deferred')
+    : meta() + row('event_msg', { type: 'task_started', turn_id: 'deferred' }) + diagnostic();
+  const boundary = Buffer.byteLength(initial);
+  await fs.writeFile(f.file, initial + Array.from({ length: 100 }, (_, i) => completed(`turn-${i}`, false)).join(''));
+  const stat = await fs.stat(f.file);
+  f.state.update(key(f), { extra: { codexTranscript: {
+    inode: stat.ino, scanOffset: boundary, ownerSessionMetaOffset: 0,
+    activeTurn: null, pendingTerminal: null, pendingFusion: null, pendingSubagent: null,
+    deferredTerminals: [{ activeTurn: { turnId: 'deferred', startOffset: 0, startedAtMs: Date.parse('2026-01-01T00:00:01Z') },
+      pendingTerminal: { turnId: 'deferred', terminalEndOffset: boundary } }],
+  } } });
+  await processFile(f);
+  expect(responses(f, 'turn-98')).toHaveLength(1);
+  expect(responses(f, 'turn-99')).toHaveLength(0);
+  expect(f.entries.filter(e => e['event.name'] === 'llm.response')).toHaveLength(mode === 'processed' ? 100 : 99);
+  expect(checkpoint(f).scanOffset).toBeLessThan(stat.size);
+  await processFile(f);
+  expect(responses(f, 'turn-99')).toHaveLength(1);
+  expect(responses(f, 'turn-98')).toHaveLength(1);
+});
+
+it('initially probes a deferred range without failure metadata once and persists retry gating across restart', async () => {
+  const f = await pendingFixture(1024);
+  let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock);
+  const cp = checkpoint(f);
+  cp.deferredTerminals = [{ activeTurn: cp.activeTurn!, pendingTerminal: cp.pendingTerminal! }];
+  cp.activeTurn = null; cp.pendingTerminal = null; cp.scanOffset = (await fs.stat(f.file)).size;
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  const recover = vi.spyOn(f.probe, 'recoverTurnSegment');
+  await processFile(f);
+  expect(recover).toHaveBeenCalledTimes(1);
+  expect(checkpoint(f).deferredTerminals![0]!.pendingTerminal.failure).toBeDefined();
+  clock += 3600_000;
+  for (let i = 0; i < 3; i++) expect((await processFile(f)).rawReadBytes).toBe(0);
+  expect(recover).toHaveBeenCalledTimes(1);
+  await f.state.save(); await f.state.load();
+  const restarted = await fixture(f.root, f.state);
+  const restartedRecover = vi.spyOn(restarted.probe, 'recoverTurnSegment');
+  await processFile(restarted);
+  expect(restartedRecover).not.toHaveBeenCalled();
+  expect(checkpoint(restarted).deferredTerminals![0]!.pendingTerminal.retryCount).toBe(1);
+});
+
+it.each(['missing-active', 'mismatched-turn', 'reversed-range', 'legacy-reversed-range'])(
+  'rejects inconsistent pending recovery (%s) and still collects later work', async mode => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f);
+    if (mode === 'missing-active') cp.activeTurn = null;
+    else if (mode === 'mismatched-turn') cp.pendingTerminal!.turnId = 'different-turn';
+    else if (mode === 'legacy-reversed-range') {
+      cp.pendingTerminal = null;
+      cp.pendingSubagent = { turnId: 'old', terminalEndOffset: 0 } as any;
+    } else cp.pendingTerminal!.terminalEndOffset = 0;
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.pendingTerminal).toBeNull();
+    if (mode !== 'missing-active') expect(parsed.activeTurn?.turnId).toBe('old');
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
+it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
+  'rejects invalid active/deferred start offset %s without blocking later work', async offset => {
+    const f = await pendingFixture(1024);
+    const cp = checkpoint(f);
+    cp.activeTurn!.startOffset = offset;
+    cp.deferredTerminals = [{ activeTurn: { ...cp.activeTurn! }, pendingTerminal: { ...cp.pendingTerminal! } }];
+    f.state.update(key(f), { extra: { codexTranscript: cp } });
+    const parsed = f.probe.readCheckpoint(key(f));
+    expect(parsed.activeTurn).toBeNull();
+    expect(parsed.pendingTerminal).toBeNull();
+    expect(parsed.deferredTerminals ?? []).toEqual([]);
+    await processFile(f);
+    expect(responses(f, 'later')).toHaveLength(1);
+  },
+);
+
 it('accepts zero as a valid terminal boundary', async () => {
   const f = await pendingFixture(1024);
   const cp = checkpoint(f);
+  cp.activeTurn!.startOffset = 0;
   cp.pendingTerminal!.terminalEndOffset = 0;
   f.state.update(key(f), { extra: { codexTranscript: cp } });
   expect(f.probe.readCheckpoint(key(f)).pendingTerminal?.terminalEndOffset).toBe(0);
