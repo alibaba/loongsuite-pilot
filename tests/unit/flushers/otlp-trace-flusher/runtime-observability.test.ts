@@ -227,12 +227,12 @@ describe('Trace runtime scalar snapshots', () => {
     const prefix = { ...entry('restored'), 'user.id': 'owner', 'event.id': 'restored-prefix' };
     const live = { ...entry('live'), 'user.id': 'owner', 'event.id': 'live-prefix' };
     await journal.append([prefix]);
-    const load = journal.load.bind(journal);
+    const load = journal.loadBatches.bind(journal);
     let release!: () => void;
     let entered!: () => void;
     const ready = new Promise<void>(resolve => { release = resolve; });
     const waiting = new Promise<void>(resolve => { entered = resolve; });
-    vi.spyOn(journal, 'load').mockImplementationOnce(async function* () {
+    vi.spyOn(journal, 'loadBatches').mockImplementationOnce(async function* () {
       entered();
       await ready;
       yield* load();
@@ -248,7 +248,7 @@ describe('Trace runtime scalar snapshots', () => {
     } finally { release(); }
     await Promise.all([restoring, sending]);
     const groups = [];
-    for await (const group of load()) groups.push(...group);
+    for await (const group of load()) groups.push(...group.entries);
     expect(groups.map(record => record['event.id'])).toContain('live-prefix');
     expect(flusher.getTraceRuntimeSnapshot()[0].pending_records).toBe(2);
   });
