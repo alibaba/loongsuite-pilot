@@ -286,6 +286,65 @@ it('attempts at most one eligible deferred range per file cycle', async () => {
   recover.mockClear(); await processFile(f); expect(recover).toHaveBeenCalledTimes(1);
 });
 
+it('bounds an oversized persisted deferred queue while preserving the blocking cursor', async () => {
+  const f = await pendingFixture(1024);
+  const cp = checkpoint(f);
+  const stat = await fs.stat(f.file);
+  cp.deferredTerminals = Array.from({ length: 10_000 }, (_, index) => ({
+    activeTurn: { ...cp.activeTurn!, turnId: `retained-${index}` },
+    pendingTerminal: { turnId: `retained-${index}`, terminalEndOffset: f.end,
+      failure: { sourceVersion: [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':'),
+        retryAtMs: 0, delayMs: 1000 } },
+  }));
+  f.state.update(key(f), { extra: { codexTranscript: cp } });
+  await f.state.save();
+  await f.state.load();
+  const parsed = f.probe.readCheckpoint(key(f));
+  expect(parsed.deferredTerminals).toHaveLength(4);
+  expect(parsed.deferredTerminals.map((item: any) => item.activeTurn.turnId))
+    .toEqual(['retained-0', 'retained-1', 'retained-2', 'retained-3']);
+  await processFile(f);
+  expect(checkpoint(f).pendingTerminal?.turnId).toBe('old');
+  expect(checkpoint(f).scanOffset).toBe(f.end);
+  expect(responses(f, 'later')).toHaveLength(0);
+  await f.state.save();
+  await f.state.load();
+  expect(checkpoint(f).deferredTerminals).toHaveLength(4);
+  expect((await processFile(f)).rawReadBytes).toBe(0);
+});
+
+it('keeps remaining deferred ranges and omits the field after the final recovery', async () => {
+  const f = await fixture();
+  const first = completed('first');
+  const text = first + completed('second', false);
+  await fs.writeFile(f.file, text);
+  const stat = await fs.stat(f.file);
+  f.state.update(key(f), { extra: { codexTranscript: {
+    inode: stat.ino, scanOffset: stat.size, ownerSessionMetaOffset: 0,
+    activeTurn: null, pendingTerminal: null, pendingFusion: null, pendingSubagent: null,
+    deferredTerminals: [
+      { activeTurn: { turnId: 'first', startOffset: 0, startedAtMs: Date.parse('2026-01-01T00:00:01Z') },
+        pendingTerminal: { turnId: 'first', terminalEndOffset: Buffer.byteLength(first) } },
+      { activeTurn: { turnId: 'second', startOffset: Buffer.byteLength(first), startedAtMs: Date.parse('2026-01-01T00:00:01Z') },
+        pendingTerminal: { turnId: 'second', terminalEndOffset: stat.size } },
+    ],
+  } } });
+  await processFile(f);
+  expect(checkpoint(f).deferredTerminals).toHaveLength(1);
+  expect(checkpoint(f).deferredTerminals![0]!.activeTurn.turnId).toBe('second');
+  expect(responses(f, 'first')).toHaveLength(1);
+  expect(responses(f, 'second')).toHaveLength(0);
+  await processFile(f);
+  expect(responses(f, 'second')).toHaveLength(1);
+  expect(checkpoint(f)).not.toHaveProperty('deferredTerminals');
+  await f.state.save();
+  await f.state.load();
+  expect(checkpoint(f)).not.toHaveProperty('deferredTerminals');
+  expect((await processFile(f)).rawReadBytes).toBe(0);
+  expect(responses(f, 'first')).toHaveLength(1);
+  expect(responses(f, 'second')).toHaveLength(1);
+});
+
 it.each([-1, 0.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])(
   'rejects invalid terminal end offset %s without blocking later collection', async offset => {
     const f = await pendingFixture(1024);

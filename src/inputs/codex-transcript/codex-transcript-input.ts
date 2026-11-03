@@ -1093,6 +1093,7 @@ export class CodexTranscriptInput extends BaseInput {
         });
       } else {
         deferred.splice(i, 1);
+        if (deferred.length === 0) delete checkpoint.deferredTerminals;
       }
       // At most one deferred range is materialized per file/cycle. Do not let
       // several failed histories accumulate simultaneous parsed body arrays.
@@ -2501,7 +2502,9 @@ export class CodexTranscriptInput extends BaseInput {
     const activeTurn = parseActiveTranscriptTurn(value.activeTurn);
     let pendingTerminal = parsePendingTerminal(value.pendingTerminal);
     const deferredTerminals: CodexDeferredTerminalTurn[] = [];
-    if (Array.isArray(value.deferredTerminals)) for (const raw of value.deferredTerminals) {
+    // Apply the same bound to persisted input, retaining the oldest queue
+    // positions without walking an arbitrarily large malformed checkpoint.
+    if (Array.isArray(value.deferredTerminals)) for (const raw of value.deferredTerminals.slice(0, MAX_DEFERRED_TERMINALS)) {
       const item = asRecord(raw);
       const active = parseActiveTranscriptTurn(item?.activeTurn);
       const pending = parsePendingTerminal(item?.pendingTerminal);
