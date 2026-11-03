@@ -622,28 +622,44 @@ describe('findTriggeredTurnWindow', () => {
   });
 
   it('keeps the user row when another UserPromptSubmit progress arrives after it', () => {
+    const firstUser = user('first prompt');
+    const firstStop = progress('Stop');
+    const firstEnd = progress('SessionEnd');
+    const secondUser = user('second prompt');
+    const secondStop = progress('Stop');
+    const secondEnd = progress('SessionEnd');
     const rows = [
       progress('UserPromptSubmit'),
       progress('UserPromptSubmit'),
-      user('first prompt'),
+      firstUser,
       progress('UserPromptSubmit'),
       assistant('first answer'),
-      progress('Stop'),
-      progress('SessionEnd'),
+      firstStop,
+      firstEnd,
       progress('UserPromptSubmit'),
-      user('second prompt'),
+      secondUser,
       progress('UserPromptSubmit'),
       assistant('second answer'),
-      progress('Stop'),
-      progress('SessionEnd'),
+      secondStop,
+      secondEnd,
     ];
     const transcript = writeTranscript('post-user-progress.jsonl', rows);
     const snapshot = readTranscriptSnapshot(transcript);
 
-    const first = findTriggeredTurnWindow(snapshot, 5);
-    const second = findTriggeredTurnWindow(snapshot, 11);
-    expect(first).toMatchObject({ status: 'complete', startLine: 2, stopLine: 5, endLine: 7 });
-    expect(second).toMatchObject({ status: 'complete', startLine: 8, stopLine: 11, endLine: 13 });
+    const first = findTriggeredTurnWindow(snapshot, rows.indexOf(firstStop));
+    const second = findTriggeredTurnWindow(snapshot, rows.indexOf(secondStop));
+    expect(first).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(firstUser),
+      stopLine: rows.indexOf(firstStop),
+      endLine: rows.indexOf(firstEnd) + 1,
+    });
+    expect(second).toMatchObject({
+      status: 'complete',
+      startLine: rows.indexOf(secondUser),
+      stopLine: rows.indexOf(secondStop),
+      endLine: rows.indexOf(secondEnd) + 1,
+    });
     expect(snapshot.rows.slice(first.startLine, first.endLine).some(row => row.message?.content === 'first prompt')).toBe(true);
     expect(snapshot.rows.slice(second.startLine, second.endLine).some(row => row.message?.content === 'second prompt')).toBe(true);
   });

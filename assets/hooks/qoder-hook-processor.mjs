@@ -528,7 +528,7 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
     }
     if (startLine >= 0) {
       for (let i = startLine - 1; i >= 0; i--) {
-        if (isRealUserPrompt(rows[i]) && !isControlUserRow(rows[i])) {
+        if (isRealUserPrompt(rows[i])) {
           startLine = i;
           break;
         }
