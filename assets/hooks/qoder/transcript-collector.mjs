@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   buildLlmBoundaries, buildEventsFromBoundaries, isRealUserPrompt, isControlUserRow,
-  hasQoderCnTerminalMarker, resolveQoderCliUserIdentity,
+  hasQoderCnTerminalMarker,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
 import { qoderWakeupRoot, qoderSourceKey, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
@@ -788,18 +788,16 @@ export class QoderTranscriptCollector {
       ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
       && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
-      ?? { cwd: source.cwd, desktop: source.desktop };
+      ?? { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
-      userIdentity: context.userIdentity, resourceAttributes: context.resourceAttributes ?? {}, spanAttributes: context.spanAttributes ?? {} };
+      userIdentity: context.userIdentity ?? source.userIdentity,
+      resourceAttributes: context.resourceAttributes ?? {},
+      spanAttributes: context.spanAttributes ?? {} };
     // The CLI persists local slash commands as user rows, including /exit
     // after the final response. Reuse the legacy parser's control-row contract
     // for both boundaries and messages so these cannot create an empty Turn
     // or leak into the next model request when a turn is still being drained.
     const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
-    if (!config.userIdentity && !context.desktop && this.agentId === 'qoder'
-      && content.some(row => row.entrypoint === 'cli' || row.promptId || row.permissionMode || row.userType)) {
-      config.userIdentity = await resolveQoderCliUserIdentity(this.dataDir);
-    }
     const turnId = digest([this.agentId, source.sessionId, source.transcriptPath, checkpoint.inode,
       checkpoint.activeStart, value.rows.find(isRealUserPrompt)]);
     const boundaries = buildLlmBoundaries([], content);

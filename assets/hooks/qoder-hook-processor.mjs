@@ -37,8 +37,22 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
 
 const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
 const QODER_HOME = path.join(os.homedir(), '.qoder');
+const QODER_CN_HOME = path.join(os.homedir(), '.qoder-cn');
 const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
 const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
+const QODER_CLI_IDENTITY = {
+  home: QODER_HOME,
+  cliDirName: 'qodercli',
+  executablePrefix: 'qodercli',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cli-user-identity.json'),
+};
+const QODER_CN_CLI_IDENTITY = {
+  home: QODER_CN_HOME,
+  cliDirName: 'qoderclicn',
+  executablePrefix: 'qoderclicn',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cn-cli-user-identity.json'),
+};
+
 function smallText(file, limit = 16 * 1024) {
   const fd = fs.openSync(file, 'r');
   try {
@@ -62,24 +76,20 @@ export function extractUserIdentity(extra) {
   const user = extra.user;
   if (!user || typeof user !== 'object' || Array.isArray(user)) return undefined;
   const name = nonEmptyIdentityValue(user.name);
-  const email = nonEmptyIdentityValue(user.email);
-  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+  const email = accountEmail(user.email);
+  return userIdentityFields(name, email);
 }
 
-// CN IDE exposes email beside `user`; phone-only Alibaba Cloud accounts may
-// have a name without an email. Never treat a login name/phone/account ID as email.
+// Phone-only Alibaba Cloud accounts may have a name without an email.
+// Never treat a login name, phone, or account ID as email.
 function accountEmail(value) {
   const email = nonEmptyIdentityValue(value);
   return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
 }
 
-export function extractQoderCnUserIdentity(extra) {
-  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
-  const user = extra.user && typeof extra.user === 'object' && !Array.isArray(extra.user)
-    ? extra.user : undefined;
-  const name = nonEmptyIdentityValue(user?.name);
-  const email = accountEmail(user?.email) ?? accountEmail(extra.email);
-  return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+function userIdentityFields(name, email) {
+  if (!name && !email) return undefined;
+  return { name: name || '', email: email || '' };
 }
 
 function readQoderAppUserIdentity(agentId) {
@@ -106,7 +116,7 @@ function readQoderAppUserIdentity(agentId) {
     if (!Number.isFinite(snapshotAt) || snapshotAt > Date.now() + 5 * 60_000) return undefined;
     const name = nonEmptyIdentityValue(status.name);
     const email = accountEmail(status.email);
-    return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+    return userIdentityFields(name, email);
   } catch {
     return undefined;
   } finally {
@@ -116,9 +126,29 @@ function readQoderAppUserIdentity(agentId) {
   }
 }
 
-export async function resolveQoderCliUserIdentity(dataDir = LOONGSUITE_PILOT_DATA_DIR) {
-  const cacheFile = path.join(dataDir, 'state/hooks/qoder-cli-user-identity.json');
-  const authPath = path.join(QODER_HOME, '.auth', 'user');
+function resolveQoderCliExecutable(home, cliDirName, executablePrefix, version) {
+  const normalized = typeof version === 'string' ? version.trim() : '';
+  if (!/^\d+(?:\.\d+)*$/.test(normalized)) return undefined;
+  try {
+    const executable = path.join(
+      home,
+      'bin',
+      cliDirName,
+      `${executablePrefix}-${normalized}${process.platform === 'win32' ? '.exe' : ''}`,
+    );
+    fs.accessSync(executable, fs.constants.X_OK);
+    if (!fs.statSync(executable).isFile()) return undefined;
+    return executable;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }, version) {
+  const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix, version);
+  if (!executable) return undefined;
+
+  const authPath = path.join(home, '.auth', 'user');
   let authStat;
   try {
     authStat = fs.statSync(authPath);
@@ -145,24 +175,9 @@ export async function resolveQoderCliUserIdentity(dataDir = LOONGSUITE_PILOT_DAT
       return undefined;
     } else {
       const name = nonEmptyIdentityValue(cached.name);
-      const email = nonEmptyIdentityValue(cached.email);
-      return name || email ? { ...(name ? { name } : {}), ...(email ? { email } : {}) } : undefined;
+      const email = accountEmail(cached.email);
+      return userIdentityFields(name, email);
     }
-  }
-
-  let executable;
-  try {
-    const cliDir = path.join(QODER_HOME, 'bin', 'qodercli');
-    const version = smallText(path.join(cliDir, 'version.txt'), 128).trim();
-    if (!/^\d+(?:\.\d+)*$/.test(version)) return undefined;
-    executable = path.join(
-      cliDir,
-      `qodercli-${version}${process.platform === 'win32' ? '.exe' : ''}`,
-    );
-    fs.accessSync(executable, fs.constants.X_OK);
-    if (!fs.statSync(executable).isFile()) return undefined;
-  } catch {
-    return undefined;
   }
 
   const timedOut = Symbol();
@@ -192,7 +207,7 @@ export async function resolveQoderCliUserIdentity(dataDir = LOONGSUITE_PILOT_DAT
         if (parsed.logged_in === false) return resolve({ loggedIn: false });
         if (parsed.logged_in !== true) return resolve(undefined);
         const name = nonEmptyIdentityValue(parsed.username);
-        const email = nonEmptyIdentityValue(parsed.email);
+        const email = accountEmail(parsed.email);
         resolve(name || email
           ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
           : undefined);
@@ -239,10 +254,7 @@ export async function resolveQoderCliUserIdentity(dataDir = LOONGSUITE_PILOT_DAT
     try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
   }
   if (!status || status === timedOut || !status.loggedIn) return undefined;
-  return {
-    ...(status.name ? { name: status.name } : {}),
-    ...(status.email ? { email: status.email } : {}),
-  };
+  return userIdentityFields(status.name, status.email);
 }
 
 // --- Timestamp helpers -------------------------------------------------------
@@ -312,18 +324,31 @@ async function main() {
       };
     }
     if (!payload) return;
-    const desktop = payload.parent_business_info?.product === 'app';
-    const identity = agentId === 'qoder-cn'
-      ? extractQoderCnUserIdentity(payload.extra)
-      : extractUserIdentity(payload.extra);
+    const business = payload.parent_business_info;
+    const parentBusinessInfo = business && typeof business === 'object' && !Array.isArray(business)
+      ? business : undefined;
+    const product = parentBusinessInfo?.product;
+    let userIdentity;
+    if (agentId === 'qoder' || agentId === 'qoder-cn') {
+      const cliIdentity = agentId === 'qoder-cn' ? QODER_CN_CLI_IDENTITY : QODER_CLI_IDENTITY;
+      if (product === 'cli') {
+        userIdentity = await resolveQoderCliUserIdentity(cliIdentity, parentBusinessInfo?.version)
+          ?? readQoderAppUserIdentity(agentId);
+      } else if (product === 'app') {
+        userIdentity = readQoderAppUserIdentity(agentId);
+      } else {
+        userIdentity = extractUserIdentity(payload.extra);
+      }
+    }
     publishQoderWakeup(payload, {
-      agentId, dataDir: LOONGSUITE_PILOT_DATA_DIR,
-      userIdentity: identity ?? (desktop ? readQoderAppUserIdentity(agentId) : undefined),
+      agentId, dataDir: LOONGSUITE_PILOT_DATA_DIR, userIdentity,
     });
   } finally {
     process.stdout.write('{}\n');
   }
 }
+
+
 
 export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
   // QoderCN can inspect a complete snapshot to rebuild its ReAct chain. Other
@@ -969,8 +994,8 @@ function finalizeRecords(records, cwd, runtimeConfig) {
   markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
-    if (userIdentity?.name) record['user.name'] = userIdentity.name;
-    if (userIdentity?.email) record['user.email'] = userIdentity.email;
+    record['user.name'] = userIdentity?.name || '';
+    record['user.email'] = userIdentity?.email || '';
     Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
       Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
