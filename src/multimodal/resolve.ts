@@ -67,10 +67,27 @@ export function matchAll(
   return out;
 }
 
-/** Dedup and cap extracted image paths. `normalize` can resolve; empty / non-image is skipped. */
+/** Plain object, or a JSON string that parses to one. Arrays and plain text are not records. */
+export function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // tool arguments and results may be plain text
+  }
+  return null;
+}
+
+/** Dedup and cap extracted image paths. Relative paths join cwd. Empty / non-image is skipped. */
 export function takeUniqueExtractedPaths(
   rawPaths: string[],
-  normalize?: (raw: string) => string,
+  cwd?: string,
 ): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -82,7 +99,7 @@ export function takeUniqueExtractedPaths(
       break;
     }
     const raw = rawPaths[i] ?? '';
-    const p = (normalize ? normalize(raw) : raw).trim();
+    const p = resolveImagePath(raw, cwd).trim();
     if (
       !p
       || p.length > MAX_MULTIMODAL_PATH_CHARS
@@ -385,6 +402,21 @@ export function modalityFromMime(mime: string): 'image' | 'audio' | 'video' | un
   if (normalized.startsWith('audio/')) return 'audio';
   if (normalized.startsWith('video/')) return 'video';
   return undefined;
+}
+
+/** `time_unix_nano` as milliseconds. Digit strings stay exact via BigInt. Missing or invalid values use now. */
+export function timeUnixNanoToMillis(nano: unknown, now = Date.now()): number {
+  if (typeof nano === 'string' && /^\d+$/.test(nano)) {
+    try {
+      return Number(BigInt(nano) / 1_000_000n);
+    } catch {
+      // fall through
+    }
+  }
+  if (typeof nano === 'number' && Number.isFinite(nano)) {
+    return Math.floor(nano / 1_000_000);
+  }
+  return now;
 }
 
 export function yyyymmddLocal(date = new Date()): string {

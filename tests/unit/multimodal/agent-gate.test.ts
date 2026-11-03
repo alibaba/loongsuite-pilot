@@ -10,8 +10,10 @@ describe('agent multimodal gate', () => {
   it('lists only agents with multimodal extraction implemented', () => {
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('codex');
     expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('qoder');
+    expect(MULTIMODAL_SUPPORTED_AGENT_IDS).toContain('qwen-work-cn');
     expect(isMultimodalSupportedAgent('codex')).toBe(true);
     expect(isMultimodalSupportedAgent('qoder')).toBe(true);
+    expect(isMultimodalSupportedAgent('qwen-work-cn')).toBe(true);
     // cursor: multimodal extraction not implemented yet
     expect(isMultimodalSupportedAgent('cursor')).toBe(false);
   });
@@ -22,6 +24,7 @@ describe('agent multimodal gate', () => {
     };
     expect(isAgentMultimodalEnabled('codex', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('qoder', enabled)).toBe(true);
+    expect(isAgentMultimodalEnabled('qwen-work-cn', enabled)).toBe(true);
     expect(isAgentMultimodalEnabled('cursor', enabled)).toBe(false);
     expect(isAgentMultimodalEnabled('codex', {
       captureMessageContent: false,

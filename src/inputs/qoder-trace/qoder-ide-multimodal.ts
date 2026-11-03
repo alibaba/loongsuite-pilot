@@ -6,10 +6,11 @@ import {
   multimodalUploadIncludesOutput,
 } from '../../types/index.js';
 import {
+  asRecord,
   attachMultimodalMetadataForEntry,
   matchAll,
-  resolveImagePath,
   takeUniqueExtractedPaths,
+  timeUnixNanoToMillis,
   MAX_MULTIMODAL_PARTS,
   MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
@@ -214,7 +215,7 @@ async function enrichInputAttachedImages(
       && (!requestIdOf(e) || requestIdOf(e) === requestId),
     );
     const uriParts = await convertPathsToUriParts(
-      lookup.paths, pathToUri, entryTimeMs(carrier), stats,
+      lookup.paths, pathToUri, timeUnixNanoToMillis(carrier.time_unix_nano), stats,
     );
 
     let requestAttached = 0;
@@ -293,7 +294,7 @@ async function enrichToolResultImages(
     const paths = extractToolImagePaths(raw);
     if (paths.length === 0) continue;
 
-    const timeMs = entryTimeMs(entry);
+    const timeMs = timeUnixNanoToMillis(entry.time_unix_nano);
     const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
     if (uriParts.length === 0) continue;
 
@@ -322,7 +323,7 @@ async function enrichToolCallImages(
     const paths = extractToolCallImagePaths(raw, cwdOf(entry));
     if (paths.length === 0) continue;
 
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
     if (uriParts.length === 0) continue;
 
     const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
@@ -346,7 +347,7 @@ async function enrichOutputMarkdownImages(
     const messages = entry['gen_ai.output.messages'];
     if (!Array.isArray(messages)) continue;
 
-    const timeMs = entryTimeMs(entry);
+    const timeMs = timeUnixNanoToMillis(entry.time_unix_nano);
     let changed = false;
     for (const message of messages) {
       if (!message || typeof message !== 'object') continue;
@@ -453,28 +454,16 @@ export function extractToolImagePaths(text: string): string[] {
 }
 
 export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
-  let record: Record<string, unknown> | null = null;
-  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
-    record = args as Record<string, unknown>;
-  } else if (typeof args === 'string' && args) {
-    try {
-      const parsed = JSON.parse(args) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        record = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // hook writes JSON.stringify; ignore non-JSON argument strings
-    }
-  }
+  const record = asRecord(args);
   const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
   if (!filePath) return [];
-  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
+  return takeUniqueExtractedPaths([filePath], cwd);
 }
 
 export function extractMarkdownImagePaths(text: string, cwd?: string): string[] {
   return takeUniqueExtractedPaths(
     matchAll(MARKDOWN_IMAGE_RE, text, m => m[1] ?? m[2]),
-    cwd ? raw => resolveImagePath(raw, cwd) : undefined,
+    cwd,
   );
 }
 
@@ -550,19 +539,4 @@ function sessionIdOf(entries: AgentActivityEntry[]): string | undefined {
     if (typeof sid === 'string' && sid.trim()) return sid.trim();
   }
   return undefined;
-}
-
-function entryTimeMs(entry: AgentActivityEntry): number {
-  const nano = entry.time_unix_nano;
-  if (typeof nano === 'string' && /^\d+$/.test(nano)) {
-    try {
-      return Number(BigInt(nano) / 1_000_000n);
-    } catch {
-      // fall through
-    }
-  }
-  if (typeof nano === 'number' && Number.isFinite(nano)) {
-    return Math.floor(nano / 1_000_000);
-  }
-  return Date.now();
 }

@@ -4,10 +4,11 @@ import {
   multimodalUploadIncludesOutput,
 } from '../../types/index.js';
 import {
+  asRecord,
   attachMultimodalMetadataForEntry,
   matchAll,
-  resolveImagePath,
   takeUniqueExtractedPaths,
+  timeUnixNanoToMillis,
   MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
   type UriPart,
@@ -122,7 +123,7 @@ async function enrichInputImages(
       entry,
       paths,
       pathToUri,
-      entryTimeMs(entry),
+      timeUnixNanoToMillis(entry.time_unix_nano),
       stats,
     );
     if (n > 0) {
@@ -147,7 +148,7 @@ async function enrichToolResultImages(
     const paths = extractToolImagePaths(raw, cwd);
     if (paths.length === 0) continue;
 
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
     if (uriParts.length === 0) continue;
 
     entry['gen_ai.tool.call.result'] = [
@@ -176,7 +177,7 @@ async function enrichToolCallImages(
     const paths = extractToolCallImagePaths(raw, cwd);
     if (paths.length === 0) continue;
 
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
     if (uriParts.length === 0) continue;
 
     const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
@@ -262,7 +263,7 @@ export function extractInputImagePaths(
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
     ...matchAll(FILE_CITATION_IMAGE_RE, text),
-  ], raw => resolveImagePath(raw, cwd));
+  ], cwd);
 }
 
 export function attachmentImageFilenames(entry: AgentActivityEntry): string[] {
@@ -285,26 +286,14 @@ export function extractToolImagePaths(text: string, cwd?: string): string[] {
     ...matchAll(READ_IMAGE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_FILE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
-  ], raw => resolveImagePath(raw, cwd));
+  ], cwd);
 }
 
 export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
-  let record: Record<string, unknown> | null = null;
-  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
-    record = args as Record<string, unknown>;
-  } else if (typeof args === 'string' && args) {
-    try {
-      const parsed = JSON.parse(args) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        record = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // hook writes JSON.stringify; ignore non-JSON argument strings
-    }
-  }
+  const record = asRecord(args);
   const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
   if (!filePath) return [];
-  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
+  return takeUniqueExtractedPaths([filePath], cwd);
 }
 
 function stripSizeSuffix(raw: string): string {
@@ -343,19 +332,4 @@ function sessionIdOf(entries: AgentActivityEntry[]): string | undefined {
     if (typeof sid === 'string' && sid.trim()) return sid.trim();
   }
   return undefined;
-}
-
-function entryTimeMs(entry: AgentActivityEntry): number {
-  const nano = entry.time_unix_nano;
-  if (typeof nano === 'string' && /^\d+$/.test(nano)) {
-    try {
-      return Number(BigInt(nano) / 1_000_000n);
-    } catch {
-      // fall through
-    }
-  }
-  if (typeof nano === 'number' && Number.isFinite(nano)) {
-    return Math.floor(nano / 1_000_000);
-  }
-  return Date.now();
 }

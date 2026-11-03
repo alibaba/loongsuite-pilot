@@ -17,8 +17,18 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 | Item | Status |
 |------|--------|
 | Media types | **Images only**. Audio and video are future work. |
-| Implemented agents | **`codex`** and **`qoder` (IDE and CLI)**. Other agents ignore `uploadMode` until their extractors land. |
-| Detection | Agent-specific: Codex uses inline base64 data-URLs in the transcript; Qoder IDE uses SQLite attachment paths and image paths in tool results / assistant markdown; Qoder CLI uses local paths in the transcript (paste / `@` / Read / ImageGen), read from disk, then `uri`. |
+| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, and **`qwen-work-cn`**. Other agents ignore `uploadMode` until their extractors land. |
+
+### Detection
+
+Where each agent finds images. Surfaces collected after it is enabled are in [What Each Agent Collects](#what-each-agent-collects).
+
+| Agent | Source | Form |
+|-------|--------|------|
+| Codex | transcript | Inline base64 data-URL |
+| Qoder IDE | SQLite attachments; transcript | Local path |
+| Qoder CLI | transcript | Local path (paste / `@` / Read / ImageGen), read from disk, then `uri` |
+| Qwen Work CN | transcript | Local path (paste tag, `Read`, `qwenwork_media_read`, generate and present tools) |
 
 ## How To Enable
 
@@ -82,7 +92,7 @@ Unknown values fall back to `none`.
 
 ## allowedRootPaths
 
-`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
+`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`, `QwenWorkCNTraceInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
 
 Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd is **not** added to the allowlist. Workspace paths and directories such as `~/Documents` need an explicit `allowedRootPaths` entry.
 
@@ -90,6 +100,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 |-------|----------|
 | `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
+| `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. The session `cwd` is not included. |
 
 UNC/device paths, symlinks, and non-image magic bytes are skipped. Local paths are treated as filesystem paths. A URL query after the image extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to `a.png`.
 
@@ -101,6 +112,7 @@ The table below describes what multimodal collection actually captures per agent
 |-------|--------|----------------|
 | `codex` | Yes | See [Codex](#codex) below. |
 | `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
+| `qwen-work-cn` | Yes | See [Qwen Work CN](#qwen-work-cn) below. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex
@@ -150,6 +162,32 @@ Notes:
 - Glob-only listings that were never `Read` / `ImageGen` are not collected.
 - Remote OSS URLs are not used as the source; local `pathToUri` is.
 - CLI (1.1.29) writes `type: "attachment"` / `image_file.filename` (absolute local path) into the transcript. The hook only copies matching `image_file` objects onto `agent.qoder.attachments`. `QoderTraceInput` unions those filenames with `[Image: source:]` / `@`, unique-resolves, then drops the carrier before emit.
+
+### Qwen Work CN
+
+Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Paste paths are already in user text, and tool paths are already on `tool.call` / `tool.result`. Failures are logged and the batch is still returned. A field is left unchanged when no `uri` is produced.
+
+User text matches only:
+
+```
+<user-pasted-image\s+file="([^"]+)"[^>]*/>
+```
+
+Selecting a file and dragging a file use the same tag; attributes such as `source="local-path"` may follow `file`. Tools are chosen by `gen_ai.tool.name`, then one field. Relative paths join `agent.qwenworkcn.cwd`. That cwd is not added to the allowlist.
+
+| `uploadMode` | Qwen Work CN surface | Typical user action / event |
+|--------------|----------------------|-----------------------------|
+| `none` | No conversion | — |
+| `input` | Paste tag in the user message; `qwenwork_media_read` result `data.files[].source` where `kind` is `image`; `qwenwork_media_task` `files` when `status` is `completed`; `qwenwork_file_present_files` result `artifacts[].filePath` | Paste, select, or drag; the model finds images; generation completes and is presented |
+| `output` | `Read` `file_path`; `qwenwork_media_read` call `files`; `qwenwork_file_present_files` call `files[].file_path` | A path in the message then Read; the model finds images; present an already generated file |
+| `all` | All of the above | Paste, read, and generate |
+
+Notes:
+
+- A `pending` `qwenwork_image_generate` result, a `qwenwork_media_task` call that only has `output_name`, and a bare filename with no image read are not collected.
+- `uri` and `originalUri` on a present result repeat `filePath`. Only `filePath` is taken.
+- OSS URLs are not a collection source.
+- Selected, dragged, Read, found, and generated files live in the session directory. Reading them requires that directory in `allowedRootPaths`.
 
 ## Output Shape (Short)
 
