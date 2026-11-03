@@ -616,7 +616,24 @@ async fn run_probe(args: &[String]) -> i32 {
             return 1;
         }
     };
-    println!("{body}");
+    if installer {
+        // Installer consumers include PowerShell 5.1 under CLM, where console
+        // encoding cannot always be changed. ASCII JSON preserves the same
+        // Unicode value across legacy codepages without a new public option.
+        let mut ascii = String::with_capacity(body.len());
+        for ch in body.chars() {
+            if ch.is_ascii() {
+                ascii.push(ch);
+            } else {
+                for unit in ch.encode_utf16(&mut [0; 2]) {
+                    ascii.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+        println!("{ascii}");
+    } else {
+        println!("{body}");
+    }
     0
 }
 

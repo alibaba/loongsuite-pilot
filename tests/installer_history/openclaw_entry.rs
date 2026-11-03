@@ -281,11 +281,20 @@ fn detected_probe(result: &WriterResult) -> &Value {
         .unwrap()
 }
 fn assert_entry(actual: &Value, entry: &Path) {
+    let raw = actual
+        .as_str()
+        .expect("private probe entry must be a JSON string");
+    let found=fs::canonicalize(raw).unwrap_or_else(|error| {
+        let points=raw.chars().take(256).map(|ch|format!("U+{:04X}",u32::from(ch))).collect::<Vec<_>>().join(" ");
+        panic!("private OpenClaw fixture path cannot resolve: actual={raw:?} expected={entry:?} codepoints={points}; {error}")
+    });
     assert_eq!(
-        fs::canonicalize(actual.as_str().unwrap()).unwrap(),
-        fs::canonicalize(entry).unwrap()
+        found,
+        fs::canonicalize(entry).unwrap(),
+        "private OpenClaw fixture bound the wrong entry"
     );
 }
+
 fn fresh_deployment(f: &Fixture, expect_healthy: bool) -> Value {
     let output = f.root.path().join("fresh-service-result.json");
     let mut command = f.command(&std::env::current_exe().unwrap());

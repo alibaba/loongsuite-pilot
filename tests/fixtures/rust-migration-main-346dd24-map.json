@@ -22953,7 +22953,7 @@
       "source_hash": "4b371d7f5006e9e550df6d35525bbb71ea0f9df6888cc9c5e4fcdb3ece75c13f",
       "coverage": "complete",
       "rust": [],
-      "note": "18/19 exact source declarations have real Native tests. L1372 remains explicitly PENDING: original it.skip generation isolation was never implemented by original API/processor, verified actual legacy negative and documented future TODO in tests/fixtures/cursor-react-existing-generation-isolation-review.json. No fake replacement, retirement, new ignore or unconditional1:1 claim. Linux actual, Windows/mac applicability not execution. All19 exact EF/main declarations now have actual nonignored Native contracts. Formerly skipped L1372 is implemented through the real shipping hook/journal/history boundary and is not retired. Eighteen existing mappings remain verbatim. Linux actual results and injected Windows transcript-path proof are separate from physical platform execution; no Node runtime is restored.",
+      "note": "All19 exact EF/main declarations now have actual nonignored Native contracts. Formerly skipped L1372 is implemented through the real shipping hook/journal/history boundary and is not retired. Eighteen existing mappings remain verbatim. Linux actual results and injected Windows transcript-path proof are separate from physical platform execution; no Node runtime is restored.",
       "cases": [
         {
           "source": {
@@ -46313,6 +46313,206 @@
               {
                 "file": "src/updater/updater_contract_tests.rs",
                 "test": "start_only_recovery_retains_the_full_default_thirty_second_health_window"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/qwen-subagent-event-log-flow.test.ts",
+      "source_hash": "d8e929a851239c199f8e105dc829c4d16dae78e2fd0226a64204133ccc4e8c4d",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All4 exact EF/main integration declarations are now actual Native Hook-to-physical-JSONL-to-production-normalization-to-real-JSONL/OTLP-flusher contracts. Seven scoped source files, including the test and original fixture, are compared by actual Git bytes, not titles. Only the exporter sink is injected; conversion and publication are production. This preserves the original direct transformHookRecord boundary; it does not claim a live personal Qwen session or an all-Agent collector E2E. Existing converter-only recursion/ambiguity tests remain in the codebase. Actual Linux GNU/glibc2.34 execution is distinct from applicable macOS/Windows tests.",
+      "cases": [
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "waits for the explicit seal and exports one recursively nested trace",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Native stop CLI has original15000ms invocation bound and writes the original synthetic recursive fixture to physical Hook JSONL. Production transform_hook_record then feeds both real JSONL and OTLP flushers, with only the endpoint exporter captured and the default real converter. Sending every record except the original final root seal leaves0 exported spans,0 converter calls and1 complete pending buffer containing the entire prefix, including child terminal facts. The seal produces exactly1ENTRY,3AGENT,5LLM,5STEP,2TOOL, one trace, unique span IDs, every parent present and containing each child time range, correct child AGENT-to-parent TOOL links, separate root/child/grandchild input usage50/22/5 and total LLM77. Actual normalized JSONL is also persisted and counted. No old Collector implementation or Node product runtime.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_hook_and_normalization_wait_for_seal_before_exporting_recursive_jsonl_and_spans"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "keeps parallel nested agents with identical native tool IDs separate",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original pure fixture builder mutations create two parallel root agent tools, two children and two grandchildren sharing the native nested-call identifier. Actual Native Hook and production normalization/JSONL/OTLP keep5AGENT,8LLM,4TOOL with4 distinct final tool IDs, one trace, unique span IDs, exact parent links and containment. Literal rows and metadata are generated directly from the unchanged pinned original fixture builders; they are not hand-simplified converter-only samples.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_parallel_children_and_grandchildren_keep_identical_native_tool_ids_separate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "keeps child lifecycle and collection diagnostics in final spans",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original grandchild meta status=failed travels through actual Native Hook, physical event JSONL, real production normalizer and default OTLP flusher/converter to the final grandchild AGENT: preserved agent.qwen-code-cli.subagent.status=failed and status.code2. Every TOOL keeps collection=collected. Full recursive topology/time containment and real normalized JSONL persist too.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_failed_child_status_and_collection_diagnostics_reach_final_spans"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "exports child content despite a legacy content opt-out without changing topology",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "At both EF and current main, the original assertion explicitly requires SENSITIVE content despite the legacy agents.qwen-code-cli.captureMessageContent:false field. The private config contains that exact old false field; actual Native Hook and real normalization/JSONL/OTLP still preserve SENSITIVE child content and all3AGENT recursive topology. No legacy content switch/API is restored, and this is not a retired capability or a claim that content is hidden.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_ignores_the_legacy_content_optout_while_preserving_recursive_topology"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/opencode-watchdog-selfheal.test.ts",
+      "source_hash": "56e9fb383e87f05f9d16a8d4317b71dcd39eb442fb80665be5e3a16867d21c2b",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All three exact original integration declarations through actual DeploymentManager, PluginInjectStrategy, Orchestrator target builder and HookWatchdog.run_check. Native requires a complete verified five-resource bundle; the disposable fixture now supplies real source bytes and Native manifest instead of weakening that gate to accept the old lone fake module. Original legacy file URL remains accepted and all repair/healthy-byte/no-asset assertions remain. GNU/glibc2.34 actually passed; other platforms need physical verification.",
+      "cases": [
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "re-injects the plugin spec after it is overwritten by a third party",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "re-injects the plugin spec after it is overwritten by a third party; actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_reinjects_a_spec_removed_by_a_third_party"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "does not rewrite the config when the spec is already healthy",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not rewrite the config when the spec is already healthy; actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_keeps_a_healthy_config_byte_identical"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L136:C3",
+            "title": "skips repair when the plugin asset is missing (precondition gate)",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "skips repair when the plugin asset is missing (precondition gate); actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_skips_missing_assets_without_repairing_config"
               }
             ]
           }

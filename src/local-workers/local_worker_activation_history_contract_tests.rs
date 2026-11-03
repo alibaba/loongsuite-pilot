@@ -423,6 +423,24 @@ fn native_worker_fixture() {
     ];
     std::fs::write(capture, serde_json::to_vec(&values).unwrap()).unwrap();
     loop {
+        // Windows has no POSIX SIGTERM for this headless test child. Cooperate
+        // with the actual supervisor stop transition without shortening its
+        // production five-second grace or the historical total test budget.
+        #[cfg(windows)]
+        {
+            let status = PathBuf::from(std::env::var("SAMPLE_STATE_DIR").unwrap())
+                .join("supervisor-status.json");
+            if std::fs::read(status)
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                .is_some_and(|row| {
+                    row["state"] == "stopping"
+                        && row["pid"].as_u64() == Some(u64::from(std::process::id()))
+                })
+            {
+                return;
+            }
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -473,6 +491,7 @@ async fn actual_native_manifest_worker_uses_the_same_real_adapter_without_node_o
         assert_eq!(f.status(&i)["state"], "running");
         assert!(!f.installed.exists());
         run.finish().await;
+        assert_eq!(f.status(&i)["state"], "stopped");
     })
     .await;
 }

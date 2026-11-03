@@ -1681,6 +1681,27 @@ fn private_child_diagnostics(home: &Path) -> String {
             }
         }
     }
+    let log_root = home.join("数据 [隔离]/logs");
+    if let Ok(entries) = fs::read_dir(log_root) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                if let Ok(bytes) = fs::read(entry.path()) {
+                    details.push(format!(
+                        "private log {}: {}",
+                        entry.file_name().to_string_lossy(),
+                        String::from_utf8_lossy(&bytes)
+                            .chars()
+                            .take(4000)
+                            .collect::<String>()
+                    ));
+                }
+            }
+        }
+    }
+    let mode = home.join("invocations.jsonl.streams-mode");
+    if let Ok(text) = fs::read_to_string(mode) {
+        details.push(format!("native fixture mode proof: {}", text.trim()));
+    }
     details.sort();
     details.join(" | ")
 }
@@ -2518,7 +2539,7 @@ fn native_background_launcher_appends_separate_streams_to_literal_unicode_and_br
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "background streams not published: {}",
+                    "background streams not published: native-stdout={out:?} native-stderr={err:?} children={}",
                     private_child_diagnostics(&fixture.home)
                 );
                 std::thread::sleep(Duration::from_millis(25));

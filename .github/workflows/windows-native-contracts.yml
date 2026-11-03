@@ -73,14 +73,35 @@ jobs:
         run: |
           set -uo pipefail
           failures=0
-          cargo test --locked -p loongsuite-pilot --lib migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source -- --test-threads=1 || failures=1
-          cargo test --locked -p loongsuite-pilot --lib resolves_directory_links_including_not_yet_created_descendants -- --test-threads=1 || failures=1
-          cargo test --locked -p loongsuite-pilot --lib actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry -- --test-threads=1 || failures=1
-          cargo test --locked -p loongsuite-pilot --test installer_native status_original_public_powershell_argument_and_writer_matrix_in_both_shells -- --test-threads=1 || failures=1
-          for filter in managed_init_type_with_wildcard source_handoff_ zip_bootstrap source_reap_l71_l78; do
-            cargo test --locked -p xtask --test windows_services "$filter" -- --test-threads=1 || failures=1
+          log="$RUNNER_TEMP/pilot-windows-regressions.log"
+          : > "$log"
+          check() {
+            printf 'command: %s\n' "$*" >> "$log"
+            "$@" 2>&1 | tee -a "$log"
+            local result=${PIPESTATUS[0]}
+            if test "$result" -ne 0; then
+              failures=1
+              printf '::error::Native regression failed: %s\n' "$*"
+            fi
+          }
+          check cargo test --locked -p loongsuite-pilot --lib migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib resolves_directory_links_including_not_yet_created_descendants -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry -- --test-threads=1
+          for filter in installer_openclaw_entry_history:: installer_hermes_rollback_history:: stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts; do
+            check cargo test --locked -p loongsuite-pilot --test installer_native "$filter" -- --test-threads=1
+          done
+          for filter in source_handoff_l58 native_background_launcher_appends_separate_streams; do
+            check cargo test --locked -p xtask --test windows_services "$filter" -- --test-threads=1
           done
           test "$failures" -eq 0
+      - name: Save early regression logs while broad tests continue
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: early-regressions-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pilot-windows-regressions.log
+          retention-days: 3
+          if-no-files-found: error
       - name: Generated Hook wrappers match production assets
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: ./target/debug/xtask.exe sync-hook-wrappers --check

@@ -385,6 +385,8 @@ fn publish_inner(
                 }
             }
         }
+        #[cfg(test)]
+        history_contract_tests::before_notice_commit(&destination);
         atomic_metadata(&destination, &record, false)?;
         Ok(true)
     })?;
@@ -625,3 +627,7 @@ mod native_file_identity_contracts {
         assert_eq!(source["observedSize"].as_u64(), Some(metadata.size));
     }
 }
+
+#[cfg(test)]
+#[path = "qoder_wakeup_history_contract_tests.rs"]
+mod history_contract_tests;

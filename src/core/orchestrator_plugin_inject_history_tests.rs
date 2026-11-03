@@ -625,3 +625,118 @@ async fn source_l365_actual_non_busy_restore_failure_has_only_sanitized_alarm_te
         .contains(&r.to_string_lossy().to_string()));
     assert!(!Path::new(&registered.wrapper_path).exists());
 }
+
+async fn opencode_selfheal_integration_contract(mode: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    let fixture = fixture(
+        r,
+        plugin(
+            r,
+            "opencode",
+            "file://$PILOT_DATA/plugins/opencode/plugin.mjs",
+        ),
+    )
+    .await;
+    // The Native managed-plugin contract requires a verified complete bundle,
+    // replacing the old single fake module without bypassing companion checks.
+    let mut resources = Vec::new();
+    for relative in [
+        "opencode/index.js",
+        "opencode/package.json",
+        "opencode/plugin.mjs",
+        "opencode/v2.mjs",
+        "shared/resource-context.mjs",
+    ] {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/plugins")
+            .join(relative);
+        let destination = fixture.pilot.join("assets/plugins").join(relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::copy(source, &destination).unwrap();
+        resources.push(json!({
+            "path":format!("assets/plugins/{relative}"),
+            "sha256":crate::utils::runtime_paths::sha256_file(&destination).unwrap()
+        }));
+    }
+    std::fs::write(
+        fixture.pilot.join("runtime-manifest.json"),
+        json!({
+            "schema":1, "runtime":"rust", "version":env!("CARGO_PKG_VERSION"),
+            "gitCommit":"a".repeat(40), "target":crate::utils::runtime_paths::build_target(),
+            "edition":crate::utils::runtime_paths::build_edition(),
+            "binary":"bin/loongsuite-pilot", "resources":resources
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let asset = fixture.data.join("plugins/opencode/plugin.mjs");
+    let settings = r.join("opencode/settings.json");
+    write(&asset, "// original disposable plugin asset\n");
+    write(&settings, "{}\n");
+    let result = fixture
+        .manager
+        .deploy_single(&fixture.definition("opencode"))
+        .await;
+    assert!(result.success, "{:?}", result.error);
+    let expected = reqwest::Url::from_file_path(&asset).unwrap().to_string();
+    let plugins = |path: &Path| {
+        let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        value["plugin"].as_array().unwrap().clone()
+    };
+    assert!(plugins(&settings).contains(&json!(expected)));
+    match mode {
+        "rewritten" => write(&settings, "{\"plugin\":[]}\n"),
+        "healthy" => {}
+        "missing-asset" => {
+            std::fs::remove_file(&asset).unwrap();
+            write(&settings, "{\"plugin\":[]}\n");
+        }
+        _ => panic!("unexpected private contract mode"),
+    }
+    let before = std::fs::read(&settings).unwrap();
+    let orchestrator = fixture.orchestrator("opencode", None);
+    let targets = orchestrator.plugin_inject_intercepts(&fixture.manager);
+    assert_eq!(targets.len(), 1);
+    let result = HookWatchdog::new(
+        crate::types::HookWatchdogConfig {
+            enabled: true,
+            interval_ms: 1_000_000,
+            repair_cooldown_ms: 0,
+        },
+        vec![],
+        targets,
+    )
+    .run_check()
+    .await;
+    match mode {
+        "rewritten" => {
+            assert_eq!(result.repaired, 1);
+            assert!(plugins(&settings).contains(&json!(expected)));
+        }
+        "healthy" => {
+            assert_eq!(result.repaired, 0);
+            assert_eq!(result.checked, 1);
+            assert_eq!(std::fs::read(&settings).unwrap(), before);
+        }
+        "missing-asset" => {
+            assert_eq!(result.skipped, 1);
+            assert_eq!(result.repaired, 0);
+            assert!(!plugins(&settings).contains(&json!(expected)));
+            assert_eq!(std::fs::read(&settings).unwrap(), before);
+        }
+        _ => unreachable!(),
+    }
+}
+#[tokio::test]
+async fn integration_opencode_watchdog_reinjects_a_spec_removed_by_a_third_party() {
+    opencode_selfheal_integration_contract("rewritten").await;
+}
+#[tokio::test]
+async fn integration_opencode_watchdog_keeps_a_healthy_config_byte_identical() {
+    opencode_selfheal_integration_contract("healthy").await;
+}
+#[tokio::test]
+async fn integration_opencode_watchdog_skips_missing_assets_without_repairing_config() {
+    opencode_selfheal_integration_contract("missing-asset").await;
+}

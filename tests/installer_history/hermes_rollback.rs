@@ -120,8 +120,8 @@ async fn hermes_l711_real_native_rollback_removes_only_current_owned_and_preserv
     let output = h.run(&h.options());
     success(&output);
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        h.plugin.to_string_lossy()
+        Path::new(String::from_utf8(output.stdout).unwrap().trim()),
+        h.plugin.as_path()
     );
     assert!(!h.plugin.exists());
     let state: Value =
@@ -326,8 +326,8 @@ async fn hermes_real_recorded_custom_target_is_removed_while_the_owned_definitio
         fallback_sdk
     );
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().trim(),
-        custom.to_string_lossy()
+        Path::new(String::from_utf8(output.stdout).unwrap().trim()),
+        custom.as_path()
     );
     let state: Value =
         serde_json::from_slice(&fs::read(h.fixture.data.join("deployed-agents.json")).unwrap())

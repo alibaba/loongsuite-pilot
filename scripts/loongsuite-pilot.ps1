@@ -1276,6 +1276,7 @@ function Start-BackgroundDaemon {
     $escapedOutput = ([string]$OutputLog).Replace("'", "''")
     $escapedError = ([string]$ErrorLog).Replace("'", "''")
     @(
+        "Import-Module -Name (`$PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop",
         "`$env:LOONGSUITE_PILOT_DATA_DIR = '$escapedDataDir'",
         "`$env:LOONGSUITE_PILOT_CACHE_DIR = '$escapedCacheDir'",
         "`$env:AGENT_DATA_COLLECTION_CONFIG = '$escapedConfig'",
@@ -1378,6 +1379,7 @@ function Schedule-UpdaterRestart {
     $escapedBin = ([string]$LOONGSUITE_PILOT_BIN).Replace("'", "''")
     $escapedLog = ([string]$UPDATER_LOG_FILE).Replace("'", "''")
     @(
+        "Import-Module -Name (`$PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop",
         "Start-Sleep -Seconds 10",
         "& '$escapedBin' restart-updater *>&1 | Out-File -LiteralPath '$escapedLog' -Append -Encoding UTF8"
     ) | Set-Content -LiteralPath $handoffScript -Encoding Unicode

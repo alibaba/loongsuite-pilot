@@ -1,6 +1,5 @@
 //! Real Windows junction fixture with one fixed cmd template and scoped paths.
 use std::io::{Read, Seek, SeekFrom};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -24,11 +23,16 @@ pub(crate) fn create(target: &Path, alias: &Path, timeout: Duration) {
     let mut stdout = tempfile::tempfile().unwrap();
     let mut stderr = tempfile::tempfile().unwrap();
     let mut command = Command::new(shell);
-    // cmd has its own command-line grammar. Keep the template literal and
-    // scoped paths in environment variables instead of CRT-quoting a command.
+    // Keep cmd's command argument a fixed unquoted ASCII filename. The batch
+    // owns shell parsing; paths remain wide scoped environment values.
+    let batch = tempfile::tempdir().unwrap();
+    std::fs::write(
+        batch.path().join("junction.cmd"),
+        b"@echo off\r\nmklink /J \"%PILOT_TEST_JUNCTION_ALIAS%\" \"%PILOT_TEST_JUNCTION_TARGET%\"\r\nexit %errorlevel%\r\n",
+    ).unwrap();
     command
-        .args(["/d", "/v:off", "/c"])
-        .raw_arg(r#"mklink /J "%PILOT_TEST_JUNCTION_ALIAS%" "%PILOT_TEST_JUNCTION_TARGET%""#)
+        .current_dir(batch.path())
+        .args(["/d", "/v:off", "/c", "junction.cmd"])
         .env("PILOT_TEST_JUNCTION_ALIAS", command_path(alias))
         .env("PILOT_TEST_JUNCTION_TARGET", command_path(target))
         .stdin(Stdio::null())

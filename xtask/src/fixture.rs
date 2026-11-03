@@ -57,8 +57,15 @@ fn main() -> Result<()> {
             std::process::exit(status.code().unwrap_or(1));
         }
         Ok("background-streams") => {
-            println!("private native stdout");
-            eprintln!("private native stderr");
+            if let Some(path) = std::env::var_os("PILOT_FIXTURE_LOG") {
+                let mut path = path;
+                path.push(".streams-mode");
+                fs::write(path, b"background-streams-entered\n")?;
+            }
+            std::io::stdout().write_all(b"private native stdout\n")?;
+            std::io::stdout().flush()?;
+            std::io::stderr().write_all(b"private native stderr\n")?;
+            std::io::stderr().flush()?;
             std::process::exit(7);
         }
         Ok("restart-stderr") => {

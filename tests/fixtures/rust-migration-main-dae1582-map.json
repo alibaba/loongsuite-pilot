@@ -24532,6 +24532,572 @@
           }
         }
       ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-wakeup-lock.test.mjs",
+      "source_hash": "001efe58915fdbd9120c70b848d4498cd3431aaaed34a1036cff82f7fa0b1e73",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source hash and declaration AST, absent at EF; no title-only drift reuse. Linux GNU/glibc2.34 actual run is recorded separately from applicable macOS/Windows targets. Original capacity/read/wait budgets are preserved. Private child fixture is not a coverage target.",
+      "cases": [
+        {
+          "source": {
+            "id": "L12:C1",
+            "title": "does not steal a still-held gate when all lock files look older than the stale timeout",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real SQLite BEGIN IMMEDIATE gate remains owned after every on-disk lock file is aged exactly120 seconds; nested zero-wait callback cannot run, outer value and immediate post-release reacquisition stay exact. Persistent lock database is never unlinked.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_wakeup_history_contract_tests.rs",
+                "test": "old_metadata_never_steals_a_live_sqlite_gate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L26:C1",
+            "title": "recovers immediately after a holder exits without running its finally block",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Real child is inside the production SQLite gate when SIGKILL ends it, with owned marker present and a Drop/finally marker absent. Parent has original3000ms child bound and immediately reacquires with wait0 without deleting the database. Unix requires actual SIGKILL; Windows uses actual TerminateProcess99 rather than pretending POSIX signals exist.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_wakeup_history_contract_tests.rs",
+                "test": "killed_holder_releases_the_real_gate_without_finally_or_stale_file_removal"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L38:C1",
+            "title": "keeps the Hook protocol quiet without swallowing unrelated warnings or retaining a patched handler",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original3000ms real callback process exposes the unrelated stderr warning and no Node experimental SQLite noise. Shipped Native CLI independently requires success, empty stderr and exact {} output. Node process.emitWarning identity/patch restoration is an inapplicable runtime mechanism: Rust gate never replaces an ambient warning handler; the active quiet-protocol and unrelated-diagnostic contracts remain executable.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_wakeup_history_contract_tests.rs",
+                "test": "a_real_gate_callback_keeps_unrelated_stderr_visible"
+              },
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcript_without_runtimes"
+              },
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_coalesces_duplicate_eight_byte_watermark_notices"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L57:C1",
+            "title": "releases the gate after an action throws",
+            "suites": [],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Existing actual SQLite error contract propagates the synthetic action failure, releases the transaction and allows immediate wait0 reacquisition while preserving the gate file/inode. No duplicate callback implementation.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_wakeup.rs",
+                "test": "real_sqlite_connections_share_a_persistent_gate_and_release_after_error"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-sqlite-runtime.test.mjs",
+      "source_hash": "50a28db97c9b63a25b05d2575f0faf9a7e878db200c6fe46879d974eb4518104",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source hash and declaration AST, absent at EF; no title-only drift reuse. Linux GNU/glibc2.34 actual run is recorded separately from applicable macOS/Windows targets. Original capacity/read/wait budgets are preserved. Private child fixture is not a coverage target.",
+      "cases": [
+        {
+          "source": {
+            "id": "L10:C3",
+            "title": "distinguishes unavailable SQLite from lock contention and preserves the Hook protocol",
+            "suites": [
+              "%s SQLite runtime selection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qodercn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Only the old Node --no-experimental-sqlite/runtime-sqlite-unavailable mechanism is retired. These two shipping Qoder Hook wrappers now exec the Native binary; Cargo links rusqlite with bundled SQLite. A Node CLI flag cannot disable the embedded library, so runtime-sqlite-unavailable is no longer a product state. Real gate contention/error recovery and quiet Native Hook protocol remain covered; this does not retire SQLite locking, capacity diagnostics or the separate Agent-owned Node/Host interception runtimes.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Only the old Node --no-experimental-sqlite/runtime-sqlite-unavailable mechanism is retired. These two shipping Qoder Hook wrappers now exec the Native binary; Cargo links rusqlite with bundled SQLite. A Node CLI flag cannot disable the embedded library, so runtime-sqlite-unavailable is no longer a product state. Real gate contention/error recovery and quiet Native Hook protocol remain covered; this does not retire SQLite locking, capacity diagnostics or the separate Agent-owned Node/Host interception runtimes.",
+            "replacement": [
+              {
+                "file": "src/hook_process/qoder_wakeup.rs",
+                "test": "real_sqlite_connections_share_a_persistent_gate_and_release_after_error"
+              },
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcript_without_runtimes"
+              },
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_coalesces_duplicate_eight_byte_watermark_notices"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L22:C3",
+            "title": "validates managed runtime %s without spawning it",
+            "suites": [
+              "%s SQLite runtime selection"
+            ],
+            "parameters": [
+              "describe.each(['qoder', 'qodercn'])",
+              "it.each([['18.20.8', false], ['20.19.0', false], ['22.12.0', false], ['22.13.0', true],\n    ['22.22.2', true], ['23.3.0', false], ['23.4.0', true], ['24.0.0', true]])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Managed Node acquisition/path-version checks (18/20/22.12/22.13/22.22/23.3/23.4/24) belonged exclusively to the former qoder/qodercn collector launch wrappers. Both wrappers now select --wakeup-only Native commands and shared/native entry resolution without locating/probing/spawning Node. Runtime selection was removed, rather than rebuilding unused Node machinery. Actual CLI runs with an empty runtime PATH, and all six Unix launchers preserve the installed Native route. Agent-owned Node runtime and retained Host tests remain in scope elsewhere.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "retired",
+            "reason": "Managed Node acquisition/path-version checks (18/20/22.12/22.13/22.22/23.3/23.4/24) belonged exclusively to the former qoder/qodercn collector launch wrappers. Both wrappers now select --wakeup-only Native commands and shared/native entry resolution without locating/probing/spawning Node. Runtime selection was removed, rather than rebuilding unused Node machinery. Actual CLI runs with an empty runtime PATH, and all six Unix launchers preserve the installed Native route. Agent-owned Node runtime and retained Host tests remain in scope elsewhere.",
+            "replacement": [
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcript_without_runtimes"
+              },
+              {
+                "file": "tests/qodercn_shell_history.rs",
+                "test": "all_supported_shell_launchers_preserve_exact_unicode_stdin_and_quoted_agent_argv"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-thin-hook.test.mjs",
+      "source_hash": "be728b5feda8d4f8001acb02f96a6e696e88afa53be5b9dfd3e8132be4c95402",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source hash and declaration AST, absent at EF; no title-only drift reuse. Linux GNU/glibc2.34 actual run is recorded separately from applicable macOS/Windows targets. Original capacity/read/wait budgets are preserved. Private child fixture is not a coverage target.",
+      "cases": [
+        {
+          "source": {
+            "id": "L20:C3",
+            "title": "never opens transcript content or forks retry workers (%s)",
+            "suites": [
+              "Qoder thin installed entry point"
+            ],
+            "parameters": [
+              "it.each(['qoder', 'qoder-cn'])"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Native binary, both qoder/qoder-cn, exact sparse128MiB file, literal session/../safe, all4 original events, original3000ms per invocation, success+{}+empty stderr, one source and4 distinct exact metadata notices. Unix additionally denies all transcript permissions, drops root UID for only the owned child and verifies a same-UID open negative control before publication: body access really cannot succeed. No prompt/tool body copying or legacy hooks/history workers. Windows retains sparse-size/protocol/metadata checks; Unix permission control is not claimed as a Windows run. Reachable --wakeup-only branch returns before inline/retry logic; no Node runtime is available.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcript_without_runtimes"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L57:C3",
+            "title": "coalesces duplicate wakeups at one file watermark without dropping distinct event facts",
+            "suites": [
+              "Qoder thin installed entry point"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Two actual Native qoder-cn Stop invocations at the exact8-byte watermark coalesce to one source/one notice; the separate128MiB contract retains four distinct event facts. Original3000ms invocation bounds and collector-owned cursor semantics stay unchanged.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_coalesces_duplicate_eight_byte_watermark_notices"
+              },
+              {
+                "file": "tests/qoder_thin_hook_history.rs",
+                "test": "shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcript_without_runtimes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qoder-wakeup-concurrency.test.mjs",
+      "source_hash": "16219028d1b8725d282c6e087260d4d97f6154090694a1d372bddb479affb295",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source hash and declaration AST, absent at EF; no title-only drift reuse. Linux GNU/glibc2.34 actual run is recorded separately from applicable macOS/Windows targets. Original capacity/read/wait budgets are preserved. Private child fixture is not a coverage target.",
+      "cases": [
+        {
+          "source": {
+            "id": "L19:C3",
+            "title": "reserves the last context slot before another process can publish",
+            "suites": [
+              "Qoder wakeup capacity under competing writers"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Preseed exactly127 contexts, start4 real publisher processes, wait for all private ready markers, then race under the production SQLite lock. A cfg(test)-only private callback pauses after the actual last-slot capacity check and before the actual atomic metadata commit, inside the actual lock; no copied publisher or product test environment/API. Original4-second competition deadline and150ms held publication interval stay exact. Only1 accepts, final128 events/source.json and absence of .lock leftovers are asserted. Child startup is outside competition, matching original IPC-ready ordering. Existing16KiB metadata/capacity budget remains enforced.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/hook_process/qoder_wakeup_history_contract_tests.rs",
+                "test": "four_real_ready_processes_cannot_overbook_the_last_context_slot"
+              },
+              {
+                "file": "src/hook_process/qoder_wakeup.rs",
+                "test": "publisher_keeps_the_original_128_context_bound_and_16k_metadata_bound"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/unit/hooks/qodercn-shell-execution.test.mjs",
+      "source_hash": "e7bd6cda7e564a8fe33600d70df8a02e987c54562ed3bc4ba0ebbaa05d4d7794",
+      "coverage": "complete",
+      "rust": [],
+      "note": "Exact Dae source hash and declaration AST, absent at EF; no title-only drift reuse. Linux GNU/glibc2.34 actual run is recorded separately from applicable macOS/Windows targets. Original capacity/read/wait budgets are preserved. Private child fixture is not a coverage target.",
+      "cases": [
+        {
+          "source": {
+            "id": "L64:C5",
+            "title": "`hands stdin and the agent argument to Node via ${launcher.name}`",
+            "suites": [
+              "Qoder CN Hook shell execution"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform === 'win32')",
+              "LAUNCHERS",
+              "it.skipIf(launcher.skip)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped wrapper/shared entry through direct,bash,bash--posix,sh,optional dash,inherited POSIXLY_CORRECT=1 sh. Exact Chinese payload including2 trailing newlines and quoted/spaced/Chinese custom agent remain byte/argv exact at the exec boundary, observed with private Bash builtin capture replacing the old Node CAPTURE mock. Native command prefix/--wakeup-only/--agent-id/--log-prefix are explicitly asserted. Original10000ms per launcher, no Node. This observer alone is not claimed as actual collector execution.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qodercn_shell_history.rs",
+                "test": "all_supported_shell_launchers_preserve_exact_unicode_stdin_and_quoted_agent_argv"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L83:C5",
+            "title": "`collects a Qoder CN transcript via ${launcher.name} without replay`",
+            "suites": [
+              "Qoder CN Hook shell execution"
+            ],
+            "parameters": [
+              "describe.skipIf(process.platform === 'win32')",
+              "LAUNCHERS",
+              "it.skipIf(launcher.skip)"
+            ]
+          },
+          "coverage": "complete",
+          "behavior": "Every supported Unix launcher first performs actual installer-helper stage-package+publish-package against private checksummed Native package and detected private QoderCN settings, replacing the original broken wrapper and shared assets byte-for-byte within original10000ms upgrade bound. Then actual shipped Native processor publishes the original three-row prompt/answer/last-prompt fixture and actual QoderCnTraceInput emits session/agent/prompt/answer. Stop drains a real disk checkpoint; second wrapper invocation plus a new StateStore loaded from disk and a completed actual collection/save cycle emits no replay. The no-token reader is explicitly synthetic; ownership resolves through a real private SQLite database. No Node postinstall/old collector is restored, no personal profile/SLS/service startup.",
+          "platforms": [
+            "linux",
+            "macos"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qodercn_shell_history.rs",
+                "test": "all_supported_shell_launchers_upgrade_stale_assets_and_collect_once_across_disk_checkpoint_restart"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/qwen-subagent-event-log-flow.test.ts",
+      "source_hash": "d8e929a851239c199f8e105dc829c4d16dae78e2fd0226a64204133ccc4e8c4d",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All4 exact EF/main integration declarations are now actual Native Hook-to-physical-JSONL-to-production-normalization-to-real-JSONL/OTLP-flusher contracts. Seven scoped source files, including the test and original fixture, are compared by actual Git bytes, not titles. Only the exporter sink is injected; conversion and publication are production. This preserves the original direct transformHookRecord boundary; it does not claim a live personal Qwen session or an all-Agent collector E2E. Existing converter-only recursion/ambiguity tests remain in the codebase. Actual Linux GNU/glibc2.34 execution is distinct from applicable macOS/Windows tests.",
+      "cases": [
+        {
+          "source": {
+            "id": "L56:C3",
+            "title": "waits for the explicit seal and exports one recursively nested trace",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Actual shipped Native stop CLI has original15000ms invocation bound and writes the original synthetic recursive fixture to physical Hook JSONL. Production transform_hook_record then feeds both real JSONL and OTLP flushers, with only the endpoint exporter captured and the default real converter. Sending every record except the original final root seal leaves0 exported spans,0 converter calls and1 complete pending buffer containing the entire prefix, including child terminal facts. The seal produces exactly1ENTRY,3AGENT,5LLM,5STEP,2TOOL, one trace, unique span IDs, every parent present and containing each child time range, correct child AGENT-to-parent TOOL links, separate root/child/grandchild input usage50/22/5 and total LLM77. Actual normalized JSONL is also persisted and counted. No old Collector implementation or Node product runtime.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_hook_and_normalization_wait_for_seal_before_exporting_recursive_jsonl_and_spans"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L73:C3",
+            "title": "keeps parallel nested agents with identical native tool IDs separate",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original pure fixture builder mutations create two parallel root agent tools, two children and two grandchildren sharing the native nested-call identifier. Actual Native Hook and production normalization/JSONL/OTLP keep5AGENT,8LLM,4TOOL with4 distinct final tool IDs, one trace, unique span IDs, exact parent links and containment. Literal rows and metadata are generated directly from the unchanged pinned original fixture builders; they are not hand-simplified converter-only samples.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_parallel_children_and_grandchildren_keep_identical_native_tool_ids_separate"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L88:C3",
+            "title": "keeps child lifecycle and collection diagnostics in final spans",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "Original grandchild meta status=failed travels through actual Native Hook, physical event JSONL, real production normalizer and default OTLP flusher/converter to the final grandchild AGENT: preserved agent.qwen-code-cli.subagent.status=failed and status.code2. Every TOOL keeps collection=collected. Full recursive topology/time containment and real normalized JSONL persist too.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_failed_child_status_and_collection_diagnostics_reach_final_spans"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L98:C3",
+            "title": "exports child content despite a legacy content opt-out without changing topology",
+            "suites": [
+              "Qwen Hook → normalization → real OTLP span conversion"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "At both EF and current main, the original assertion explicitly requires SENSITIVE content despite the legacy agents.qwen-code-cli.captureMessageContent:false field. The private config contains that exact old false field; actual Native Hook and real normalization/JSONL/OTLP still preserve SENSITIVE child content and all3AGENT recursive topology. No legacy content switch/API is restored, and this is not a retired capability or a claim that content is hidden.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "tests/qwen_subagent_event_log_flow.rs",
+                "test": "native_qwen_ignores_the_legacy_content_optout_while_preserving_recursive_topology"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "legacy": "tests/integration/opencode-watchdog-selfheal.test.ts",
+      "source_hash": "56e9fb383e87f05f9d16a8d4317b71dcd39eb442fb80665be5e3a16867d21c2b",
+      "coverage": "complete",
+      "rust": [],
+      "note": "All three exact original integration declarations through actual DeploymentManager, PluginInjectStrategy, Orchestrator target builder and HookWatchdog.run_check. Native requires a complete verified five-resource bundle; the disposable fixture now supplies real source bytes and Native manifest instead of weakening that gate to accept the old lone fake module. Original legacy file URL remains accepted and all repair/healthy-byte/no-asset assertions remain. GNU/glibc2.34 actually passed; other platforms need physical verification.",
+      "cases": [
+        {
+          "source": {
+            "id": "L99:C3",
+            "title": "re-injects the plugin spec after it is overwritten by a third party",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "re-injects the plugin spec after it is overwritten by a third party; actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_reinjects_a_spec_removed_by_a_third_party"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L121:C3",
+            "title": "does not rewrite the config when the spec is already healthy",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "does not rewrite the config when the spec is already healthy; actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_keeps_a_healthy_config_byte_identical"
+              }
+            ]
+          }
+        },
+        {
+          "source": {
+            "id": "L136:C3",
+            "title": "skips repair when the plugin asset is missing (precondition gate)",
+            "suites": [
+              "E2E: opencode plugin-inject watchdog self-heal"
+            ],
+            "parameters": []
+          },
+          "coverage": "complete",
+          "behavior": "skips repair when the plugin asset is missing (precondition gate); actual initial manager deployment, physical config mutation, real orchestrator targets and run_check results, no copied watchdog implementation or callback mock.",
+          "platforms": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "target": {
+            "kind": "rust",
+            "tests": [
+              {
+                "file": "src/core/orchestrator_plugin_inject_history_tests.rs",
+                "test": "integration_opencode_watchdog_skips_missing_assets_without_repairing_config"
+              }
+            ]
+          }
+        }
+      ]
     }
   ]
 }

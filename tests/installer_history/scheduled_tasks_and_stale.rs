@@ -410,6 +410,8 @@ fn stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_
                 .join(format!("service O'Brien [隔离] 🚀.{extension}"));
             let text = if extension == "ps1" {
                 r#"param([string]$Command)
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop
 Add-Content -LiteralPath $env:TEST_TRACE -Value $Command -Encoding UTF8
 [Console]::Error.WriteLine('controlled native stderr progress')
 exit ([int]$env:TEST_EXIT)
@@ -429,7 +431,12 @@ exit /b %TEST_EXIT%
                 if trace.exists() {
                     fs::remove_file(&trace).unwrap();
                 }
-                let mut body = windows_prelude(false);
+                let mut body = windows_prelude(false)
+                    .lines()
+                    .filter(|line| !line.contains("Microsoft.PowerShell.Archive"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                body.push_str("\n$env:PSModulePath = $env:TEST_STALE_CHILD_MODULES\n$env:PILOT_TEST_STAGE='stale-prelude-ready'\n");
                 body.push_str(block(source, STALE).unwrap());
                 body.push_str(r#"
 $prior='old'
@@ -438,7 +445,9 @@ $entry=$env:TEST_ENTRY
 if ($env:TEST_SCENARIO -eq 'fresh') { $prior='' }
 if ($env:TEST_SCENARIO -eq 'newly-started') { $output=@('collector started from current') }
 if ($env:TEST_SCENARIO -eq 'missing') { $entry=Join-Path $env:TEST_PRIVATE_ROOT 'missing.ps1' }
+$env:PILOT_TEST_STAGE='stale-'+$env:TEST_EXTENSION+'-'+$env:TEST_SCENARIO+'-invoke'
 $got=Restart-StaleCollector $entry $prior $output
+$env:PILOT_TEST_STAGE='stale-'+$env:TEST_EXTENSION+'-'+$env:TEST_SCENARIO+'-assert'
 if ($ErrorActionPreference -ne 'Stop') { throw 'restart did not restore caller error policy' }
 if ($env:TEST_SCENARIO -eq 'failure') {
     if ($got -ne $false -or $script:PILOT_LAST_RESTART_ERR -notmatch 'restart-collector \(exit 7\)' -or $script:PILOT_LAST_RESTART_ERR -notmatch 'controlled native stderr progress') { throw ('failed displacement lost actual exit/stderr: '+$script:PILOT_LAST_RESTART_ERR) }
@@ -452,7 +461,12 @@ if ($invoked) {
                 let mut command = powershell_case(&f, &shell, &body);
                 command
                     .env("TEST_ENTRY", &entry)
+                    .env(
+                        "TEST_STALE_CHILD_MODULES",
+                        windows_shells()[0].parent().unwrap().join("Modules"),
+                    )
                     .env("TEST_TRACE", &trace)
+                    .env("TEST_EXTENSION", extension)
                     .env("TEST_SCENARIO", scenario)
                     .env("TEST_PRIVATE_ROOT", f.root.path())
                     .env("TEST_EXIT", if scenario == "failure" { "7" } else { "0" });
@@ -465,6 +479,8 @@ if ($invoked) {
             concat!(
                 "\u{feff}",
                 r#"param([string]$Command)
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop
 Add-Content -LiteralPath $env:TEST_TRACE -Value $Command -Encoding UTF8
 switch ($Command) {
  'start' { Write-Output $env:TEST_START_LINE; exit 0 }
@@ -480,11 +496,18 @@ switch ($Command) {
             if trace.exists() {
                 fs::remove_file(&trace).unwrap();
             }
-            let mut body = windows_prelude(false);
+            let mut body = windows_prelude(false)
+                .lines()
+                .filter(|line| !line.contains("Microsoft.PowerShell.Archive"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            body.push_str("\n$env:PSModulePath = $env:TEST_STALE_CHILD_MODULES\n$env:PILOT_TEST_STAGE='stale-prelude-ready'\n");
             body.push_str(block(source, STALE).unwrap());
             body.push_str(&function(source, "function Start-PilotAndWait {"));
             body.push_str(r#"
+$env:PILOT_TEST_STAGE='stale-actual-start-'+$env:TEST_STALE+'-invoke'
 $got=Start-PilotAndWait -ScriptPath $env:TEST_ENTRY -PriorVersion old -TimeoutSeconds 0
+$env:PILOT_TEST_STAGE='stale-actual-start-'+$env:TEST_STALE+'-assert'
 $expected=$env:TEST_STALE -ne 'true'
 if ($got -ne $expected) { throw 'running status hid a failed actual stale displacement' }
 if ($ErrorActionPreference -ne 'Stop') { throw 'start did not restore caller error policy' }
@@ -497,6 +520,10 @@ if ($env:TEST_STALE -eq 'true') {
             let mut command = powershell_case(&f, &shell, &body);
             command
                 .env("TEST_ENTRY", &entry)
+                .env(
+                    "TEST_STALE_CHILD_MODULES",
+                    windows_shells()[0].parent().unwrap().join("Modules"),
+                )
                 .env("TEST_TRACE", &trace)
                 .env("TEST_STALE", if stale { "true" } else { "false" })
                 .env(

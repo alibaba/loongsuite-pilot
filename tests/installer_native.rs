@@ -2636,6 +2636,9 @@ mod cross_version_upgrade;
 #[path = "installer_history/openclaw_entry.rs"]
 mod installer_openclaw_entry_history;
 
+#[path = "installer_history/probe_transport.rs"]
+mod installer_probe_transport_history;
+
 #[path = "installer_history/config_bridge.rs"]
 mod installer_config_bridge_history;
 
