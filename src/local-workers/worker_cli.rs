@@ -639,3 +639,7 @@ mod tests {
         assert!(!handle_worker_cli(&args(&["agent", "list"]), &mut io).await);
     }
 }
+
+#[cfg(test)]
+#[path = "worker_cli_history_contract_tests.rs"]
+mod history_contract_tests;

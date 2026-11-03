@@ -1205,6 +1205,8 @@ impl Orchestrator {
             let def_for_available = def.clone();
             let def_for_start = def.clone();
             let bits = Arc::clone(&self.bits);
+            let bits_for_available = Arc::clone(&self.bits);
+            let bits_for_start = Arc::clone(&self.bits);
             let agents = Arc::clone(&self.agents);
             let config = self.config.clone();
             let agent_id = def.id.clone();
@@ -1221,16 +1223,28 @@ impl Orchestrator {
                 available: Arc::new(move || {
                     let deployment = Arc::clone(&deployment);
                     let def = def_for_available.clone();
-                    let bits_scope = DeploymentScopeMode::Auto;
-                    let _ = bits_scope;
-                    Box::pin(async move { deployment.is_agent_detected(&def).await })
+                    let bits = Arc::clone(&bits_for_available);
+                    Box::pin(async move {
+                        let recorded =
+                            bits.lock().expect("bits").scope == DeploymentScopeMode::Recorded;
+                        if recorded {
+                            return false;
+                        }
+                        deployment.is_agent_detected(&def).await
+                    })
                 }),
                 start: Arc::new({
                     let deployment = self.deployment.lock().expect("deploy").clone().unwrap();
                     move || {
                         let deployment = Arc::clone(&deployment);
                         let def = def_for_start.clone();
+                        let bits = Arc::clone(&bits_for_start);
                         Box::pin(async move {
+                            let recorded =
+                                bits.lock().expect("bits").scope == DeploymentScopeMode::Recorded;
+                            if recorded {
+                                return Ok(());
+                            }
                             logger("Orchestrator").info(
                                 "new agent discovered, deploying",
                                 Some(&fields(serde_json::json!({ "agentId": def.id }))),
@@ -5544,3 +5558,7 @@ mod tests {
 #[cfg(test)]
 #[path = "orchestrator_privacy_wiring_tests.rs"]
 mod privacy_wiring_contracts;
+
+#[cfg(test)]
+#[path = "orchestrator_deployment_history_contract_tests.rs"]
+mod deployment_history_contract_tests;

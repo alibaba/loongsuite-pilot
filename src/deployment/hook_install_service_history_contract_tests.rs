@@ -398,3 +398,11 @@ async fn source_l326_l345_alarm_marks_cannot_replace_current_install_generation(
     assert_eq!(current.ts, disk.ts);
     assert_eq!(current.alarm_sent, Some(false));
 }
+
+#[cfg(unix)]
+pub(super) async fn with_owner_for_history<F: std::future::Future>(
+    owner: u32,
+    future: F,
+) -> F::Output {
+    HISTORY_OWNER.scope(owner, future).await
+}

@@ -223,6 +223,15 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
     let identity = identity
         .as_ref()
         .and_then(|id| serde_json::from_str::<Value>(&identity_json(id)).ok());
+    // A native terminal hook has resolved the current account, including a
+    // known absence after logout. Preserve that empty result explicitly so a
+    // source created during an earlier account cannot reuse its descriptor.
+    // Legacy/raw notices without account context retain their fallback.
+    let terminal = value
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .is_none_or(|event| matches!(event, "Stop" | "SessionEnd"));
+    let identity = identity.or_else(|| terminal.then(|| json!({"name":"","email":""})));
     let stamp = build_stamp(request.env);
     if super::qoder_wakeup::publish_qoder_wakeup(
         &value,
@@ -3390,7 +3399,7 @@ fn resolve_qoder_cli_user_identity(env: &Env) -> Option<UserIdentity> {
     let home = home_dir(env).join(".qoder");
     resolve_cached_cli_user_identity(
         env,
-        &home.join(".auth/user"),
+        &home.join(".auth").join("user"),
         &identity_cache_file(env),
         cli_executable(&home),
     )
@@ -3411,7 +3420,7 @@ fn resolve_qoder_product_cli_user_identity(
     let executable = cli_executable_for_version(&home, flavor, version.trim())?;
     resolve_cached_cli_user_identity(
         env,
-        &home.join(".auth/user"),
+        &home.join(".auth").join("user"),
         &data_dir(env).join("state/hooks").join(cache),
         Some(executable),
     )

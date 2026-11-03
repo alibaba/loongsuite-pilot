@@ -438,10 +438,13 @@ impl WorkerManifestSupervisor {
                     .cloned()
                     .unwrap_or(json!([]));
                 if !write_status(&paths.status, &json!({"state":"stopping","name":manifest.name,"agentId":agent_id,"pid":pid,"processIdentity":expected,"trackedProcesses":tracked,"updatedAt":iso()})).await { return false; }
+                let grace = Duration::from_secs(5);
+                #[cfg(test)]
+                let grace = history_contract_tests::grace_for_history(grace);
                 if let Err((remaining, error)) = stop_tree_with_journal(
                     self.processes.as_ref(),
                     &expected,
-                    Duration::from_secs(5),
+                    grace,
                     Some(&paths.status),
                 )
                 .await
@@ -2208,3 +2211,7 @@ mod tests {
         assert!(validate_placeholders(&manifest).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "worker_manifest_history_contract_tests.rs"]
+mod history_contract_tests;

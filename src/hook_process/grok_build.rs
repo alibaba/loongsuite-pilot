@@ -1113,7 +1113,22 @@ fn file_mtime_ms(path: &Path) -> Option<i64> {
 }
 
 fn is_transient_rename(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(1) | Some(13) | Some(16))
+    if matches!(
+        err.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ResourceBusy
+    ) {
+        return true;
+    }
+    // Node's EPERM/EACCES/EBUSY are platform-independent. Rust exposes the
+    // underlying OS code; Windows sharing/access errors are not Unix errno.
+    #[cfg(windows)]
+    {
+        matches!(err.raw_os_error(), Some(5) | Some(32) | Some(33))
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(err.raw_os_error(), Some(1) | Some(13) | Some(16))
+    }
 }
 
 fn rename_retrying(mut op: impl FnMut() -> io::Result<()>) -> io::Result<()> {
@@ -4463,12 +4478,145 @@ mod tests {
     }
 
     #[test]
+    fn rename_retries_permission_denied_even_without_a_unix_raw_error_code() {
+        let mut calls = 0;
+        rename_retrying(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "EPERM"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn rename_retry_classification_keeps_permission_busy_and_rejects_unrelated_errors() {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::ResourceBusy] {
+            assert!(is_transient_rename(&io::Error::new(
+                kind,
+                "synthetic typed OS error"
+            )));
+        }
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::WouldBlock,
+        ] {
+            assert!(!is_transient_rename(&io::Error::new(kind, "non-transient")));
+        }
+        let (retry, stop): (&[i32], &[i32]) = if cfg!(windows) {
+            (&[5, 32, 33], &[2, 3, 112])
+        } else {
+            (&[1, 13, 16], &[2, 28, 32])
+        };
+        for code in retry {
+            assert!(
+                is_transient_rename(&io::Error::from_raw_os_error(*code)),
+                "retry OS code {code}"
+            );
+        }
+        for code in stop {
+            assert!(
+                !is_transient_rename(&io::Error::from_raw_os_error(*code)),
+                "stop OS code {code}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_windows_rename_retries_after_a_non_delete_shared_destination_is_released() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.tmp");
+        let destination = dir.path().join("destination.json");
+        fs::write(&source, "new-state").unwrap();
+        fs::write(&destination, "old-state").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+        let (failed, observed) = std::sync::mpsc::channel();
+        let (released, ready) = std::sync::mpsc::channel();
+        let holder = thread::spawn(move || {
+            observed.recv_timeout(Duration::from_secs(1)).unwrap();
+            drop(held);
+            released.send(()).unwrap();
+        });
+        let mut calls = 0;
+        rename_retrying(|| {
+            calls += 1;
+            let result = fs::rename(&source, &destination);
+            if calls == 1 {
+                let error = result
+                    .as_ref()
+                    .expect_err("non-delete-shared Windows destination must block replacement");
+                assert!(
+                    matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33)),
+                    "{error:?}"
+                );
+                failed.send(()).unwrap();
+                ready.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            result
+        })
+        .unwrap();
+        holder.join().unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new-state");
+        assert!(!source.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_windows_persistent_rename_sharing_conflict_keeps_both_files_and_original_retry_budget()
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.tmp");
+        let destination = dir.path().join("destination.json");
+        fs::write(&source, "new-state").unwrap();
+        fs::write(&destination, "old-state").unwrap();
+        let _held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&destination)
+            .unwrap();
+        let mut calls = 0;
+        let started = Instant::now();
+        let error = rename_retrying(|| {
+            calls += 1;
+            fs::rename(&source, &destination)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33)),
+            "{error:?}"
+        );
+        assert_eq!(calls, 3);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "new-state");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "old-state");
+    }
+
+    #[test]
     fn rename_retries_transient_errors() {
         let mut calls = 0;
         let result = rename_retrying(|| {
             calls += 1;
             if calls == 1 {
-                Err(io::Error::from_raw_os_error(1))
+                Err(io::Error::from_raw_os_error(if cfg!(windows) {
+                    5
+                } else {
+                    1
+                }))
             } else {
                 Ok(())
             }

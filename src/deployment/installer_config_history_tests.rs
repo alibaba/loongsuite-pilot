@@ -211,3 +211,193 @@ fn config_diff_shows_safe_storage_type_without_disclosing_other_storage_fields()
     assert!(!diff.contains("synthetic-old-secret"));
     assert!(!diff.contains("synthetic-private-endpoint"));
 }
+
+fn multimodal_history_options(mode: &str, selected: &str) -> Value {
+    json!({
+        "multimodalMode":mode,
+        "multimodalSupportedAgents":"codex,qoder",
+        "selectedAgents":selected,
+        "probeResult":[
+            {"id":"codex","detected":false},
+            {"id":"qoder","detected":false},
+            {"id":"cursor","detected":false}
+        ]
+    })
+}
+fn multimodal_history_complete_sls(options: &mut Value) {
+    for (key, value) in [
+        ("slsEndpoint", "cn-hangzhou.log.aliyuncs.com"),
+        ("slsProject", "agentloop-example"),
+        ("slsLogstore", "agent-event"),
+        ("slsApiKey", "synthetic-multimodal-private-key"),
+    ] {
+        options[key] = json!(value);
+    }
+}
+
+#[test]
+fn multimodal_original_selected_supported_and_existing_unselected_modes() {
+    let got=apply(
+        json!({"agents":{"codex":{"enabled":true},"qoder":{"enabled":true},"cursor":{"enabled":true}}}),
+        multimodal_history_options("all","codex,qoder,cursor")
+    ).unwrap();
+    for id in ["codex", "qoder"] {
+        assert_eq!(got["agents"][id]["multimodal"], json!({"uploadMode":"all"}));
+    }
+    assert!(got["agents"]["cursor"].get("multimodal").is_none());
+    assert!(got["agents"].get("foo").is_none());
+    assert!(got.get("multimodal").is_none());
+    let got = apply(
+        json!({"agents":{"qoder":{"enabled":false},"cursor":{"enabled":true}}}),
+        multimodal_history_options("output", "cursor"),
+    )
+    .unwrap();
+    assert_eq!(
+        got["agents"]["qoder"]["multimodal"],
+        json!({"uploadMode":"none"})
+    );
+    assert!(got["agents"]["cursor"].get("multimodal").is_none());
+    let got=apply(
+        json!({"agents":{"codex":{"enabled":true,"multimodal":{"uploadMode":"all"}},"qoder":{"enabled":true,"multimodal":{"uploadMode":"all"}}}}),
+        multimodal_history_options("all","codex")
+    ).unwrap();
+    assert_eq!(
+        got["agents"]["codex"]["multimodal"],
+        json!({"uploadMode":"all"})
+    );
+    assert_eq!(
+        got["agents"]["qoder"]["multimodal"],
+        json!({"uploadMode":"none"})
+    );
+}
+
+#[test]
+fn multimodal_original_private_missing_probe_selection_is_rejected_and_valid_selection_preserves_roots(
+) {
+    let old = json!({"agents":{"qoder":{"enabled":false,"multimodal":{"uploadMode":"none","allowedRootPaths":["~/workspace"]}}}});
+    let missing = json!({"multimodalMode":"input","multimodalSupportedAgents":"codex,qoder","selectedAgents":"qoder"});
+    let error = apply(old.clone(), missing).unwrap_err();
+    assert!(error.to_string().contains("探测集合外"));
+    assert_eq!(old["agents"]["qoder"]["enabled"], false);
+    let got = apply(old.clone(), multimodal_history_options("input", "qoder")).unwrap();
+    assert_eq!(
+        got["agents"]["qoder"]["multimodal"],
+        json!({"uploadMode":"input","allowedRootPaths":["~/workspace"]})
+    );
+    // Explicit installation selection enables the agent; the original direct
+    // private-writer fixture supplied no probe definitions and kept false.
+    assert_eq!(got["agents"]["qoder"]["enabled"], true);
+    assert_eq!(old["agents"]["qoder"]["enabled"], false);
+}
+
+#[test]
+fn multimodal_original_selection_creates_only_declared_entries_before_upload_mode() {
+    let mut options = multimodal_history_options("all", "codex");
+    options["probeResult"] =
+        json!([{"id":"codex","detected":false},{"id":"cursor","detected":false}]);
+    let got = apply(json!({}), options).unwrap();
+    assert_eq!(
+        got["agents"]["codex"],
+        json!({"enabled":true,"multimodal":{"uploadMode":"all"}})
+    );
+    assert_eq!(got["agents"]["cursor"], json!({"enabled":false}));
+    assert!(got["agents"].get("foo").is_none());
+    assert!(got["agents"].get("qoder").is_none());
+}
+
+#[test]
+fn multimodal_original_omission_none_and_all_agents_preserve_unrelated_configuration() {
+    let old = json!({"agents":{"qoder":{"enabled":true}}});
+    let got = apply(old.clone(), multimodal_history_options("", "")).unwrap();
+    assert_eq!(got["agents"], old["agents"]);
+    assert!(got.get("multimodal").is_none());
+    let mut options = multimodal_history_options("", "");
+    multimodal_history_complete_sls(&mut options);
+    let got = apply(
+        json!({"agents":{"codex":{"enabled":true},"qoder":{"enabled":true}}}),
+        options,
+    )
+    .unwrap();
+    assert!(got["agents"]["codex"].get("multimodal").is_none());
+    assert!(got.get("multimodal").is_none());
+    let storage = json!({"type":"oss","target":{"endpoint":"oss.example.com","storageBasePath":"oss://bucket/prefix"},"auth":{"mode":"ak","accessKeyId":"synthetic-id","accessKeySecret":"synthetic-secret"}});
+    let old = json!({"agents":{"codex":{"enabled":true,"multimodal":{"uploadMode":"all","allowedRootPaths":["~/workspace"]}},"qoder":{"enabled":true,"multimodal":{"uploadMode":"input"}},"cursor":{"enabled":true,"multimodal":{"uploadMode":"all"}}},"multimodal":{"storage":storage}});
+    let mut options = multimodal_history_options("none", "");
+    multimodal_history_complete_sls(&mut options);
+    let got = apply(old, options).unwrap();
+    for id in ["codex", "qoder"] {
+        assert_eq!(got["agents"][id], json!({"enabled":true}));
+    }
+    assert_eq!(
+        got["agents"]["cursor"]["multimodal"],
+        json!({"uploadMode":"all"})
+    );
+    assert_eq!(got["multimodal"]["storage"], storage);
+    let mut options = multimodal_history_options("all", "");
+    options["allAgentsMode"] = json!(true);
+    let got=apply(
+        json!({"agents":{"cursor":{"enabled":false,"extra":true},"qoder":{"enabled":false,"multimodal":{"uploadMode":"none","allowedRootPaths":["~/workspace"]}}}}),
+        options
+    ).unwrap();
+    assert_eq!(
+        got["agents"]["codex"],
+        json!({"multimodal":{"uploadMode":"all"}})
+    );
+    assert_eq!(
+        got["agents"]["qoder"],
+        json!({"multimodal":{"uploadMode":"all","allowedRootPaths":["~/workspace"]}})
+    );
+    assert_eq!(got["agents"]["cursor"], json!({"extra":true}));
+}
+
+#[test]
+fn multimodal_original_four_tuple_replaces_storage_without_destroying_other_user_fields() {
+    let expected = json!({"type":"sls","target":{"endpoint":"cn-hangzhou.log.aliyuncs.com","project":"agentloop-example","logstore":"agent-event"}});
+    for old_storage in [
+        None,
+        Some(
+            json!({"type":"oss","target":{"endpoint":"oss.example.com","storageBasePath":"oss://bucket/prefix"},"auth":{"mode":"ak","accessKeyId":"synthetic-id","accessKeySecret":"synthetic-old-secret"}}),
+        ),
+    ] {
+        let mut old = json!({"agents":{"codex":{"enabled":true},"qoder":{"enabled":true}},"multimodal":{"extra":true}});
+        if let Some(storage) = old_storage {
+            old["multimodal"]["storage"] = storage;
+        }
+        let mut options = multimodal_history_options("input", "codex,qoder");
+        multimodal_history_complete_sls(&mut options);
+        let got = apply(old.clone(), options).unwrap();
+        assert_eq!(got["multimodal"]["storage"], expected);
+        assert!(got["multimodal"]["storage"].get("auth").is_none());
+        // Preserving this user field intentionally differs from the old
+        // JavaScript writer's replacement of the whole multimodal object.
+        assert_eq!(got["multimodal"]["extra"], true);
+        assert!(!changed_fields(&old, &got).contains("synthetic-old-secret"));
+    }
+    let mut options = multimodal_history_options("all", "codex,qoder");
+    multimodal_history_complete_sls(&mut options);
+    options["slsApiKey"] = json!("");
+    let got = apply(
+        json!({"agents":{"codex":{"enabled":true},"qoder":{"enabled":true}}}),
+        options,
+    )
+    .unwrap();
+    assert_eq!(
+        got["agents"]["codex"]["multimodal"],
+        json!({"uploadMode":"all"})
+    );
+    assert!(got.get("multimodal").is_none());
+}
+
+#[test]
+fn multimodal_original_safe_storage_overwrite_diff_uses_production_merge() {
+    let old = json!({"multimodal":{"storage":{"type":"oss","auth":{"accessKeySecret":"synthetic-original-storage-secret"}}}});
+    let mut options = multimodal_history_options("all", "codex,qoder");
+    multimodal_history_complete_sls(&mut options);
+    let next = apply(old.clone(), options).unwrap();
+    let diff = changed_fields(&old, &next);
+    assert!(diff
+        .lines()
+        .any(|x| x == "multimodal.storage.type: oss -> sls"));
+    assert!(!diff.contains("synthetic-original-storage-secret"));
+    assert!(!diff.contains("synthetic-multimodal-private-key"));
+}

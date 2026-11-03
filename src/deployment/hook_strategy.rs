@@ -624,8 +624,51 @@ impl HookStrategy {
                 super::codex_trust_writer::read_config_snapshot(&resolve_home(&trust.config_path))
                     .map_err(|err| format!("无法读取 Codex config.toml：{err}"))?
             {
-                toml::from_str::<toml::Value>(&raw)
-                    .map_err(|_| "invalid Codex config.toml，未修改配置".to_string())?;
+                if toml::from_str::<toml::Value>(&raw).is_err() {
+                    // Duplicate owned hook-state sections can be repaired, but
+                    // only the normal strict planner may authorize that edit.
+                    // Derive keys from actual installed matching commands;
+                    // arbitrary trust keys and invalid unrelated TOML stay fatal.
+                    let retired = self.build_retired_hook_definitions(def);
+                    let events: Vec<_> = hook
+                        .events
+                        .iter()
+                        .cloned()
+                        .chain(
+                            retired
+                                .iter()
+                                .filter_map(|item| item.hook_json_path.last().cloned()),
+                        )
+                        .collect();
+                    let all = self.resolve_codex_hooks_from_data(
+                        def,
+                        &events,
+                        true,
+                        &document.data,
+                        true,
+                    )?;
+                    let hooks_json = node_resolve(&resolve_home(&hook.settings_path));
+                    let retired_keys = all
+                        .iter()
+                        .filter(|(event, _)| !hook.events.contains(event))
+                        .map(|(_, location)| installed_hook_state_key(&hooks_json, location))
+                        .collect();
+                    let opts = TrustOpts::Installed(InstalledTrustOpts {
+                        config_path: resolve_home(&trust.config_path),
+                        hooks_json_abs_path: hooks_json,
+                        locations: all
+                            .into_iter()
+                            .filter(|(event, _)| hook.events.contains(event))
+                            .collect(),
+                        retired_keys,
+                        marker: trust.marker.clone(),
+                    });
+                    let planned = plan_trusted_hashes(&opts, Some(&raw))
+                        .map_err(|_| "invalid Codex config.toml，未修改配置".to_string())?
+                        .ok_or_else(|| "invalid Codex config.toml，未修改配置".to_string())?;
+                    toml::from_str::<toml::Value>(&planned)
+                        .map_err(|_| "invalid Codex config.toml，未修改配置".to_string())?;
+                }
             }
         }
         if hook.kiro_agent.is_some() {
@@ -790,10 +833,16 @@ impl HookStrategy {
         }
         if let Some(cfg) = &hook.trust_toml {
             let original = snapshot("trust")?;
-            if let Some(raw) = &original {
-                toml::from_str::<toml::Value>(raw)
-                    .map_err(|_| "invalid Codex config.toml，未修改配置".to_string())?;
+            if uninstall {
+                if let Some(raw) = &original {
+                    toml::from_str::<toml::Value>(raw)
+                        .map_err(|_| "invalid Codex config.toml，未修改配置".to_string())?;
+                }
             }
+            // Installation validates the fresh snapshot through the strict
+            // owned-key trust planner and verifies its complete result below.
+            // Parsing the unreconciled duplicate tables first would prevent
+            // that existing repair path from ever running.
             let owned_keys: Vec<_> = old_locations
                 .values()
                 .map(|location| installed_hook_state_key(&hooks_json, location))
@@ -2251,3 +2300,7 @@ mod tests {
 #[cfg(test)]
 #[path = "hook_strategy_contract_tests.rs"]
 mod migration_contract_tests;
+
+#[cfg(test)]
+#[path = "codex_trust_reconciliation_history_contract_tests.rs"]
+mod trust_reconciliation_history_contract_tests;

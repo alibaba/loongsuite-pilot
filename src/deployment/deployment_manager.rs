@@ -64,6 +64,8 @@ pub struct DeploymentManager {
     detection_calls: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     undeploy_calls: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    history_strategy_detection_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl DeploymentManager {
@@ -126,6 +128,8 @@ impl DeploymentManager {
             detection_calls: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             undeploy_calls: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            history_strategy_detection_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -808,6 +812,9 @@ impl DeploymentManager {
     }
 
     async fn detect_target(&self, def: &AgentDefinition) -> bool {
+        #[cfg(test)]
+        self.history_strategy_detection_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match def.deploy_mode {
             DeployMode::Hook => self.hook.detect(def).await,
             DeployMode::PluginProbe => self.probe.detect(def).await,
@@ -1338,3 +1345,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "deployment_manager_history_contract_tests.rs"]
+mod history_contract_tests;

@@ -341,70 +341,10 @@ mod migration_contract_tests {
     }
     #[cfg(windows)]
     fn link_directory(target: &Path, alias: &Path) {
-        use std::io::{Read, Seek, SeekFrom};
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
-        // Pass fixture paths as process environment values, never through cmd
-        // or PowerShell source interpolation. New-Item supports real junctions
-        // without the cmd built-in's second command-line quoting grammar.
-        fn junction_path(path: &Path) -> String {
-            let raw = path.to_str().expect("fixture UTF-8 path");
-            if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
-                format!(r"\\{unc}")
-            } else {
-                raw.strip_prefix(r"\\?\").unwrap_or(raw).to_owned()
-            }
-        }
-        let command_path =
-            std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
-                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let mut stdout = tempfile::tempfile().unwrap();
-        let mut stderr = tempfile::tempfile().unwrap();
-        let mut command = Command::new(command_path);
-        command
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:PILOT_JUNCTION_LINK -Target $env:PILOT_JUNCTION_TARGET | Out-Null"])
-            .env("PILOT_JUNCTION_LINK", junction_path(alias))
-            .env("PILOT_JUNCTION_TARGET", junction_path(target))
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout.try_clone().unwrap()))
-            .stderr(Stdio::from(stderr.try_clone().unwrap()));
-        let mut child =
-            crate::utils::candidate_process::CandidateChild::spawn(&mut command).unwrap();
-        let started = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break Some(status);
-            }
-            // Cold PowerShell startup on ARM runners can exceed five seconds.
-            // This bounds fixture creation; collector command budgets are unchanged.
-            if started.elapsed() >= Duration::from_secs(30) {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        drop(child);
-        stdout.seek(SeekFrom::Start(0)).unwrap();
-        stderr.seek(SeekFrom::Start(0)).unwrap();
-        let mut out_bytes = Vec::new();
-        let mut err_bytes = Vec::new();
-        stdout
-            .take(1024 * 1024)
-            .read_to_end(&mut out_bytes)
-            .unwrap();
-        stderr
-            .take(1024 * 1024)
-            .read_to_end(&mut err_bytes)
-            .unwrap();
-        let out = String::from_utf8_lossy(&out_bytes);
-        let err = String::from_utf8_lossy(&err_bytes);
-        assert!(
-            status.is_some_and(|status| status.success()),
-            "junction creation failed: status={status:?} stdout={out:?} stderr={err:?}"
-        );
-        assert_eq!(
-            std::fs::canonicalize(alias).unwrap(),
-            std::fs::canonicalize(target).unwrap()
+        crate::utils::windows_test_junction::create(
+            target,
+            alias,
+            std::time::Duration::from_secs(30),
         );
     }
     #[test]

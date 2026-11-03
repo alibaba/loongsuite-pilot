@@ -237,7 +237,7 @@ $ExcludeWorkspace=@()
 $json=Get-InstallConfigJson
 if (($json | ConvertFrom-Json).excludeWorkspaces) { throw 'omission became an explicit replacement' }
 Write-Config
-$preserved=Get-Content -Raw -LiteralPath (Join-Path $DataDir 'config.json') | ConvertFrom-Json
+$preserved=Get-Content -Encoding UTF8 -Raw -LiteralPath (Join-Path $DataDir 'config.json') | ConvertFrom-Json
 if (@($preserved.privacy.excludeWorkspaces).Count -ne 1 -or $preserved.privacy.excludeWorkspaces[0] -ne $env:TEST_OLD_PATH) { throw 'omitted option erased existing workspace exclusions' }
 if (-not $preserved.privacy.custom -or $preserved.userId -ne 'existing') { throw 'omitted option changed unrelated user settings' }
 $ExcludeWorkspace=@($env:TEST_PATH0,$env:TEST_PATH1)
@@ -278,16 +278,16 @@ fn original_public_powershell_parser_checks_flags_before_resolving_packages_in_b
         let mut script = windows_prelude(false);
         script.push_str(r#"
 $cases=@(
-    @{ args=@('-InterceptorMode','audit'); expected='Unknown interceptor mode' },
-    @{ args=@('-InterceptorMode','custom'); expected='InterceptorTypes is required' },
-    @{ args=@('-InterceptorTypes','apiKey'); expected='can only be used' },
-    @{ args=@('-MaskReplacementMode','unsafe'); expected='Unknown mask replacement mode' },
-    @{ args=@('-ExcludeWorkspace','relative'); expected='requires absolute local directories' },
-    @{ args=@('-MultimodalMode','all'); expected='requires -SlsEndpoint' }
+    @{ parameters=@{InterceptorMode='audit'}; expected='Unknown interceptor mode' },
+    @{ parameters=@{InterceptorMode='custom'}; expected='InterceptorTypes is required' },
+    @{ parameters=@{InterceptorTypes='apiKey'}; expected='can only be used' },
+    @{ parameters=@{MaskReplacementMode='unsafe'}; expected='Unknown mask replacement mode' },
+    @{ parameters=@{ExcludeWorkspace=@('relative')}; expected='requires absolute local directories' },
+    @{ parameters=@{MultimodalMode='all'}; expected='requires -SlsEndpoint' }
 )
 foreach ($case in $cases) {
     $caught=$null
-    $arguments=$case.args
+    $arguments=$case.parameters
     try { & $env:TEST_PARAMETER_SCRIPT @arguments | Out-Null } catch { $caught="$_" }
     if (-not $caught -or $caught -notlike ('*'+$case.expected+'*')) { throw ('wrong parameter rejection: '+$case.expected) }
 }
@@ -298,6 +298,303 @@ if ($accepted -ne 'PILOT_PARAMETER_PARSE_OK') { throw 'valid public flags were r
         command.env("TEST_PARAMETER_SCRIPT", &parse);
         success(&bounded(command));
         assert!(!f.data.exists());
+        assert!(!f.root.path().join("cache").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn original_multimodal_public_bash_parser_rejects_each_blank_tuple_and_accepts_all_modes() {
+    let f = Fixture::new();
+    let source = include_str!("../../deploy/installer-opensource.sh");
+    let prelude = source
+        .split_once("# Validate current user and sudo access on Linux")
+        .unwrap()
+        .0;
+    let parse = f.root.path().join("multimodal-parse.sh");
+    fs::write(&parse,format!("{prelude}\nprintf '%s\\n' \"$MULTIMODAL_MODE\" \"$MULTIMODAL_SUPPORTED_AGENTS\" \"$MULTIMODAL_MODE_SET\"\n")).unwrap();
+    let tuple = [
+        ("--sls-endpoint", "https://cn-hangzhou.log.aliyuncs.com"),
+        ("--sls-project", "agentloop-example"),
+        ("--sls-logstore", "agent-event"),
+        ("--sls-api-key", "synthetic-private-multimodal-key"),
+    ];
+    for mode in ["none", "input", "output", "all"] {
+        for equals in [false, true] {
+            let mut command = f.command(Path::new("/bin/bash"));
+            command.arg(&parse).arg("install");
+            if equals {
+                command.arg(format!("--multimodal-mode={mode}"));
+            } else {
+                command.args(["--multimodal-mode", mode]);
+            }
+            for (key, value) in tuple {
+                if equals {
+                    command.arg(format!("{key}={value}"));
+                } else {
+                    command.args([key, value]);
+                }
+            }
+            let out = bounded(command);
+            success(&out);
+            assert_eq!(
+                String::from_utf8(out.stdout)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                [mode, "codex,qoder", "1"]
+            );
+        }
+    }
+    for blank_index in 0..tuple.len() {
+        for blank in ["   ", "\t"] {
+            let mut command = f.command(Path::new("/bin/bash"));
+            command
+                .arg(&parse)
+                .args(["install", "--multimodal-mode", "all"]);
+            for (i, (key, value)) in tuple.iter().enumerate() {
+                command.args([*key, if i == blank_index { blank } else { *value }]);
+            }
+            let out = bounded(command);
+            assert!(!out.status.success());
+            let error = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                error.contains(
+                    "requires --sls-endpoint, --sls-project, --sls-logstore, and --sls-api-key"
+                ),
+                "{error}"
+            );
+            assert!(!error.contains("synthetic-private-multimodal-key"));
+        }
+    }
+    let mut command = f.command(Path::new("/bin/bash"));
+    command.arg(&parse).args([
+        "install",
+        "--multimodal-mode",
+        "all",
+        "--sls-endpoint=   ",
+        "--sls-project",
+        "agentloop-example",
+        "--sls-logstore",
+        "agent-event",
+        "--sls-api-key",
+        "synthetic-private-multimodal-key",
+    ]);
+    assert!(!bounded(command).status.success());
+    let mut command = f.command(Path::new("/bin/bash"));
+    command.arg(&parse).args([
+        "install",
+        "--multimodal-mode",
+        "all",
+        "--sls-endpoint",
+        "https://cn-hangzhou.log.aliyuncs.com",
+        "--sls-project",
+        "agentloop-example",
+        "--sls-logstore",
+        "agent-event",
+    ]);
+    assert!(!bounded(command).status.success());
+    let mut command = f.command(Path::new("/bin/bash"));
+    command.arg(&parse).args([
+        "install",
+        "--multimodal-mode",
+        "none",
+        "--sls-endpoint",
+        "   ",
+    ]);
+    success(&bounded(command));
+    assert!(!f.data.exists());
+    assert!(!f.root.path().join("cache").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn original_multimodal_public_powershell_parser_checks_every_blank_tuple_in_both_shells() {
+    for shell in windows_shells() {
+        let f = Fixture::new();
+        let source = include_str!("../../deploy/installer-opensource.ps1");
+        let prelude = source.split_once("# Resolve package URL").unwrap().0;
+        let parse = f.root.path().join("multimodal-public-parser.ps1");
+        fs::write(&parse, format!("{prelude}\n'PILOT_MULTIMODAL_PARSE_OK'\n")).unwrap();
+        let mut script = windows_prelude(false);
+        script.push_str(r#"
+$tuple=@{SlsEndpoint='https://cn-hangzhou.log.aliyuncs.com';SlsProject='agentloop-example';SlsLogstore='agent-event';SlsApiKey='synthetic-private-multimodal-key'}
+foreach ($mode in @('none','input','output','all')) {
+    $arguments=@{MultimodalMode=$mode}
+    foreach ($key in $tuple.Keys) {$arguments[$key]=$tuple[$key]}
+    $accepted=& $env:TEST_PARAMETER_SCRIPT @arguments
+    if ($accepted -ne 'PILOT_MULTIMODAL_PARSE_OK') {throw 'valid multimodal mode was rejected'}
+}
+foreach ($blankAt in @('SlsEndpoint','SlsProject','SlsLogstore','SlsApiKey')) {
+    foreach ($blank in @('   ',([string][char]9))) {
+        $arguments=@{MultimodalMode='all'}
+        foreach ($key in $tuple.Keys) {$arguments[$key]=$tuple[$key]}
+        $arguments[$blankAt]=$blank
+        $caught=$null
+        try { & $env:TEST_PARAMETER_SCRIPT @arguments | Out-Null } catch {$caught="$_"}
+        if (-not $caught -or $caught -notmatch 'requires -Sls\s*Endpoint,\s*-SlsProject,\s*-SlsLogstore,\s*and -SlsApiKey') {throw 'wrong multimodal tuple rejection'}
+        if ($caught -like '*synthetic-private-multimodal-key*') {throw 'credentials appeared in diagnostic'}
+    }
+}
+$accepted=& $env:TEST_PARAMETER_SCRIPT -MultimodalMode none -SlsEndpoint '   '
+if ($accepted -ne 'PILOT_MULTIMODAL_PARSE_OK') {throw 'none must permit an incomplete tuple'}
+"#);
+        let mut command = windows_command(&f, &shell, &script);
+        command.env("TEST_PARAMETER_SCRIPT", &parse);
+        success(&bounded(command));
+        assert!(!f.data.exists());
+        assert!(!f.root.path().join("cache").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn original_multimodal_public_bash_writer_roundtrips_modes_and_stops_after_native_write_failure() {
+    for scenario in ["all", "none", "array", "corrupt"] {
+        let f = Fixture::new();
+        fs::create_dir_all(&f.data).unwrap();
+        let original=match scenario {
+            "array"=>"{\"sls\":[{},{}]}".to_owned(),
+            "corrupt"=>"{broken".to_owned(),
+            _=>json!({"agents":{"qoder":{"enabled":false,"multimodal":{"uploadMode":"output","allowedRootPaths":["~/workspace"]}},"cursor":{"enabled":true,"multimodal":{"uploadMode":"all"}}},"multimodal":{"extra":true,"storage":{"type":"oss","target":{"storageBasePath":"oss://bucket/prefix"}}}}).to_string()
+        };
+        fs::write(f.data.join("config.json"), &original).unwrap();
+        let source = include_str!("../../deploy/installer-opensource.sh");
+        let prelude = source
+            .split_once("# Validate current user and sudo access on Linux")
+            .unwrap()
+            .0;
+        let mut script = prelude.to_owned();
+        for name in [
+            "native_installer_helper",
+            "installer_config_operation",
+            "write_config",
+        ] {
+            script.push_str(&function(source, &format!("{name}() {{")));
+        }
+        script.push_str(
+            "\nmsg() { :; }\nPROBE_RESULT='[]'\nwrite_config\nprintf 'NATIVE_WRITE_CONTINUED\\n'\n",
+        );
+        let path = f.root.path().join("multimodal-public-writer.sh");
+        fs::write(&path, script).unwrap();
+        let mut command = f.command(Path::new("/bin/bash"));
+        command
+            .arg(&path)
+            .args([
+                "install",
+                "--all-agents",
+                "--multimodal-mode",
+                if scenario == "none" { "none" } else { "all" },
+                "--sls-endpoint",
+                "cn-hangzhou.log.aliyuncs.com",
+                "--sls-project",
+                "agentloop-example",
+                "--sls-logstore",
+                "agent-event",
+                "--sls-api-key",
+                "synthetic-multimodal-api-key",
+                "--data-dir",
+            ])
+            .arg(&f.data)
+            .env("INSTALL_SRC", &f.candidate);
+        let out = bounded(command);
+        if matches!(scenario, "array" | "corrupt") {
+            assert!(!out.status.success());
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("NATIVE_WRITE_CONTINUED"));
+            assert_eq!(
+                fs::read(f.data.join("config.json")).unwrap(),
+                original.as_bytes()
+            );
+        } else {
+            success(&out);
+            assert!(String::from_utf8_lossy(&out.stdout).contains("NATIVE_WRITE_CONTINUED"));
+            let got = f.config();
+            assert_eq!(got["multimodal"]["extra"], true);
+            assert_eq!(
+                got["agents"]["cursor"]["multimodal"],
+                json!({"uploadMode":"all"})
+            );
+            if scenario == "none" {
+                assert!(got["agents"]["qoder"].get("multimodal").is_none());
+                assert_eq!(got["multimodal"]["storage"]["type"], "oss");
+            } else {
+                assert_eq!(
+                    got["agents"]["codex"]["multimodal"],
+                    json!({"uploadMode":"all"})
+                );
+                assert_eq!(
+                    got["agents"]["qoder"]["multimodal"],
+                    json!({"uploadMode":"all","allowedRootPaths":["~/workspace"]})
+                );
+                assert_eq!(
+                    got["multimodal"]["storage"],
+                    json!({"type":"sls","target":{"endpoint":"cn-hangzhou.log.aliyuncs.com","project":"agentloop-example","logstore":"agent-event"}})
+                );
+            }
+        }
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("synthetic-multimodal-api-key"));
+        assert!(!f.root.path().join("cache").exists());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn original_multimodal_public_powershell_writer_roundtrips_modes_and_aborts_native_failure() {
+    for shell in windows_shells() {
+        let f = Fixture::new();
+        fs::create_dir_all(&f.data).unwrap();
+        let source = include_str!("../../deploy/installer-opensource.ps1");
+        let mut writer = source
+            .split_once("# Resolve package URL")
+            .unwrap()
+            .0
+            .to_owned();
+        for name in [
+            "Invoke-InstallerHelper",
+            "Get-InstallConfigJson",
+            "Write-Config",
+        ] {
+            writer.push_str(&function(source, &format!("function {name} {{")));
+        }
+        writer.push_str("\nfunction Msg {param($zh,$en)}\n$script:INSTALL_SRC=$env:TEST_CANDIDATE\n$script:PROBE_RESULT='[]'\nWrite-Config\n'NATIVE_WRITE_CONTINUED'\n");
+        let writer_path = f.root.path().join("multimodal-public-writer.ps1");
+        fs::write(&writer_path, writer).unwrap();
+        let mut script = windows_prelude(false);
+        script.push_str(r#"
+foreach ($mode in @('all','none')) {
+    '{"agents":{"qoder":{"enabled":false,"multimodal":{"uploadMode":"output","allowedRootPaths":["~/workspace"]}},"cursor":{"enabled":true,"multimodal":{"uploadMode":"all"}}},"multimodal":{"extra":true,"storage":{"type":"oss","target":{"storageBasePath":"oss://bucket/prefix"}}}}' | Set-Content -LiteralPath (Join-Path $env:TEST_DATA 'config.json') -Encoding UTF8
+    $result=& $env:TEST_WRITER install -AllAgents -MultimodalMode $mode -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA
+    if ($result -ne 'NATIVE_WRITE_CONTINUED') {throw 'native write did not continue'}
+    $config=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $env:TEST_DATA 'config.json') -Raw | ConvertFrom-Json
+    if ($config.multimodal.extra -ne $true -or $config.agents.cursor.multimodal.uploadMode -ne 'all') {throw 'unrelated multimodal values were lost'}
+    if ($mode -eq 'all') {
+        if ($config.agents.codex.multimodal.uploadMode -ne 'all' -or $config.agents.qoder.multimodal.allowedRootPaths[0] -ne '~/workspace' -or $config.agents.qoder.multimodal.uploadMode -ne 'all') {throw 'agent multimodal merge failed'}
+        if ($config.multimodal.storage.type -ne 'sls' -or $config.multimodal.storage.target.project -ne 'agentloop-example' -or $config.multimodal.storage.target.logstore -ne 'agent-event') {throw 'storage target merge failed'}
+    } elseif ($config.agents.qoder.PSObject.Properties.Name -contains 'multimodal' -or $config.multimodal.storage.type -ne 'oss') {throw 'none failed to preserve global storage'}
+}
+foreach ($raw in @('{"sls":[{},{}]}','{broken')) {
+    $path=Join-Path $env:TEST_DATA 'config.json'
+    Set-Content -LiteralPath $path -Value $raw -Encoding UTF8
+    $before=Get-Content -Encoding UTF8 -LiteralPath $path -Raw
+    $caught=$null
+    try {
+        & $env:TEST_WRITER install -AllAgents -MultimodalMode all -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA | Out-Null
+    } catch {$caught="$_"}
+    if (-not $caught -or $caught -notmatch 'exit=1') {throw 'Write-Config did not propagate native failure'}
+    if ((Get-Content -Encoding UTF8 -LiteralPath $path -Raw) -ne $before) {throw 'failed native write changed the config'}
+    if ($caught -like '*synthetic-multimodal-api-key*') {throw 'native failure disclosed credentials'}
+}
+"#);
+        let mut command = windows_command(&f, &shell, &script);
+        command
+            .env("TEST_WRITER", &writer_path)
+            .env("TEST_CANDIDATE", &f.candidate)
+            .env("TEST_DATA", &f.data);
+        let out = bounded(command);
+        success(&out);
+        for stream in [&out.stdout, &out.stderr] {
+            assert!(!String::from_utf8_lossy(stream).contains("synthetic-multimodal-api-key"));
+        }
         assert!(!f.root.path().join("cache").exists());
     }
 }

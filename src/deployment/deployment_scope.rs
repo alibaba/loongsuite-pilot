@@ -108,3 +108,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "deployment_scope_history_contract_tests.rs"]
+mod history_contract_tests;

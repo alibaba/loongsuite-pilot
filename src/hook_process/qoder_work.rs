@@ -2329,3 +2329,7 @@ mod tests {
 #[cfg(test)]
 #[path = "qoder_work_pure_history_contract_tests.rs"]
 mod pure_history_contracts;
+
+#[cfg(test)]
+#[path = "qoder_work_line_record_history_contract_tests.rs"]
+mod line_record_history_contract_tests;

@@ -130,3 +130,6 @@ pub use segmented_jsonl_writer::{
 };
 
 pub(crate) mod file_identity;
+
+#[cfg(all(test, windows))]
+pub(crate) mod windows_test_junction;

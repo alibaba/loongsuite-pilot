@@ -271,6 +271,7 @@ async fn collector_l301_real_same_watermark_publication_after_old_read_survives_
 ) {
     for agent in ["qoder", "qoder-cn"] {
         let mut f = Fixture::new(agent).await;
+        f.source.inner.lock().await.directory_inventory = true;
         f.write(&closed_turn(0, false));
         let empty = Map::new();
         let payload = json!({"session_id":"session","transcript_path":f.file,"hook_event_name":"Stop","cwd":f.root});
@@ -333,6 +334,21 @@ async fn collector_l301_real_same_watermark_publication_after_old_read_survives_
             "a later notice at the same watermark must survive the old receipt"
         );
         drop(guard);
+        // The real publisher coalesces the same watermark/context into the same
+        // filename. Simulate NTFS coalescing the directory's clock hints too;
+        // changed observation payloads must not remain behind a stale cache.
+        let actual_version = directory_version(&events, true).unwrap();
+        if let Some(cached) = f
+            .source
+            .inner
+            .lock()
+            .await
+            .metadata
+            .get_mut(events.parent().unwrap())
+        {
+            assert_eq!(cached.version.inventory, actual_version.inventory);
+            cached.version = actual_version;
+        }
         assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
         assert!(f.collect().await.records.is_empty());
     }
@@ -384,5 +400,90 @@ async fn same_directory_mtime_new_generation_refreshes_notices_and_acknowledges_
         assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
         f.restart().await;
         assert!(f.collect().await.records.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn same_name_real_publication_refreshes_coalesced_metadata_without_any_durable_ack() {
+    for agent in ["qoder", "qoder-cn"] {
+        for staged_output in [false, true] {
+            let mut f = Fixture::new(agent).await;
+            f.source.inner.lock().await.directory_inventory = true;
+            f.write(&closed_turn(0, false));
+            let empty = Map::new();
+            let payload = json!({"session_id":"session","transcript_path":f.file,"hook_event_name":"Stop","cwd":f.root});
+            assert!(crate::hook_process::publish_qoder_wakeup(
+                &payload, &f.root, agent, None, &empty, &empty
+            ));
+            let legacy = qoder_legacy_retry_lock_path(&f.root, &f.file);
+            if !staged_output {
+                std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+                std::fs::write(&legacy, "{").unwrap();
+            }
+            let first = f.collect().await;
+            if staged_output {
+                assert_eq!(user_texts(&first.records), ["prompt 0"]);
+                // Output/checkpoint transaction rolled back: no receipt is durable.
+                f.state = json!({});
+            } else {
+                assert!(first.records.is_empty());
+                assert_eq!(f.state, json!({}));
+                std::fs::remove_file(legacy).unwrap();
+            }
+            let events = std::fs::read_dir(
+                f.root
+                    .join("state/qoder-transcripts")
+                    .join(agent)
+                    .join("sources"),
+            )
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("events");
+            let names = || {
+                std::fs::read_dir(&events)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect::<Vec<_>>()
+            };
+            let original_names = names();
+            assert_eq!(original_names.len(), 1);
+            let old_len = std::fs::metadata(&f.file).unwrap().len();
+            let replacement = f.file.with_extension("next");
+            let rewritten = jsonl(&closed_turn(1, false));
+            assert_eq!(rewritten.len() as u64, old_len);
+            std::fs::write(&replacement, rewritten).unwrap();
+            std::fs::rename(replacement, &f.file).unwrap();
+            assert!(crate::hook_process::publish_qoder_wakeup(
+                &payload, &f.root, agent, None, &empty, &empty
+            ));
+            assert_eq!(
+                names(),
+                original_names,
+                "real publisher must coalesce the same filename"
+            );
+            let actual = directory_version(&events, true).unwrap();
+            {
+                let mut collector = f.source.inner.lock().await;
+                let cached = collector
+                    .metadata
+                    .get_mut(events.parent().unwrap())
+                    .expect("first no-ACK cycle cached metadata");
+                assert_eq!(cached.version.inventory, actual.inventory);
+                cached.version.modified = actual.modified;
+                cached.version.changed = actual.changed;
+            }
+            let next = f.collect().await;
+            assert_eq!(
+                user_texts(&next.records),
+                ["prompt 1"],
+                "agent={agent} staged_output={staged_output}"
+            );
+            assert!(next.metrics.bytes_read <= scanner::SCAN_BYTES as u64);
+            assert!(f.source.inner.lock().await.metadata_bytes <= MAX_METADATA_BYTES);
+            assert!(f.collect().await.records.is_empty());
+        }
     }
 }

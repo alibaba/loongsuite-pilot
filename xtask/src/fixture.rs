@@ -32,6 +32,11 @@ fn main() -> Result<()> {
             std::thread::sleep(Duration::from_secs(60));
             return Ok(());
         }
+        Ok("restart-stderr") => {
+            eprintln!("synthetic schtasks refusal");
+            eprintln!();
+            std::process::exit(7);
+        }
         Ok("exit") => return Ok(()),
         Ok("fail") => bail!("测试请求的激活失败"),
         Ok(other) => bail!("未知 fixture 模式：{other}"),

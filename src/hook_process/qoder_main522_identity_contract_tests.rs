@@ -82,6 +82,7 @@ impl Fixture {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(self.reply(agent),json!({"logged_in":true,"username":format!("{agent}-cli-user"),"email":format!("{agent}@example.com"),"access_token":"do-not-copy-status-token"}).to_string()).unwrap();
     }
+    #[cfg(unix)]
     fn calls(&self, agent: &str) -> usize {
         fs::read_to_string(self.counter(agent))
             .map(|s| s.lines().count())
@@ -386,7 +387,7 @@ async fn main522_partial_accounts_phone_email_and_logged_out_snapshots_fail_open
                 json!({"user":{"name":"not-for-cli","email":"hook@example.com"}}),
             ),
         );
-        assert!(metadata.get("userIdentity").is_none());
+        assert_eq!(metadata["userIdentity"], identity("", ""));
         let source = f.source(agent);
         assert_records(&f.collect(&source, &mut json!({})).await, "", "");
         source.stop();
@@ -496,7 +497,17 @@ async fn main522_stop_account_is_frozen_before_collector_retry_and_source_descri
     let ack = source.read(Some(&state), true).await.unwrap();
     state = ack.state;
     f.rows(2, true, false);
-    f.publish(agent, f.payload(Value::Null, json!({})));
+    // This case covers an old/raw notice whose identity is unknown. An
+    // actual native Stop resolves absence explicitly (tested separately).
+    let empty = Obj::new();
+    assert!(super::super::qoder_wakeup::publish_qoder_wakeup(
+        &f.payload(Value::Null, json!({})),
+        &data_dir(&f.env(agent)),
+        agent,
+        None,
+        &empty,
+        &empty,
+    ));
     let second = f.collect(&source, &mut state).await;
     assert_records(&second, "qoder-cn-cli-user", "qoder-cn@example.com");
     assert_eq!(f.calls(agent), 1);
@@ -537,7 +548,7 @@ fn main522_public_snapshot_validation_partials_and_missing_files_never_fabricate
             let f = Fixture::new();
             f.status(agent, patch);
             let metadata = f.publish(agent, f.payload(json!({"product":"app"}), json!({})));
-            assert!(metadata.get("userIdentity").is_none());
+            assert_eq!(metadata["userIdentity"], identity("", ""));
         }
         for variant in ["missing", "truncated", "oversized"] {
             let f = Fixture::new();
@@ -548,10 +559,10 @@ fn main522_public_snapshot_validation_partials_and_missing_files_never_fabricate
                 "truncated" => fs::write(&path, "{").unwrap(),
                 _ => fs::write(&path, vec![b' '; 16 * 1024 + 1]).unwrap(),
             }
-            assert!(f
-                .publish(agent, f.payload(json!({"product":"app"}), json!({})))
-                .get("userIdentity")
-                .is_none());
+            assert_eq!(
+                f.publish(agent, f.payload(json!({"product":"app"}), json!({})))["userIdentity"],
+                identity("", "")
+            );
         }
         for (patch, expected) in [
             (json!({"email":null}), identity("desktop-user", "")),
@@ -685,6 +696,468 @@ async fn main522_next_stop_observes_account_changes_without_rewriting_prior_even
             assert!(next
                 .iter()
                 .all(|r| !first.iter().any(|old| old["event.id"] == r["event.id"])));
+            source.stop();
+        }
+    }
+}
+
+fn main522_assert_source_account_and_collection_user(
+    records: &[Value],
+    name: &str,
+    email: &str,
+    user_id: &str,
+) {
+    assert_records(records, name, email);
+    assert!(
+        records
+            .iter()
+            .any(|record| record["agent.qoder.raw_type"] == "user"
+                && record["gen_ai.input.messages_delta"].is_array()),
+        "root prompt must be collected"
+    );
+    for record in records {
+        assert_eq!(record["user.id"], user_id);
+        assert_ne!(record["user.id"], "transcript-account");
+        assert_ne!(record["user.id"], "hook-account-uid");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn main522_real_source_projects_every_desktop_partial_invalid_and_unreadable_snapshot() {
+    for agent in ["qoder", "qoder-cn"] {
+        let wrong_product = if agent == "qoder" { "qodercn" } else { "qoder" };
+        let variants = [
+            ("valid", json!({}), "desktop-user", "desktop@example.com"),
+            (
+                "past-snapshot",
+                json!({"snapshot_at":"2025-01-01T00:00:00.000Z"}),
+                "desktop-user",
+                "desktop@example.com",
+            ),
+            ("missing-email", json!({}), "desktop-user", ""),
+            ("null-email", json!({"email":null}), "desktop-user", ""),
+            ("empty-email", json!({"email":""}), "desktop-user", ""),
+            (
+                "phone-email",
+                json!({"email":"13800138000"}),
+                "desktop-user",
+                "",
+            ),
+            (
+                "email-only",
+                json!({"name":"","email":"desktop@example.com"}),
+                "",
+                "desktop@example.com",
+            ),
+            ("logged-out", json!({"logged_in":false}), "", ""),
+            ("string-login", json!({"logged_in":"true"}), "", ""),
+            ("schema", json!({"schema_version":2}), "", ""),
+            ("product", json!({"product":wrong_product}), "", ""),
+            ("writer", json!({"writer":"other"}), "", ""),
+            ("invalid-time", json!({"snapshot_at":"invalid"}), "", ""),
+            (
+                "future-time",
+                json!({"snapshot_at":"2999-01-01T00:00:00.000Z"}),
+                "",
+                "",
+            ),
+            ("missing", json!({}), "", ""),
+            ("truncated", json!({}), "", ""),
+            ("oversized", json!({}), "", ""),
+            (
+                "configured-employee",
+                json!({}),
+                "desktop-user",
+                "desktop@example.com",
+            ),
+        ];
+        for (variant, patch, name, email) in variants {
+            let f = Fixture::new();
+            f.cli(agent, None);
+            f.status(agent, patch);
+            let path = f.home(agent).join(".qoder-app-status.json");
+            match variant {
+                "missing-email" => {
+                    let mut value: Value =
+                        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+                    value.as_object_mut().unwrap().remove("email");
+                    fs::write(&path, value.to_string()).unwrap();
+                }
+                "missing" => fs::remove_file(&path).unwrap(),
+                "truncated" => fs::write(&path, "{").unwrap(),
+                "oversized" => fs::write(&path, vec![b' '; 16 * 1024 + 1]).unwrap(),
+                "configured-employee" => fs::write(
+                    f.root.join("config.json"),
+                    json!({"userId":"employee-123"}).to_string(),
+                )
+                .unwrap(),
+                _ => {}
+            }
+            f.rows(1, false, false);
+            f.publish(agent,f.payload(json!({"product":"app"}),json!({"user":{"name":"ignored-hook","email":"hook@example.com","uid":"hook-account-uid"}})));
+            let source = f.source(agent);
+            let mut state = json!({});
+            let records = f.collect(&source, &mut state).await;
+            let user_id = if variant == "configured-employee" {
+                "employee-123".to_owned()
+            } else {
+                hostname()
+            };
+            main522_assert_source_account_and_collection_user(&records, name, email, &user_id);
+            assert_eq!(
+                f.calls(agent),
+                0,
+                "App must never borrow CLI: {agent}/{variant}"
+            );
+            if variant == "valid" {
+                f.status(
+                    agent,
+                    json!({"name":"next-user","email":"next@example.com"}),
+                );
+                f.rows(2, true, true);
+                f.publish(agent, f.payload(json!({"product":"app"}), json!({})));
+                let next = f.collect(&source, &mut state).await;
+                main522_assert_source_account_and_collection_user(
+                    &next,
+                    "next-user",
+                    "next@example.com",
+                    &hostname(),
+                );
+                main522_assert_source_account_and_collection_user(&records, name, email, &user_id);
+                assert!(next.iter().all(|record| !records
+                    .iter()
+                    .any(|old| old["event.id"] == record["event.id"])));
+                assert_eq!(f.calls(agent), 0);
+            }
+            source.stop();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn main522_real_source_keeps_only_nested_ide_identity_for_every_malformed_product() {
+    for agent in ["qoder", "qoder-cn"] {
+        for (product, extra, name, email) in [
+            (Value::Null, json!({}), "", ""),
+            (json!({"product":"APP"}), json!({}), "", ""),
+            (json!("app"), json!({}), "", ""),
+            (json!([]), json!({}), "", ""),
+            (
+                Value::Null,
+                json!({"user":{"name":" ide-user ","email":" ide@example.com ","uid":"hook-account-uid"},"email":"git@example.com"}),
+                "ide-user",
+                "ide@example.com",
+            ),
+            (
+                Value::Null,
+                json!({"user":{"name":"hook-user"},"email":"git@example.com"}),
+                "hook-user",
+                "",
+            ),
+            (Value::Null, json!({"email":"git@example.com"}), "", ""),
+            (
+                Value::Null,
+                json!({"user":{"email":"nested@example.com"}}),
+                "",
+                "nested@example.com",
+            ),
+        ] {
+            for configured in [false, true] {
+                let f = Fixture::new();
+                f.cli(agent, None);
+                f.status(agent, json!({}));
+                if configured {
+                    fs::write(
+                        f.root.join("config.json"),
+                        json!({"userId":"employee-123"}).to_string(),
+                    )
+                    .unwrap();
+                }
+                f.rows(1, false, true);
+                f.publish(agent, f.payload(product.clone(), extra.clone()));
+                let source = f.source(agent);
+                let records = f.collect(&source, &mut json!({})).await;
+                main522_assert_source_account_and_collection_user(
+                    &records,
+                    name,
+                    email,
+                    &if configured {
+                        "employee-123".to_owned()
+                    } else {
+                        hostname()
+                    },
+                );
+                assert_eq!(f.calls(agent), 0);
+                source.stop();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn main522_real_source_cli_logout_invalid_timeout_and_failed_cache_never_leak_account_fields()
+{
+    for agent in ["qoder", "qoder-cn"] {
+        for mode in ["logged-in", "logged-out", "invalid", "timeout"] {
+            let f = Fixture::new();
+            let script = if mode == "timeout" {
+                Some("#!/bin/sh\nprintf '%s\\n' status >> \"$MAIN522_COUNTER\"\ntrap '' TERM\nsleep 8\n")
+            } else {
+                None
+            };
+            f.cli(agent, script);
+            if mode != "timeout" && mode != "logged-in" {
+                fs::write(f.reply(agent),if mode=="logged-out"{json!({"logged_in":false,"username":"stale-account","email":"stale@example.com"}).to_string()}else{"invalid-json".into()}).unwrap();
+            }
+            f.rows(1, false, true);
+            let product = json!({"product":"cli","version":"1.0.0"});
+            let start = Instant::now();
+            f.publish(agent, f.payload(product.clone(), json!({})));
+            assert!(
+                start.elapsed() < Duration::from_secs(6),
+                "original hung-status bound"
+            );
+            let source = f.source(agent);
+            let mut state = json!({});
+            let first = f.collect(&source, &mut state).await;
+            let (name, email) = if mode == "logged-in" {
+                (format!("{agent}-cli-user"), format!("{agent}@example.com"))
+            } else {
+                (String::new(), String::new())
+            };
+            main522_assert_source_account_and_collection_user(&first, &name, &email, &hostname());
+            assert_eq!(f.calls(agent), 1);
+            // A real next Stop and collected turn must reuse the unchanged auth cache.
+            f.rows(2, true, true);
+            let start = Instant::now();
+            f.publish(agent, f.payload(product.clone(), json!({})));
+            assert!(start.elapsed() < Duration::from_secs(1));
+            let second = f.collect(&source, &mut state).await;
+            main522_assert_source_account_and_collection_user(&second, &name, &email, &hostname());
+            assert_eq!(f.calls(agent), 1, "same failed auth must not query again");
+            assert!(second.iter().all(|record| !first
+                .iter()
+                .any(|old| old["event.id"] == record["event.id"])));
+            if mode == "logged-in" {
+                fs::write(
+                    f.reply(agent),
+                    json!({"logged_in":true,"username":"other","email":"other@example.com"})
+                        .to_string(),
+                )
+                .unwrap();
+                fs::write(f.home(agent).join(".auth/user"), "auth-b-changed").unwrap();
+                f.rows(3, true, true);
+                f.publish(agent, f.payload(product, json!({})));
+                let third = f.collect(&source, &mut state).await;
+                main522_assert_source_account_and_collection_user(
+                    &third,
+                    "other",
+                    "other@example.com",
+                    &hostname(),
+                );
+                main522_assert_source_account_and_collection_user(
+                    &first,
+                    &name,
+                    &email,
+                    &hostname(),
+                );
+                main522_assert_source_account_and_collection_user(
+                    &second,
+                    &name,
+                    &email,
+                    &hostname(),
+                );
+                assert_eq!(f.calls(agent), 2);
+                assert!(third.iter().all(|record| !first
+                    .iter()
+                    .chain(&second)
+                    .any(|old| old["event.id"] == record["event.id"])));
+            }
+            source.stop();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn main522_incomplete_stop_then_account_change_and_boundary_append_keeps_stop_account() {
+    use std::io::Write;
+    for agent in ["qoder", "qoder-cn"] {
+        for (product, hook_extra) in [("app", false), ("app", true), ("cli", false)] {
+            let f = Fixture::new();
+            f.cli(agent, None);
+            f.status(agent, json!({"email":"stop@example.com"}));
+            f.rows(1, false, true);
+            let complete = fs::read_to_string(&f.file).unwrap();
+            let lines = complete.lines().collect::<Vec<_>>();
+            fs::write(&f.file, format!("{}\n", lines[..2].join("\n"))).unwrap();
+            f.publish(agent,f.payload(json!({"product":product,"version":"1.0.0"}),if hook_extra{json!({"user":{"uid":"hook-account-uid","name":"hook-user","email":"hook@example.com"}})}else{json!({})}));
+            let source = f.source(agent);
+            let mut state = json!({});
+            let pending = source.read(Some(&state), true).await.unwrap();
+            assert!(
+                pending.records.is_empty(),
+                "no incomplete turn may escape before the boundary"
+            );
+            state = pending.state;
+            // This is the original detached-retry window: the real Source has already
+            // observed an incomplete Stop and the public/CLI account now changes.
+            f.status(
+                agent,
+                json!({"name":"later-account","email":"later@example.com"}),
+            );
+            fs::write(
+                f.reply(agent),
+                json!({"logged_in":true,"username":"later-cli","email":"later-cli@example.com"})
+                    .to_string(),
+            )
+            .unwrap();
+            fs::write(
+                f.home(agent).join(".auth/user"),
+                "changed-after-incomplete-stop",
+            )
+            .unwrap();
+            writeln!(
+                fs::OpenOptions::new().append(true).open(&f.file).unwrap(),
+                "{}",
+                lines[2]
+            )
+            .unwrap();
+            let records = f.collect(&source, &mut state).await;
+            let (name, email) = if product == "app" {
+                ("desktop-user".to_owned(), "stop@example.com".to_owned())
+            } else {
+                (format!("{agent}-cli-user"), format!("{agent}@example.com"))
+            };
+            main522_assert_source_account_and_collection_user(&records, &name, &email, &hostname());
+            assert_eq!(f.calls(agent), if product == "app" { 0 } else { 1 });
+            source.stop();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn main522_real_source_cli_fallbacks_keep_one_account_and_ignore_transcript_shape() {
+    for agent in ["qoder", "qoder-cn"] {
+        for mode in [
+            "missing-executable",
+            "invalid-status",
+            "logged-out",
+            "missing-version",
+            "phone-email",
+            "non-cli-transcript",
+            "missing-cli-logged-out-desktop",
+        ] {
+            let f = Fixture::new();
+            f.status(
+                agent,
+                if mode == "missing-cli-logged-out-desktop" {
+                    json!({"logged_in":false})
+                } else {
+                    json!({})
+                },
+            );
+            if !mode.starts_with("missing-executable") && mode != "missing-cli-logged-out-desktop" {
+                f.cli(agent, None);
+                let reply = match mode {
+                    "invalid-status" => Some("bad-json".to_owned()),
+                    "logged-out" => Some(
+                        json!({"logged_in":false,"username":"stale","email":"stale@example.com"})
+                            .to_string(),
+                    ),
+                    "phone-email" => Some(
+                        json!({"logged_in":true,"username":"phone-cli","email":"13800138000"})
+                            .to_string(),
+                    ),
+                    _ => None,
+                };
+                if let Some(reply) = reply {
+                    fs::write(f.reply(agent), reply).unwrap();
+                }
+            }
+            f.rows(1, false, mode != "non-cli-transcript");
+            let product = if mode == "missing-version" {
+                json!({"product":"cli"})
+            } else {
+                json!({"product":"cli","version":"1.0.0"})
+            };
+            f.publish(
+                agent,
+                f.payload(
+                    product,
+                    json!({"user":{"name":"ignored-hook","email":"hook@example.com"}}),
+                ),
+            );
+            let source = f.source(agent);
+            let records = f.collect(&source, &mut json!({})).await;
+            let (name, email) = match mode {
+                "phone-email" => ("phone-cli".to_owned(), String::new()),
+                "non-cli-transcript" => {
+                    (format!("{agent}-cli-user"), format!("{agent}@example.com"))
+                }
+                "missing-cli-logged-out-desktop" => (String::new(), String::new()),
+                _ => ("desktop-user".to_owned(), "desktop@example.com".to_owned()),
+            };
+            main522_assert_source_account_and_collection_user(&records, &name, &email, &hostname());
+            assert_eq!(
+                f.calls(agent),
+                if matches!(
+                    mode,
+                    "missing-executable" | "missing-version" | "missing-cli-logged-out-desktop"
+                ) {
+                    0
+                } else {
+                    1
+                }
+            );
+            source.stop();
+        }
+    }
+}
+
+#[tokio::test]
+async fn main522_next_stop_without_account_never_inherits_a_previous_descriptor_account() {
+    for agent in ["qoder", "qoder-cn"] {
+        for product in ["app", "ide"] {
+            let f = Fixture::new();
+            f.status(agent, json!({}));
+            let parent = if product == "app" {
+                json!({"product":"app"})
+            } else {
+                Value::Null
+            };
+            let first_extra = if product == "app" {
+                json!({})
+            } else {
+                json!({"user":{"name":"first-hook-user","email":"first-hook@example.com"}})
+            };
+            f.rows(1, false, false);
+            f.publish(agent, f.payload(parent.clone(), first_extra));
+            let source = f.source(agent);
+            let mut state = json!({});
+            let first = f.collect(&source, &mut state).await;
+            let (name, email) = if product == "app" {
+                ("desktop-user", "desktop@example.com")
+            } else {
+                ("first-hook-user", "first-hook@example.com")
+            };
+            main522_assert_source_account_and_collection_user(&first, name, email, &hostname());
+            f.status(
+                agent,
+                json!({"logged_in":false,"name":"stale-account","email":"stale@example.com"}),
+            );
+            f.rows(2, true, false);
+            f.publish(agent, f.payload(parent, json!({})));
+            let second = f.collect(&source, &mut state).await;
+            main522_assert_source_account_and_collection_user(&second, "", "", &hostname());
+            main522_assert_source_account_and_collection_user(&first, name, email, &hostname());
+            assert!(second.iter().all(|record| !first
+                .iter()
+                .any(|old| old["event.id"] == record["event.id"])));
             source.stop();
         }
     }

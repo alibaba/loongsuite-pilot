@@ -931,3 +931,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "instance_store_history_contract_tests.rs"]
+mod history_contract_tests;

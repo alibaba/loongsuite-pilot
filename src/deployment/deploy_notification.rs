@@ -150,3 +150,7 @@ mod tests {
         assert!(read_pending_notifications(&root).await.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "deploy_notification_history_contract_tests.rs"]
+mod history_contract_tests;

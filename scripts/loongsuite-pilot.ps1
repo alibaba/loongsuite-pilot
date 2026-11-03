@@ -1407,7 +1407,12 @@ function Cmd-RestartCollector {
     $task = Get-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_COLLECTOR -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
-        Wait-ForTaskNotRunning $TASK_NAME_COLLECTOR | Out-Null
+        if (-not (Wait-ForTaskNotRunning $TASK_NAME_COLLECTOR)) {
+            Write-RestartFailure -Target "collector" -Stage "service-manager-refused" `
+                -Detail "scheduled task remained Running for 10s after Stop-ScheduledTask; Start-ScheduledTask was not attempted"
+            Write-Error "Cannot restart collector: scheduled task did not stop (stage=service-manager-refused)"
+            exit 1
+        }
     }
     Stop-PidFile $PID_FILE
 
@@ -1615,7 +1620,12 @@ function Cmd-RestartUpdater {
     $task = Get-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
     if ($task -and $task.State -eq "Running") {
         Stop-ScheduledTask -TaskName $TASK_NAME_UPDATER -TaskPath "$TASK_FOLDER\" -ErrorAction SilentlyContinue
-        Wait-ForTaskNotRunning $TASK_NAME_UPDATER | Out-Null
+        if (-not (Wait-ForTaskNotRunning $TASK_NAME_UPDATER)) {
+            Write-RestartFailure -Target "updater" -Stage "service-manager-refused" `
+                -Detail "scheduled task remained Running for 10s after Stop-ScheduledTask; Start-ScheduledTask was not attempted"
+            Write-Error "Cannot restart updater: scheduled task did not stop (stage=service-manager-refused)"
+            exit 1
+        }
     }
     Stop-PidFile $UPDATER_PID_FILE
 
@@ -2021,19 +2031,19 @@ function Cmd-Upgrade {
 function Remove-HermesPluginForRollback {
     param([string]$TargetVersionPath)
 
-    if (Test-Path (Join-Path $TargetVersionPath "agents.d\hermes-agent.json")) { return }
+    if (Test-Path -LiteralPath (Join-Path $TargetVersionPath "agents.d\hermes-agent.json")) { return }
 
     $hermesHome = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:USERPROFILE ".hermes" }
     $pluginDir = Join-Path $hermesHome "plugins\loongsuite-pilot"
     $stateFile = Join-Path $DATA_DIR "deployed-agents.json"
     $state = $null
-    if (Test-Path $stateFile) {
+    if (Test-Path -LiteralPath $stateFile) {
         try {
             # -Encoding UTF8 on the read too: node writes this file as UTF-8 without a
             # BOM, and 5.1's Get-Content falls back to the ANSI codepage when there is no
             # BOM to sniff. Without it a non-ASCII targetDir comes back mangled and the
             # plugin at that path goes uncleaned.
-            $state = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
             $recorded = $state.'hermes-agent'.targetDir
             # Regex instead of [System.IO.Path]::IsPathRooted: System.IO.Path is not a
             # Constrained-Language core type, so the call throws under CLM (WDAC). The
@@ -2051,13 +2061,13 @@ function Remove-HermesPluginForRollback {
     }
 
     $marker = Join-Path $pluginDir ".loongsuite-pilot-managed.json"
-    if (-not (Test-Path $marker)) { return }
+    if (-not (Test-Path -LiteralPath $marker)) { return }
     try {
         # Same as above: the marker is written by node (directory-plugin-strategy) as
         # BOM-less UTF-8.
-        $meta = Get-Content $marker -Raw -Encoding UTF8 | ConvertFrom-Json
+        $meta = Get-Content -LiteralPath $marker -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($meta.owner -ne "loongsuite-pilot" -or $meta.agentId -ne "hermes-agent") { return }
-        Remove-Item $pluginDir -Recurse -Force
+        Remove-Item -LiteralPath $pluginDir -Recurse -Force
         if ($state -and $state.'hermes-agent') {
             # Select-Object -ExcludeProperty (a cmdlet) instead of
             # $state.PSObject.Properties.Remove(): PSMemberInfoCollection is not a
@@ -2073,8 +2083,8 @@ function Remove-HermesPluginForRollback {
             # BOM -- readJsonFile strips a leading BOM for exactly this reason. Without
             # that strip JSON.parse throws, readJsonFile swallows it and returns null, and
             # the whole deployment state silently resets to empty.
-            $pruned | ConvertTo-Json -Depth 20 | Set-Content $tmp -Encoding UTF8
-            Move-Item -Force $tmp $stateFile
+            $pruned | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $tmp -Encoding UTF8
+            Move-Item -LiteralPath $tmp -Destination $stateFile -Force
         }
         Write-Host "   Removed Hermes plugin not supported by rollback target: $pluginDir"
     } catch {

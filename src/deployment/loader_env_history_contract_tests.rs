@@ -18,6 +18,17 @@ impl F {
             .to_string_lossy()
             .into_owned()
     }
+    fn home(&self) -> std::path::PathBuf {
+        let isolated = self.root.path().join("home");
+        let process_home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .expect("the test launcher must supply an isolated process home");
+        assert_ne!(normalized(&isolated), normalized(process_home));
+        assert!(
+            !isolated.exists(),
+            "fallback resolution must not create HOME"
+        );
+        isolated
+    }
     async fn load(&self, value: Value, mut env: HashMap<String, String>) -> AgentDefinition {
         // No fallback may probe the host's actual Hermes/uv installation.
         env.entry("HERMES_HOME".into())
@@ -45,13 +56,6 @@ impl F {
 }
 fn normalized(path: impl AsRef<Path>) -> String {
     path.as_ref().to_string_lossy().replace('\\', "/")
-}
-fn home() -> std::path::PathBuf {
-    std::path::PathBuf::from(if cfg!(windows) {
-        std::env::var("USERPROFILE").unwrap()
-    } else {
-        std::env::var("HOME").unwrap()
-    })
 }
 fn hermes() -> Value {
     json!({"id":"hermes-agent","displayName":"Hermes Agent","deployMode":"directory-plugin","detection":{"paths":["$HERMES_HOME"],"commands":["hermes"]},"directoryPlugin":{"sourceDir":"$PILOT_DIR/assets/plugins/hermes-agent/loongsuite-pilot","targetDir":"$HERMES_HOME/plugins/loongsuite-pilot","activation":{"command":"$HERMES_CLI","enableArgs":["plugins","enable","loongsuite-pilot"]}}})
@@ -168,7 +172,7 @@ async fn source_l388_pi_override_reaches_detection_and_settings_paths() {
 #[tokio::test]
 async fn source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settings() {
     let f = F::new();
-    let expected = home().join(".pi/agent");
+    let expected = f.home().join(".pi/agent");
     let def = f.load(pi(), HashMap::new()).await;
     assert_eq!(def.detection.paths[0], normalized(&expected));
     assert_eq!(
@@ -180,7 +184,10 @@ async fn source_l418_pi_unset_defaults_to_user_pi_agent_for_detection_and_settin
 async fn source_l447_pi_blank_override_is_unset() {
     let f = F::new();
     let def = f.load(pi(), env("PI_CODING_AGENT_DIR", "   ".into())).await;
-    assert_eq!(def.detection.paths[0], normalized(home().join(".pi/agent")));
+    assert_eq!(
+        def.detection.paths[0],
+        normalized(f.home().join(".pi/agent"))
+    );
 }
 #[tokio::test]
 async fn source_l481_grok_override_reaches_detection_and_hook_settings() {
@@ -196,7 +203,7 @@ async fn source_l481_grok_override_reaches_detection_and_hook_settings() {
 #[tokio::test]
 async fn source_l510_grok_unset_defaults_to_user_home_for_detection_and_settings() {
     let f = F::new();
-    let expected = home().join(".grok");
+    let expected = f.home().join(".grok");
     let def = f.load(grok(), HashMap::new()).await;
     assert_eq!(def.detection.paths[0], normalized(&expected));
     assert_eq!(
@@ -208,7 +215,7 @@ async fn source_l510_grok_unset_defaults_to_user_home_for_detection_and_settings
 async fn source_l539_grok_blank_override_is_unset() {
     let f = F::new();
     let def = f.load(grok(), env("GROK_HOME", "   ".into())).await;
-    assert_eq!(def.detection.paths[0], normalized(home().join(".grok")));
+    assert_eq!(def.detection.paths[0], normalized(f.home().join(".grok")));
 }
 #[tokio::test]
 async fn source_l567_dsh_override_keeps_detection_and_absent_patch_path_for_process_locator() {
@@ -222,13 +229,13 @@ async fn source_l567_dsh_override_keeps_detection_and_absent_patch_path_for_proc
 async fn source_l595_dsh_unset_defaults_to_user_dsh() {
     let f = F::new();
     let def = f.load(dsh(), HashMap::new()).await;
-    assert_eq!(def.detection.paths[0], normalized(home().join(".dsh")));
+    assert_eq!(def.detection.paths[0], normalized(f.home().join(".dsh")));
 }
 #[tokio::test]
 async fn source_l620_dsh_blank_override_is_unset() {
     let f = F::new();
     let def = f.load(dsh(), env("DSH_HOME", "   ".into())).await;
-    assert_eq!(def.detection.paths[0], normalized(home().join(".dsh")));
+    assert_eq!(def.detection.paths[0], normalized(f.home().join(".dsh")));
 }
 #[test]
 fn source_l473_l559_l645_shipped_pi_grok_and_dsh_placeholders_remain_unresolved_in_assets() {

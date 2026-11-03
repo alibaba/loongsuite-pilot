@@ -1522,3 +1522,7 @@ mod tests {
 #[cfg(test)]
 #[path = "hook_install_service_history_contract_tests.rs"]
 mod history_contract_tests;
+
+#[cfg(test)]
+#[path = "hook_install_grok_history_contract_tests.rs"]
+mod grok_history_contract_tests;

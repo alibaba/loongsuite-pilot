@@ -220,7 +220,7 @@ pub(crate) async fn run(args: &ArgMatches) -> Result<i32> {
             let config = read_config(Path::new(&path))?.1;
             ensure!(
                 !config.get("sls").is_some_and(Value::is_array),
-                "配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json"
+                "Multiple SLS flushers found; 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json"
             );
             String::new()
         }

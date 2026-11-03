@@ -410,6 +410,13 @@ fn readonly_config_guards_reject_arrays_corruption_and_invalid_options() {
     assert!(!fixture.data.exists());
     fs::create_dir_all(&fixture.data).unwrap();
     let path = fixture.data.join("config.json");
+    let single = json!({"sls":{"project":"p1","logstore":"l1"}});
+    fs::write(&path, single.to_string()).unwrap();
+    let single_bytes = fs::read(&path).unwrap();
+    for mode in [false, true] {
+        success(&fixture.helper("check-config", &options, mode));
+        assert_eq!(fs::read(&path).unwrap(), single_bytes);
+    }
     for raw in [
         "{\"sls\":[]}",
         "{\"sls\":[{\"apiKey\":\"never-print\"}]}",
@@ -423,6 +430,11 @@ fn readonly_config_guards_reject_arrays_corruption_and_invalid_options() {
             let result = fixture.helper("check-config", &options, mode);
             assert_eq!(result.status.code(), Some(1));
             assert!(result.stdout.is_empty());
+            if raw.starts_with("{\"sls\":[") {
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("Multiple SLS flushers found")
+                );
+            }
             assert!(!String::from_utf8_lossy(&result.stderr).contains("never-print"));
             assert_eq!(fs::read(&path).unwrap(), before);
         }
@@ -1057,16 +1069,22 @@ fn install_preflight_and_confirmation_finish_before_any_service_stop() {
         "invalid-privacy",
         "supported-enricher",
         "bad-resource",
+        "multi-sls",
     ] {
         let fixture = Fixture::new();
         fixture.package();
         let data = fixture.root.path().join("首次安装主流程 🚀");
-        if matches!(scenario, "invalid-privacy" | "supported-enricher") {
+        if matches!(
+            scenario,
+            "invalid-privacy" | "supported-enricher" | "multi-sls"
+        ) {
             fs::create_dir_all(&data).unwrap();
             fs::write(
                 data.join("config.json"),
                 if scenario == "invalid-privacy" {
                     r#"{"privacy":{"excludeWorkspaces":["relative"]}}"#
+                } else if scenario == "multi-sls" {
+                    r#"{"sls":[{"project":"a"},{"project":"b"}]}"#
                 } else {
                     r#"{"otlpTrace":{"spanEnrichers":["optional.mjs"]}}"#
                 },
@@ -1136,7 +1154,10 @@ cmd_install
         );
         assert!(!fixture.root.path().join("cache/current").exists());
         assert!(!fixture.root.path().join(".local").exists());
-        if !matches!(scenario, "invalid-privacy" | "supported-enricher") {
+        if !matches!(
+            scenario,
+            "invalid-privacy" | "supported-enricher" | "multi-sls"
+        ) {
             assert!(!data.exists());
         }
         if !matches!(scenario, "new" | "supported-enricher") {

@@ -455,3 +455,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "deploy_command_history_contract_tests.rs"]
+mod history_contract_tests;

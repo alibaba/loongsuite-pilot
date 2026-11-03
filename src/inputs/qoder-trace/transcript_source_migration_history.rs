@@ -131,58 +131,15 @@ fn directory_alias(target: &Path, alias: &Path) {
 }
 #[cfg(windows)]
 fn directory_alias(target: &Path, alias: &Path) {
-    use std::io::{Read, Seek, SeekFrom};
-    use std::process::{Command, Stdio};
-    let shell = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"))
-        .join("System32/cmd.exe");
-    let mut stdout = tempfile::tempfile().unwrap();
-    let mut stderr = tempfile::tempfile().unwrap();
-    let mut command = Command::new(shell);
-    // cmd's built-in junction creation avoids PowerShell module/cold startup.
-    // Paths are normalized and passed as literal arguments in this temp fixture.
-    command
-        .args(["/d", "/c", "mklink", "/J"])
-        .arg(fixture_native_path(alias.to_path_buf()))
-        .arg(fixture_native_path(target.to_path_buf()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout.try_clone().unwrap()))
-        .stderr(Stdio::from(stderr.try_clone().unwrap()));
-    let mut child = crate::utils::candidate_process::CandidateChild::spawn(&mut command).unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break Some(status);
-        }
-        if std::time::Instant::now() >= deadline {
-            break None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    drop(child);
-    stdout.seek(SeekFrom::Start(0)).unwrap();
-    stderr.seek(SeekFrom::Start(0)).unwrap();
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    stdout.take(1024 * 1024).read_to_end(&mut out).unwrap();
-    stderr.take(1024 * 1024).read_to_end(&mut err).unwrap();
-    assert!(
-        status.is_some_and(|s| s.success()),
-        "junction failed status={status:?}: {} {}",
-        String::from_utf8_lossy(&out),
-        String::from_utf8_lossy(&err)
-    );
-    assert_eq!(
-        std::fs::canonicalize(alias).unwrap(),
-        std::fs::canonicalize(target).unwrap()
-    );
+    crate::utils::windows_test_junction::create(target, alias, std::time::Duration::from_secs(5));
 }
 #[tokio::test]
 async fn migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source() {
     for agent in ["qoder", "qoder-cn"] {
         for nested in [false, true] {
             let mut f = migration_fixture(agent).await;
-            let real = f.root.join("real");
-            let alias = f.root.join("alias");
+            let real = f.root.join("real directory Ω");
+            let alias = f.root.join("directory alias Ω");
             std::fs::create_dir(&real).unwrap();
             directory_alias(&real, &alias);
             f.file = if nested {

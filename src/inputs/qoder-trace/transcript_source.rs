@@ -66,6 +66,19 @@ struct DirectoryVersion {
     modified: u128,
     changed: (i64, i64),
     inventory: Option<Vec<String>>,
+    notice_versions: Option<Vec<FileVersion>>,
+}
+fn notice_attribute_version(path: &Path) -> std::io::Result<FileVersion> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Metadata notices need only attributes here. The bounded JSON snapshot
+        // below remains the authority for receipt contents; no body is read.
+        std::fs::OpenOptions::new().access_mode(0x80).open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = scanner::open_regular(path)?;
+    scanner::version(&file)
 }
 fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<DirectoryVersion> {
     #[cfg(unix)]
@@ -104,10 +117,12 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
         // directory generation when last-write timestamps happen to be equal.
         (metadata, (info.ChangeTime, 0))
     };
-    // NTFS directory timestamps are hints. New UUID notice filenames identify
-    // inventory changes even when filesystem timestamps coalesce or are restored.
+    // NTFS directory timestamps are hints. Native publication coalesces the
+    // same watermark/context into one filename, so both its bounded inventory
+    // and notice attribute generations must participate even before any ACK.
+    let mut notice_versions = None;
     let inventory = if inspect_inventory {
-        let mut names = Vec::new();
+        let mut entries = Vec::new();
         for (index, entry) in std::fs::read_dir(path)?.enumerate() {
             if index >= MAX_CONTEXTS {
                 return Err(std::io::Error::new(
@@ -119,16 +134,22 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
             if entry.file_type()?.is_file()
                 && entry.file_name().to_string_lossy().ends_with(".json")
             {
-                names.push(entry.file_name().to_string_lossy().into_owned());
+                entries.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    notice_attribute_version(&entry.path())?,
+                ));
             }
         }
-        names.sort();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let (names, versions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        notice_versions = Some(versions);
         Some(names)
     } else {
         None
     };
     Ok(DirectoryVersion {
         inventory,
+        notice_versions,
         modified: metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)
@@ -515,6 +536,10 @@ impl Collector {
                 .iter()
                 .map(|name| name.len() + std::mem::size_of::<String>())
                 .sum::<usize>()
+                + std::mem::size_of::<Vec<String>>()
+        }) + version.notice_versions.as_ref().map_or(0, |versions| {
+            versions.len() * std::mem::size_of::<FileVersion>()
+                + std::mem::size_of::<Vec<FileVersion>>()
         });
         let bytes = serde_json::to_vec(&json!([source, contexts]))?.len() + inventory_bytes;
         if let Some(prior) = self.metadata.shift_remove(dir) {
@@ -538,6 +563,11 @@ impl Collector {
             self.metadata_bytes += bytes;
         }
         Ok((source, contexts))
+    }
+    fn drop_metadata(&mut self, directory: &Path) {
+        if let Some(prior) = self.metadata.shift_remove(directory) {
+            self.metadata_bytes -= prior.bytes;
+        }
     }
     fn acknowledge(&mut self, state: &Value, stopped: &AtomicBool) {
         let Some(state) = state.as_object() else {
@@ -579,9 +609,12 @@ impl Collector {
                     continue;
                 };
                 if notice_version(&v, &version) != text(receipt, "version") {
+                    // A same-path publication may leave directory clock/name
+                    // hints unchanged. Never keep its former cached context.
+                    self.drop_metadata(&dir);
                     continue;
                 }
-                let _ = with_qoder_wakeup_lock(&dir, 0, || {
+                let revalidated = with_qoder_wakeup_lock(&dir, 0, || {
                     // Revalidate the exact receipt and complete metadata payload
                     // under the publication gate. An unchanged observation may
                     // acquire different filesystem timestamps without new data.
@@ -593,6 +626,12 @@ impl Collector {
                     }
                     Ok(())
                 });
+                if matches!(revalidated, Ok(Some(()))) {
+                    // The gate either removed the exact old receipt or found
+                    // a changed payload. Refresh metadata in either case;
+                    // transcript rows, checkpoints and ACK predicates stay put.
+                    self.drop_metadata(&dir);
+                }
             }
         }
     }

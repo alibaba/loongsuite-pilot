@@ -420,19 +420,7 @@ mod tests {
         {
             use std::os::windows::io::AsRawHandle;
             // FSCTL_SET_SPARSE avoids allocating ten GiB of physical NTFS blocks.
-            #[link(name = "kernel32")]
-            unsafe extern "system" {
-                fn DeviceIoControl(
-                    handle: *mut std::ffi::c_void,
-                    code: u32,
-                    input: *mut std::ffi::c_void,
-                    input_size: u32,
-                    output: *mut std::ffi::c_void,
-                    output_size: u32,
-                    returned: *mut u32,
-                    overlapped: *mut std::ffi::c_void,
-                ) -> i32;
-            }
+            use windows_sys::Win32::System::IO::DeviceIoControl;
             let mut returned = 0;
             let marked = unsafe {
                 DeviceIoControl(

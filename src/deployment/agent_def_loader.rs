@@ -318,7 +318,19 @@ impl AgentDefLoader {
             .replace("$PI_CODING_AGENT_DIR", &resolve_pi_coding_agent_dir(env))
             .replace("$GROK_HOME", &resolve_grok_home(env))
             .replace("$DSH_HOME", &resolve_dsh_home(env));
-        result = resolve_home(&result);
+        result = if let Some(env) = &self.env {
+            let homedir = || home.clone();
+            crate::utils::resolve_home_with(
+                &result,
+                &crate::utils::HomeResolutionOptions {
+                    env: crate::utils::EnvSource::Isolated(env),
+                    platform: None,
+                    homedir: Some(&homedir),
+                },
+            )
+        } else {
+            resolve_home(&result)
+        };
         if cfg!(windows) {
             result = result.replace('\\', "/");
             result = replace_first_shell_script(&result);
@@ -544,6 +556,10 @@ mod tests {
         assert!(!root.path().join("synthetic-local").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "isolated_agent_home_history_contract_tests.rs"]
+mod isolated_home_history_contract_tests;
 
 #[cfg(test)]
 #[path = "loader_core_history_contract_tests.rs"]

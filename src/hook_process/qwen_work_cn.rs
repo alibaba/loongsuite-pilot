@@ -2804,4 +2804,208 @@ mod tests {
         assert!(!session_record_path(root, "qwen-work-cn", "sess-qwen-1").exists());
         assert!(debug_text(root, "qwen-work-cn").contains(PRIVACY_ERROR));
     }
+    #[test]
+    fn history_qwen_three_native_run_and_real_converter_keep_all_original_step_and_input_assertions(
+    ) {
+        use crate::flushers::{ConvertOptions, EventLogConverter, GenAiEventLogConverter};
+        use crate::types::AgentActivityEntry;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let transcript = root.join("session.jsonl");
+        write_rows(&transcript, &real_shape());
+        let path = transcript.to_string_lossy().into_owned();
+        let (code, stdout) = run_in(
+            root,
+            ARGS,
+            &payload(&path, "sess-qwen-1", "/fallback"),
+            USER,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "{}\n");
+        let events = history(root);
+        assert_eq!(
+            names(&events),
+            [
+                "other",
+                "llm.request",
+                "llm.response",
+                "tool.call",
+                "tool.result",
+                "llm.request",
+                "llm.response",
+                "tool.call",
+                "tool.result",
+                "llm.request",
+                "llm.response"
+            ]
+        );
+        assert!(events
+            .iter()
+            .all(|event| event["gen_ai.agent.type"] == "qwen-work-cn"
+                && event.get("version").is_none()
+                && event["agent.qwenworkcn.version"] == "0.1.5"
+                && event["gen_ai.turn.id"] == "prompt-turn-1"));
+        assert_eq!(
+            events[0]["gen_ai.input.messages_delta"][0]["parts"][0]["content"],
+            "<system-reminder>workspace context</system-reminder>\ninspect package.json"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event.name"] != "other")
+                .map(|event| event["gen_ai.step.id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "prompt-turn-1:s1",
+                "prompt-turn-1:s1",
+                "prompt-turn-1:s1",
+                "prompt-turn-1:s1",
+                "prompt-turn-1:s2",
+                "prompt-turn-1:s2",
+                "prompt-turn-1:s2",
+                "prompt-turn-1:s2",
+                "prompt-turn-1:s3",
+                "prompt-turn-1:s3"
+            ]
+        );
+        let requests = events
+            .iter()
+            .filter(|event| event["event.name"] == "llm.request")
+            .collect::<Vec<_>>();
+        let responses = events
+            .iter()
+            .filter(|event| event["event.name"] == "llm.response")
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(responses.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|event| event["gen_ai.input.messages_delta"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|message| message["role"].as_str().unwrap())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [
+                vec!["user"],
+                vec!["assistant", "tool"],
+                vec!["assistant", "tool"]
+            ]
+        );
+        assert_eq!(
+            responses
+                .iter()
+                .map(|event| event["gen_ai.output.messages"][0]["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part["type"].as_str().unwrap())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [
+                vec!["reasoning", "tool_call"],
+                vec!["reasoning", "tool_call"],
+                vec!["reasoning", "text"]
+            ]
+        );
+        let records = events
+            .into_iter()
+            .map(|event| serde_json::from_value::<AgentActivityEntry>(event).unwrap())
+            .collect::<Vec<_>>();
+        let conversion = GenAiEventLogConverter
+            .convert(&records, &ConvertOptions::default())
+            .unwrap();
+        assert_eq!(conversion.warnings, Vec::<String>::new());
+        for (kind, count) in [("STEP", 3), ("LLM", 3), ("TOOL", 2)] {
+            assert_eq!(
+                conversion
+                    .spans
+                    .iter()
+                    .filter(|span| span.attributes.get("gen_ai.span.kind") == Some(&json!(kind)))
+                    .count(),
+                count
+            );
+        }
+        let mut llms = conversion
+            .spans
+            .iter()
+            .filter(|span| span.attributes.get("gen_ai.span.kind") == Some(&json!("LLM")))
+            .collect::<Vec<_>>();
+        llms.sort_by_key(|span| span.start_time);
+        assert!(llms
+            .iter()
+            .all(|span| span.duration[0] > 0 || span.duration[1] > 0));
+        let inputs = llms
+            .iter()
+            .map(|span| match &span.attributes["gen_ai.input.messages"] {
+                Value::String(text) => serde_json::from_str::<Value>(text).unwrap(),
+                value => value.clone(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|messages| messages
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|message| message["role"].as_str().unwrap())
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [
+                vec!["user"],
+                vec!["user", "assistant", "tool"],
+                vec!["user", "assistant", "tool", "assistant", "tool"]
+            ]
+        );
+        assert_eq!(inputs[1][1]["parts"][0]["type"], "tool_call");
+        assert_eq!(inputs[1][1]["parts"][0]["id"], "call-1");
+        assert_eq!(inputs[1][1]["parts"][0]["name"], "Glob");
+        assert_eq!(inputs[1][2]["parts"][0]["type"], "tool_call_response");
+        assert_eq!(inputs[1][2]["parts"][0]["id"], "call-1");
+    }
+
+    #[test]
+    fn history_qwen_review_copy_suppresses_both_incremental_and_missing_cursor_real_runs() {
+        for incremental in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let transcript = root.join("review-copy.jsonl");
+            let mut rows = real_shape();
+            rows.extend([
+                json!({"type":"user","uuid":"review-task","parentUuid":"text-3","timestamp":"2026-08-06T03:45:15.000Z","message":{"role":"user","content":[{"type":"text","text":"[SYSTEM: This is an automated background review task. Review the preceding conversation.]"}]}}),
+                json!({"type":"assistant","uuid":"review-response","parentUuid":"review-task","timestamp":"2026-08-06T03:45:16.000Z","message":{"role":"assistant","id":"review-response","model":"qwork-advanced","content":[{"type":"text","text":"The review is complete."}]}}),
+            ]);
+            write_rows(&transcript, &rows);
+            let path = transcript.to_string_lossy().into_owned();
+            if incremental {
+                let cursor = session_record_path(root, "qwen-work-cn", "sess-qwen-1");
+                fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+                fs::write(cursor,json!({"session_id":"sess-qwen-1","transcript_path":path,"last_line_count":0,"updated_at":"2026-07-22 10:00:00"}).to_string()).unwrap();
+            }
+            let (code, stdout) = run_in(
+                root,
+                ARGS,
+                &payload(&path, "sess-qwen-1", "/fallback"),
+                USER,
+            );
+            assert_eq!(code, 0);
+            assert_eq!(stdout, "{}\n");
+            assert!(history(root).is_empty());
+            let cursor: Value = serde_json::from_str(
+                &fs::read_to_string(session_record_path(root, "qwen-work-cn", "sess-qwen-1"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cursor["last_line_count"], 11);
+            let debug = debug_text(root, "qwen-work-cn");
+            assert!(debug.contains(if incremental {
+                "(incremental)"
+            } else {
+                "(missing-cursor)"
+            }));
+        }
+    }
 }

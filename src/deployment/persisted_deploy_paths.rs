@@ -464,3 +464,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "persisted_deploy_paths_history_contract_tests.rs"]
+mod history_contract_tests;

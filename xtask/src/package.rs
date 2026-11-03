@@ -617,6 +617,32 @@ mod tests {
     }
 
     #[test]
+    fn every_supported_package_uses_native_core_binding_and_preserves_only_required_host_runtimes()
+    {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for target in SUPPORTED_TARGETS {
+            let files = runtime_files(root, target).unwrap();
+            for keep in [
+                "assets/hooks/shared/native.sh",
+                "assets/hooks/shared/native.ps1",
+                "assets/hooks/qodercli-token-intercept.mjs",
+                "assets/hooks/qodercli-runtime-wrapper.sh",
+                "assets/hooks/qoderwork-runtime-wrapper.mjs",
+            ] {
+                assert!(files.contains(keep), "{target}: {keep}");
+            }
+            for retired in [
+                "assets/hooks/shared/node-runtime.sh",
+                "assets/hooks/shared/common.ps1",
+                "scripts/collector-daemon.js",
+                "scripts/updater-daemon.js",
+            ] {
+                assert!(!files.contains(retired), "{target}: {retired}");
+            }
+        }
+    }
+
+    #[test]
     fn whitelist_keeps_host_dependencies_and_excludes_standalone_legacy_tools() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let files = runtime_files(root, SUPPORTED_TARGETS[0]).unwrap();
