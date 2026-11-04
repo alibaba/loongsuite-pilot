@@ -1,0 +1,73 @@
+{
+  "native": {
+    "request": {
+      "systemInstruction": {
+        "parts": [{ "text": "Synthetic identity.\n临时规则：只返回测试标记。" }]
+      },
+      "contents": [{ "role": "user", "parts": [{ "text": "Return GOOGLE_FIXTURE_OK." }] }],
+      "generationConfig": { "maxOutputTokens": 64 }
+    },
+    "response": {
+      "candidates": [{
+        "index": 0,
+        "content": { "role": "model", "parts": [{ "text": "GOOGLE_FIXTURE_OK" }] },
+        "finishReason": "STOP"
+      }],
+      "usageMetadata": {
+        "promptTokenCount": 120,
+        "candidatesTokenCount": 7,
+        "totalTokenCount": 127,
+        "cachedContentTokenCount": 4
+      },
+      "modelVersion": "gemini-2.5-flash",
+      "responseId": "synthetic-native-response"
+    },
+    "toolResponse": {
+      "candidates": [{
+        "index": 0,
+        "content": {
+          "role": "model",
+          "parts": [{ "functionCall": { "name": "terminal", "args": { "command": "pwd" } } }]
+        },
+        "finishReason": "STOP"
+      }],
+      "usageMetadata": { "promptTokenCount": 120, "candidatesTokenCount": 7, "totalTokenCount": 127 },
+      "modelVersion": "gemini-2.5-flash",
+      "responseId": "synthetic-native-tool-response"
+    }
+  },
+  "compatible": {
+    "request": {
+      "model": "gemini-2.5-flash",
+      "messages": [
+        { "role": "system", "content": "Synthetic identity.\n临时规则：只返回测试标记。" },
+        { "role": "user", "content": "Return GOOGLE_FIXTURE_OK." }
+      ],
+      "max_tokens": 64
+    },
+    "response": {
+      "id": "synthetic-compatible-response",
+      "object": "chat.completion",
+      "created": 1793232000,
+      "model": "gemini-2.5-flash",
+      "choices": [{ "index": 0, "message": { "role": "assistant", "content": "GOOGLE_FIXTURE_OK" }, "finish_reason": "stop" }],
+      "usage": { "prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127 }
+    },
+    "toolResponse": {
+      "id": "synthetic-compatible-tool-response",
+      "object": "chat.completion",
+      "created": 1793232000,
+      "model": "gemini-2.5-flash",
+      "choices": [{
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [{ "id": "synthetic-terminal-call", "type": "function", "function": { "name": "terminal", "arguments": "{\"command\":\"pwd\"}" } }]
+        },
+        "finish_reason": "tool_calls"
+      }],
+      "usage": { "prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127 }
+    }
+  }
+}
