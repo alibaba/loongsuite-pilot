@@ -101,6 +101,10 @@ arguments, or the root environment variable. A system request reports the actual
 shared configuration path; this is configuration-root coverage, not a native
 machine-wide Pi policy. Omitting `--scope` retains the existing home behavior.
 
+Runtime assets and Pi settings are replaced atomically. A failed write preserves
+the previous file; incomplete Pi configuration cleanup stops uninstall before
+runtime removal so it can be retried. These safeguards also apply to home installs.
+
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded
 Pilot home registrations; unrecorded homes are not scanned. Invalid, conflicting,

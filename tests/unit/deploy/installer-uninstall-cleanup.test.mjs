@@ -379,6 +379,40 @@ describe('uninstall cleans the Pi Coding Agent extension injection', () => {
     verifyPiCleanupContinuesPastInvalidConfig(script, envKey);
   });
 
+  it('fails Pi cleanup without truncating settings when a staged write fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pilot-pi-cleanup-fault-'));
+    try {
+      const configPath = join(root, '.pi', 'agent', 'settings.json');
+      const dataDir = join(root, 'pilot');
+      mkdirSync(dirname(configPath), { recursive: true });
+      mkdirSync(dataDir);
+      const original = JSON.stringify({ theme: 'dark', extensions: [
+        join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'), '/third-party.mjs',
+      ] }, null, 2) + '\n';
+      writeFileSync(configPath, original);
+      const preload = join(root, 'disk-full.mjs');
+      writeFileSync(preload, `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = function(file, ...args) {
+  if (String(file) === ${JSON.stringify(configPath)} || String(file).startsWith(${JSON.stringify(configPath + '.')} ) && String(file).endsWith('.tmp')) {
+    write(file, '{'); throw Object.assign(new Error('simulated disk full'), {code:'ENOSPC'});
+  }
+  return write.call(this, file, ...args);
+}; syncBuiltinESMExports();`);
+      const start = sh.indexOf('remove_pi_coding_agent_extension() {');
+      const helper = sh.slice(start, sh.indexOf('\n# ====', start));
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${helper}\nDATA_DIR="$1"\nmsg() { :; }\nremove_pi_coding_agent_extension`,
+        'cleanup', dataDir], { encoding: 'utf8', env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: dirname(configPath), NODE_OPTIONS: `--import=${preload}` } });
+      expect(run.status, run.stderr).toBe(1);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+      expect(readdirSync(dirname(configPath)).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      const uninstall = sh.slice(sh.indexOf('\ncmd_uninstall() {'));
+      expect(uninstall).toMatch(/if ! remove_pi_coding_agent_extension; then\s+return 1/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('cleans a persisted custom Pi home when uninstall has no PI_CODING_AGENT_DIR', () => {
     const root = mkdtempSync(join(tmpdir(), 'pilot-pi-persisted-'));
     const customDir = mkdtempSync(join(tmpdir(), 'pilot-pi-custom-home-'));

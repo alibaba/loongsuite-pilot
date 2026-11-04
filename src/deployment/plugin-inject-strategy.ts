@@ -8,7 +8,7 @@ import type {
   DeployedAgentRecord,
   PluginInjectConfig,
 } from '../types/index.js';
-import { fileExists, resolveHome } from '../utils/fs-utils.js';
+import { fileExists, resolveHome, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
@@ -188,7 +188,7 @@ export class PluginInjectStrategy implements DeployStrategy {
           }
           await this.writePrivateBackup(configPath + '.bak', raw);
         }
-        await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
+        await this.writeConfig(def, configPath, json, raw);
         logger.info('plugin injected', { agentId: def.id, configPath, spec: resolvedSpec });
       } else {
         logger.info('plugin already injected', { agentId: def.id, configPath, spec: resolvedSpec });
@@ -237,7 +237,7 @@ export class PluginInjectStrategy implements DeployStrategy {
           logger.warn('config will be rewritten as JSON; JSONC comments in the original file will be removed', { configPath });
           await this.writePrivateBackup(configPath + '.bak', raw);
         }
-        await fs.writeFile(configPath, JSON.stringify(json, null, 2) + '\n', 'utf-8');
+        await this.writeConfig(def, configPath, json, raw);
         logger.info('plugin removed', { agentId: def.id, configPath });
       }
 
@@ -285,6 +285,18 @@ export class PluginInjectStrategy implements DeployStrategy {
 
   private isOpenclawNested(config: PluginInjectConfig): boolean {
     return config.configShape === 'openclaw-nested';
+  }
+
+  private async writeConfig(def: AgentDefinition, configPath: string, json: Record<string, unknown>, raw: string): Promise<void> {
+    const text = JSON.stringify(json, null, 2) + '\n';
+    if (def.id !== 'pi-coding-agent') return fs.writeFile(configPath, text, 'utf8');
+    const stat = await fs.lstat(configPath);
+    if (stat.isSymbolicLink() || (stat.mode & 0o222) === 0) {
+      throw new Error('Pi settings are read-only or externally managed; original preserved');
+    }
+    await writeTextFileAtomic(configPath, text, {
+      mode: stat.mode & 0o777, preserveMode: true, expected: { exists: true, content: raw },
+    });
   }
 
   private async writePrivateBackup(backupPath: string, raw: string): Promise<void> {

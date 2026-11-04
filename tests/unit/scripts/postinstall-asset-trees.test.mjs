@@ -67,8 +67,8 @@ const walk = (dir) => {
 //
 // spawnSync rather than execFileSync: the exit code is the thing under test here (the
 // installers key their check mark off it), and the per-tree failures are on stderr.
-const runPostinstall = (dataDir, home) => {
-  const res = spawnSync(process.execPath, [POSTINSTALL], {
+const runPostinstall = (dataDir, home, nodeArgs = []) => {
+  const res = spawnSync(process.execPath, [...nodeArgs, POSTINSTALL], {
     encoding: 'utf-8',
     env: {
       ...process.env,
@@ -81,6 +81,48 @@ const runPostinstall = (dataDir, home) => {
 };
 
 describe('postinstall installs every asset tree', () => {
+  it('preserves a usable plugin when an upgrade asset write runs out of disk space', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pilot-postinstall-atomic-'));
+    try {
+      const dataDir = path.join(root, 'data');
+      expect(runPostinstall(dataDir, root).out).not.toMatch(/failed asset tree/);
+      const pluginDir = path.join(dataDir, 'plugins', 'pi-coding-agent');
+      const entry = path.join(pluginDir, 'index.mjs');
+      const previous = 'export default function previousPlugin() {}\n';
+      writeFileSync(entry, previous);
+      const preload = path.join(root, 'disk-full.mjs');
+      writeFileSync(preload, `
+import fs from 'node:fs';
+import path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = function (file, ...args) {
+  if (typeof file === 'string' && path.dirname(file) === ${JSON.stringify(pluginDir)}
+    && path.basename(file).startsWith('index.mjs')) {
+    write(file, 'export default function(');
+    throw Object.assign(new Error('simulated disk full after partial write'), { code: 'ENOSPC' });
+  }
+  return write.call(this, file, ...args);
+};
+syncBuiltinESMExports();
+`);
+      const failed = runPostinstall(dataDir, root, ['--import', preload]);
+      expect(failed.status, failed.out).toBe(0);
+      expect(failed.out).toMatch(/failed asset tree/);
+      expect(readFileSync(entry, 'utf8')).toBe(previous);
+      expect(readdirSync(pluginDir).filter(name => name.endsWith('.tmp'))).toEqual([]);
+      const loaded = spawnSync(process.execPath, ['--input-type=module', '-e',
+        'const m = await import(process.argv[1]); if (typeof m.default !== "function") process.exit(1)', entry],
+      { encoding: 'utf8' });
+      expect(loaded.status, loaded.stderr).toBe(0);
+
+      expect(runPostinstall(dataDir, root).out).not.toMatch(/failed asset tree/);
+      expect(readFileSync(entry, 'utf8')).toBe(read('assets/plugins/pi-coding-agent/index.mjs'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('no shipped script or source file calls fs.cpSync', () => {
     // No allowlist: cpSync is unusable on the platform we ship a Node runtime for, and
     // the async fs.cp / a mkdir+copyFile walk are exact substitutes. Tests may still use

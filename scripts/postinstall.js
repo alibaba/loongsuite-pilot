@@ -45,9 +45,19 @@ function getFileMode(filePath) {
   return 0o644;
 }
 
+let assetWriteSequence = 0;
+
 function installHookFile(sourcePath, targetPath) {
   const content = fs.readFileSync(sourcePath);
-  fs.writeFileSync(targetPath, content, { mode: getFileMode(sourcePath) });
+  // Agents may load these files while Pilot upgrades. A failed or partial
+  // write must leave the previously installed runtime usable.
+  const stagedPath = `${targetPath}.${process.pid}.${assetWriteSequence++}.tmp`;
+  try {
+    fs.writeFileSync(stagedPath, content, { mode: getFileMode(sourcePath), flag: 'wx' });
+    fs.renameSync(stagedPath, targetPath);
+  } finally {
+    try { fs.unlinkSync(stagedPath); } catch {}
+  }
 }
 
 /**

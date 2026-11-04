@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
+
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -131,6 +136,35 @@ describe('PluginInjectStrategy', () => {
     expect(await strategy.undeploy(piDefinition())).toBe(true);
     const after = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
     expect(after.extensions).toEqual([]);
+  });
+
+  it.each(['install', 'uninstall'] as const)('preserves Pi settings on a partial %s write failure', async action => {
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ theme: 'dark', extensions: ['/third-party.mjs'] }, null, 2) + '\n');
+    if (action === 'uninstall') await strategy.deploy(piDefinition());
+    const before = await fs.readFile(settingsPath, 'utf8');
+    const write = fs.writeFile;
+    const failWrite: typeof fs.writeFile = async (file, data, options) => {
+      const name = String(file);
+      if (name === settingsPath || (name.startsWith(settingsPath + '.') && name.endsWith('.tmp'))) {
+        await write(file, '{', options);
+        throw Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' });
+      }
+      return write(file, data, options);
+    };
+    const fault = vi.spyOn(fs, 'writeFile').mockImplementation(failWrite);
+    const nativeFault = vi.spyOn(nativeFs, 'writeFile').mockImplementation(failWrite);
+    try {
+      const ok = action === 'install'
+        ? (await strategy.deploy(piDefinition())).success
+        : await strategy.undeploy(piDefinition());
+      expect(ok).toBe(false);
+      expect(await fs.readFile(settingsPath, 'utf8')).toBe(before);
+      expect((await fs.readdir(path.dirname(settingsPath))).filter(name => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      nativeFault.mockRestore();
+      fault.mockRestore();
+    }
   });
 
   it('treats mixed Windows separators as the same injected extension', async () => {

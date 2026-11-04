@@ -2799,8 +2799,9 @@ try {
     fi
     local short="${cfg/#$HOME/\~}"
     if ! command -v node &>/dev/null; then
+        [ -f "$cfg" ] || [ -d "$DATA_DIR/agents.d.local" ] || return 0
         msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-        return 0
+        return 1
     fi
 
     local result
@@ -2889,7 +2890,14 @@ try {
           if (e?.code !== 'EEXIST') throw e;
         }
       }
-      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      const stat = fs.lstatSync(target.configPath);
+      if (stat.isSymbolicLink() || !(stat.mode & 0o222)) throw new Error('Pi settings are read-only or externally managed');
+      const staged = target.configPath + '.' + process.pid + '.tmp';
+      try {
+        fs.writeFileSync(staged, JSON.stringify(data, null, 2) + '\n', { mode: stat.mode & 0o777, flag: 'wx' });
+        if (fs.readFileSync(target.configPath, 'utf8') !== raw) throw new Error('Pi settings changed during cleanup');
+        fs.renameSync(staged, target.configPath);
+      } finally { try { fs.unlinkSync(staged); } catch {} }
       cleaned++;
     } catch {
       skipped++;
@@ -2912,6 +2920,7 @@ try {
         *)
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
     esac
+    case "$result" in cleaned|nochange) return 0 ;; *) return 1 ;; esac
 }
 
 # ============================================================
@@ -3185,7 +3194,9 @@ cmd_uninstall() {
     echo ""
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    remove_pi_coding_agent_extension
+    if ! remove_pi_coding_agent_extension; then
+        return 1
+    fi
     echo ""
 
     # Remove plugin-inject specs (MiMo Code)
