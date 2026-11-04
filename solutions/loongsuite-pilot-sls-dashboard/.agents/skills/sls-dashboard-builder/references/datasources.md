@@ -182,4 +182,4 @@ storeview 不是独立的 datasource 值，而是在原始 datasource 基础上�
 - 不要把 `logstoreview` 等直接写成 datasource 字符串
 - 需要日志样本 / TopN / 事件明细时，优先 `tablepro + logstore + scan SQL`
 - 需要错误趋势 / 事件趋势时，优先 `linepro + logstore + 聚合 SQL`
-- `droplistpro` 的 `dropListOption.type` 除 `filter` / `token` 外还支持 `adhoc`；`adhoc` 模式用于即席过滤场景
+- 筛选机制、变量语法及控件候选数据源配置见 [筛选器与变量替换](filters-and-variables.md)

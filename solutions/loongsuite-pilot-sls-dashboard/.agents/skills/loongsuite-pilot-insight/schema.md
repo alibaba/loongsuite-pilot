@@ -427,25 +427,28 @@ LEFT JOIN 的事实时间、Agent、模型等条件在事实 CTE 中应用，避
 
 ### 筛选与交互
 
-控件显示标签，实际筛选原值，例如“高危 → high”。控件支持独立显示名与替换值时直接配置这对值；下钻也传递原编码，按需保留非展示字段或显式反查映射。
+控件显示标签，筛选、关联与下钻传递原始编码，例如“高危 → high”。控件结构、标签与原值的配置方式、动态候选协议及默认值语法见 [筛选器与变量替换](../sls-dashboard-builder/references/filters-and-variables.md)。
 
-大盘顶部 `droplistpro` 的静态别名和动态列表协议需按目标控件核对，不能直接套用表格值映射。若无法分离标签和值，控件使用标签选项，SQL 参数层按同一字典转回编码后过滤。两种传值方式不混用。
+风险来源的静态单选配置如下；原值直接对应风险事实的 `source_scope`，无需把显示标签传入 SQL 后再反查编码：
 
-例如单选来源控件使用 `type=token`、`key=source_scope_label`、静态 `list=["全部", "应用侧", "运行时"]`。以下片段可接入查询，`i` 为风险事实别名：
-
-```sql
-WITH params AS (
-  SELECT CASE '${{source_scope_label|全部}}'
-    WHEN '应用侧' THEN 'application'
-    WHEN '运行时' THEN 'runtime'
-    ELSE '${{source_scope_label|全部}}' END AS source_code
-)
--- 后续事实查询的 WHERE 条件：
--- ('${{source_scope_label|全部}}' = '全部'
---   OR i.source_scope = (SELECT source_code FROM params))
+```json
+{
+  "key": "source_scope", "alias": "风险来源", "type": "token",
+  "showType": "select", "multipleToken": false,
+  "list": ["__all__", "application", "runtime"],
+  "listAlias": ["全部", "应用侧", "运行时"],
+  "tokenDefault": [true, false, false]
+}
 ```
 
-“全部 / All”表示不筛选，不对应事实中的 NULL；应避开真实标签中的同名值。多选和动态选项沿用控件的实际传值、转义和列表语法，映射保留父类及 taxonomy 上下文。验证候选、选中态、实际查询条件及结果，不能只检查配置字段。
+`__all__` 约定为不筛选，避开真实来源编码；它不对应事实中的 NULL。例如 `i` 为风险事实别名时，在事实查询层使用：
+
+```sql
+WHERE ('${{source_scope|__all__}}' = '__all__'
+       OR i.source_scope = '${{source_scope|__all__}}')
+```
+
+普通意图、风险意图的子类选项保留父类及 taxonomy 上下文；不同父类中的同名标签不能合并成同一个筛选值。下钻按需保留原编码辅助列，枚举标签仅用于展示。
 
 ### SQL 展示投影
 

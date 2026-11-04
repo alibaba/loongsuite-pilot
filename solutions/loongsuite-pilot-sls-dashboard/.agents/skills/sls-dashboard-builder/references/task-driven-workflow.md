@@ -73,15 +73,7 @@ Use a consistent vertical rhythm. Avoid mixing many unrelated chart sizes in the
 
 ## 5. Filter Rules
 
-Only add filters when they genuinely work.
-
-Good cases:
-- raw filter keys that exist across the target charts
-- tokenized queries that already use `${{var}}`
-
-Bad cases:
-- decorative filters with no query binding
-- filters on joined fields that the charts never expose in the filter path
+For each requested control, record its mechanism, key, scope, defaults, and consuming queries in the view inventory. Use [Filters and variables](filters-and-variables.md) for the selection rules and configuration; validate the actual queries and results when switching or clearing a selection.
 
 ## 6. Blockers And Partial Metrics
 

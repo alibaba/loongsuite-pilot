@@ -536,21 +536,7 @@
 }
 ```
 
-上方模板展示的是最常见的 `filter` 模式。`dropListOption.type` 还支持 `token`（变量替换）和 `adhoc`（即席过滤）。
-
-`adhoc` 最小结构：
-
-```json
-"dropListOption": {
-  "key": "",
-  "alias": "",
-  "type": "adhoc",
-  "list": [],
-  "listAlias": []
-}
-```
-
-`adhoc` 模式用于即席过滤场景，生成时按实际需求补充对应字段。
+上方是字段过滤控件的结构骨架。机制选择、实际 Key、选项、默认值及变量替换控件配方见 [筛选器与变量替换](filters-and-variables.md)；使用前补齐查询绑定。
 
 ## 9. dashboardrow
 
