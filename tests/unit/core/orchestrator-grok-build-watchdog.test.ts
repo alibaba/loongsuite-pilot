@@ -107,6 +107,22 @@ describe('Grok Build watchdog target', () => {
     expect(needsRedeploy).toHaveBeenCalledTimes(2);
   });
 
+  it('routes Codex system TOML through scoped checks and keeps it out of JSON repair', async () => {
+    const definition = { ...grokDefinition(), id: 'codex', hook: {
+      ...grokDefinition().hook!, settingsPath: '/home/base/.codex/hooks.json', events: ['SessionStart'],
+    } };
+    const manager = (orchestrator as any).deploymentManager;
+    manager.getDefinitions = () => [definition];
+    manager.effectiveDefinition = () => ({ ...definition, hook: { ...definition.hook, scope: 'system' } });
+    vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
+    expect((orchestrator as any).buildHookWatchdogTargets()).toEqual([]);
+    const [target] = targets(orchestrator);
+    expect(target.id).toBe('hook:codex');
+    await expect(target.check()).resolves.toBe(true);
+    expect(areSystemHookAssetsHealthy).toHaveBeenCalledWith('codex', expect.any(String), DATA_DIR);
+    await expect(target.repair()).resolves.toBeUndefined();
+  });
+
   it('surfaces failed repair and removes only the Grok definition on cleanup', async () => {
     repairHookSettings.mockResolvedValue({
       success: false,

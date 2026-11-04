@@ -7,6 +7,7 @@ import { withDeployedStateLock } from './deployed-state-merge.js';
 
 export const SYSTEM_TOML_HOOK_PATHS: Record<string, string> = {
   'grok-build': '/etc/grok/managed_config.toml',
+  codex: '/etc/codex/config.toml',
 };
 
 export function supportsSystemTomlHooks(id: string): boolean {
