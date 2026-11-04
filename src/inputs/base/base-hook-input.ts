@@ -191,6 +191,8 @@ export abstract class BaseHookInput extends BaseInput {
       // newline; otherwise a transient half-line would be rejected as invalid
       // JSON and the persisted offset would skip its remaining bytes forever.
       const lastNewline = snapshot.lastIndexOf(0x0a);
+      // This is a single read at offset. Cache the tail only if that read
+      // reached the observed EOF; a short read must be retried.
       if (bytesRead === stat.size - offset && lastNewline + 1 < bytesRead) {
         this.incompleteTails.set(logFile, { stat, offset: offset + lastNewline + 1 });
       }

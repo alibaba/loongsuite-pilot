@@ -136,15 +136,18 @@ describe('BaseHookInput', () => {
     it('does not reread a static incomplete tail and resumes when it grows', async () => {
       const file = path.join(tmpDir, `test-hook-${getTodayDateString()}.jsonl`);
       const initial = JSON.stringify({ file_path: '/already-complete.ts' }) + '\n';
-      const partial = '{"file_path":"/finished.ts","padding":"' + 'x'.repeat(32 * 1024 * 1024);
-      await fs.writeFile(file, initial + partial);
+      const prefix = '{"file_path":"/finished.ts","padding":"';
+      const padding = Buffer.alloc(1024 * 1024, 0x78);
+      await fs.writeFile(file, initial + prefix);
+      for (let i = 0; i < 32; i++) await fs.appendFile(file, padding);
+      const partialBytes = Buffer.byteLength(prefix) + 32 * padding.length;
       const deltas: Array<Record<string, number>> = [];
       const entries: AgentActivityEntry[] = [];
       input.on('input-runtime-delta', delta => deltas.push(delta));
       input.on('entries', batch => entries.push(...batch));
       await input.start();
       await input.stop();
-      expect(deltas[0].rawReadBytes).toBe(Buffer.byteLength(initial + partial));
+      expect(deltas[0].rawReadBytes).toBe(Buffer.byteLength(initial) + partialBytes);
       expect(stateStore.get(input.id).lastOffset).toBe(Buffer.byteLength(initial));
 
       for (let i = 0; i < 2; i++) {
@@ -152,7 +155,7 @@ describe('BaseHookInput', () => {
         await input.stop();
       }
       expect(deltas.slice(1)).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
-        rawReadCalls: 0, rawReadBytes: 0, rawBacklogBytesMax: Buffer.byteLength(partial),
+        rawReadCalls: 0, rawReadBytes: 0, rawBacklogBytesMax: partialBytes,
       })));
 
       await fs.appendFile(file, '"}\n');
