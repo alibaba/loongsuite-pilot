@@ -168,6 +168,7 @@ function freshState(sessionId) {
     chat_checkpoint: emptyCheckpoint(),
     updates_checkpoint: emptyCheckpoint(),
     recent_prompt_ids: [],
+    active_prompt_id: null,
     turn_count: 0,
   };
 }
@@ -186,6 +187,7 @@ function normalizeState(sessionId, raw) {
   return {
     ...freshState(sessionId),
     initialized: raw.initialized === true,
+    active_prompt_id: typeof raw.active_prompt_id === 'string' ? raw.active_prompt_id : null,
     transcript_path: typeof raw.transcript_path === 'string' ? raw.transcript_path : null,
     cwd: typeof raw.cwd === 'string' ? raw.cwd : null,
     chat_checkpoint: normalizeCheckpoint(raw.chat_checkpoint),
@@ -219,6 +221,7 @@ export function saveState(sessionId, state) {
     version: STATE_VERSION,
     session_id: sessionId,
     initialized: state.initialized === true,
+    active_prompt_id: typeof state.active_prompt_id === 'string' ? state.active_prompt_id : null,
     transcript_path: typeof state.transcript_path === 'string' ? state.transcript_path : null,
     cwd: typeof state.cwd === 'string' ? state.cwd : null,
     chat_checkpoint: normalizeCheckpoint(state.chat_checkpoint),
@@ -275,6 +278,12 @@ export function markSessionClosed(sessionId, now = Date.now()) {
     try { fs.unlinkSync(tmp); } catch {}
     throw err;
   }
+}
+
+/** Caller holds the session lock and has observed a new native prompt. */
+export function reopenSession(sessionId) {
+  try { fs.unlinkSync(closedMarkerPath(sessionId)); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
 }
 
 function writeCleanupMarker(markerPath, now) {

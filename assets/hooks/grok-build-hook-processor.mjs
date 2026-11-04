@@ -32,13 +32,13 @@ import {
 import {
   loadState,
   saveState,
-  clearState,
   hasExportedPrompt,
   markPromptExported,
   cleanupExpiredStates,
   withSessionStateLock,
   isSessionClosed,
   markSessionClosed,
+  reopenSession,
 } from './grok-build/state.mjs';
 import { parseGrokTranscript } from './grok-build/transcript-parser.mjs';
 import { parseGrokUpdates } from './grok-build/updates-parser.mjs';
@@ -706,12 +706,17 @@ async function processHook(trigger) {
 }
 
 async function processHookLocked(trigger, event, sessionId) {
-  // SessionEnd is the final authority for a session. Keep a content-free,
-  // expiring tombstone before deleting state so a concurrently delayed Stop
-  // cannot recreate fresh state and export the same prompt again.
-  if (isSessionClosed(sessionId)) return;
-
   const state = loadState(sessionId);
+  // SessionEnd closes one process lifetime. A Hub may resume the same native
+  // session in its next process, so keep checkpoints/deduplication across exit.
+  const closed = isSessionClosed(sessionId);
+  const newPrompt = trigger === 'user_prompt_submit'
+    && typeof event.prompt_id === 'string' && event.prompt_id.length > 0
+    && !hasExportedPrompt(state, event.prompt_id);
+  if (closed && !newPrompt) return;
+  if (trigger === 'session_end' && event.prompt_id && state.active_prompt_id
+    && event.prompt_id !== state.active_prompt_id
+    && (!hasExportedPrompt(state, state.active_prompt_id) || hasExportedPrompt(state, event.prompt_id))) return;
   if (event.transcript_path) {
     const eventTranscriptPath = validateUpdatesPath(event.transcript_path, sessionId);
     if (!eventTranscriptPath) {
@@ -745,6 +750,10 @@ async function processHookLocked(trigger, event, sessionId) {
     });
     return;
   }
+  if (newPrompt) {
+    if (closed) reopenSession(sessionId);
+    state.active_prompt_id = event.prompt_id;
+  }
 
   // A first UserPromptSubmit establishes the session without advancing either
   // file cursor. Grok persists the current user record before invoking this
@@ -754,13 +763,13 @@ async function processHookLocked(trigger, event, sessionId) {
   // preserves the current turn without backfilling older completed turns.
   //
   // A first SessionEnd has no current turn boundary we can identify safely, so
-  // it still establishes-and-clears the state without replaying history.
+  // it still establishes-and-closes the state without replaying history.
   if (!state.initialized && (trigger === 'user_prompt_submit' || trigger === 'session_end')) {
     state.initialized = true;
     state.transcript_path = updatesPath;
     if (trigger === 'session_end') {
+      saveState(sessionId, state);
       markSessionClosed(sessionId);
-      clearState(sessionId);
     } else {
       saveState(sessionId, state);
     }
@@ -833,8 +842,8 @@ async function processHookLocked(trigger, event, sessionId) {
       };
     }
     if (trigger === 'session_end') {
+      saveState(sessionId, state);
       markSessionClosed(sessionId);
-      clearState(sessionId);
     } else saveState(sessionId, state);
     return;
   }
@@ -897,7 +906,6 @@ async function processHookLocked(trigger, event, sessionId) {
     // interrupted, a later hook can still deduplicate against the saved state.
     saveState(sessionId, state);
     markSessionClosed(sessionId);
-    clearState(sessionId);
   } else saveState(sessionId, state);
 }
 
