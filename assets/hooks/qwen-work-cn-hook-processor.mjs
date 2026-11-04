@@ -11,14 +11,12 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import {
   appendRowsToHistory,
-  getLineRangeInfo,
   HOOKS_DIR,
   loadHookRuntimeConfig,
   logDebug,
   parseArgs,
   parseStdinPayload,
-  readTranscriptSnapshotLines,
-  sliceTranscriptLines,
+  readTranscriptIncrement,
   updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
@@ -36,12 +34,11 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const snapshot = readTranscriptSnapshotLines(payload.transcriptPath);
-  const range = getLineRangeInfo(agentId, payload.transcriptPath, payload.sessionId, snapshot.lineCount);
-  if (!range) return;
-  const lines = sliceTranscriptLines(snapshot.allLines, range.startLine, range.endLine);
+  const batch = readTranscriptIncrement(agentId, payload.transcriptPath, payload.sessionId);
+  if (!batch) return;
+  const { lines } = batch;
   if (!lines.length) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
     return;
   }
 
@@ -49,13 +46,16 @@ async function main() {
   for (const line of lines) {
     try { parsed.push(JSON.parse(line)); } catch { /* skip malformed transcript rows */ }
   }
+  // A capped bootstrap can start inside an old turn. Only a prompt
+  // present in the retained window can anchor a recovered turn.
+  if (batch.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
   const rows = processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, {
-    rangeReason: range.reason,
+    rangeReason: batch.reason,
   });
   const serialized = rows.filter(Boolean).map(row => JSON.stringify(row));
   if (appendRowsToHistory(agentId, logPrefix, serialized)) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
     logDebug(agentId, `Mapped ${serialized.length} QwenWorkCN event(s)`);
   }
 }

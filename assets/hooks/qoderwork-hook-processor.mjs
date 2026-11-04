@@ -19,9 +19,7 @@ import {
   parseArgs,
   parseStdinPayload,
   logDebug,
-  getLineRangeInfo,
-  readTranscriptSnapshotLines,
-  sliceTranscriptLines,
+  readTranscriptIncrement,
   appendRowsToHistory,
   updateLineRecord,
   loadHookRuntimeConfig,
@@ -45,15 +43,13 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const snapshot = readTranscriptSnapshotLines(transcriptPath);
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
-  if (!range) return;
+  const batch = readTranscriptIncrement(agentId, transcriptPath, sessionId);
+  if (!batch) return;
 
-  const { startLine, endLine, reason: rangeReason } = range;
-  const lines = sliceTranscriptLines(snapshot.allLines, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
+  const { lines, endLine, byteCursor, reason: rangeReason } = batch;
+  logDebug(agentId, `Read ${lines.length} new lines from ${transcriptPath}`);
   if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
     return;
   }
 
@@ -62,10 +58,13 @@ async function main() {
     try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
   }
   if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
     return;
   }
 
+  // A capped bootstrap can start inside an old turn. Only a prompt
+  // present in the retained window can anchor a recovered turn.
+  if (batch.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
     rangeReason,
   });
@@ -75,7 +74,7 @@ async function main() {
   const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
   if (success) {
     logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
   }
 }
 

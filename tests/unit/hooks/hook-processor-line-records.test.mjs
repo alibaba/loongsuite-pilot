@@ -284,3 +284,145 @@ describe('readTranscriptSnapshotLines / sliceTranscriptLines', () => {
     });
   }
 });
+
+describe('Work transcript byte cursor', () => {
+  const worker = `
+    import fs from 'node:fs';
+    import { readTranscriptIncrement, updateLineRecord } from ${JSON.stringify(BASE_MODULE)};
+    const file = process.env.TEST_TRANSCRIPT;
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    const originalRead = fs.readSync;
+    let transcriptFd;
+    let bytes = 0;
+    fs.openSync = (...args) => {
+      const fd = originalOpen(...args);
+      if (args[0] === file) transcriptFd = fd;
+      return fd;
+    };
+    fs.closeSync = fd => {
+      if (fd === transcriptFd) transcriptFd = undefined;
+      return originalClose(fd);
+    };
+    fs.readSync = (...args) => {
+      const read = originalRead(...args);
+      if (args[0] === transcriptFd) bytes += read;
+      return read;
+    };
+    if (process.env.TEST_LEGACY_COUNT !== undefined) {
+      updateLineRecord('qoder-work', file, 'session', Number(process.env.TEST_LEGACY_COUNT));
+    }
+    const batch = readTranscriptIncrement('qoder-work', file, 'session');
+    if (batch) updateLineRecord('qoder-work', file, 'session', batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
+    console.log(JSON.stringify({ bytes, batch }));
+  `;
+
+  it('migrates a legacy cursor and reads only appended bytes on subsequent invocations', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const row = JSON.stringify({ type: 'session_meta', text: 'x'.repeat(256 * 1024) }) + '\n';
+    fs.writeFileSync(file, row.repeat(128));
+    const run = extra => runWorker(worker, { TEST_TRANSCRIPT: file, ...extra }).then(JSON.parse);
+    expect((await run({ TEST_LEGACY_COUNT: '128' })).batch).toBeNull();
+    const unchanged = await run();
+    expect(unchanged.batch).toBeNull();
+    expect(unchanged.bytes).toBeLessThanOrEqual(64);
+
+    const next = JSON.stringify({ type: 'user', text: '新内容' }) + '\n';
+    fs.appendFileSync(file, next);
+    const appended = await run();
+    expect(appended.batch).toMatchObject({ lines: [next.trim()], endLine: 129, reason: 'incremental' });
+    expect(appended.bytes).toBeLessThanOrEqual(Buffer.byteLength(next) + 256);
+    expect(JSON.parse(fs.readFileSync(path.join(dataDir, 'state/hooks/qoder-work-line-records.json'), 'utf8'))[file])
+      .toMatchObject({ last_line_count: 129 });
+  });
+
+  it('recovers a byte cursor from the rollback shadow without scanning its prefix', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const row = JSON.stringify({ type: 'user', text: 'x'.repeat(1024) }) + '\n';
+    fs.writeFileSync(file, row);
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    expect((await run()).batch.endLine).toBe(1);
+    fs.rmSync(path.join(dataDir, 'state/hooks/qoder-work-line-records'), { recursive: true });
+    const recovered = await run();
+    expect(recovered.batch).toBeNull();
+    expect(recovered.bytes).toBeLessThanOrEqual(128);
+  });
+
+  it('recovers only a bounded tail after a large bootstrap prefix', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const next = '{"type":"user","text":"latest"}';
+    fs.writeFileSync(file, '');
+    fs.truncateSync(file, 33 * 1024 * 1024);
+    fs.appendFileSync(file, '\n' + next + '\n');
+    const result = JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file }));
+    expect(result.batch).toMatchObject({ clipped: true, lines: [next], endLine: 2 });
+    expect(JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file })).bytes).toBeLessThanOrEqual(128);
+  });
+
+  it('recovers a newer bounded tail when an incremental backlog exceeds the read window', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    fs.writeFileSync(file, '{"type":"user"}\n');
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    expect((await run()).batch.endLine).toBe(1);
+    fs.truncateSync(file, 33 * 1024 * 1024);
+    const next = '{"type":"user","text":"latest"}';
+    fs.appendFileSync(file, '\n' + next + '\n');
+    const result = await run();
+    expect(result.batch).toMatchObject({ clipped: true, reason: 'oversized-backlog', lines: [next], endLine: 3 });
+    expect((await run()).batch).toBeNull();
+  });
+
+  it('rechecks a same-size rewrite even if the saved boundary bytes match', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const last = JSON.stringify({ type: 'assistant', text: 'x'.repeat(100) });
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    fs.writeFileSync(file, '{"type":"user","text":"old"}\n' + last + '\n');
+    expect((await run()).batch.endLine).toBe(2);
+    const rewritten = '{"type":"user","text":"new"}';
+    fs.writeFileSync(file, rewritten + '\n' + last + '\n');
+    const stamp = new Date(Date.now() - 60_000);
+    fs.utimesSync(file, stamp, stamp);
+    expect((await run()).batch).toMatchObject({ lines: [rewritten, last], reason: 'truncated' });
+  });
+
+  it('waits for a delimiter on a large final JSON object', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    fs.writeFileSync(file, JSON.stringify({ type: 'user', text: 'x'.repeat(1024 * 1024) }));
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    expect((await run()).batch).toBeNull();
+    fs.appendFileSync(file, '\n');
+    expect((await run()).batch.endLine).toBe(1);
+  });
+
+  it.each([true, false])('preserves a complete final row without a delimiter (legacy: %s)', async legacy => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const run = extra => runWorker(worker, { TEST_TRANSCRIPT: file, ...extra }).then(JSON.parse);
+    const first = '{"type":"user"}';
+    fs.writeFileSync(file, first);
+    const initial = await run(legacy ? { TEST_LEGACY_COUNT: '1' } : {});
+    if (legacy) expect(initial.batch).toBeNull();
+    else expect(initial.batch).toMatchObject({ endLine: 1, lines: [first] });
+    expect((await run()).batch).toBeNull();
+    const next = '{"type":"assistant"}';
+    fs.appendFileSync(file, '\n' + next + '\n');
+    expect((await run()).batch).toMatchObject({ endLine: 2, lines: [next] });
+  });
+
+  it('keeps a partial final row and invalidates the cursor after replacement', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    fs.writeFileSync(file, '{"type":"user"}\n');
+    expect((await run()).batch.endLine).toBe(1);
+    fs.appendFileSync(file, '{"type":"assistant"');
+    expect((await run()).batch).toBeNull();
+    fs.appendFileSync(file, '}\n');
+    expect((await run()).batch).toMatchObject({ lines: ['{"type":"assistant"}'], endLine: 2 });
+
+    const replacement = path.join(dataDir, 'replacement.jsonl');
+    const newRow = JSON.stringify({ type: 'user', text: 'new'.repeat(64) });
+    fs.writeFileSync(replacement, newRow + '\n');
+    fs.renameSync(replacement, file);
+    expect((await run()).batch).toMatchObject({ lines: [newRow], endLine: 1, reason: 'truncated' });
+    expect((await run()).batch).toBeNull();
+  });
+});
