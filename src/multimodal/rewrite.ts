@@ -99,6 +99,8 @@ function collectUriPartsFromMessages(messages: unknown[]): UriPart[] {
       const partRecord = asRecord(part);
       if (partRecord?.type === 'tool_call_response') {
         parts.push(...collectUriPartsFromValue(partRecord.response));
+      } else if (partRecord?.type === 'tool_call') {
+        parts.push(...collectUriPartsFromValue(partRecord.arguments));
       }
     }
   }
