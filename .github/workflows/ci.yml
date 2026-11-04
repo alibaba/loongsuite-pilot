@@ -19,8 +19,8 @@ jobs:
   rust:
     name: ci-gate
     runs-on: ubuntu-22.04
-    # 单个质量任务控制执行预算；冷缓存及排队耗时仍需实测。
-    timeout-minutes: 10
+    # 完整功能与宿主回归优先，保留编译及缓存收尾余量。
+    timeout-minutes: 15
     env:
       RUSTUP_TOOLCHAIN: 1.99.1
       CARGO_TERM_COLOR: always
