@@ -237,7 +237,8 @@ async function readAppendedEvents(
       }
       const chunkStart = position;
       position += bytesRead;
-      const data = chunk.subarray(0, bytesRead);
+      // Retained slices must not pin the full requested allocation on short reads.
+      const data = bytesRead === chunk.length ? chunk : Buffer.from(chunk.subarray(0, bytesRead));
       let cursor = 0;
       while (cursor < data.length) {
         const newline = data.indexOf(0x0a, cursor);

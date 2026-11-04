@@ -114,6 +114,32 @@ describe('readSegmentTokensForSession incremental JSONL reading', () => {
     expect(hoisted.segmentReadBytes - before).toBe(Buffer.byteLength(suffix));
   });
 
+  it('does not retain the requested backing capacity of many short reads', async () => {
+    const sessionId = nextSessionId();
+    const [start, end] = requestLines('req-short', 1000, 2000);
+    const largeEnd = end.slice(0, -1) + ',"padding":"' + 'x'.repeat(1024 * 1024) + '"}\n';
+    const size = Buffer.byteLength(largeEnd);
+    await writeSegment(sessionId, start + '\n' + largeEnd);
+    hoisted.maxBytesPerRead = 4 * 1024;
+
+    const originalConcat = Buffer.concat;
+    let retainedBytes = 0;
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation((parts, length) => {
+      if (length === size) {
+        retainedBytes = [...new Set(parts.map(part => part.buffer))]
+          .reduce((total, buffer) => total + buffer.byteLength, 0);
+      }
+      return originalConcat(parts, length);
+    });
+    try {
+      expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-short']);
+      expect(retainedBytes).toBeGreaterThanOrEqual(size);
+      expect(retainedBytes).toBeLessThanOrEqual(2 * size);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
   it('reads only bytes appended after the last complete record', async () => {
     const sessionId = nextSessionId();
     const firstBody = `${requestLines('req-a', 1000, 2000).join('\n')}\n`;
