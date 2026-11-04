@@ -10,7 +10,11 @@ import { DoubaoWorkNativeReader } from '../../../src/inputs/doubao-work/doubao-w
 import { DoubaoWorkBudget } from '../../../src/inputs/doubao-work/doubao-work-budget.js';
 
 class ProbeInput extends DoubaoWorkInput {
-  constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
+  constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) {
+    // These tests exercise correlation/checkpoints, not host scheduling speed.
+    // Keep byte/record limits; real wall budgets have separate performance tests.
+    super({ nativeScanIntervalMs: 0, workBudget: { milliseconds: Number.POSITIVE_INFINITY }, ...opts });
+  }
   poll() { return this.collect(); }
 }
 const temporary: string[] = [];
