@@ -9,6 +9,7 @@ use crate::utils::{
     create_logger, read_json_document, write_text_file_atomic, AtomicTextWriteOptions,
     ExpectedFileState, JsonDocumentRead, JsonSyntax,
 };
+use anyhow::Context;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
@@ -146,6 +147,11 @@ impl DeploymentManager {
         self.loader.pilot_dir()
     }
 
+    pub(crate) fn with_config_identity(mut self, config: &crate::types::AnalyticsConfig) -> Self {
+        self.directory = self.directory.with_config_identity(config);
+        self
+    }
+
     pub(crate) fn preserving_runtime_assets(mut self) -> Self {
         self.hook = self.hook.preserving_runtime_assets();
         self
@@ -165,6 +171,9 @@ impl DeploymentManager {
     ) -> Vec<DeployResult> {
         let definitions = self.loader.load().await;
         *self.definitions.lock().unwrap() = definitions.clone();
+        if let Err(err) = self.recover_plugin_state(None).await {
+            return definitions.iter().map(|def| failed(def, &err)).collect();
+        }
         if let Err(err) = self.load_state().await {
             logger().error(&err, None);
             return definitions.iter().map(|def| failed(def, &err)).collect();
@@ -247,6 +256,9 @@ impl DeploymentManager {
 
     pub async fn deploy_single(&self, def: &AgentDefinition) -> DeployResult {
         let _guard = self.gate.lock().await;
+        if let Err(err) = self.recover_plugin_state(Some(def)).await {
+            return failed(def, &err);
+        }
         if let Err(err) = self.load_state().await {
             return failed(def, &err);
         }
@@ -263,6 +275,9 @@ impl DeploymentManager {
         assume_detected: bool,
     ) -> DeployResult {
         let _guard = self.gate.lock().await;
+        if let Err(err) = self.recover_plugin_state(Some(def)).await {
+            return failed(def, &err);
+        }
         if let Err(err) = self.load_state().await {
             return failed(def, &err);
         }
@@ -291,6 +306,9 @@ impl DeploymentManager {
             Err(err) => return failed(def, &err),
         };
         let _guard = self.gate.lock().await;
+        if let Err(err) = self.recover_plugin_state(Some(def)).await {
+            return failed(def, &err);
+        }
         if let Err(err) = self.load_state().await {
             return failed(def, &err);
         }
@@ -319,6 +337,10 @@ impl DeploymentManager {
         self.undeploy_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = self.gate.lock().await;
+        if let Err(err) = self.recover_plugin_state(Some(def)).await {
+            logger().error(&err, None);
+            return false;
+        }
         if let Err(err) = self.load_state().await {
             logger().error(&err, None);
             return false;
@@ -619,6 +641,11 @@ impl DeploymentManager {
             }
         }
         let record = self.state.lock().unwrap().get(&def.id).cloned();
+        if !opts.preserve_plugin_config {
+            if let Some(result) = self.relocate_missing_pi(def, record.as_ref()).await? {
+                return Ok(result);
+            }
+        }
         let def = apply_persisted_deploy_targets(
             def,
             record.as_ref(),
@@ -823,6 +850,132 @@ impl DeploymentManager {
         Ok(result)
     }
 
+    async fn relocate_missing_pi(
+        &self,
+        def: &AgentDefinition,
+        record: Option<&DeployedAgentRecord>,
+    ) -> Result<Option<DeployResult>, String> {
+        if def.id != "pi-coding-agent" || def.deploy_mode != DeployMode::PluginInject {
+            return Ok(None);
+        }
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let Some(old) = record.plugin_inject_config_path.as_deref() else {
+            return Ok(None);
+        };
+        match std::fs::symlink_metadata(old) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Ok(None),
+        }
+        let Some(config) = def.plugin_inject.as_ref() else {
+            return Ok(None);
+        };
+        let Some(selected) = self.inject.relocation_candidate(config).await? else {
+            return Ok(None);
+        };
+        if node_resolve(old) == node_resolve(&selected) {
+            return Ok(None);
+        }
+        super::relocation_ownership::validate_owned_target(Path::new(old), true)
+            .map_err(|error| error.to_string())?;
+        super::relocation_ownership::validate_owned_target(
+            Path::new(&selected),
+            config.create_if_missing == Some(true),
+        )
+        .map_err(|error| error.to_string())?;
+        if !self.inject.detect(def).await {
+            return Ok(Some(skipped(def, DeploySkipReason::NotDetected)));
+        }
+        let mut memory = self.state.lock().unwrap().clone();
+        let mut updated = record.clone();
+        updated.plugin_inject_config_path = Some(node_resolve(&selected));
+        backfill_lifecycle_fields(&mut updated, def);
+        if let Some(installed_by) = self.installed_by {
+            updated.installed_by = Some(installed_by);
+        }
+        memory.insert(def.id.clone(), updated);
+        let mut changed = self.changed_ids();
+        changed.insert(def.id.clone());
+        let expected_record = serde_json::to_value(record).map_err(|error| error.to_string())?;
+        let (merged, up_to_date) = self.inject.relocate_pi_config(def, &selected, |raw| {
+            anyhow::ensure!(!super::hook_assets::recovery_pending(Path::new(&self.data_dir)), "Hook transaction is pending");
+            let raw = raw.context("recorded Pi state is missing")?;
+            let raw = raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw);
+            let disk: DeployedAgentsState = serde_json::from_slice(raw)?;
+            anyhow::ensure!(serde_json::to_value(disk.get(&def.id))? == expected_record, "Pi record changed concurrently");
+            // Recheck old path inside all locks; never recreate a stale HOME.
+            anyhow::ensure!(matches!(std::fs::symlink_metadata(old), Err(error) if error.kind() == std::io::ErrorKind::NotFound), "recorded Pi config reappeared");
+            let merged = merge_deployed_agents_state(&disk, &memory, &changed);
+            let raw_disk: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(raw)?;
+            let mut persisted = serde_json::to_value(&merged)?;
+            for (id, record) in raw_disk {
+                if !changed.contains(&id) {
+                    persisted[&id] = record;
+                }
+            }
+            let bytes = crate::utils::fs_utils::to_pretty_json(&persisted)?.into_bytes();
+            Ok((bytes, merged))
+        }).await?;
+        *self.state.lock().unwrap() = merged.clone();
+        *self.loaded.lock().unwrap() = merged;
+        self.touched.lock().unwrap().clear();
+        Ok(Some(DeployResult {
+            success: true,
+            agent_id: def.id.clone(),
+            deploy_mode: def.deploy_mode,
+            skipped: up_to_date.then_some(true),
+            reason: up_to_date.then_some(DeploySkipReason::UpToDate),
+            error: None,
+            plugin_inject_config_path: Some(node_resolve(&selected)),
+        }))
+    }
+
+    /// Recovery authority comes only from the current declaration or persisted
+    /// record, never a journal's path. Recovery precedes load_state, so a crashed
+    /// state write cannot become the next manager's comparison baseline.
+    async fn recover_plugin_state(
+        &self,
+        additional: Option<&AgentDefinition>,
+    ) -> Result<(), String> {
+        if !super::plugin_assets::recovery_pending(Path::new(&self.data_dir)) {
+            return Ok(());
+        }
+        let (disk, _) = self.read_state_file().await?;
+        let mut defs = self.loader.load().await;
+        if let Some(def) = additional {
+            defs.push(def.clone());
+        }
+        for def in defs {
+            if def.deploy_mode != DeployMode::PluginInject {
+                continue;
+            }
+            let mut paths = def
+                .plugin_inject
+                .as_ref()
+                .map(|config| config.config_paths.clone())
+                .unwrap_or_default();
+            if let Some(path) = disk
+                .get(&def.id)
+                .and_then(|record| record.plugin_inject_config_path.clone())
+            {
+                paths.push(path);
+            }
+            for path in paths {
+                let path = node_resolve(&crate::utils::resolve_home(&path));
+                if self
+                    .inject
+                    .recover_config(&def, Path::new(&path))
+                    .await
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err("plugin recovery does not match any declared or recorded config".into())
+    }
+
     async fn detect_target(&self, def: &AgentDefinition) -> bool {
         #[cfg(test)]
         self.history_strategy_detection_calls
@@ -966,10 +1119,26 @@ impl DeploymentManager {
                     !super::hook_assets::recovery_pending(Path::new(&self.data_dir)),
                     "Hook 事务待恢复，拒绝覆盖部署状态"
                 );
+                anyhow::ensure!(
+                    !super::plugin_assets::recovery_pending(Path::new(&self.data_dir)),
+                    "Plugin transaction is pending; preserve deployment state for recovery"
+                );
                 let (disk, expected) = self.read_state_file().await.map_err(anyhow::Error::msg)?;
                 let memory = self.state.lock().unwrap().clone();
-                let merged = merge_deployed_agents_state(&disk, &memory, &self.changed_ids());
-                let text = crate::utils::fs_utils::to_pretty_json(&merged)?;
+                let changed = self.changed_ids();
+                let merged = merge_deployed_agents_state(&disk, &memory, &changed);
+                let mut persisted = serde_json::to_value(&merged)?;
+                if let ExpectedFileState::Present(raw) = &expected {
+                    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+                    let original: serde_json::Map<String, serde_json::Value> =
+                        serde_json::from_str(raw)?;
+                    for (id, record) in original {
+                        if !changed.contains(&id) {
+                            persisted[&id] = record;
+                        }
+                    }
+                }
+                let text = crate::utils::fs_utils::to_pretty_json(&persisted)?;
                 write_text_file_atomic(
                     &file,
                     &text,

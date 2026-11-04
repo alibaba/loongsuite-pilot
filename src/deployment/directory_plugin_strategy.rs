@@ -27,6 +27,7 @@ fn logger() -> crate::utils::BoundLogger {
 struct Marker {
     source_hash: String,
     data_dir: Option<String>,
+    install_id: Option<String>,
     activation_hash: Option<String>,
     activation_status: Option<String>,
 }
@@ -36,18 +37,116 @@ enum TargetState {
     Missing,
     Empty,
     Managed(Marker),
+    Relocatable(Marker),
     Unmanaged,
 }
 
 pub struct DirectoryPluginStrategy {
     data_dir: Option<String>,
+    install_id: Option<String>,
+    identity_invalid: bool,
 }
 
 impl DirectoryPluginStrategy {
     pub fn new(data_dir: Option<String>) -> Self {
+        let data_dir = data_dir.map(|dir| node_resolve(&dir));
+        let identity = data_dir
+            .as_ref()
+            .map(|dir| {
+                super::relocation_ownership::read_install_id(&Path::new(dir).join("config.json"))
+            })
+            .unwrap_or(Ok(None));
         Self {
-            data_dir: data_dir.map(|dir| node_resolve(&dir)),
+            data_dir,
+            identity_invalid: identity.is_err(),
+            install_id: identity.ok().flatten(),
         }
+    }
+
+    pub(crate) fn with_config_identity(mut self, config: &crate::types::AnalyticsConfig) -> Self {
+        let identity = super::relocation_ownership::effective_install_id(config);
+        self.identity_invalid = identity.is_err();
+        self.install_id = identity.ok().flatten();
+        self
+    }
+
+    /// Explicit absent identity remains a valid legacy state; invalid evidence
+    /// is distinct and cannot fall back to the same-user compatibility branch.
+    #[cfg(test)]
+    pub(crate) fn with_installation_id(mut self, install_id: Option<String>) -> Self {
+        self.identity_invalid = install_id
+            .as_deref()
+            .is_some_and(|id| !super::relocation_ownership::valid_install_id(id));
+        self.install_id = install_id.filter(|_| !self.identity_invalid);
+        self
+    }
+
+    async fn inspect_for_deploy(
+        &self,
+        target: &str,
+        marker_file: &str,
+        agent_id: &str,
+        source: &str,
+    ) -> Result<TargetState, String> {
+        let state = self.inspect_at(target, marker_file, agent_id).await?;
+        if self.identity_invalid {
+            return Ok(state);
+        }
+        if !matches!(state, TargetState::Unmanaged) {
+            return Ok(state);
+        }
+        let marker_path = Path::new(target).join(marker_file);
+        let marker = match super::relocation_ownership::read_owned_bytes(&marker_path, 64 * 1024) {
+            Ok(Some(bytes)) => parse_owned_marker(&bytes, agent_id),
+            _ => None,
+        };
+        let Some(marker) = marker else {
+            return Ok(state);
+        };
+        let Some(old_data) = marker.data_dir.as_deref().filter(|old| is_absolute(old)) else {
+            return Ok(state);
+        };
+        if Some(old_data) == self.data_dir.as_deref() {
+            return Ok(state);
+        }
+        // Read only the old owned config identity for legacy schema1 markers.
+        let old_id = match super::relocation_ownership::read_install_id(
+            &Path::new(old_data).join("config.json"),
+        ) {
+            Ok(id) => id,
+            Err(_) => return Ok(state),
+        };
+        let proven = match marker.install_id.as_deref() {
+            Some(id) => {
+                self.install_id.as_deref() == Some(id)
+                    && old_id.as_deref().is_none_or(|old| old == id)
+            }
+            // Original schema1 did not persist installation identity. Preserve
+            // its same-user automatic move only for a completely unchanged
+            // payload and safe owned target/data roots. Explicit conflicting
+            // identities never enter this compatibility branch.
+            None => match (old_id.as_deref(), self.install_id.as_deref()) {
+                (Some(old), Some(current)) => old == current,
+                _ => true,
+            },
+        };
+        if !proven {
+            return Ok(state);
+        }
+        if super::relocation_ownership::open_owned(Path::new(target), true).is_err()
+            || super::relocation_ownership::validate_owned_directory(Path::new(old_data)).is_err()
+            || self.data_dir.as_deref().is_none_or(|current| {
+                super::relocation_ownership::validate_owned_directory(Path::new(current)).is_err()
+            })
+        {
+            return Ok(state);
+        }
+        // Repeated on live target after staging and on captured backup before
+        // installation: content/marker swaps never become relocation authority.
+        if hash_directory(target, marker_file, Some(source)).await? != marker.source_hash {
+            return Ok(state);
+        }
+        Ok(TargetState::Relocatable(marker))
     }
 
     pub async fn directory_needs_deploy(
@@ -150,7 +249,9 @@ impl DirectoryPluginStrategy {
         let target_dir = node_resolve(&config.target_dir);
         assert_non_overlapping(&source_dir, &target_dir)?;
         assert_directory(&source_dir, "sourceDir").await?;
-        let target_state = self.inspect_at(&target_dir, &marker_file, &def.id).await?;
+        let target_state = self
+            .inspect_for_deploy(&target_dir, &marker_file, &def.id, &source_dir)
+            .await?;
         if matches!(target_state, TargetState::Unmanaged) {
             let marker_path = Path::new(&target_dir).join(&marker_file);
             // Diagnostics grant no relocation authority and do not follow an
@@ -199,11 +300,16 @@ impl DirectoryPluginStrategy {
             let mut marker = Marker {
                 source_hash: source_hash.clone(),
                 data_dir: self.data_dir.clone(),
+                install_id: self.install_id.clone(),
                 activation_hash: None,
                 activation_status: None,
             };
             write_marker(&staging_path, &marker_file, &def.id, &marker).await?;
-            if self.inspect_at(&target_dir, &marker_file, &def.id).await? != target_state {
+            if self
+                .inspect_for_deploy(&target_dir, &marker_file, &def.id, &source_dir)
+                .await?
+                != target_state
+            {
                 return Err(format!(
                     "target directory changed during deployment: {target_dir}"
                 ));
@@ -211,7 +317,12 @@ impl DirectoryPluginStrategy {
             if !matches!(target_state, TargetState::Missing) {
                 transaction.capture_previous()?;
                 let captured = self
-                    .inspect_at(&transaction.backup.to_string_lossy(), &marker_file, &def.id)
+                    .inspect_for_deploy(
+                        &transaction.backup.to_string_lossy(),
+                        &marker_file,
+                        &def.id,
+                        &source_dir,
+                    )
                     .await?;
                 if captured != target_state {
                     return Err(format!(
@@ -806,6 +917,9 @@ fn encode_marker(agent_id: &str, marker: &Marker) -> String {
     if let Some(data_dir) = &marker.data_dir {
         body.insert("dataDir".into(), json!(data_dir));
     }
+    if let Some(install_id) = &marker.install_id {
+        body.insert("installId".into(), json!(install_id));
+    }
     if let Some(activation_hash) = &marker.activation_hash {
         body.insert("activationHash".into(), json!(activation_hash));
     }
@@ -833,8 +947,12 @@ async fn read_owned_marker(path: &Path, agent_id: &str) -> Option<Marker> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return None;
     }
-    let raw = tokio::fs::read_to_string(path).await.ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
+    let raw = tokio::fs::read(path).await.ok()?;
+    parse_owned_marker(&raw, agent_id)
+}
+
+fn parse_owned_marker(raw: &[u8], agent_id: &str) -> Option<Marker> {
+    let value: Value = serde_json::from_slice(raw).ok()?;
     if value.get("schemaVersion").and_then(Value::as_u64) != Some(MARKER_SCHEMA_VERSION) {
         return None;
     }
@@ -855,8 +973,16 @@ async fn read_owned_marker(path: &Path, agent_id: &str) -> Option<Marker> {
     if activation_hash.as_ref().is_some_and(|hash| !is_sha(hash)) {
         return None;
     }
+    let install_id = match value.get("installId") {
+        Some(Value::String(id)) if super::relocation_ownership::valid_install_id(id) => {
+            Some(id.clone())
+        }
+        Some(_) => return None,
+        None => None,
+    };
     Some(Marker {
         source_hash,
+        install_id,
         data_dir: value
             .get("dataDir")
             .and_then(Value::as_str)
@@ -1134,6 +1260,8 @@ mod tests {
         let second = DirectoryPluginStrategy::new(Some(
             root.path().join("second").to_string_lossy().into_owned(),
         ));
+        let first = first.with_installation_id(Some("first-install".into()));
+        let second = second.with_installation_id(Some("second-install".into()));
         let result = first.deploy(&def).await;
         assert!(result.success, "{:?}", result.error);
         let before = std::fs::read(target.join(DEFAULT_MARKER_FILE)).unwrap();
@@ -1300,3 +1428,7 @@ mod removal_history_contract_tests;
 #[cfg(test)]
 #[path = "directory_data_dir_history_contract_tests.rs"]
 mod data_dir_history_contract_tests;
+
+#[cfg(test)]
+#[path = "directory_relocation_ownership_tests.rs"]
+mod relocation_ownership_tests;

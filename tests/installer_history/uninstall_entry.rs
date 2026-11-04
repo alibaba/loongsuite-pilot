@@ -456,3 +456,7 @@ fn uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell
         }
     }
 }
+
+#[cfg(unix)]
+#[path = "pi_relocation_public_entry_tests.rs"]
+mod pi_relocation_public_entry_tests;

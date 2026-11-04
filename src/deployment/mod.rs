@@ -42,6 +42,7 @@ mod plugin_assets;
 mod plugin_inject_strategy;
 mod plugin_migration;
 mod plugin_probe_strategy;
+mod relocation_ownership;
 mod runtime_launcher;
 mod worker_manifest_supervisor;
 mod worker_process;

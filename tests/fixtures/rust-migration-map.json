@@ -18866,7 +18866,7 @@
       "source_hash": "fd308f4095834ab7129c6b91096b2f50146e0bb518e36aa8e927b8197d26f77e",
       "coverage": "partial",
       "rust": [],
-      "note": "30 immutable source declarations:26complete/4partial L606,L675,L870,L898. Zero retirement. All public actual filesystem semantics run on GNU/glibc2.34 Rust1.99.1; other platform labels applicability only. Release implementation unchanged, only scoped cfg(test) strategy-detection counter added; source mock drift/unsafe health semantics explicitly pending.",
+      "note": "Exact immutable source declarations retained. Pi recorded-path relocation and same-user unchanged directory dataDir relocation now use real Native filesystem/public-entry contracts, with rollback and fixed-role restart recovery. Remaining source assertion differences stay explicit: L870:C5, L898:C5. Source mapping is not execution evidence; physical platform results are recorded separately.",
       "cases": [
         {
           "source": {
@@ -19340,8 +19340,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "Original expects a vanished recorded Pi config to fall through into a different current home and uninstall it via installer-opensource.sh. Native persisted target is deliberately exclusive ownership; real current foreign config remains byte-identical and record remains at the owned stale path. Source installer acceptance and silent home adoption stay pending an explicit ownership-safe relocation design.",
+          "coverage": "complete",
+          "behavior": "A vanished recorded Pi config reselects and injects the declared current home without recreating the old home, then atomically persists the exact selected target. The whole shipped public uninstall shell consumes that new record: its shipped/default definition differs from the manager-only custom target, so definition fallback cannot mask a missing persisted path. Third-party extension bytes and other Agent records are preserved. The original twenty-second public-entry contract remains; the direct Native manager contract uses a tighter fifteen-second limit. Assets/config/backup/state-last writes share one journal and fixed-role recovery.",
           "platforms": [
             "linux",
             "macos",
@@ -19351,8 +19351,12 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/deployment/deployment_manager_history_contract_tests.rs",
-                "test": "manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_another_home"
+                "file": "src/deployment/pi_config_relocation_history_tests.rs",
+                "test": "pi_missing_recorded_home_automatically_injects_current_config_and_persists_the_new_target"
+              },
+              {
+                "file": "tests/installer_history/pi_relocation_public_entry_tests.rs",
+                "test": "pi_original_l664_relocated_record_is_consumed_by_the_whole_public_uninstall_script"
               }
             ]
           }
@@ -19367,8 +19371,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "Original expects an already-injected different live home to replace a stale recorded Pi path automatically. Native cannot infer installation ownership merely from an injected reference; leaves the other home byte-identical and preserves recorded target. Pending explicit migration ownership context; no foreign guard weakened.",
+          "coverage": "complete",
+          "behavior": "A missing recorded Pi target reselects the declared current home, recognizes its already-injected healthy resources, returns success/UpToDate/skipped=true, and atomically persists that exact selected path without rewriting config bytes or mtime. After the fallback definition changes, real manager undeployment still cleans the persisted current path and preserves third-party entries. The original fifteen-second contract is retained.",
           "platforms": [
             "linux",
             "macos",
@@ -19378,8 +19382,8 @@
             "kind": "rust",
             "tests": [
               {
-                "file": "src/deployment/deployment_manager_history_contract_tests.rs",
-                "test": "manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_another_home"
+                "file": "src/deployment/pi_config_relocation_history_tests.rs",
+                "test": "pi_already_injected_current_home_only_moves_record_without_rewriting_config"
               }
             ]
           }
@@ -104721,9 +104725,9 @@
     {
       "legacy": "tests/unit/deployment/directory-plugin-strategy.test.ts",
       "source_hash": "08ba4aab1006326033280d5658e2ad3588c3be1fac5820cdd0bae2f6d33f9165",
-      "coverage": "partial",
+      "coverage": "complete",
       "rust": [],
-      "note": "19/20 exact EF declarations complete, f84/2b identical. Original failure diagnostic/retry marker assertions are preserved through atomic metadata-only pending publication after SDK rollback. Source assertions were not weakened; the contrary prior Native missing/empty assumption was updated explicitly. DataDir migration L278 remains a genuine gap pending trustworthy ownership/activity gating, not retired. Linux actual only; Windows/macOS applicable but unexecuted. All20 exact declarations accounted:19 complete from unchanged EF/Main source; L278 remains explicitly partial because automatic cross-dataDir adoption has no strong same-install relocation authority. Real Native fixed ownership diagnostic, zero-write refusal, explicit cleanup from the owning installation and successful retry/health are tested; dirty/unknown old targets are preserved. No automatic relocation API or marker-only takeover introduced.",
+      "note": "Exact immutable source declarations retained. Pi recorded-path relocation and same-user unchanged directory dataDir relocation now use real Native filesystem/public-entry contracts, with rollback and fixed-role restart recovery. Remaining source assertion differences stay explicit: none. Source mapping is not execution evidence; physical platform results are recorded separately.",
       "cases": [
         {
           "source": {
@@ -105268,8 +105272,8 @@
             ],
             "parameters": []
           },
-          "coverage": "partial",
-          "behavior": "Original automatic dataDir redeployment remains intentionally unsupported without same-install relocation authority. Actual Native producer old-data deployment -> new-data refusal with bytes/marker preserved -> explicit old-owner safe cleanup -> new-data retry/marker/health success is verified. Dirty old content and unknown sibling prevent both old cleanup and new takeover. Fixed diagnostic explains owning-install cleanup/retry; original five-second budget remains.",
+          "coverage": "complete",
+          "behavior": "The original source dataDir-change deployment succeeds automatically for the unchanged same-user schema1 payload, including no installId, no old config and initially absent data roots. The marker names the new data root and needs-deploy becomes false without an explicit old-install cleanup. Modern explicit identity conflicts, foreign ownership, modified payloads and unknown siblings remain protected; activation failure rolls back the old bytes and marker. The source's default fifteen-second budget is met by the tighter existing five-second Native contract; applicability is not a claim of physical platform execution.",
           "platforms": [
             "linux",
             "macos",
@@ -105280,7 +105284,7 @@
             "tests": [
               {
                 "file": "src/deployment/directory_data_dir_history_contract_tests.rs",
-                "test": "original_l278_reports_data_ownership_and_safe_old_install_cleanup_allows_explicit_retry"
+                "test": "original_l278_automatically_relocates_owned_unchanged_legacy_payload"
               },
               {
                 "file": "src/deployment/directory_data_dir_history_contract_tests.rs",

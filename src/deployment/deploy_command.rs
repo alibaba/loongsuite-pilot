@@ -239,7 +239,8 @@ pub async fn deploy_loaded_config(
         pilot_dir: pilot_dir.clone(),
         builtin_agents_dir: None,
         installed_by: Some(crate::types::InstalledBy::Build),
-    });
+    })
+    .with_config_identity(config);
     let results = manager
         .deploy_all(Some(&|def: &AgentDefinition| {
             is_agent_gated_enabled(config, &def.id)

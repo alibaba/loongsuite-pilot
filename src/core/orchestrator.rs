@@ -413,12 +413,15 @@ impl Orchestrator {
         self.start_multimodal().await;
         let pilot_dir = resolve_pilot_dir(&self.data_dir, &[]).map_err(anyhow::Error::msg)?;
         self.restore_pi_sdk(&alarm).await;
-        let deployment = Arc::new(DeploymentManager::new(DeploymentManagerOptions {
-            data_dir: self.data_dir.clone(),
-            pilot_dir: pilot_dir.clone(),
-            builtin_agents_dir: None,
-            installed_by: Some(InstalledBy::Daemon),
-        }));
+        let deployment = Arc::new(
+            DeploymentManager::new(DeploymentManagerOptions {
+                data_dir: self.data_dir.clone(),
+                pilot_dir: pilot_dir.clone(),
+                builtin_agents_dir: None,
+                installed_by: Some(InstalledBy::Daemon),
+            })
+            .with_config_identity(&self.config),
+        );
         deployment.load_definitions().await;
         *self.deployment.lock().expect("deploy") = Some(Arc::clone(&deployment));
         self.apply_deployment_scope(hook_report.as_ref());
@@ -1194,12 +1197,15 @@ impl Orchestrator {
                     .expect("deploy")
                     .clone()
                     .unwrap_or_else(|| {
-                        Arc::new(DeploymentManager::new(DeploymentManagerOptions {
-                            data_dir: self.data_dir.clone(),
-                            pilot_dir: self.data_dir.clone(),
-                            builtin_agents_dir: None,
-                            installed_by: None,
-                        }))
+                        Arc::new(
+                            DeploymentManager::new(DeploymentManagerOptions {
+                                data_dir: self.data_dir.clone(),
+                                pilot_dir: self.data_dir.clone(),
+                                builtin_agents_dir: None,
+                                installed_by: None,
+                            })
+                            .with_config_identity(&self.config),
+                        )
                     }),
             );
             let def_for_available = def.clone();

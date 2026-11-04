@@ -124,6 +124,14 @@ jobs:
             test "$(cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --list | grep -c ': test$')" -eq 1
             cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --exact --test-threads=1 --nocapture
           done
+      - name: Automatic Pi and directory relocation with transaction recovery
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for selector in deployment::directory_plugin_strategy::data_dir_history_contract_tests:: deployment::directory_plugin_strategy::relocation_ownership_tests:: deployment::deployment_manager::history_contract_tests::pi_relocation_tests:: deployment::plugin_assets::pi_relocation_recovery_tests:: deployment::relocation_ownership::identity_tests::; do
+            test "$(cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --list | grep -c ': test$')" -gt 0
+            cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --test-threads=1 --nocapture
+          done
       - name: Optional Node worker resolution policy
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |

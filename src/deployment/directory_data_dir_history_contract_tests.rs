@@ -46,43 +46,26 @@ impl World {
 }
 
 #[tokio::test]
-async fn original_l278_reports_data_ownership_and_safe_old_install_cleanup_allows_explicit_retry() {
+async fn original_l278_automatically_relocates_owned_unchanged_legacy_payload() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let world = World::new();
         let def = world.definition();
         let old = world.old();
         let new_install = world.new_install();
         assert!(old.deploy_directory(&def).await.success);
-        let marker = std::fs::read(world.marker()).unwrap();
         let plugin = std::fs::read(world.target.join("plugin.py")).unwrap();
         assert!(new_install.directory_needs_deploy(&def, None).await);
-        let refused = new_install.deploy_directory(&def).await;
-        assert!(!refused.success);
-        assert_eq!(std::fs::read(world.marker()).unwrap(), marker);
+        let result = new_install.deploy_directory(&def).await;
+        assert!(result.success, "{:?}", result.error);
+        let marker: Value =
+            serde_json::from_slice(&std::fs::read(world.marker()).unwrap()).unwrap();
+        assert_eq!(marker["dataDir"], json!(world.new_data));
         assert_eq!(
             std::fs::read(world.target.join("plugin.py")).unwrap(),
             plugin
         );
-        assert!(!old.directory_needs_deploy(&def, None).await);
-        // This is explicit cleanup by the owning dataDir, not automatic
-        // adoption by the other installation or a marker-only relocation API.
-        assert!(old.undeploy(&def).await);
-        assert!(!world.target.exists());
-        assert!(new_install.deploy_directory(&def).await.success);
-        let current: Value =
-            serde_json::from_slice(&std::fs::read(world.marker()).unwrap()).unwrap();
-        assert_eq!(
-            Path::new(current["dataDir"].as_str().unwrap()),
-            world.new_data
-        );
         assert!(!new_install.directory_needs_deploy(&def, None).await);
-        let diagnostic = refused.error.unwrap();
-        assert!(
-            diagnostic.contains("dataDir ownership differs"),
-            "{diagnostic}"
-        );
-        assert!(diagnostic.contains("owning installation"), "{diagnostic}");
-        assert!(diagnostic.contains("retry"), "{diagnostic}");
+        assert!(!old.undeploy(&def).await);
     })
     .await
     .expect("original five-second test deadline");

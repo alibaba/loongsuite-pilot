@@ -2,9 +2,21 @@
 
 ## 本轮交付顺序与边界
 
-先更新文档，再交付自动发布 CI，随后分批提交生产代码、脚本和文档，最后迁移独立测试。内嵌 `#[cfg(test)]` 模块及编译必需 fixture 随所属源码提交，不为拆分提交破坏源码闭包。
+当前优先补齐与最新 main 对应的运行能力和历史测试，分批验证、提交，并在每次打包后替换远端开发机的运行二进制。功能和真实运行验收优先；Ubuntu 完整质量任务保留 15 分钟预算，严格 Clippy 与功能测试继续阻断失败。正式发布、资产上传和更新渠道切换暂缓。内嵌 `#[cfg(test)]` 模块及编译必需 fixture 随所属源码提交，保持源码闭包。
 
 推送前必须通过 `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`。不降低 lint 等级、不添加全局 allow、不使用 `continue-on-error` 把诊断变成绿色。Git 推送目标为 `origin/loongsuite-pilot-rust`，不推 main，不自动创建 tag 或实际 Release。
+
+## 2026-11-04 功能迁移收口（最终原生 CI 复验中，尚未发布）
+
+- 已将 main 与 dev/v2.0.0 的 f72c981 合入并完成 Rust 适配：Codex 有界 deferred 恢复、Agent system 映射、DSH 有界 JSONL 进度与真实运行指标调用链。工具链保持 Rust 1.99.1、验证运行库 glibc 2.34，未降低依赖版本；发行目标保持六平台，不恢复 musl。
+- Pi 记录路径消失后可重新选择当前声明路径；已注入配置返回 UpToDate/skipped，保留 bytes/mtime。资源、配置、备份与最终状态写入使用同一事务，正常部署和恢复均按资源→配置→状态取锁，并在锁内重新授权。公开 SH 卸载在默认定义与实际迁移路径不同的情况下仍消费记录路径；其他 Agent 未变记录的未知字段保持原样。
+- Directory 插件恢复原版无 installId 的旧 schema1 自动 dataDir 迁移：同用户、未修改的受管内容与安全目录满足条件时无需先手动清理。明确身份冲突、不同用户的所有权、用户改动和未知内容继续保留，激活失败回滚原内容。
+- 可选 Node worker 在覆盖路径缺省时从宿主绝对 PATH 查找 Node；显式覆盖仍优先，manifest PATH、隐式当前目录及 Pilot 本身不可成为发现的运行时。普通核心运行、默认 Cargo 测试与安装不要求 Node。
+- Copilot fallback watcher 启动先采样目录基线，避免把现有目录当变化、在首次队列拒绝后产生虚假重试。macOS 巨大 Codex 记录夹具先完成前缀异步写入再读取长度，生产扫描器、129 MiB 数据与原断言不变。
+- 本批生产代码在 glibc 2.34 完整 workspace/all-features 回归为 4,761 通过、0 失败、8 ignored，104 个 Cargo harness；内部子进程摘要不重复计数。Pi/Directory 私有部署模块 610 项及独立定义下的完整公开 SH 卸载通过。随后仅测试夹具的同步修正另跑原 scanner 合同、fmt 和全目标严格检查，不冒称重新执行整个大库。
+- 当前 PowerShell ACL backend 的真实 Windows 冷启动两架构各 20/20 轮通过，首轮先于 ACL 测试，15 秒原界限未变。另有各 1 项 ACL oracle、6 项边界、31 项 supervisor、2 项进程出生顺序回归通过；新的 WinAPI ACL helper 仅冻结为后续优化。整合版本的 Windows/macOS 最终 head 结果仍需单独收齐，不以旧基线或单模块证据替代。
+- 八份历史来源账本核对精确源码与 AST；最新 main 470 文件、5,421 声明：complete 5,231、retired 153、partial 34、pending 3。Pi 两项与 Directory 一项原合同已补齐，对应 15 个跨基线来源别名。映射不等于执行、参数化声明不等于展开测试数；旧协议、语言表示及其他剩余断言差异继续明确列出。3 项真实千问个人资料测试按用户要求保留待人工验收，不计通过。
+- 远端每次实际打包后立即替换并检查服务、输入启动和本地指标，保留业务配置、未知 CN Hook 与回滚版本，自动更新关闭。采集和心跳通道已有 SLS 接收成功回执；索引查询可见性尚未确认。未创建正式 tag/Release，未上传 OSS，未切换更新渠道。
 
 ## 2026-10-29 开发收口进展（尚未发布）
 

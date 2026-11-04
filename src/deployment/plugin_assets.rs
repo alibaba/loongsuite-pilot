@@ -260,7 +260,7 @@ impl PluginAssets {
         !self.files.is_empty()
     }
 
-    fn begin_install(&self, config: &Path) -> Result<ActivationTransaction> {
+    fn install_targets(&self, config: &Path) -> Result<BTreeMap<String, PathBuf>> {
         ensure!(self.managed(), "非托管插件没有资源事务");
         let mut targets = BTreeMap::new();
         for asset in &self.files {
@@ -274,6 +274,60 @@ impl PluginAssets {
             "backup".into(),
             PathBuf::from(format!("{}.bak", config.display())),
         );
+        Ok(targets)
+    }
+
+    fn state_role(&self) -> BTreeMap<String, PathBuf> {
+        if !self
+            .files
+            .iter()
+            .any(|asset| asset.relative == "pi-coding-agent/index.mjs")
+        {
+            return BTreeMap::new();
+        }
+        BTreeMap::from([(
+            "deployment-state".into(),
+            self.data.join("deployed-agents.json"),
+        )])
+    }
+
+    // Optional role is fixed under this installation, never read from journal
+    // paths. Legacy schema2 transactions without the role remain recoverable.
+    pub(super) fn recover_install(&self, config: &Path) -> Result<()> {
+        let directory = self.data.join(".plugin-install");
+        if recovery_pending(&self.data) {
+            ActivationTransaction::recover_registered(
+                &directory,
+                &[self.install_targets(config)?],
+                &self.state_role(),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn recover_config(
+        &self,
+        config: &Path,
+        authorize: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        with_plugin_locks(Some(&self.data), config, || async {
+            let state_lock = self.data.join("deployed-agents.json.lock");
+            super::with_deployed_state_lock(
+                state_lock.to_str().context("invalid state lock path")?,
+                || async {
+                    authorize()?;
+                    self.recover_install(config)
+                },
+                5000,
+            )
+            .await
+        })
+        .await
+    }
+
+    fn begin_install(&self, config: &Path) -> Result<ActivationTransaction> {
+        self.recover_install(config)?;
+        let targets = self.install_targets(config)?;
         let directory = self.data.join(".plugin-install");
         match std::fs::symlink_metadata(&directory) {
             Ok(_) => ensure!(runtime_metadata(&directory)?.is_dir(), "插件恢复目录无效"),
@@ -319,6 +373,59 @@ impl PluginAssets {
         Ok(())
     }
 
+    /// A relocation publishes the config/resources and its fixed state role in
+    /// one schema2 transaction, with state written last. Lock order is always
+    /// resources -> config -> deployment state.
+    pub(super) async fn install_config_and_state<T>(
+        &self,
+        config: &Path,
+        build: impl FnOnce(Option<&str>) -> Result<Option<PluginConfigEdit>>,
+        build_state: impl FnOnce(Option<&[u8]>) -> Result<(Vec<u8>, T)>,
+    ) -> Result<T> {
+        std::fs::create_dir_all(&self.data)?;
+        with_plugin_locks(Some(&self.data), config, || async {
+            let state_lock = self.data.join("deployed-agents.json.lock");
+            super::with_deployed_state_lock(
+                state_lock.to_str().context("invalid state lock path")?,
+                || async {
+                    self.recover_install(config)?;
+                    let mut targets = self.install_targets(config)?;
+                    targets.extend(self.state_role());
+                    let mut transaction =
+                        ActivationTransaction::begin(&self.data.join(".plugin-install"), targets)?;
+                    let result: Result<T> = (|| {
+                        let original = transaction.original_bytes("config")?;
+                        let original = original.as_deref().map(std::str::from_utf8).transpose()?;
+                        let edit = build(original)?;
+                        let state = transaction.original_bytes("deployment-state")?;
+                        let (state_bytes, value) = build_state(state.as_deref())?;
+                        self.prepare(&mut transaction)?;
+                        Self::write_config(&mut transaction, edit)?;
+                        transaction.write_preserving_mode(
+                            "deployment-state",
+                            &state_bytes,
+                            0o600,
+                        )?;
+                        transaction.commit()?;
+                        Ok(value)
+                    })();
+                    match result {
+                        Ok(value) => Ok(value),
+                        Err(error) => match transaction.rollback() {
+                            Ok(()) => Err(error),
+                            Err(rollback) => Err(error.context(format!(
+                                "plugin relocation rollback failed: {rollback:#}"
+                            ))),
+                        },
+                    }
+                },
+                5000,
+            )
+            .await
+        })
+        .await
+    }
+
     /// 配置、首次备份与全部共享资源使用同一持久事务；恢复完成后重新计算配置变更。
     pub(super) async fn install_config(
         &self,
@@ -330,24 +437,32 @@ impl PluginAssets {
         }
         std::fs::create_dir_all(&self.data)?;
         with_plugin_locks(Some(&self.data), config, || async {
-            let mut transaction = self.begin_install(config)?;
-            let result = (|| {
-                let original = transaction.original_bytes("config")?;
-                let original = original.as_deref().map(std::str::from_utf8).transpose()?;
-                let edit = build(original)?;
-                self.prepare(&mut transaction)?;
-                Self::write_config(&mut transaction, edit)?;
-                transaction.commit()
-            })();
-            if let Err(err) = result {
-                return match transaction.rollback() {
-                    Ok(()) => Err(err),
-                    Err(rollback) => {
-                        Err(err.context(format!("插件配置与资源恢复失败：{rollback:#}")))
+            let state_lock = self.data.join("deployed-agents.json.lock");
+            super::with_deployed_state_lock(
+                state_lock.to_str().context("invalid state lock path")?,
+                || async {
+                    let mut transaction = self.begin_install(config)?;
+                    let result = (|| {
+                        let original = transaction.original_bytes("config")?;
+                        let original = original.as_deref().map(std::str::from_utf8).transpose()?;
+                        let edit = build(original)?;
+                        self.prepare(&mut transaction)?;
+                        Self::write_config(&mut transaction, edit)?;
+                        transaction.commit()
+                    })();
+                    if let Err(err) = result {
+                        return match transaction.rollback() {
+                            Ok(()) => Err(err),
+                            Err(rollback) => {
+                                Err(err.context(format!("插件配置与资源恢复失败：{rollback:#}")))
+                            }
+                        };
                     }
-                };
-            }
-            Ok(())
+                    Ok(())
+                },
+                5000,
+            )
+            .await
         })
         .await
     }
@@ -991,3 +1106,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(external).unwrap().count(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_assets_pi_relocation_tests.rs"]
+mod pi_relocation_recovery_tests;

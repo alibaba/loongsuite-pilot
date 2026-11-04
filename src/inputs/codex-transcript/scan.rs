@@ -690,7 +690,11 @@ mod main346_scanner_contracts {
     async fn large_record(path: &std::path::Path, newline: bool) -> (i64, i64) {
         let mut f = tokio::fs::File::create(path).await.unwrap();
         f.write_all(b"{\"before\":true}\n").await.unwrap();
+        // Tokio File can still have a background write in flight after
+        // write_all returns; metadata must witness the completed prefix.
+        f.flush().await.unwrap();
         let prefix = f.metadata().await.unwrap().len() as i64;
+        assert_eq!(prefix, b"{\"before\":true}\n".len() as i64);
         f.write_all(b"{\"padding\":\"").await.unwrap();
         let block = vec![b'x'; 1024 * 1024];
         for _ in 0..129 {

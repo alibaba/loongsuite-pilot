@@ -68,6 +68,124 @@ impl PluginInjectStrategy {
         self.find_config_file(config, false).await
     }
 
+    pub(super) async fn relocation_candidate(
+        &self,
+        config: &PluginInjectConfig,
+    ) -> Result<Option<String>, String> {
+        self.find_config_file(config, config.create_if_missing == Some(true))
+            .await
+    }
+
+    pub(super) async fn recover_config(
+        &self,
+        def: &AgentDefinition,
+        path: &Path,
+    ) -> anyhow::Result<()> {
+        let assets = super::plugin_assets::PluginAssets::load(
+            def,
+            Path::new(&self.pilot_dir),
+            Path::new(&self.data_dir),
+        )?;
+        assets
+            .recover_config(path, || {
+                // Re-evaluate recorded authority only after acquiring the real
+                // resource, config and state locks. Static declarations are still
+                // valid authority even while their transaction state awaits rollback.
+                let selected = node_resolve(&path.to_string_lossy());
+                let declared = def.plugin_inject.as_ref().is_some_and(|config| {
+                    config
+                        .config_paths
+                        .iter()
+                        .any(|candidate| node_resolve(&resolve_home(candidate)) == selected)
+                });
+                if !declared {
+                    let bytes = super::relocation_ownership::read_owned_bytes(
+                        &Path::new(&self.data_dir).join("deployed-agents.json"),
+                        4 * 1024 * 1024,
+                    )
+                    .map_err(anyhow::Error::msg)?
+                    .ok_or_else(|| anyhow::anyhow!("recorded plugin state is missing"))?;
+                    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+                    let state: crate::types::DeployedAgentsState = serde_json::from_slice(bytes)?;
+                    anyhow::ensure!(
+                        state
+                            .get(&def.id)
+                            .and_then(|record| record.plugin_inject_config_path.as_deref())
+                            .is_some_and(|recorded| node_resolve(recorded) == selected),
+                        "plugin recovery path is no longer declared or recorded"
+                    );
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    pub(super) async fn relocate_pi_config<T>(
+        &self,
+        def: &AgentDefinition,
+        selected: &str,
+        build_state: impl FnOnce(Option<&[u8]>) -> anyhow::Result<(Vec<u8>, T)>,
+    ) -> Result<(T, bool), String> {
+        let config = def.plugin_inject.as_ref().ok_or("missing plugin config")?;
+        let assets = super::plugin_assets::PluginAssets::load(
+            def,
+            Path::new(&self.pilot_dir),
+            Path::new(&self.data_dir),
+        )
+        .map_err(|error| error.to_string())?;
+        if !assets.managed() || def.id != "pi-coding-agent" {
+            return Err("only the verified Pi bundle can relocate a recorded config".into());
+        }
+        let mut projected = def.clone();
+        projected.plugin_inject.as_mut().unwrap().config_paths = vec![selected.into()];
+        let up_to_date = !self.needs_deploy(&projected, None).await;
+        let resolved = self.resolve_spec(&config.plugin_spec);
+        let result = assets
+            .install_config_and_state(
+                Path::new(selected),
+                |raw| {
+                    super::relocation_ownership::validate_owned_target(
+                        Path::new(selected),
+                        config.create_if_missing == Some(true),
+                    )?;
+                    let observed = super::relocation_ownership::read_owned_bytes(
+                        Path::new(selected),
+                        4 * 1024 * 1024,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    anyhow::ensure!(
+                        observed.as_deref() == raw.map(str::as_bytes),
+                        "Pi config changed during relocation preflight"
+                    );
+                    anyhow::ensure!(
+                        raw.is_some() || config.create_if_missing == Some(true),
+                        "Pi config is missing"
+                    );
+                    let mut json = parse_plugin_config(raw.unwrap_or("{}\n"), config)
+                        .map_err(anyhow::Error::msg)?;
+                    if let Some(entries) = json
+                        .get(config.config_key.as_deref().unwrap_or("plugin"))
+                        .and_then(Value::as_array)
+                    {
+                        for entry in entries.iter().filter_map(Value::as_str) {
+                            let normalized = self.normalize_spec(entry);
+                            anyhow::ensure!(
+                                !normalized.ends_with("/pi-coding-agent/index.mjs")
+                                    || self.same_spec(entry, &resolved),
+                                "Pi config references another Pilot installation"
+                            );
+                        }
+                    }
+                    self.flat_array_inject(&mut json, &resolved, config);
+                    prepare_plugin_config(raw, &json, false).map_err(anyhow::Error::msg)
+                },
+                build_state,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        Ok((result, up_to_date))
+    }
+
     async fn resolve_deployment_host(&mut self) -> Option<OpenClawHost> {
         let mut detail = None;
         let mut env = std::collections::HashMap::new();

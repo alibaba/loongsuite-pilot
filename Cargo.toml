@@ -66,7 +66,7 @@ which = "7"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console", "Win32_System_IO", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console", "Win32_System_IO", "Win32_System_SystemServices", "Win32_Storage_FileSystem"] }
 
 # 安装态预检需计算含调试信息的完整二进制摘要；保持与 release 相同的摘要算法。
 [profile.dev.package.sha2]

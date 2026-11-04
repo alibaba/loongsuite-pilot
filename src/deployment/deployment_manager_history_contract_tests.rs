@@ -498,10 +498,13 @@ async fn manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_anothe
             .join("plugins/pi-coding-agent/index.mjs")
             .to_string_lossy()
             .replace('\\', "/");
+        let other = f
+            .root
+            .join("another-install/plugins/pi-coding-agent/index.mjs");
         let foreign = if injected {
-            json!({"extensions":[spec,"/opt/third-party/extension.mjs"]})
+            json!({"extensions":[spec,other,"/opt/third-party/extension.mjs"]})
         } else {
-            json!({"extensions":["/opt/third-party/extension.mjs"]})
+            json!({"extensions":[other,"/opt/third-party/extension.mjs"]})
         };
         std::fs::write(&current, serde_json::to_vec(&foreign).unwrap()).unwrap();
         let before = std::fs::read(&current).unwrap();
@@ -513,7 +516,7 @@ async fn manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_anothe
         )
         .unwrap();
         let result = f.manager().deploy_all(None).await;
-        assert!(result[0].success);
+        assert!(!result[0].success);
         assert_eq!(std::fs::read(&current).unwrap(), before);
         assert_eq!(
             f.state()["pi-coding-agent"]["pluginInjectConfigPath"],
@@ -522,3 +525,6 @@ async fn manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_anothe
         assert_eq!(World::read(&current), foreign);
     }
 }
+
+#[path = "pi_config_relocation_history_tests.rs"]
+mod pi_relocation_tests;
