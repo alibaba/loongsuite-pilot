@@ -216,3 +216,53 @@ async fn native_growing_rewrite_rechecks_partial_prefix_even_with_coalesced_meta
     assert_eq!(offset, source.len() as u64);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
 }
+
+// Upstream main #543: model coarse timestamps while keeping physical bytes,
+// inode, sizes, and reads. The cached view is the sole simulated boundary.
+#[tokio::test]
+async fn main543_growing_partial_records_with_unchanged_stamps_preserve_rewrite_and_append() {
+    for rewrite in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("history.jsonl");
+        let mut reader = QoderLegacyHookReader::new(64 * 1024, 256 * 1024);
+        let mut offset = 0;
+        std::fs::write(
+            &path,
+            format!("{{\"id\":\"old\",\"text\":\"{}", "x".repeat(96 * 1024)),
+        )
+        .unwrap();
+        assert_eq!(poll(&mut reader, &path, &mut offset).await.next_offset, 0);
+        let expected = json!({
+            "id": if rewrite { "new" } else { "old" },
+            "text": "x".repeat(96 * 1024)
+        });
+        if rewrite {
+            std::fs::write(&path, format!("{expected}\n")).unwrap();
+        } else {
+            append(&path, b"\"}\n");
+        }
+        let actual = snapshot(&open_regular(&path).await.unwrap()).await.unwrap();
+        let cached = &mut reader.tail.as_mut().unwrap().snapshot;
+        cached.modified = actual.modified;
+        cached.changed = actual.changed;
+        assert!(cached.same_stamp(&actual));
+        assert!(actual.size > cached.size);
+        let mut buffers = Vec::new();
+        for _ in 0..4 {
+            if offset >= actual.size {
+                break;
+            }
+            let batch = poll(&mut reader, &path, &mut offset).await;
+            assert!(batch.bytes_read <= 64 * 1024);
+            buffers.extend(batch.buffer);
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&buffers).unwrap(),
+            expected
+        );
+        assert_eq!(offset, actual.size);
+        let idle = poll(&mut reader, &path, &mut offset).await;
+        assert_eq!(idle.bytes_read, 0);
+        assert!(idle.buffer.is_empty());
+    }
+}

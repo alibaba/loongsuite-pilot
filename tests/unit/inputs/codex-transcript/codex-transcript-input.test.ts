@@ -3002,7 +3002,7 @@ describe('CodexTranscriptInput', () => {
     expect(checkpoint.forkBootstrap).toBeUndefined();
   });
 
-  it('retains a truly unparseable pending range and does not scan later work', async () => {
+  it('retains a truly unparseable range separately and collects later work', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-transcript-unparseable-pending-'));
     tempDirs.push(root);
     const sessionDir = path.join(root, 'sessions');
@@ -3058,24 +3058,34 @@ describe('CodexTranscriptInput', () => {
     await input.start();
     await input.stop();
 
-    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(0);
+    expect(responsesForTurn(entries, normalTurnId)).toHaveLength(1);
     const checkpoint = transcriptCheckpoint(loadedState, transcript) as {
       scanOffset?: number;
       pendingTerminal?: { turnId?: string; retryCount?: number; sourceRecordCount?: number };
+      deferredTerminals?: { activeTurn: { turnId: string }; pendingTerminal: unknown }[];
     };
-    expect(checkpoint.scanOffset).toBe(terminalEndOffset);
-    expect(checkpoint.pendingTerminal).toMatchObject({
+    expect(checkpoint.scanOffset).toBe(stat.size);
+    expect(checkpoint.pendingTerminal).toBeNull();
+    expect(checkpoint.deferredTerminals).toHaveLength(1);
+    expect(checkpoint.deferredTerminals![0]!.activeTurn.turnId).toBe(pendingTurnId);
+    expect(checkpoint.deferredTerminals![0]!.pendingTerminal).toMatchObject({
       turnId: pendingTurnId,
       retryCount: 1,
       sourceRecordCount: 1,
     });
     expect(warn).toHaveBeenCalledWith(
-      'pending Codex terminal turn still could not be parsed; will retry',
+      'Codex terminal turn could not be parsed; retained until source changes and backoff expires',
       expect.objectContaining({
         transcriptPath: transcript,
         turnId: pendingTurnId,
         retryCount: 1,
         sourceRecordCount: 1,
+        deferred: true,
+        deferredRanges: 1,
+        deferredLimit: 4,
+        retryDelayMs: 1000,
+        recoveryPhase: 'pending',
+        blocked: false,
       }),
     );
   });

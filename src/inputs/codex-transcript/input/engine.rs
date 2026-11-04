@@ -20,7 +20,9 @@ use super::super::builder::{
 };
 use super::super::checkpoint::{
     checkpoint_to_value, create_active_turn, empty_checkpoint, new_pending_terminal,
-    parse_checkpoint, update_active_turn_from_extracted, update_active_turn_metadata,
+    new_pending_terminal_at, parse_checkpoint, update_active_turn_from_extracted,
+    update_active_turn_metadata, MAX_DEFERRED_TERMINALS, MAX_SAFE_INTEGER, RECOVERY_RETRY_MAX_MS,
+    RECOVERY_RETRY_MIN_MS,
 };
 use super::super::discovery::{
     canonical_directory_path, collect_recent_rollout_files, collect_rollout_files, directory_mtime,
@@ -35,17 +37,18 @@ use super::super::extractor::{
     extract_codex_transcript_meta, session_id_from_transcript_path, ExtractOptions,
 };
 use super::super::scan::{
-    self, file_meta_snapshot, file_mtime_ms, find_owner_session_meta_offset,
-    find_turn_start_offset, last_complete_jsonl_offset, read_json_line_at, read_json_lines,
-    scan_json_lines, scan_json_lines_through_quarantine, select_owner_session_meta_offset,
-    terminal_turn_id_for, turn_id_for_start, uuid_v7_timestamp_ms, JsonLine,
+    self, file_meta_snapshot, file_mtime_ms, find_turn_start_offset, last_complete_jsonl_offset,
+    read_json_line_at, read_json_lines, scan_json_lines, scan_json_lines_through_quarantine,
+    select_owner_session_meta_offset, terminal_turn_id_for, turn_id_for_start,
+    uuid_v7_timestamp_ms, JsonLine,
 };
 use super::super::subagent_linker::{
     extract_codex_spawn_descriptors, is_codex_work_input, CodexSpawnDescriptor,
     MAX_LINK_DESCRIPTORS,
 };
 use super::super::types::{
-    CodexActiveTranscriptTurn, CodexForkBootstrap, CodexTerminalStatus, CodexThreadSource,
+    CodexActiveTranscriptTurn, CodexDeferredTerminalTurn, CodexForkBootstrap,
+    CodexPendingTerminalTurn, CodexTerminalRecoveryFailure, CodexTerminalStatus, CodexThreadSource,
     CodexTranscriptCheckpoint, CodexTranscriptInputContext, CodexTranscriptMeta,
     CodexTranscriptSourceRecord, ForkBootstrapState,
 };
@@ -56,6 +59,13 @@ pub(super) const MAX_EMIT_BATCH_ENTRIES: usize = 256;
 pub(super) const MAX_EMIT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_BYTES: usize = 1024 * 1024;
 const MAX_TERMINALS_PER_FILE_CYCLE: usize = 100;
+
+struct TerminalFailureContext {
+    start_offset: i64,
+    phase: &'static str,
+    deferred: bool,
+}
+
 const MAX_SCAN_BYTES_PER_FILE_CYCLE: i64 = 16 * 1024 * 1024;
 const MAX_CACHED_INCOMPLETE_TAILS: usize = 2048;
 const INCOMPLETE_TAIL_WITNESS_BYTES: usize = 64;
@@ -541,10 +551,25 @@ impl<'a> CodexTranscriptEngine<'a> {
         if rollout_caught_up(&checkpoint, stat.ino, stat.size) {
             return Ok(0);
         }
-        if checkpoint.owner_session_meta_offset.is_none() {
-            checkpoint.owner_session_meta_offset =
-                find_owner_session_meta_offset(file_path, stat.size, Some(rt)).await?;
+        let version = scan::file_version_snapshot(file_path).await?;
+        if version.inode != stat.ino || version.size != stat.size {
+            return Ok(0);
+        }
+        if checkpoint
+            .owner_session_meta_offset
+            .is_some_and(|offset| offset >= stat.size)
+        {
+            checkpoint.owner_session_meta_offset = None;
             changed = true;
+        }
+        if checkpoint.owner_session_meta_offset.is_none() {
+            if let Some(offset) = self
+                .find_owner_offset(rt, file_path, &version, None)
+                .await?
+            {
+                checkpoint.owner_session_meta_offset = Some(offset);
+                changed = true;
+            }
         }
         let active_access = checkpoint.scan_offset < stat.size
             || checkpoint.active_turn.is_some()
@@ -649,11 +674,23 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
 
         let mut scanned_bytes = 0i64;
-        let had_pending = checkpoint.pending_terminal.is_some();
-        let pending = self
-            .recover_pending_terminal(rt, file_path, &mut checkpoint)
+        let deferred = self
+            .recover_deferred_terminals(rt, file_path, &mut checkpoint, &version)
             .await?;
-        changed |= had_pending;
+        changed |= deferred.changed;
+        emitted_count += deferred.emitted_count;
+        processed_terminals += deferred.processed_terminal_count;
+        let prior_pending = checkpoint.pending_terminal.clone();
+        let pending = self
+            .recover_pending_terminal(rt, file_path, &mut checkpoint, &version)
+            .await?;
+        #[cfg(test)]
+        self.body.with_shared(|shared| {
+            shared
+                .main543_pending_results
+                .push((pending.blocked, pending.processed_terminal_count))
+        });
+        changed |= checkpoint.pending_terminal != prior_pending;
         emitted_count += pending.emitted_count;
         processed_terminals += pending.processed_terminal_count;
         if pending.blocked {
@@ -795,23 +832,29 @@ impl<'a> CodexTranscriptEngine<'a> {
                             .as_ref()
                             .map(|active| active.start_offset)
                             .unwrap_or(0);
-                        checkpoint.pending_terminal = Some(new_pending_terminal(
-                            turn_id.clone(),
+                        let now = self.recovery_now_ms();
+                        let mut pending = new_pending_terminal_at(
+                            turn_id,
                             next_scan_offset,
                             recovered.diagnostics.source_record_count as u64,
-                        ));
-                        let meta = json!({
-                            "transcriptPath": file_path,
-                            "turnId": turn_id,
-                            "range": { "startOffset": start, "endOffset": next_scan_offset },
-                            "retryCount": checkpoint.pending_terminal.as_ref().and_then(|item| item.retry_count),
-                            "sourceRecordCount": recovered.diagnostics.source_record_count,
-                        });
-                        rt.warn(
-                            "terminal Codex turn could not be parsed; retaining it for the next scan",
-                            meta.as_object(),
+                            now,
                         );
-                        blocked = true;
+                        self.note_terminal_failure(&mut pending, &version, now);
+                        checkpoint.pending_terminal = Some(pending.clone());
+                        let deferred = Self::defer_pending_terminal(&mut checkpoint);
+                        self.log_terminal_failure(
+                            rt,
+                            file_path,
+                            &checkpoint,
+                            &pending,
+                            TerminalFailureContext {
+                                start_offset: start,
+                                phase: "terminal",
+                                deferred,
+                            },
+                        );
+                        blocked = !deferred;
+                        processed_terminals += 1;
                     } else if checkpoint.pending_fusion.is_none() {
                         checkpoint.active_turn = None;
                         checkpoint.pending_terminal = None;
@@ -944,6 +987,7 @@ fn rollout_caught_up(checkpoint: &CodexTranscriptCheckpoint, ino: u64, size: i64
         && checkpoint.owner_session_meta_offset.is_some()
         && checkpoint.active_turn.is_none()
         && checkpoint.pending_terminal.is_none()
+        && checkpoint.deferred_terminals.is_empty()
         && checkpoint.pending_fusion.is_none()
         && checkpoint.pending_subagent.is_none()
         && checkpoint.fork_bootstrap.is_none()
@@ -961,13 +1005,178 @@ fn should_skip_copied_parent_turn(
 }
 
 impl<'a> CodexTranscriptEngine<'a> {
+    fn recovery_now_ms(&self) -> f64 {
+        #[cfg(test)]
+        if let Some(clock) = self.body.with_shared(|shared| shared.main543_clock.clone()) {
+            return clock().floor();
+        }
+        now_ms().floor()
+    }
+    fn terminal_retry_ready(
+        &self,
+        pending: &CodexPendingTerminalTurn,
+        version: &scan::FileVersion,
+    ) -> bool {
+        pending.failure.as_ref().is_none_or(|failure| {
+            failure.source_version != source_version(version)
+                && self.recovery_now_ms() >= failure.retry_at_ms
+        })
+    }
+    fn note_terminal_failure(
+        &self,
+        pending: &mut CodexPendingTerminalTurn,
+        version: &scan::FileVersion,
+        now: f64,
+    ) {
+        let delay = pending
+            .failure
+            .as_ref()
+            .map(|failure| failure.delay_ms)
+            .unwrap_or(RECOVERY_RETRY_MIN_MS / 2)
+            .saturating_mul(2)
+            .clamp(RECOVERY_RETRY_MIN_MS, RECOVERY_RETRY_MAX_MS);
+        pending.failure = Some(CodexTerminalRecoveryFailure {
+            source_version: source_version(version),
+            retry_at_ms: now + delay as f64,
+            delay_ms: delay,
+        });
+    }
+    fn defer_pending_terminal(checkpoint: &mut CodexTranscriptCheckpoint) -> bool {
+        if checkpoint.active_turn.is_none()
+            || checkpoint.pending_terminal.is_none()
+            || checkpoint.deferred_terminals.len() >= MAX_DEFERRED_TERMINALS
+        {
+            return false;
+        }
+        let active_turn = checkpoint.active_turn.take().expect("checked active");
+        let pending_terminal = checkpoint.pending_terminal.take().expect("checked pending");
+        checkpoint.scan_offset = checkpoint
+            .scan_offset
+            .max(pending_terminal.terminal_end_offset);
+        checkpoint
+            .deferred_terminals
+            .push(CodexDeferredTerminalTurn {
+                active_turn,
+                pending_terminal,
+            });
+        true
+    }
+    fn log_terminal_failure(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        checkpoint: &CodexTranscriptCheckpoint,
+        pending: &CodexPendingTerminalTurn,
+        context: TerminalFailureContext,
+    ) {
+        let TerminalFailureContext {
+            start_offset,
+            phase,
+            deferred,
+        } = context;
+        let mut meta = json!({
+            "transcriptPath": file_path, "turnId": pending.turn_id, "recoveryPhase": phase,
+            "range": {"startOffset": start_offset, "endOffset": pending.terminal_end_offset},
+            "retryCount": pending.retry_count.unwrap_or(0), "firstPendingAtMs": pending.first_pending_at_ms,
+            "lastAttemptAtMs": pending.last_attempt_at_ms, "sourceRecordCount": pending.source_record_count.unwrap_or(0),
+            "retryDelayMs": pending.failure.as_ref().map(|failure| failure.delay_ms),
+            "deferred": deferred, "deferredRanges": checkpoint.deferred_terminals.len(),
+            "deferredLimit": MAX_DEFERRED_TERMINALS, "blocked": checkpoint.pending_terminal.is_some(),
+        });
+        if let Some(blocking) = &checkpoint.pending_terminal {
+            meta["blockingTurnId"] = json!(blocking.turn_id);
+        }
+        const MESSAGE: &str = "Codex terminal turn could not be parsed; retained until source changes and backoff expires";
+        #[cfg(test)]
+        if let Some(observer) = self
+            .body
+            .with_shared(|shared| shared.main543_failure_observer.clone())
+        {
+            observer(MESSAGE, &meta);
+        }
+        rt.warn(MESSAGE, meta.as_object());
+    }
+    async fn recover_deferred_terminals(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        checkpoint: &mut CodexTranscriptCheckpoint,
+        version: &scan::FileVersion,
+    ) -> anyhow::Result<DeferredRecovery> {
+        let Some(index) = checkpoint
+            .deferred_terminals
+            .iter()
+            .position(|item| self.terminal_retry_ready(&item.pending_terminal, version))
+        else {
+            return Ok(DeferredRecovery {
+                changed: false,
+                emitted_count: 0,
+                processed_terminal_count: 0,
+            });
+        };
+        let item = checkpoint.deferred_terminals[index].clone();
+        let mut recovery = checkpoint.clone();
+        recovery.active_turn = Some(item.active_turn.clone());
+        recovery.pending_terminal = Some(item.pending_terminal.clone());
+        let recovered = self
+            .recover_turn_segment(
+                rt,
+                file_path,
+                &mut recovery,
+                RecoveryBoundary {
+                    end_offset: item.pending_terminal.terminal_end_offset,
+                    terminal: true,
+                    inferred: None,
+                    next_turn_started_at_ms: None,
+                },
+                None,
+            )
+            .await?;
+        let emitted_count = if matches!(recovered.kind, RecoveryKind::Unparseable) {
+            let now = self.recovery_now_ms();
+            let mut pending = item.pending_terminal;
+            pending.retry_count = Some(
+                pending
+                    .retry_count
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(MAX_SAFE_INTEGER),
+            );
+            pending.first_pending_at_ms = Some(pending.first_pending_at_ms.unwrap_or(now));
+            pending.last_attempt_at_ms = Some(now);
+            pending.source_record_count = Some(recovered.diagnostics.source_record_count as u64);
+            self.note_terminal_failure(&mut pending, version, now);
+            checkpoint.deferred_terminals[index].pending_terminal = pending.clone();
+            self.log_terminal_failure(
+                rt,
+                file_path,
+                checkpoint,
+                &pending,
+                TerminalFailureContext {
+                    start_offset: item.active_turn.start_offset,
+                    phase: "deferred",
+                    deferred: true,
+                },
+            );
+            0
+        } else {
+            checkpoint.deferred_terminals.remove(index);
+            self.body.emit_batches(recovered.entries)
+        };
+        Ok(DeferredRecovery {
+            changed: true,
+            emitted_count,
+            processed_terminal_count: 1,
+        })
+    }
     async fn recover_pending_terminal(
         &self,
         rt: &InputRuntime,
         file_path: &str,
         checkpoint: &mut CodexTranscriptCheckpoint,
+        version: &scan::FileVersion,
     ) -> anyhow::Result<PendingRecovery> {
-        let Some(pending) = checkpoint.pending_terminal.clone() else {
+        let Some(mut pending) = checkpoint.pending_terminal.clone() else {
             return Ok(PendingRecovery {
                 blocked: false,
                 emitted_count: 0,
@@ -982,6 +1191,14 @@ impl<'a> CodexTranscriptEngine<'a> {
             checkpoint.pending_terminal = None;
             return Ok(PendingRecovery {
                 blocked: false,
+                emitted_count: 0,
+                processed_terminal_count: 0,
+            });
+        }
+        if !self.terminal_retry_ready(&pending, version) {
+            let deferred = Self::defer_pending_terminal(checkpoint);
+            return Ok(PendingRecovery {
+                blocked: !deferred,
                 emitted_count: 0,
                 processed_terminal_count: 0,
             });
@@ -1001,37 +1218,48 @@ impl<'a> CodexTranscriptEngine<'a> {
             )
             .await?;
         if matches!(recovered.kind, RecoveryKind::Unparseable) {
-            let now = now_ms();
-            checkpoint.pending_terminal = Some(super::super::types::CodexPendingTerminalTurn {
-                turn_id: pending.turn_id.clone(),
-                terminal_end_offset: pending.terminal_end_offset,
-                retry_count: Some(pending.retry_count.unwrap_or(0) + 1),
-                first_pending_at_ms: Some(pending.first_pending_at_ms.unwrap_or(now)),
-                last_attempt_at_ms: Some(now),
-                source_record_count: Some(recovered.diagnostics.source_record_count as u64),
-            });
-            let meta = json!({
-                "transcriptPath": file_path,
-                "turnId": pending.turn_id,
-                "retryCount": checkpoint.pending_terminal.as_ref().and_then(|item| item.retry_count),
-                "sourceRecordCount": recovered.diagnostics.source_record_count,
-            });
-            rt.warn(
-                "pending Codex terminal turn still could not be parsed; will retry",
-                meta.as_object(),
+            let now = self.recovery_now_ms();
+            pending.retry_count = Some(
+                pending
+                    .retry_count
+                    .unwrap_or(0)
+                    .saturating_add(1)
+                    .min(MAX_SAFE_INTEGER),
+            );
+            pending.first_pending_at_ms = Some(pending.first_pending_at_ms.unwrap_or(now));
+            pending.last_attempt_at_ms = Some(now);
+            pending.source_record_count = Some(recovered.diagnostics.source_record_count as u64);
+            self.note_terminal_failure(&mut pending, version, now);
+            let start = checkpoint
+                .active_turn
+                .as_ref()
+                .expect("retained active")
+                .start_offset;
+            checkpoint.pending_terminal = Some(pending.clone());
+            let deferred = Self::defer_pending_terminal(checkpoint);
+            self.log_terminal_failure(
+                rt,
+                file_path,
+                checkpoint,
+                &pending,
+                TerminalFailureContext {
+                    start_offset: start,
+                    phase: "pending",
+                    deferred,
+                },
             );
             return Ok(PendingRecovery {
-                blocked: true,
+                blocked: !deferred,
                 emitted_count: 0,
-                processed_terminal_count: 0,
+                processed_terminal_count: 1,
             });
         }
-        let emitted = self.body.emit_batches(recovered.entries);
+        let emitted_count = self.body.emit_batches(recovered.entries);
         checkpoint.active_turn = None;
         checkpoint.pending_terminal = None;
         Ok(PendingRecovery {
             blocked: false,
-            emitted_count: emitted,
+            emitted_count,
             processed_terminal_count: 1,
         })
     }
@@ -1044,6 +1272,25 @@ impl<'a> CodexTranscriptEngine<'a> {
         boundary: RecoveryBoundary,
         attachment_parent_thread_id: Option<&str>,
     ) -> anyhow::Result<Recovery> {
+        #[cfg(test)]
+        if let Some(observer) = self
+            .body
+            .with_shared(|shared| shared.main543_recovery_end_observer.clone())
+        {
+            observer(boundary.end_offset);
+        }
+
+        // Match the legacy contract's one-shot converter failure at the actual
+        // recovery entry, without affecting any product build or filesystem IO.
+        #[cfg(test)]
+        if boundary.terminal
+            && self
+                .body
+                .with_shared(|shared| std::mem::take(&mut shared.main543_force_terminal_failure))
+        {
+            return Ok(empty_unparseable(boundary.end_offset));
+        }
+
         let RecoveryBoundary {
             end_offset,
             terminal,
@@ -1954,7 +2201,22 @@ impl<'a> CodexTranscriptEngine<'a> {
         } else {
             let witness = source_ownership::capture_baseline(file_path).await?;
             let size = i64::try_from(witness.size())?;
-            let offset = last_complete_jsonl_offset(file_path, size, Some(rt)).await?;
+            // A verified full owner probe has already observed this exact LF
+            // boundary. Reuse its bounded metadata proof, preserving the first
+            // durable ownership floor before any checkpoint reconstruction.
+            let version = scan::file_version_snapshot(file_path).await?;
+            let known_complete = if !copied && version.size == size {
+                let key = owner_probe_key(file_path, &version, size);
+                self.body.with_shared(|shared| {
+                    shared.owner_offset_probes.complete_boundary(&key, &version)
+                })
+            } else {
+                None
+            };
+            let offset = match known_complete {
+                Some(end) if end == size => end,
+                _ => last_complete_jsonl_offset(file_path, size, Some(rt)).await?,
+            };
             let floor = BaselineFloor {
                 offset: u64::try_from(offset)?,
                 copied,
@@ -2079,6 +2341,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 scan_offset: stats.next_offset,
                 active_turn: active,
                 pending_terminal: None,
+                deferred_terminals: Vec::new(),
                 pending_fusion: None,
                 pending_subagent: None,
                 owner_session_meta_offset: owner,
@@ -2118,7 +2381,10 @@ impl<'a> CodexTranscriptEngine<'a> {
         let (inode, scan_offset) = self
             .baseline_boundary(rt, file_path, true, restored)
             .await?;
-        let owner = find_owner_session_meta_offset(file_path, scan_offset, Some(rt)).await?;
+        let version = scan::file_version_snapshot(file_path).await?;
+        let owner = self
+            .find_owner_offset(rt, file_path, &version, Some(scan_offset))
+            .await?;
         self.validate_baseline_boundary(
             file_path,
             super::source_ownership::BaselineFloor {
@@ -2136,6 +2402,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                 scan_offset,
                 active_turn: None,
                 pending_terminal: None,
+                deferred_terminals: Vec::new(),
                 pending_fusion: None,
                 pending_subagent: None,
                 owner_session_meta_offset: owner,
@@ -2508,9 +2775,14 @@ impl<'a> CodexTranscriptEngine<'a> {
                 Ok((recorded_real, transcript_real)) if recorded_real != transcript_real => Some(
                     "Codex wakeup transcript path differs from discovered session file; accepting session anchor",
                 ),
-                Err(_) if lexical_absolute_path(recorded) != lexical_absolute_path(transcript_path) => Some(
-                    "Codex wakeup transcript path could not be canonicalized; accepting session anchor",
-                ),
+                Err(_)
+                    if lexical_absolute_path(recorded)
+                        != lexical_absolute_path(transcript_path) =>
+                {
+                    Some(
+                        "Codex wakeup transcript path could not be canonicalized; accepting session anchor",
+                    )
+                }
                 _ => None,
             };
             if let Some(reason) = reason {
@@ -2845,18 +3117,22 @@ impl<'a> CodexTranscriptEngine<'a> {
             if skip.is_some_and(|skip| skip.contains(&file.file_path)) {
                 continue;
             }
-            let Ok((inode, size, _)) = file_meta_snapshot(&file.file_path).await else {
+            let Ok(version) = scan::file_version_snapshot(&file.file_path).await else {
                 continue;
             };
+            let inode = version.inode;
+            let size = version.size;
             let checkpoint = self.read_checkpoint(rt, &self.state_key(&file.file_path));
             let owner = if checkpoint.as_ref().is_some_and(|item| item.inode == inode) {
                 if let Some(offset) = checkpoint.and_then(|item| item.owner_session_meta_offset) {
                     Some(offset)
                 } else {
-                    find_owner_session_meta_offset(&file.file_path, size, Some(rt)).await?
+                    self.find_owner_offset(rt, &file.file_path, &version, None)
+                        .await?
                 }
             } else {
-                find_owner_session_meta_offset(&file.file_path, size, Some(rt)).await?
+                self.find_owner_offset(rt, &file.file_path, &version, None)
+                    .await?
             };
             let Some(owner) = owner else {
                 continue;
@@ -3135,6 +3411,14 @@ impl<'a> CodexTranscriptEngine<'a> {
         file_path: &str,
         checkpoint: &mut CodexTranscriptCheckpoint,
     ) -> anyhow::Result<(usize, usize)> {
+        #[cfg(test)]
+        if let Some(observer) = self
+            .body
+            .with_shared(|shared| shared.main543_legacy_release_observer.clone())
+        {
+            observer("release_parent_fusion_independently");
+        }
+
         let Some(pending) = checkpoint.pending_fusion.clone() else {
             return Ok((0, 0));
         };
@@ -3182,6 +3466,14 @@ impl<'a> CodexTranscriptEngine<'a> {
         file_path: &str,
         checkpoint: &mut CodexTranscriptCheckpoint,
     ) -> anyhow::Result<(usize, usize)> {
+        #[cfg(test)]
+        if let Some(observer) = self
+            .body
+            .with_shared(|shared| shared.main543_legacy_release_observer.clone())
+        {
+            observer("release_captured_subagent_independently");
+        }
+
         let Some(captured) = checkpoint.pending_subagent.clone() else {
             return Ok((0, 0));
         };
@@ -3444,6 +3736,80 @@ fn reusable_cached(cached: &CachedMeta, inode: u64, file_size: i64, owner_offset
         && file_size >= cached.file_size
         && owner_offset >= 0
         && owner_offset < file_size
+}
+
+struct DeferredRecovery {
+    changed: bool,
+    emitted_count: usize,
+    processed_terminal_count: usize,
+}
+fn owner_probe_key(path: &str, version: &scan::FileVersion, end: i64) -> String {
+    format!("{}\0{}\0{}", path, source_version(version), end)
+}
+fn source_version(version: &scan::FileVersion) -> String {
+    let modified = version
+        .modified
+        .map(|time| match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => {
+                duration.as_secs() as f64 * 1000.0 + duration.subsec_nanos() as f64 / 1_000_000.0
+            }
+            Err(error) => -error.duration().as_secs_f64() * 1000.0,
+        })
+        .unwrap_or(0.0);
+    #[cfg(unix)]
+    let changed = version.changed.0 as f64 * 1000.0 + version.changed.1 as f64 / 1_000_000.0;
+    #[cfg(windows)]
+    let changed = (version.changed.0 - 116_444_736_000_000_000_i64) as f64 / 10_000.0;
+    format!(
+        "{}:{}:{}:{}:{}",
+        version.device, version.inode, version.size, modified, changed
+    )
+}
+impl CodexTranscriptEngine<'_> {
+    async fn find_owner_offset(
+        &self,
+        rt: &InputRuntime,
+        file_path: &str,
+        version: &scan::FileVersion,
+        end_offset: Option<i64>,
+    ) -> anyhow::Result<Option<i64>> {
+        #[cfg(test)]
+        self.body
+            .with_shared(|shared| shared.main543_owner_probe_calls += 1);
+        let end = end_offset.unwrap_or(version.size);
+        // NUL cannot occur in a filesystem path; include the requested boundary
+        // because a short prefix cannot establish absence beyond that prefix.
+        let key = owner_probe_key(file_path, version, end);
+        if let Some(cached) = self
+            .body
+            .with_shared(|shared| shared.owner_offset_probes.get_copied(&key))
+        {
+            return Ok(cached);
+        }
+        let (offset, complete) =
+            scan::find_owner_session_meta_probe(file_path, end, Some(rt)).await?;
+        #[cfg(test)]
+        if let Some(observer) = self
+            .body
+            .with_shared(|shared| shared.main543_probe_after_read.clone())
+        {
+            observer(file_path);
+        }
+        let Ok(after) = scan::file_version_snapshot(file_path).await else {
+            return Ok(None);
+        };
+        if &after != version {
+            return Ok(None);
+        }
+        self.body.with_shared(|shared| {
+            shared.owner_offset_probes.set_verified(
+                key,
+                offset,
+                complete.then_some((*version, end)),
+            )
+        });
+        Ok(offset)
+    }
 }
 
 #[cfg(test)]

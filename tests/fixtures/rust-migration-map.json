@@ -47865,10 +47865,10 @@
     },
     {
       "legacy": "tests/unit/inputs/codex-transcript/codex-transcript-input.test.ts",
-      "coverage": "complete",
+      "coverage": "partial",
       "rust": [],
       "source_hash": "6ae448fd44164a31545a3cd7b51a228903393ec938ac7c35b7f9d71bcb6d172e",
-      "note": "固定ef8953 109/109逐声明完整处置：101原合同真实native+8由固定f84上游明确改为独立子会话/不强制结束而逐条替代（含privacy矩阵）；所有仍有效精确断言保留。Linux隔离Rust1.99.1/ICU原锁/glibc2.34/no-network strict alltargets allfeatures +109targeted实际通过。Windows/macOS未执行不能代证；fullworkspace后补receipt。source_hash保持immutable。",
+      "note": "固定ef8953 109/109逐声明完整处置：101原合同真实native+8由固定f84上游明确改为独立子会话/不强制结束而逐条替代（含privacy矩阵）；所有仍有效精确断言保留。Linux隔离Rust1.99.1/ICU原锁/glibc2.34/no-network strict alltargets allfeatures +109targeted实际通过。Windows/macOS未执行不能代证；fullworkspace后补receipt。source_hash保持immutable。 95081bd #543适配：仅原“truly unparseable pending range blocks later work”精确case降为partial；保留源hash/descriptor和其它全部case原样。新deferred旁路行为不冒充原阻塞合同通过。",
       "cases": [
         {
           "source": {
@@ -49454,8 +49454,8 @@
             ],
             "parameters": []
           },
-          "coverage": "complete",
-          "behavior": "retains a truly unparseable pending range and does not scan later work；真实StateStore save/load后真实Input.start，使用首次实际runtime delta完成信号再stop，不手动多重cycle；保留offset/retryCount/sourceRecordCount全部精确断言。独立真实子进程验证warning精确msg/level/完整transcriptPath与count。 Linux Rust1.99.1/glibc2.34/network-none：修补后strict workspace/alltargets/allfeatures -Dwarnings与64 targeted全部通过；Windows/macOS未执行。",
+          "coverage": "partial",
+          "behavior": "主干95081bd #543将真正不可解析的terminal保留为最多4个deferred语义上下文，并以sourceVersion变化且退避到期同时满足为重试门禁，允许后来健康turn继续采集。保留源范围/上下文及durable restart投影；原later响应为0、scan停在旧terminal、旧阻塞告警字符串投影已被主干替代，当前Rust不再通过这些原断言。此精确旧case保留partial且不退役；新主干合同在rust-migration-main-95081bd-map.json单列。",
           "platforms": [
             "linux",
             "macos",

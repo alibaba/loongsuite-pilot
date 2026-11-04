@@ -3,7 +3,9 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("claude-code", "claude"),
     ("codex", "codex"),
     ("codex-session", "codex"),
+    ("copilot", "copilot"),
     ("qoder", "qoder"),
+    ("qoder-cn", "qoder"),
     ("qoder-idea", "qoder"),
     ("qoder-work", "qoder"),
     ("qoder-work-cn", "qoder"),
@@ -11,9 +13,12 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("qoder-cli", "qoder"),
     ("qoder-cli-hook", "qoder"),
     ("cursor", "cursor"),
+    ("cursor-cli", "cursor"),
     ("cursor-hook", "cursor"),
+    ("kiro-cli", "kiro"),
     ("qwen-code-cli", "qwen-code"),
     ("opencode", "opencode"),
+    ("openclaw", "openclaw"),
     ("mimo-code", "mimo-code"),
     ("pi-coding-agent", "pi"),
     ("grok-build", "grok"),
@@ -152,6 +157,50 @@ mod tests {
             assert!(
                 agent_system_defined(key),
                 "{key} missing from AGENT_SYSTEM_MAP"
+            );
+        }
+    }
+
+    #[test]
+    fn main549_supported_types_use_the_original_system_aliases() {
+        for (agent_type, system) in [
+            ("openclaw", "openclaw"),
+            ("copilot", "copilot"),
+            ("cursor-cli", "cursor"),
+            ("kiro-cli", "kiro"),
+            ("qoder-cn", "qoder"),
+        ] {
+            assert_eq!(resolve_agent_system(agent_type), system, "{agent_type}");
+        }
+    }
+
+    #[test]
+    fn main549_every_bundled_agent_and_runtime_only_wukong_has_a_system() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents.d");
+        let mut emitted_types = std::fs::read_dir(directory)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .map(|entry| {
+                let definition: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+                match definition["id"].as_str().unwrap() {
+                    "hermes-agent" => "hermes".to_owned(),
+                    "qoder-jetbrains" => "qoder-idea".to_owned(),
+                    agent_type => agent_type.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !emitted_types.is_empty(),
+            "bundled Agent definitions must be present"
+        );
+        emitted_types.push("wukong".to_owned());
+        for agent_type in emitted_types {
+            assert_ne!(
+                resolve_agent_system(&agent_type),
+                "unknown",
+                "Missing system mapping for {agent_type}"
             );
         }
     }

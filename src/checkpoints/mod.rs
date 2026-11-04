@@ -8,6 +8,7 @@
 
 mod snapshot_store;
 pub(crate) mod source_ownership;
+mod state_json;
 mod state_store;
 
 pub use snapshot_store::{SnapshotEntry, SnapshotStatus, SnapshotStore};
@@ -443,3 +444,6 @@ mod json_file {
 #[cfg(test)]
 #[path = "numeric_equality_tests.rs"]
 mod numeric_equality_tests;
+
+#[cfg(test)]
+mod state_json_tests;

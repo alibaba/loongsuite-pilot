@@ -505,7 +505,11 @@ async fn actual_native_manifest_worker_uses_the_same_real_adapter_without_node_o
         stage("stop");
         run.finish().await;
         stage("stopped");
-        assert_eq!(f.status(&i)["state"], "stopped");
+        let stopped = f.status(&i);
+        assert_eq!(
+            stopped["state"], "stopped",
+            "complete stop status: {stopped}"
+        );
     })
     .await;
 }

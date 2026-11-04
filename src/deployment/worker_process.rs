@@ -76,7 +76,7 @@ impl ProcessOperations for NativeProcesses {
                 {
                     continue;
                 }
-                if let Some(identity) = lineage_identity(pid.as_u32(), parent)? {
+                if let Some(identity) = lineage_identity(pid.as_u32(), &parent_identity)? {
                     pending.push(identity.clone());
                     result.push(identity);
                 }
@@ -97,10 +97,17 @@ impl ProcessOperations for NativeProcesses {
     }
 }
 
-fn lineage_identity(pid: u32, parent: u32) -> io::Result<Option<ProcessIdentity>> {
+fn lineage_identity(pid: u32, parent: &ProcessIdentity) -> io::Result<Option<ProcessIdentity>> {
     let Some(before) = native_identity(pid)? else {
         return Ok(None);
     };
+    // A stale PPID can refer to a prior generation of this numeric root PID.
+    // The coarse sysinfo start_time filter cannot distinguish an older child
+    // within the same second. Native Windows identity retains 100ns time.
+    #[cfg(windows)]
+    if !windows_child_not_older_than_parent(&before, parent)? {
+        return Ok(None);
+    }
     let key = sysinfo::Pid::from_u32(pid);
     let mut fresh = sysinfo::System::new();
     fresh.refresh_processes_specifics(
@@ -112,7 +119,7 @@ fn lineage_identity(pid: u32, parent: u32) -> io::Result<Option<ProcessIdentity>
         .process(key)
         .and_then(|p| p.parent())
         .map(|p| p.as_u32())
-        != Some(parent)
+        != Some(parent.pid)
     {
         return Ok(None);
     }
@@ -123,6 +130,18 @@ fn lineage_identity(pid: u32, parent: u32) -> io::Result<Option<ProcessIdentity>
         return Err(io::Error::other("后代查询期间 PID 已复用"));
     }
     Ok(Some(after))
+}
+
+#[cfg(any(windows, test))]
+fn windows_child_not_older_than_parent(
+    child: &ProcessIdentity,
+    parent: &ProcessIdentity,
+) -> io::Result<bool> {
+    let parent_created = chrono::DateTime::parse_from_rfc3339(&parent.creation_time)
+        .map_err(|_| io::Error::other("父进程高精度创建时间无效"))?;
+    let child_created = chrono::DateTime::parse_from_rfc3339(&child.creation_time)
+        .map_err(|_| io::Error::other("子进程高精度创建时间无效"))?;
+    Ok(child_created >= parent_created)
 }
 
 pub(super) fn is_alive(pid: u32) -> bool {
@@ -411,3 +430,7 @@ mod windows {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "worker_process_birth_order_tests.rs"]
+mod birth_order_tests;

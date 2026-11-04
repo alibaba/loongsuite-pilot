@@ -4,10 +4,10 @@
   "mappings": [
     {
       "legacy": "tests/unit/inputs/codex-transcript/codex-transcript-input.test.ts",
-      "coverage": "complete",
+      "coverage": "partial",
       "rust": [],
       "source_hash": "3c4dbf7cb65be13daab3925341cefaa88c3af63d9fa38e508b3a92b7f5bc791e",
-      "note": "精确d1bc8abf4a9fc4cfe6fea00b30422f3b37b24910 main #541；完整文件全部AST，非只新增11。原130 outer calls/参数/helpers/imports全字节证明在main541-source-exact-ast-proof.json SHA40460fdb1ccd5086bb18f097ce805f9b48f28ad59637e9cc1afc77fe6a94ba9f；12个新Native测试、named native backend与完整Codex/strict结果以冻结receipt为准。原128MiB record/16MiB cycle/2048 tail cache/64byte witness，默认10s poll、200ms固定窗口/1024 dirty，actual wake wait2s/poll10ms保留；新测试整体15s上界（fork双参数聚合15s为更严Native bound）。GNU已定向执行，Win/mac物理执行另记。",
+      "note": "精确d1bc8abf4a9fc4cfe6fea00b30422f3b37b24910 main #541；完整文件全部AST，非只新增11。原130 outer calls/参数/helpers/imports全字节证明在main541-source-exact-ast-proof.json SHA40460fdb1ccd5086bb18f097ce805f9b48f28ad59637e9cc1afc77fe6a94ba9f；12个新Native测试、named native backend与完整Codex/strict结果以冻结receipt为准。原128MiB record/16MiB cycle/2048 tail cache/64byte witness，默认10s poll、200ms固定窗口/1024 dirty，actual wake wait2s/poll10ms保留；新测试整体15s上界（fork双参数聚合15s为更严Native bound）。GNU已定向执行，Win/mac物理执行另记。 95081bd #543适配：仅原“truly unparseable pending range blocks later work”精确case降为partial；保留源hash/descriptor和其它全部case原样。新deferred旁路行为不冒充原阻塞合同通过。",
       "cases": [
         {
           "source": {
@@ -2154,8 +2154,8 @@
             ],
             "parameters": []
           },
-          "coverage": "complete",
-          "behavior": "d1bc8abf #541：旧outer-call/参数/suite逐字SHA一致，唯一新增statement移除后整文件与Dae完全相同，故imports/helpers无变化；沿用实际Native合同。 固定f84该声明与ef8953 L2721:C3 原有效断言相同（metadata循环仅稳定drain；两处删除completed额外限制无新增断言；explicit-ID与privacy采用已验证main替代）。沿用真实native精确断言，115targeted本轮全实过；Windows/macOS未执行。 retains a truly unparseable pending range and does not scan later work；真实StateStore save/load后真实Input.start，使用首次实际runtime delta完成信号再stop，不手动多重cycle；保留offset/retryCount/sourceRecordCount全部精确断言。独立真实子进程验证warning精确msg/level/完整transcriptPath与count。 Linux Rust1.99.1/glibc2.34/network-none：修补后strict workspace/alltargets/allfeatures -Dwarnings与64 targeted全部通过；Windows/macOS未执行。",
+          "coverage": "partial",
+          "behavior": "主干95081bd #543将真正不可解析的terminal保留为最多4个deferred语义上下文，并以sourceVersion变化且退避到期同时满足为重试门禁，允许后来健康turn继续采集。保留源范围/上下文及durable restart投影；原later响应为0、scan停在旧terminal、旧阻塞告警字符串投影已被主干替代，当前Rust不再通过这些原断言。此精确旧case保留partial且不退役；新主干合同在rust-migration-main-95081bd-map.json单列。",
           "platforms": [
             "linux",
             "macos",

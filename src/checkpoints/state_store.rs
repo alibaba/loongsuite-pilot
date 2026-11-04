@@ -420,7 +420,7 @@ impl StateStore {
     /// Loads the file. Missing or corrupt JSON becomes an empty map.
     /// Revisions reset to zero, so a following `save` is a no-op until a mutation.
     pub async fn load(&self) {
-        let parsed = json_file::read_json(&self.file_path).await;
+        let parsed = super::state_json::read_json(&self.file_path).await;
         let mut data = self.mu.lock().unwrap();
         mark_collect_mutation(&mut data, None);
         data.states.clear();

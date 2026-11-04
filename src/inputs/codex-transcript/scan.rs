@@ -419,15 +419,15 @@ pub async fn read_json_line_at(
     Ok(None)
 }
 
-pub async fn find_owner_session_meta_offset(
+pub async fn find_owner_session_meta_probe(
     file_path: &str,
     end_offset: i64,
     runtime: Option<&InputRuntime>,
-) -> anyhow::Result<Option<i64>> {
+) -> anyhow::Result<(Option<i64>, bool)> {
     let mut owner_offset = None;
     let mut saw_session_meta = false;
     let mut stop = false;
-    scan_json_lines(file_path, 0, end_offset, runtime, |line| {
+    let stats = scan_json_lines(file_path, 0, end_offset, runtime, |line| {
         if stop {
             return false;
         }
@@ -443,7 +443,10 @@ pub async fn find_owner_session_meta_offset(
         true
     })
     .await?;
-    Ok(owner_offset)
+    Ok((
+        owner_offset,
+        stats.next_offset == end_offset && !stats.quarantined,
+    ))
 }
 
 pub fn select_owner_session_meta_offset(

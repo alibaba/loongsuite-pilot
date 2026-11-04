@@ -1328,7 +1328,7 @@ fn user_parts(turn: &super::super::super::types::CodexExtractedTranscriptTurn) -
 }
 #[test]
 fn image_data_url_converts_to_uri_collapses_wrappers_and_survives_real_entry_building() {
-    let text="\n# Files mentioned by the user:\n\n## pipeline.jpg: /tmp/pipeline.jpg\n\n## My request for Codex:\n这个图像是什么意思？\n";
+    let text = "\n# Files mentioned by the user:\n\n## pipeline.jpg: /tmp/pipeline.jpg\n\n## My request for Codex:\n这个图像是什么意思？\n";
     let records = media_records(
         json!([{"type":"input_text","text":text},{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/pipeline.jpg\">"},{"type":"input_image","image_url":"data:image/png;base64,ZmFrZS1wbmc=","detail":"high"},{"type":"input_text","text":"</image>"}]),
         None,
@@ -2194,13 +2194,33 @@ async fn truly_unparseable_legacy_pending_range_survives_durable_restart_and_blo
     first.rt().state_store.update(&first.engine().state_key(&p),InputStatePatch{last_offset:Some(pending.len() as f64),extra:Some(json!({"codexTranscript":{"inode":ino,"scanOffset":pending.len(),"activeTurn":{"turnId":"turn-unparseable","startOffset":0,"startedAtMs":1_782_280_800_000.0},"pendingTerminal":{"turnId":"turn-unparseable","terminalEndOffset":pending.len()},"latestSessionMetaOffset":null,"emittedTerminalTurnIds":[]}})),..Default::default()});
     let second = first.restart().await;
     start_until_first_native_cycle(&second).await;
-    assert!(second.records().is_empty());
+    // Historical function name stays stable for frozen ledger references.
+    // Main #543 supersedes the old blocking projection: preserve the failed
+    // semantic range separately and deliver later healthy work.
+    assert_eq!(responses_for(&second.records(), "turn-normal").len(), 1);
     let cp = second.checkpoint(&p);
-    assert_eq!(cp.scan_offset, pending.len() as i64);
-    let still = cp.pending_terminal.expect("pending retained");
+    assert_eq!(
+        cp.scan_offset,
+        tokio::fs::metadata(&p).await.unwrap().len() as i64
+    );
+    assert!(cp.pending_terminal.is_none());
+    assert_eq!(cp.deferred_terminals.len(), 1);
+    let retained = &cp.deferred_terminals[0];
+    assert_eq!(retained.active_turn.turn_id, "turn-unparseable");
+    let still = &retained.pending_terminal;
     assert_eq!(still.turn_id, "turn-unparseable");
     assert_eq!(still.retry_count, Some(1));
     assert_eq!(still.source_record_count, Some(1));
+    let third = second.restart().await;
+    third.process(&p).await;
+    assert!(third.records().is_empty());
+    assert_eq!(third.checkpoint(&p).deferred_terminals.len(), 1);
+    assert_eq!(
+        third.checkpoint(&p).deferred_terminals[0]
+            .pending_terminal
+            .retry_count,
+        Some(1)
+    );
 }
 fn turn_block(turn: &str, base: &str) -> Vec<String> {
     let at = chrono::DateTime::parse_from_rfc3339(base).expect("time");
@@ -2585,20 +2605,21 @@ async fn native_diagnostic_records_preserve_control_retry_resource_and_anchor_re
                         first_pending_at_ms: None,
                         last_attempt_at_ms: None,
                         source_record_count: None,
+                        failure: None,
                     });
                 f.engine()
                     .save_checkpoint(f.rt(), &f.engine().state_key(&p), &cp);
                 f.process(&p).await;
-                assert!(f.records().is_empty());
+                assert_eq!(responses_for(&f.records(), "turn-normal").len(), 1);
                 println!(
                     "{}",
                     json!({"msg":"synthetic fixture expected pending path","expectedPath":p})
                 );
+                let cp = f.checkpoint(&p);
+                assert!(cp.pending_terminal.is_none());
+                assert_eq!(cp.deferred_terminals.len(), 1);
                 assert_eq!(
-                    f.checkpoint(&p)
-                        .pending_terminal
-                        .expect("retained")
-                        .retry_count,
+                    cp.deferred_terminals[0].pending_terminal.retry_count,
                     Some(1)
                 );
             }
@@ -2673,12 +2694,18 @@ async fn native_diagnostic_records_preserve_control_retry_resource_and_anchor_re
     let pending = isolated_diagnostic_records("pending");
     let retry = pending
         .iter()
-        .find(|e| e["msg"] == "pending Codex terminal turn still could not be parsed; will retry")
+        .find(|e| e["msg"] == "Codex terminal turn could not be parsed; retained until source changes and backoff expires")
         .expect("pending retry diagnostic");
     assert_eq!(retry["level"], "WARN");
     assert_eq!(retry["turnId"], "turn-unparseable");
     assert_eq!(retry["retryCount"], 1);
     assert_eq!(retry["sourceRecordCount"], 1);
+    assert_eq!(retry["deferred"], true);
+    assert_eq!(retry["deferredRanges"], 1);
+    assert_eq!(retry["deferredLimit"], 4);
+    assert_eq!(retry["retryDelayMs"], 1000);
+    assert_eq!(retry["recoveryPhase"], "pending");
+    assert_eq!(retry["blocked"], false);
     let expected_pending = pending
         .iter()
         .find(|e| e["msg"] == "synthetic fixture expected pending path")
@@ -3812,12 +3839,42 @@ async fn closed_wave_incomplete_suffix_restores_messages_model_instructions_and_
 }
 const NATIVE_PARENT_NAME: &str =
     "rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl";
-const NATIVE_PARENT:&str=include_str!("../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
-const NATIVE_CHILDREN:[(&str,&str,&str,&str);4]=[
- ("rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl","bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","child-turn-1",include_str!("../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl")),
- ("rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl","cccccccc-cccc-4ccc-8ccc-cccccccccccc","child-turn-2",include_str!("../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl")),
- ("rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl","dddddddd-dddd-4ddd-8ddd-dddddddddddd","child-turn-3",include_str!("../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl")),
- ("rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl","eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee","child-turn-4",include_str!("../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl")),
+const NATIVE_PARENT: &str = include_str!(
+    "../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+);
+const NATIVE_CHILDREN: [(&str, &str, &str, &str); 4] = [
+    (
+        "rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "child-turn-1",
+        include_str!(
+            "../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-04-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"
+        ),
+    ),
+    (
+        "rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "child-turn-2",
+        include_str!(
+            "../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-05-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl"
+        ),
+    ),
+    (
+        "rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl",
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "child-turn-3",
+        include_str!(
+            "../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-06-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl"
+        ),
+    ),
+    (
+        "rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl",
+        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "child-turn-4",
+        include_str!(
+            "../../../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-07-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl"
+        ),
+    ),
 ];
 async fn write_native_fixture(f: &Fixture, name: &str, text: &str) -> String {
     let p = f.write(&format!("2026/08/07/{name}"), text).await;
@@ -4885,12 +4942,14 @@ async fn independent_child_six_case_privacy_matrix_blocks_before_real_attachment
             ));
             let parent = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
             if blocked_parent {
-                assert!(!f.rt().with_workspace_policy(|p| p.allows(
-                    json!({"gen_ai.session.id":parent,"cwd":private})
-                        .as_object()
-                        .expect("record"),
-                    "codex"
-                )));
+                assert!(!f.rt().with_workspace_policy(|p| {
+                    p.allows(
+                        json!({"gen_ai.session.id":parent,"cwd":private})
+                            .as_object()
+                            .expect("record"),
+                        "codex",
+                    )
+                }));
             }
             let output = Arc::new(Mutex::new(Vec::<AgentActivityEntry>::new()));
             let target = output.clone();
@@ -5314,3 +5373,6 @@ mod discovery_cache_main_tests;
 
 #[path = "engine_main541_history.rs"]
 mod main541_contracts;
+
+#[path = "engine_main543_regression_tests.rs"]
+mod main543_contracts;

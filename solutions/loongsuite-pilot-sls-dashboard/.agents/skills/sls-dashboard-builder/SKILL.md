@@ -73,6 +73,8 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 多张盘之间保持命名、筛选器、标题风格与版式节奏一致。
 
+涉及总览到明细、原始日志或业务页面的点击跳转时，读取 [交互事件与下钻报表](references/drill-down-events.md)，先确定报表的查看环境，再定义点击字段、目标资源、变量映射和时间继承。纯 SLS 控制台场景的日志库、仪表盘、快速查询使用对应原生事件；需要在 AgentLoop 中查看并跳转的报表，当前暂时仅支持自定义 HTTP URL 方式，使用 `event: link` 指向 AgentLoop 宿主页面；仪表盘间跳转按参考文档内置的 [AgentLoop URL 配方](references/drill-down-events.md#agentloop-dashboard-navigation) 配置站内路由、时间参数和双层编码的 token JSON。宿主原生跳转适配修复并验证后再切换。任意业务 HTTP(S) 地址同样使用自定义链接。
+
 ## 任务包工作流
 
 当输入包含需求文档、查询方案、结果文件或参考大盘时，按以下顺序：
@@ -82,7 +84,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 3. 若有名称或 URL，优先拉取真实参考大盘  
 4. 将视图归组为大盘区块，例如 `概览`、`趋势`、`TOP`、`Cohort`、`钻取`  
 5. 按**视图意图**选图表配方，不按产品营销名称选  
-6. 仅当图表查询**确实可被过滤或可被 token 替换**时才加筛选器  
+6. 涉及筛选器或查询参数时，先读 [筛选器与变量替换](references/filters-and-variables.md)，确定机制、作用范围、原值与标签、默认值及消费变量的查询
 7. 受阻指标写成简短 `markdownpro` 说明，或明确省略；**绝不编造**缺失的源数据  
 8. 每张大盘输出完整 JSON  
 
@@ -140,6 +142,10 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 - 目标受众为中文运维或业务时，图例、轴标签、表头使用规范中文  
 - 新改动基于最新线上大盘，而非更旧的本地副本  
 - `droplistpro` 非装饰，必须绑定真实 key 或 token 路径  
+- 交互类型符合实际查看环境：纯 SLS 使用原生事件，AgentLoop 暂用 HTTP URL
+- 交互绑定字段与传参来源列分别校验；表格单元格与柱图数值系列按实际点击位置配置
+- 目标查询必须消费交互传入的同名变量
+- 保存后在实际 SLS 或嵌入宿主中验证点击、参数和结果；HTML 预览不能替代交互验收
 - 分组趋势不强行塞进错误的图表家族  
 - 老格式大盘不静默整体迁到现代结构  
 - 使用预聚合 CTE 时，检查外层是否对 `approx_distinct` 结果做了 `sum()`——如果是，该指标需要改为在原始事件上直接去重，或从 CTE 中移除  
@@ -171,7 +177,7 @@ python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
 - `--dashboard <path>`：指定 dashboard JSON。
 - `--output <path>`：指定 HTML 输出路径。
 - `--case-dir <path> <scenario>`：按 `cases/<business-skill>/output/<scenario>-dashboard.json` 约定读取并输出。
-- `--var key=value`：替换 SQL 中的 `${{key}}` token。
+- `--var key=value`：仅替换 SQL 中精确的 `${{key}}` token；高级模板与交互的预览范围见 [筛选器与变量替换](references/filters-and-variables.md#验证与本地预览)。
 - `--profile test`：指定 aliyun CLI profile；本交付目录默认使用 `test`。
 - `--with-diff`：和 git HEAD 中同一路径 dashboard JSON 做 SQL / 结果 diff。
 
@@ -186,7 +192,9 @@ python3 .agents/skills/sls-dashboard-builder/scripts/render_report.py \
 - `references/datasources.md` — `chartQueries` 形态  
 - `references/layout.md` — 网格或自由布局规则  
 - `references/chart-templates.md` — 基础图表模板  
-- `references/query-syntax.md` — `query` 与 `tokenQuery` 规则  
+- `references/query-syntax.md` — 搜索、SQL、SPL 与 PromQL 查询写法
+- [references/filters-and-variables.md](references/filters-and-variables.md) — 筛选机制、作用范围、变量语法、控件 JSON、候选列表、单图变量与验证
+- [references/drill-down-events.md](references/drill-down-events.md) — 原生日志库、仪表盘、快速查询下钻，自定义 HTTP 链接，字段绑定、传参及验收
 
 ## 示例
 

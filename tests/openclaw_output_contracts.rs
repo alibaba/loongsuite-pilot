@@ -231,3 +231,28 @@ async fn legacy_inference_and_incomplete_flags_reach_final_spans_without_cross_t
         .get("agent.openclaw.collection.incomplete")
         .is_none());
 }
+
+#[tokio::test]
+async fn main549_agent_type_only_openclaw_input_sets_system_on_every_real_span_resource() {
+    let data = fixture();
+    let mut input = data["projection"].clone();
+    for entry in input.as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove(KEY);
+        assert_eq!(entry["gen_ai.agent.type"], "openclaw");
+        assert!(entry.get("gen_ai.agent.system").is_none());
+    }
+    let spans = exported(records(&input)).await;
+    let kinds: HashSet<_> = spans
+        .iter()
+        .map(|span| span.attributes["gen_ai.span.kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        HashSet::from(["ENTRY", "AGENT", "STEP", "LLM", "TOOL"])
+    );
+    for span in &spans {
+        let resource = span.resource_attributes.as_ref().unwrap();
+        assert_eq!(resource["gen_ai.agent.type"], "openclaw");
+        assert_eq!(resource["gen_ai.agent.system"], "openclaw");
+    }
+}

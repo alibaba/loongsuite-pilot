@@ -711,6 +711,7 @@ mod tests {
         alives: RefCell<VecDeque<bool>>,
         execs: RefCell<VecDeque<io::Result<String>>>,
         self_pid: u32,
+        windows: bool,
     }
 
     impl FakeIo {
@@ -721,7 +722,15 @@ mod tests {
                 alives: RefCell::new(VecDeque::new()),
                 execs: RefCell::new(VecDeque::new()),
                 self_pid: std::process::id(),
+                windows: false,
             }
+        }
+
+        fn scanned_pid(&self) -> u32 {
+            self.self_pid
+                .max(123)
+                .checked_add(1)
+                .expect("fixture PID must differ from this process and the pid-file fixture")
         }
     }
 
@@ -754,7 +763,7 @@ mod tests {
             self.self_pid
         }
         fn windows(&self) -> bool {
-            false
+            self.windows
         }
     }
 
@@ -1044,15 +1053,16 @@ mod tests {
     #[test]
     fn falls_through_to_process_scan_when_pid_file_command_is_unreadable() {
         let io = FakeIo::new();
+        let scanned_pid = io.scanned_pid();
         io.reads.borrow_mut().push_back(Ok("123\n".into()));
         io.alives.borrow_mut().push_back(true);
         io.execs.borrow_mut().push_back(Ok(String::new()));
-        io.execs
-            .borrow_mut()
-            .push_back(Ok("456 /usr/bin/node /tmp/collector-daemon.js\n".into()));
+        io.execs.borrow_mut().push_back(Ok(format!(
+            "{scanned_pid} /usr/bin/node /tmp/collector-daemon.js\n"
+        )));
         let result = check_process_liveness_with("/tmp/pilot.pid", COLLECTOR_PROCESS_PATTERNS, &io);
         assert!(result.running);
-        assert_eq!(result.pid, Some(456));
+        assert_eq!(result.pid, Some(scanned_pid));
         assert_eq!(result.source, ProcessLivenessSource::ProcessScan);
         assert_eq!(result.pid_file_state, Some(PidFileState::Stale));
         assert_eq!(result.pid_file_process_alive, Some(true));
@@ -1062,12 +1072,13 @@ mod tests {
     #[test]
     fn reports_unhealthy_when_command_is_unreadable_and_scan_finds_nothing() {
         let io = FakeIo::new();
+        let scanned_pid = io.scanned_pid();
         io.reads.borrow_mut().push_back(Ok("123\n".into()));
         io.alives.borrow_mut().push_back(true);
         io.execs.borrow_mut().push_back(Ok(String::new()));
         io.execs
             .borrow_mut()
-            .push_back(Ok("456 /usr/bin/node unrelated.js\n".into()));
+            .push_back(Ok(format!("{scanned_pid} /usr/bin/node unrelated.js\n")));
         let result = check_process_liveness_with("/tmp/pilot.pid", COLLECTOR_PROCESS_PATTERNS, &io);
         assert!(!result.running);
         assert_eq!(result.pid, Some(123));
@@ -1080,14 +1091,15 @@ mod tests {
     #[test]
     fn does_not_report_down_when_pid_changed_but_command_identity_is_present() {
         let io = FakeIo::new();
+        let scanned_pid = io.scanned_pid();
         io.reads.borrow_mut().push_back(Ok("123\n".into()));
         io.alives.borrow_mut().push_back(false);
-        io.execs
-            .borrow_mut()
-            .push_back(Ok("456 /usr/bin/node /tmp/collector-daemon.js\n".into()));
+        io.execs.borrow_mut().push_back(Ok(format!(
+            "{scanned_pid} /usr/bin/node /tmp/collector-daemon.js\n"
+        )));
         let result = check_process_liveness_with("/tmp/pilot.pid", COLLECTOR_PROCESS_PATTERNS, &io);
         assert!(result.running);
-        assert_eq!(result.pid, Some(456));
+        assert_eq!(result.pid, Some(scanned_pid));
         assert_eq!(result.source, ProcessLivenessSource::ProcessScan);
         assert_eq!(result.pid_file_state, Some(PidFileState::Stale));
     }
@@ -1095,11 +1107,12 @@ mod tests {
     #[test]
     fn reports_unhealthy_when_pid_is_stale_and_no_matching_command_exists() {
         let io = FakeIo::new();
+        let scanned_pid = io.scanned_pid();
         io.reads.borrow_mut().push_back(Ok("123\n".into()));
         io.alives.borrow_mut().push_back(false);
         io.execs
             .borrow_mut()
-            .push_back(Ok("456 /usr/bin/node unrelated.js\n".into()));
+            .push_back(Ok(format!("{scanned_pid} /usr/bin/node unrelated.js\n")));
         let result = check_process_liveness_with("/tmp/pilot.pid", COLLECTOR_PROCESS_PATTERNS, &io);
         assert!(!result.running);
         assert_eq!(result.pid, Some(123));
@@ -1110,18 +1123,47 @@ mod tests {
     #[test]
     fn falls_back_to_command_identity_when_pid_file_is_missing() {
         let io = FakeIo::new();
+        let scanned_pid = io.scanned_pid();
         io.reads
             .borrow_mut()
             .push_back(Err(io::Error::new(io::ErrorKind::NotFound, "missing")));
         io.exists.borrow_mut().push_back(false);
-        io.execs
-            .borrow_mut()
-            .push_back(Ok("789 /usr/bin/node /tmp/updater-daemon.js\n".into()));
+        io.execs.borrow_mut().push_back(Ok(format!(
+            "{scanned_pid} /usr/bin/node /tmp/updater-daemon.js\n"
+        )));
         let result = check_process_liveness_with("/tmp/updater.pid", UPDATER_PROCESS_PATTERNS, &io);
         assert!(result.running);
-        assert_eq!(result.pid, Some(789));
+        assert_eq!(result.pid, Some(scanned_pid));
         assert_eq!(result.source, ProcessLivenessSource::ProcessScan);
         assert_eq!(result.pid_file_state, Some(PidFileState::Missing));
+    }
+
+    #[test]
+    fn process_scan_skips_own_matching_command_before_selecting_another_process() {
+        for windows in [false, true] {
+            for self_pid in [std::process::id(), 123, 456, 789] {
+                let mut io = FakeIo::new();
+                io.self_pid = self_pid;
+                io.windows = windows;
+                let scanned_pid = io.scanned_pid();
+                assert_ne!(scanned_pid, self_pid);
+                assert_ne!(scanned_pid, 123);
+                io.reads
+                    .borrow_mut()
+                    .push_back(Err(io::Error::new(io::ErrorKind::NotFound, "missing")));
+                io.exists.borrow_mut().push_back(false);
+                let (separator, newline) = if windows { ("\t", "\r\n") } else { (" ", "\n") };
+                io.execs.borrow_mut().push_back(Ok(format!(
+                    "{self_pid}{separator}/usr/bin/node /tmp/collector-daemon.js{newline}{scanned_pid}{separator}/usr/bin/node /tmp/collector-daemon.js{newline}"
+                )));
+                let result =
+                    check_process_liveness_with("/tmp/pilot.pid", COLLECTOR_PROCESS_PATTERNS, &io);
+                assert!(result.running);
+                assert_eq!(result.pid, Some(scanned_pid));
+                assert_eq!(result.source, ProcessLivenessSource::ProcessScan);
+                assert_eq!(result.pid_file_state, Some(PidFileState::Missing));
+            }
+        }
     }
 
     #[test]

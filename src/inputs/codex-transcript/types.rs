@@ -200,6 +200,20 @@ pub struct CodexPendingSubagentTurn {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CodexTerminalRecoveryFailure {
+    pub source_version: String,
+    pub retry_at_ms: f64,
+    pub delay_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDeferredTerminalTurn {
+    pub active_turn: CodexActiveTranscriptTurn,
+    pub pending_terminal: CodexPendingTerminalTurn,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexPendingTerminalTurn {
     pub turn_id: String,
     pub terminal_end_offset: i64,
@@ -211,6 +225,8 @@ pub struct CodexPendingTerminalTurn {
     pub last_attempt_at_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_record_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<CodexTerminalRecoveryFailure>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +271,8 @@ pub struct CodexTranscriptCheckpoint {
     pub scan_offset: i64,
     pub active_turn: Option<CodexActiveTranscriptTurn>,
     pub pending_terminal: Option<CodexPendingTerminalTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_terminals: Vec<CodexDeferredTerminalTurn>,
     pub pending_fusion: Option<CodexPendingFusionTurn>,
     pub pending_subagent: Option<CodexPendingSubagentTurn>,
     pub owner_session_meta_offset: Option<i64>,

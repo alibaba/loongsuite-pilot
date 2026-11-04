@@ -211,6 +211,7 @@ async fn l488_startup_and_fork_baselines_cross_quarantine_without_retaining_an_o
                 scan_offset: size,
                 active_turn: None,
                 pending_terminal: None,
+                deferred_terminals: Vec::new(),
                 pending_fusion: None,
                 pending_subagent: None,
                 owner_session_meta_offset: Some(0),

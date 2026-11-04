@@ -223,31 +223,4 @@ The SQL alias usually becomes the legend, axis field, or table column. If the al
 
 ## `droplistpro` For Real Filters
 
-Use only when the dashboard can truly respond to the filter.
-
-Common live pattern:
-
-```json
-"dropListOption": {
-  "key": "ownerId",
-  "type": "filter",
-  "autoFilter": true,
-  "globalFilter": false,
-  "logic": "and"
-}
-```
-
-Typical value-source query:
-
-```json
-{
-  "name": "A",
-  "datasource": "logstore",
-  "project": "my-project",
-  "logstore": "my-logstore",
-  "query": "",
-  "tokenQuery": "* | select distinct ownerId"
-}
-```
-
-Do not add `droplistpro` just because the screenshot has filters. It must bind to a real key or token path.
+Choose field filtering, dashboard variables, or chart-local variables using [Filters and variables](filters-and-variables.md). That reference owns the control recipes, value-source queries, label/value mapping, defaults, and verification rules. Record which queries consume each control when composing the views.

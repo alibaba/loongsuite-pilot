@@ -4,10 +4,10 @@
   "mappings": [
     {
       "legacy": "tests/unit/inputs/codex-transcript/codex-transcript-input.test.ts",
-      "coverage": "complete",
+      "coverage": "partial",
       "rust": [],
       "source_hash": "8a433bf8b9dd19dbe4f67c9d21d3468eb90ceef5ec9296620a6b9740598109dc",
-      "note": "Rebased exact source declarations by title/suites/parameters against frozen 346dd24dd56452b8ca127db75a9c6b1f6992669f. Original unchanged assertions retain proven native targets; new contracts use individually verified incremental tests. No denominator substitution. 最新main346dd24相对f84新增7声明逐原assert承接全部完成（原参数展开12场景），累计准确仅这7条；原文件仍130声明，Root已有123需另行精确重基，不以本7冒称130完整。保留128MiB record上限、16MiB scan预算、2048内存hint上限及64byte witness。额外真实live指标验收新turn start恰1次计入rawRecords/parseSuccess、rawBytes恰物理文件大小，恢复专用零宽terminal不污染指标。生产hint不持久化，不改变checkpoint命名空间或源数据。Linux strict及相关Codex225实跑全绿；Windows/macOS未运行，实际验收待CI。2048为生产有界淘汰上限，本批不将未执行的2049文件性能试验伪列测试。",
+      "note": "Rebased exact source declarations by title/suites/parameters against frozen 346dd24dd56452b8ca127db75a9c6b1f6992669f. Original unchanged assertions retain proven native targets; new contracts use individually verified incremental tests. No denominator substitution. 最新main346dd24相对f84新增7声明逐原assert承接全部完成（原参数展开12场景），累计准确仅这7条；原文件仍130声明，Root已有123需另行精确重基，不以本7冒称130完整。保留128MiB record上限、16MiB scan预算、2048内存hint上限及64byte witness。额外真实live指标验收新turn start恰1次计入rawRecords/parseSuccess、rawBytes恰物理文件大小，恢复专用零宽terminal不污染指标。生产hint不持久化，不改变checkpoint命名空间或源数据。Linux strict及相关Codex225实跑全绿；Windows/macOS未运行，实际验收待CI。2048为生产有界淘汰上限，本批不将未执行的2049文件性能试验伪列测试。 95081bd #543适配：仅原“truly unparseable pending range blocks later work”精确case降为partial；保留源hash/descriptor和其它全部case原样。新deferred旁路行为不冒充原阻塞合同通过。",
       "cases": [
         {
           "source": {
@@ -2128,8 +2128,8 @@
             ],
             "parameters": []
           },
-          "coverage": "complete",
-          "behavior": "固定f84该声明与ef8953 L2721:C3 原有效断言相同（metadata循环仅稳定drain；两处删除completed额外限制无新增断言；explicit-ID与privacy采用已验证main替代）。沿用真实native精确断言，115targeted本轮全实过；Windows/macOS未执行。 retains a truly unparseable pending range and does not scan later work；真实StateStore save/load后真实Input.start，使用首次实际runtime delta完成信号再stop，不手动多重cycle；保留offset/retryCount/sourceRecordCount全部精确断言。独立真实子进程验证warning精确msg/level/完整transcriptPath与count。 Linux Rust1.99.1/glibc2.34/network-none：修补后strict workspace/alltargets/allfeatures -Dwarnings与64 targeted全部通过；Windows/macOS未执行。",
+          "coverage": "partial",
+          "behavior": "主干95081bd #543将真正不可解析的terminal保留为最多4个deferred语义上下文，并以sourceVersion变化且退避到期同时满足为重试门禁，允许后来健康turn继续采集。保留源范围/上下文及durable restart投影；原later响应为0、scan停在旧terminal、旧阻塞告警字符串投影已被主干替代，当前Rust不再通过这些原断言。此精确旧case保留partial且不退役；新主干合同在rust-migration-main-95081bd-map.json单列。",
           "platforms": [
             "linux",
             "macos",

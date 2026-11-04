@@ -55,6 +55,72 @@ pub struct CodexTranscriptInput {
 }
 
 type BatchHandler = Arc<dyn Fn(&[AgentActivityEntry]) + Send + Sync>;
+#[cfg(test)]
+type RecoveryClock = Arc<dyn Fn() -> f64 + Send + Sync>;
+#[cfg(test)]
+type RecoveryFailureObserver = Arc<dyn Fn(&str, &Value) + Send + Sync>;
+#[cfg(test)]
+type OwnerProbeAfterRead = Arc<dyn Fn(&str) + Send + Sync>;
+#[cfg(test)]
+type RecoveryEndObserver = Arc<dyn Fn(i64) + Send + Sync>;
+#[cfg(test)]
+type LegacyReleaseObserver = Arc<dyn Fn(&str) + Send + Sync>;
+pub(super) const MAX_OWNER_OFFSET_PROBES: usize = 2048;
+
+#[derive(Clone)]
+struct OwnerProbeEntry {
+    owner: Option<i64>,
+    complete: Option<(super::scan::FileVersion, i64)>,
+}
+pub(super) struct OwnerProbeCache {
+    values: LruMap<OwnerProbeEntry>,
+}
+impl OwnerProbeCache {
+    fn new() -> Self {
+        Self {
+            values: LruMap::new(MAX_OWNER_OFFSET_PROBES).expect("positive owner probe bound"),
+        }
+    }
+    fn get_copied(&mut self, key: &str) -> Option<Option<i64>> {
+        self.values.get_copied(key).map(|entry| entry.owner)
+    }
+    fn set_verified(
+        &mut self,
+        key: String,
+        owner: Option<i64>,
+        complete: Option<(super::scan::FileVersion, i64)>,
+    ) {
+        self.values.set(key, OwnerProbeEntry { owner, complete });
+    }
+    fn complete_boundary(&mut self, key: &str, version: &super::scan::FileVersion) -> Option<i64> {
+        self.values
+            .get_copied(key)
+            .and_then(|entry| entry.complete)
+            .filter(|(observed, _)| observed == version)
+            .map(|(_, end)| end)
+    }
+    fn clear(&mut self) {
+        self.values.clear();
+    }
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+    #[cfg(test)]
+    pub fn has(&mut self, key: &str) -> bool {
+        self.values.has(key)
+    }
+    #[cfg(test)]
+    pub fn set(&mut self, key: impl Into<String>, owner: Option<i64>) {
+        self.values.set(
+            key,
+            OwnerProbeEntry {
+                owner,
+                complete: None,
+            },
+        );
+    }
+}
 
 pub(super) struct CachedMeta {
     pub inode: u64,
@@ -92,6 +158,24 @@ pub(super) struct Shared {
     pub meta_cache_bytes: usize,
     pub idle: IndexMap<String, RolloutStat>,
     pub incomplete_tails: IndexMap<String, super::scan::IncompleteJsonlTail>,
+    pub owner_offset_probes: OwnerProbeCache,
+    #[cfg(test)]
+    pub main543_clock: Option<RecoveryClock>,
+    #[cfg(test)]
+    pub main543_failure_observer: Option<RecoveryFailureObserver>,
+    #[cfg(test)]
+    pub main543_probe_after_read: Option<OwnerProbeAfterRead>,
+    #[cfg(test)]
+    pub main543_owner_probe_calls: usize,
+    #[cfg(test)]
+    pub main543_recovery_end_observer: Option<RecoveryEndObserver>,
+    #[cfg(test)]
+    pub main543_legacy_release_observer: Option<LegacyReleaseObserver>,
+    #[cfg(test)]
+    pub main543_pending_results: Vec<(bool, usize)>,
+    #[cfg(test)]
+    pub main543_force_terminal_failure: bool,
+
     pub last_historical_stat_at: i64,
     pub cached_default: Option<CachedDefault>,
     wakeup: WakeupState,
@@ -175,6 +259,24 @@ impl CodexTranscriptInput {
                 meta_cache_bytes: 0,
                 idle: IndexMap::new(),
                 incomplete_tails: IndexMap::new(),
+                owner_offset_probes: OwnerProbeCache::new(),
+                #[cfg(test)]
+                main543_clock: None,
+                #[cfg(test)]
+                main543_failure_observer: None,
+                #[cfg(test)]
+                main543_probe_after_read: None,
+                #[cfg(test)]
+                main543_owner_probe_calls: 0,
+                #[cfg(test)]
+                main543_recovery_end_observer: None,
+                #[cfg(test)]
+                main543_legacy_release_observer: None,
+                #[cfg(test)]
+                main543_pending_results: Vec::new(),
+                #[cfg(test)]
+                main543_force_terminal_failure: false,
+
                 last_historical_stat_at: 0,
                 cached_default: None,
                 wakeup: WakeupState::default(),
@@ -437,6 +539,7 @@ impl InputBody for CodexTranscriptBody {
             shared.wakeup = WakeupState::default();
             shared.meta_cache.clear();
             shared.incomplete_tails.clear();
+            shared.owner_offset_probes.clear();
             shared.meta_cache_bytes = 0;
         });
         Ok(())

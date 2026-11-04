@@ -7,7 +7,7 @@
 - Cargo workspace：主程序 `src/main.rs` / `src/cli_main.rs`，开发工具 `xtask/`，工具链固定 Rust 1.99.1。
 - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` 和 Cargo 测试是本地门禁；内嵌测试随源码提交，独立测试分批迁移。
 - 安装后的 Pilot 不依赖 Node/npm/Python；Agent 宿主插件、preload/runtime wrapper、Dashboard 和 Swift UI 按其原生环境保留。
-- 优先级：文档 → 八平台轻发布 CI → 主要代码/脚本分批提交 → 独立测试迁移。严格 clippy 清零后才能推送。
+- 发布矩阵为六平台：Linux GNU x64/ARM64、macOS x64/ARM64、Windows MSVC x64/ARM64；不支持 musl。当前优先历史测试与运行能力迁移，发布可另拆 PR。严格 clippy 清零后才能推送。
 - 日常 CI 以整体 10 分钟为目标；发布构建单独计时，每次工作流不超过 10 个 runner 任务。暂缓新增完整 Agent 注入矩阵，不把暂缓当通过。
 - 发布和测试分级见 [Rust 发布与测试优先级](docs/zh-CN/rust-release.md)。未完成映射的历史 TS/MJS 测试保留作行为参考，不宣称它们可对当前 Rust 源码直接运行。
 

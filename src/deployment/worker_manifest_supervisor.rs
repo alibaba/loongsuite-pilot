@@ -1167,22 +1167,44 @@ async fn stop_tree_with_journal(
             }
         }
     }
-    if ops
-        .identity(root.pid)
-        .map_err(|e| (vec![root.pid], e.to_string()))?
-        .is_some_and(|actual| root.matches(&actual))
-    {
-        let children = ops
-            .descendants(root)
-            .map_err(|e| (vec![root.pid], e.to_string()))?;
+    let mut last_error = String::new();
+    for force in [false, true] {
+        // Publishing "stopping" may let the worker exit while Windows is
+        // querying its identity. Retry only denied reads, sharing this phase's
+        // existing grace period. Signals still require a fresh exact identity.
+        let phase_started = Instant::now();
+        let children = loop {
+            let snapshot = match ops.identity(root.pid) {
+                Ok(Some(actual)) if root.matches(&actual) => ops.descendants(root),
+                Ok(_) => Ok(Vec::new()),
+                Err(error) => Err(error),
+            };
+            match snapshot {
+                Ok(children) => break Some(children),
+                Err(error) => {
+                    last_error = error.to_string();
+                    if error.kind() != std::io::ErrorKind::PermissionDenied {
+                        return Err((tracked.iter().map(|p| p.pid).collect(), last_error));
+                    }
+                    let remaining = grace.saturating_sub(phase_started.elapsed());
+                    if remaining.is_zero() {
+                        if force {
+                            return Err((tracked.iter().map(|p| p.pid).collect(), last_error));
+                        }
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50).min(remaining)).await;
+                }
+            }
+        };
+        let Some(children) = children else {
+            continue;
+        };
         for identity in children {
-            if !tracked.iter().any(|p| p.matches(&identity)) {
+            if !tracked.iter().any(|known| known.matches(&identity)) {
                 tracked.push(identity);
             }
         }
-    }
-    let mut last_error = String::new();
-    for force in [false, true] {
         if let Some(path) = journal {
             let mut status = read_status(path)
                 .await
@@ -1207,7 +1229,6 @@ async fn stop_tree_with_journal(
                 Err(error) => last_error = error.to_string(),
             }
         }
-        let start = Instant::now();
         loop {
             let mut remaining = Vec::new();
             for identity in &tracked {
@@ -1223,31 +1244,17 @@ async fn stop_tree_with_journal(
             if remaining.is_empty() {
                 return Ok(());
             }
-            if start.elapsed() >= grace {
+            if phase_started.elapsed() >= grace {
                 if force {
                     return Err((remaining, last_error));
                 }
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let remaining_grace = grace.saturating_sub(phase_started.elapsed());
+            tokio::time::sleep(Duration::from_millis(50).min(remaining_grace)).await;
         }
-        if !force {
-            // 优雅退出期间仍可能派生后代，强制阶段前补充仍属于同一根身份的进程。
-            if ops
-                .identity(root.pid)
-                .map_err(|e| (vec![root.pid], e.to_string()))?
-                .is_some_and(|actual| root.matches(&actual))
-            {
-                for child in ops
-                    .descendants(root)
-                    .map_err(|e| (vec![root.pid], e.to_string()))?
-                {
-                    if !tracked.iter().any(|known| known.matches(&child)) {
-                        tracked.push(child);
-                    }
-                }
-            }
-        }
+        // The next phase takes another identity-checked snapshot before
+        // signalling, including descendants created during graceful shutdown.
     }
     unreachable!()
 }
@@ -2215,3 +2222,7 @@ mod tests {
 #[cfg(test)]
 #[path = "worker_manifest_history_contract_tests.rs"]
 mod history_contract_tests;
+
+#[cfg(test)]
+#[path = "worker_manifest_snapshot_retry_tests.rs"]
+mod snapshot_retry_contract_tests;
