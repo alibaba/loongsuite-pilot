@@ -3,7 +3,7 @@ import { createWriteStream, type Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { createLogger } from '../utils/logger.js';
-import { ensureDir, fileExists } from '../utils/fs-utils.js';
+import { ensureDir, fileExists, writeJsonFile } from '../utils/fs-utils.js';
 
 const logger = createLogger('WorkerManifestSupervisor');
 const WINDOWS_PROCESS_COMMAND_TIMEOUT_MS = 5000;
@@ -414,7 +414,10 @@ export class WorkerManifestSupervisor {
     if (runtime) runtime.stopping = true;
 
     const pid = await this.readPid(paths.pid);
-    if (!pid) return true;
+    if (!pid) {
+      this.runtimes.delete(paths.pid);
+      return true;
+    }
 
     let processIdentity: WindowsProcessIdentity | undefined;
     if (this.shouldVerifyWindowsProcessIdentity(options)) {
@@ -566,6 +569,7 @@ export class WorkerManifestSupervisor {
 
     await fs.rm(paths.pid, { force: true });
     await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+    this.runtimes.delete(paths.pid);
     await this.writeStatus(paths.status, {
       state: 'stopped',
       name: manifest.name,
@@ -955,9 +959,13 @@ if ($null -ne $process) {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Promise<void> {
+    // Explicit stop owns pid cleanup and the final status. A delayed exit
+    // callback must not remove a replacement pid or overwrite "stopped".
+    if (runtime.stopping) return;
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     await fs.rm(paths.pid, { force: true });
     await fs.rm(this.processIdentityPath(paths.pid), { force: true });
+    if (runtime.stopping) return;
 
     const failed = code !== 0 || signal !== null;
     const policy = manifest.restartPolicy ?? {};
@@ -1085,8 +1093,9 @@ if ($null -ne $process) {
   }
 
   private async writeStatus(statusPath: string, payload: Record<string, unknown>): Promise<void> {
-    await ensureDir(path.dirname(statusPath));
-    await fs.writeFile(statusPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+    // Exit/start/stop callbacks can overlap. Publish a complete document with
+    // a unique temporary file so their writes cannot mix bytes at the target.
+    await writeJsonFile(statusPath, payload);
   }
 
   private isAlive(pid: number): boolean {

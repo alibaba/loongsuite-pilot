@@ -7,6 +7,7 @@ import { DoubaoWorkInput } from '../../../src/inputs/doubao-work/doubao-work-inp
 import { parseDoubaoLogLine } from '../../../src/inputs/doubao-work/doubao-work-log.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../../helpers/doubao-work-fixture.js';
 import { DoubaoWorkNativeReader } from '../../../src/inputs/doubao-work/doubao-work-reader.js';
+import { DoubaoWorkBudget } from '../../../src/inputs/doubao-work/doubao-work-budget.js';
 
 class ProbeInput extends DoubaoWorkInput {
   constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
@@ -60,14 +61,28 @@ describe('Doubao Work passive client-message input', () => {
   it('bounds a missing parent snapshot wait across restart even when the parent Write succeeded', async () => {
     const { input, stateStore, statePath, logs, sessionsRoot, snapshotRoot, child } = await missingParentFixture();
     const now = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(now);
-    await input.poll(); await stateStore.save();
+    // CI can spend the entire cooperative budget before observing the child.
+    const exhausted = vi.spyOn(DoubaoWorkBudget.prototype, 'exhausted', 'get').mockReturnValue(true);
+    expect(await input.poll()).toEqual([]);
+    exhausted.mockRestore();
+    // Grace starts when the child is actually observed, not on the first poll.
+    // Allow deferred native work to finish while keeping business time fixed.
+    await vi.waitFor(async () => {
+      expect(await input.poll()).toEqual([]);
+      const checkpoint = stateStore.get('doubao-work').extra?.doubaoWork as any;
+      expect(checkpoint?.executionFirstSeen?.[child.executionKey]).toBe(now);
+    }, { timeout: 5000, interval: 10 });
+    await stateStore.save();
     const restored = new StateStore(statePath); await restored.load();
     const restarted = new ProbeInput({ stateStore: restored, logDir: logs, sessionsRoot, snapshotRoot });
     clock.mockReturnValue(now + 90_000);
     expect(await restarted.poll()).toEqual([]);
     clock.mockReturnValue(now + 120_001);
-    const events = await restarted.poll();
-    expect(events).toHaveLength(2);
+    const events: Awaited<ReturnType<typeof restarted.poll>> = [];
+    await vi.waitFor(async () => {
+      events.push(...await restarted.poll());
+      expect(events).toHaveLength(2);
+    }, { timeout: 5000, interval: 10 });
     expect(events[0]['loongsuite.doubao_work.native_execution_id']).toBe(child.executionKey);
     expect(events[0]['loongsuite.doubao_work.parent_resolution']).toBe('root_request_ancestor');
     expect(events[0].parent_span_id).toBeUndefined();

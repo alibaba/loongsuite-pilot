@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
+import { promises as mutableFs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -69,6 +71,50 @@ describe('WorkerManifestSupervisor', () => {
       await fs.readFile(path.join(stateDir, 'supervisor-status.json'), 'utf-8'),
     ) as Record<string, unknown>;
   }
+
+  it('keeps the published status valid while a replacement is being written', async () => {
+    const supervisor = new WorkerManifestSupervisor();
+    const statusPath = path.join(stateDir, 'supervisor-status.json');
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(statusPath, JSON.stringify({ state: 'running' }));
+    let opened!: () => void;
+    let resume!: () => void;
+    const started = new Promise<void>(resolve => { opened = resolve; });
+    const released = new Promise<void>(resolve => { resume = resolve; });
+    const writer = vi.spyOn(mutableFs, 'writeFile').mockImplementation(async (target, data, options) => {
+      if (typeof target !== 'string') throw new Error('expected a status file path');
+      const handle = await fs.open(target, 'w');
+      opened();
+      try { await released; await handle.writeFile(data, options); }
+      finally { await handle.close(); }
+    });
+    syncBuiltinESMExports();
+    const writing = (supervisor as any).writeStatus(statusPath, { state: 'stopped' });
+    try {
+      await started;
+      expect(await readStatus()).toEqual({ state: 'running' });
+    } finally {
+      resume();
+      try { await writing; }
+      finally { writer.mockRestore(); syncBuiltinESMExports(); }
+    }
+    expect(await readStatus()).toEqual({ state: 'stopped' });
+    expect(await fs.readdir(stateDir)).toEqual(['supervisor-status.json']);
+  });
+
+  it('does not overwrite the explicit stop status from a late exit callback', async () => {
+    const supervisor = new WorkerManifestSupervisor();
+    await writeManifest(['unused']);
+    const manifest = JSON.parse(await fs.readFile(path.join(bundleRoot, 'worker.manifest.json'), 'utf8'));
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(path.join(stateDir, 'supervisor-status.json'), JSON.stringify({ state: 'stopped' }));
+    const pidPath = path.join(stateDir, 'worker.pid');
+    await fs.writeFile(pidPath, 'replacement-pid');
+    await (supervisor as any).handleExit('test', bundleRoot, manifest, {}, options(),
+      pidPath, { restarts: 0, stopping: true }, 0, 'SIGTERM');
+    expect(await readStatus()).toEqual({ state: 'stopped' });
+    expect(await fs.readFile(pidPath, 'utf8')).toBe('replacement-pid');
+  });
 
   function processIdentity(pid: number, creationTime = '2026-07-30T00:00:00.0000000Z'): WindowsProcessIdentity {
     return {
