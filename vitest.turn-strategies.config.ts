@@ -36,6 +36,7 @@ export default defineConfig({
       'tests/unit/inputs/copilot-log/copilot-log-input.test.ts',
       'tests/unit/inputs/codex-transcript/codex-transcript-input.test.ts',
       'tests/unit/inputs/dsh-log/dsh-otlp-grouping.test.ts',
+      'tests/unit/inputs/dsh-log/dsh-log-input.test.ts',
       'tests/unit/inputs/workbuddy-input.test.ts',
       'tests/unit/inputs/wukong-input.test.ts',
     ],
