@@ -170,6 +170,7 @@ async function readSegmentTokensOnce(
 
     const incomplete = fileState.incomplete;
     if (file.size > fileState.committedOffset && !(incomplete
+      && incomplete.dev === file.dev && incomplete.ino === file.ino
       && incomplete.size === file.size && incomplete.mtimeMs === file.mtimeMs
       && incomplete.ctimeMs === file.ctimeMs)) {
       const read = await readAppendedEvents(file, fileState, sessionId);
@@ -246,11 +247,13 @@ async function readAppendedEvents(
         if (!skippingLine) {
           const part = data.subarray(cursor, end);
           lineBytes += part.length;
-          if (lineBytes > MAX_RECORD_BYTES || (lineBytes === MAX_RECORD_BYTES && newline < 0)) {
+          const recordBytes = lineBytes - (newline >= 0 ? 1 : 0);
+          if (recordBytes > MAX_RECORD_BYTES) {
             skippingLine = true;
             parts = [];
             logger.warn('oversized segment JSONL record; skipping it', {
               sessionId, filePath: snapshot.filePath, offset: chunkStart + cursor + part.length - lineBytes,
+              maxRecordBytes: MAX_RECORD_BYTES, recordBytes,
             });
           } else {
             parts.push(part);
