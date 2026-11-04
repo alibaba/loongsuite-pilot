@@ -284,3 +284,73 @@ describe('readTranscriptSnapshotLines / sliceTranscriptLines', () => {
     });
   }
 });
+
+describe('Work transcript byte cursor', () => {
+  const worker = `
+    import fs from 'node:fs';
+    import { readTranscriptIncrement, updateLineRecord } from ${JSON.stringify(BASE_MODULE)};
+    const file = process.env.TEST_TRANSCRIPT;
+    const originalOpen = fs.openSync;
+    const originalClose = fs.closeSync;
+    const originalRead = fs.readSync;
+    let transcriptFd;
+    let bytes = 0;
+    fs.openSync = (...args) => {
+      const fd = originalOpen(...args);
+      if (args[0] === file) transcriptFd = fd;
+      return fd;
+    };
+    fs.closeSync = fd => {
+      if (fd === transcriptFd) transcriptFd = undefined;
+      return originalClose(fd);
+    };
+    fs.readSync = (...args) => {
+      const read = originalRead(...args);
+      if (args[0] === transcriptFd) bytes += read;
+      return read;
+    };
+    if (process.env.TEST_LEGACY_COUNT) {
+      updateLineRecord('qoder-work', file, 'session', Number(process.env.TEST_LEGACY_COUNT));
+    }
+    const batch = readTranscriptIncrement('qoder-work', file, 'session');
+    if (batch) updateLineRecord('qoder-work', file, 'session', batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
+    console.log(JSON.stringify({ bytes, batch }));
+  `;
+
+  it('migrates a legacy cursor and reads only appended bytes on subsequent invocations', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const row = JSON.stringify({ type: 'session_meta', text: 'x'.repeat(256 * 1024) }) + '\n';
+    fs.writeFileSync(file, row.repeat(128));
+    const run = extra => runWorker(worker, { TEST_TRANSCRIPT: file, ...extra }).then(JSON.parse);
+    expect((await run({ TEST_LEGACY_COUNT: '128' })).batch).toBeNull();
+    const unchanged = await run();
+    expect(unchanged.batch).toBeNull();
+    expect(unchanged.bytes).toBeLessThanOrEqual(64);
+
+    const next = JSON.stringify({ type: 'user', text: '新内容' }) + '\n';
+    fs.appendFileSync(file, next);
+    const appended = await run();
+    expect(appended.batch).toMatchObject({ lines: [next.trim()], endLine: 129, reason: 'incremental' });
+    expect(appended.bytes).toBeLessThanOrEqual(Buffer.byteLength(next) + 128);
+    expect(JSON.parse(fs.readFileSync(path.join(dataDir, 'state/hooks/qoder-work-line-records.json'), 'utf8'))[file])
+      .toMatchObject({ last_line_count: 129 });
+  });
+
+  it('keeps a partial final row and invalidates the cursor after replacement', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    fs.writeFileSync(file, '{"type":"user"}\n');
+    expect((await run()).batch.endLine).toBe(1);
+    fs.appendFileSync(file, '{"type":"assistant"');
+    expect((await run()).batch).toBeNull();
+    fs.appendFileSync(file, '}\n');
+    expect((await run()).batch).toMatchObject({ lines: ['{"type":"assistant"}'], endLine: 2 });
+
+    const replacement = path.join(dataDir, 'replacement.jsonl');
+    const newRow = JSON.stringify({ type: 'user', text: 'new'.repeat(64) });
+    fs.writeFileSync(replacement, newRow + '\n');
+    fs.renameSync(replacement, file);
+    expect((await run()).batch).toMatchObject({ lines: [newRow], endLine: 1, reason: 'truncated' });
+    expect((await run()).batch).toBeNull();
+  });
+});

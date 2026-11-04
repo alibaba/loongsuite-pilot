@@ -165,11 +165,11 @@ function isLineRecordNewer(candidate, existing) {
     && (!existingUpdated || candidateUpdated > existingUpdated);
 }
 
-function updateAggregateShadow(file, transcriptPath, record) {
+function updateAggregateShadow(file, transcriptPath, record, reset) {
   const result = withSyncFileLock(`${file}.lock`, 1_000, 30_000, () => {
     const records = readJsonObject(file) || {};
     const existing = records[transcriptPath];
-    if (existing?.session_id === record.session_id
+    if (!reset && existing?.session_id === record.session_id
       && Number(existing.last_line_count) > Number(record.last_line_count)) {
       return true;
     }
@@ -206,18 +206,19 @@ export function loadLineRecord(agentId, sessionId) {
   return readJsonObject(file) || {};
 }
 
-export function updateLineRecord(agentId, transcriptPath, sessionId, endLine) {
+export function updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, reset = false) {
   const record = {
     session_id: sessionId,
     transcript_path: transcriptPath,
     last_line_count: endLine,
+    ...(byteCursor ? { byte_cursor: byteCursor } : {}),
     updated_at: new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ''),
   };
   const ok = saveSessionLineRecord(agentId, sessionId, record);
   if (ok) {
     logDebug(agentId, `Updated record: ${transcriptPath} -> ${endLine} lines`);
     for (const shadow of rollbackShadowFiles(agentId)) {
-      if (!updateAggregateShadow(shadow, transcriptPath, record)) {
+      if (!updateAggregateShadow(shadow, transcriptPath, record, reset)) {
         logDebug(agentId, `Warning: Failed to update rollback cursor shadow ${shadow}`);
       }
     }
@@ -324,6 +325,95 @@ export function readTranscriptSnapshotLines(transcriptPath) {
     return { lineCount, allLines };
   } catch {
     return { lineCount: 0, allLines: [] };
+  }
+}
+
+function readTranscriptBytes(fd, offset, length) {
+  const buffer = Buffer.allocUnsafe(length);
+  let read = 0;
+  while (read < length) {
+    const bytes = fs.readSync(fd, buffer, read, length - read, offset + read);
+    if (!bytes) break;
+    read += bytes;
+  }
+  return buffer.subarray(0, read);
+}
+
+function offsetAtLine(fd, size, lines) {
+  if (lines === 0) return 0;
+  for (let offset = 0; offset < size;) {
+    const chunk = readTranscriptBytes(fd, offset, Math.min(256 * 1024, size - offset));
+    if (!chunk.length) break;
+    for (let i = chunk.indexOf(10); i >= 0; i = chunk.indexOf(10, i + 1)) {
+      if (--lines === 0) return offset + i + 1;
+    }
+    offset += chunk.length;
+  }
+  return undefined;
+}
+
+function cursorWitness(fd, offset) {
+  const start = Math.max(0, offset - 64);
+  return crypto.createHash('sha256').update(readTranscriptBytes(fd, start, offset - start)).digest('hex');
+}
+
+/** The Work processors keep their legacy line counts but read only the unread bytes. */
+export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
+  let fd;
+  try {
+    fd = fs.openSync(transcriptPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    const record = loadLineRecord(agentId, sessionId);
+    const count = record.last_line_count;
+    const saved = record.byte_cursor;
+    let offset = 0;
+    let startLine = 0;
+    let reason = 'missing-cursor';
+    let migrated = false;
+    if (record.session_id && record.session_id !== sessionId) {
+      reason = 'session-changed';
+    } else if (record.transcript_path && record.transcript_path !== transcriptPath) {
+      reason = 'transcript-changed';
+    } else if (Number.isSafeInteger(count) && count >= 0) {
+      if (saved) {
+        if (saved.dev === stat.dev && saved.ino === stat.ino && Number.isSafeInteger(saved.offset)
+          && saved.offset >= 0 && saved.offset <= stat.size && cursorWitness(fd, saved.offset) === saved.witness) {
+          offset = saved.offset;
+          startLine = count;
+          reason = 'incremental';
+        } else {
+          reason = 'truncated';
+        }
+      } else {
+        const legacyOffset = offsetAtLine(fd, stat.size, count);
+        if (legacyOffset !== undefined) {
+          offset = legacyOffset;
+          startLine = count;
+          reason = 'incremental';
+          migrated = true;
+        } else {
+          reason = 'truncated';
+        }
+      }
+    }
+
+    const bytes = readTranscriptBytes(fd, offset, stat.size - offset);
+    const complete = bytes.lastIndexOf(10) + 1;
+    const endOffset = offset + complete;
+    if (!complete && !migrated) return null;
+    const byteCursor = { dev: stat.dev, ino: stat.ino, offset: endOffset, witness: cursorWitness(fd, endOffset) };
+    if (!complete) {
+      updateLineRecord(agentId, transcriptPath, sessionId, startLine, byteCursor);
+      return null;
+    }
+    const lines = bytes.toString('utf8', 0, complete - 1).split('\n');
+    const endLine = startLine + lines.length;
+    return { lines: lines.map(line => line.trim()).filter(Boolean), endLine, byteCursor, reason };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 

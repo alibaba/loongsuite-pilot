@@ -19,9 +19,7 @@ import {
   parseArgs,
   parseStdinPayload,
   logDebug,
-  getLineRangeInfo,
-  readTranscriptSnapshotLines,
-  sliceTranscriptLines,
+  readTranscriptIncrement,
   appendRowsToHistory,
   updateLineRecord,
   loadHookRuntimeConfig,
@@ -45,15 +43,13 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const snapshot = readTranscriptSnapshotLines(transcriptPath);
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
+  const range = readTranscriptIncrement(agentId, transcriptPath, sessionId);
   if (!range) return;
 
-  const { startLine, endLine, reason: rangeReason } = range;
-  const lines = sliceTranscriptLines(snapshot.allLines, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
+  const { lines, endLine, byteCursor, reason: rangeReason } = range;
+  logDebug(agentId, `Read ${lines.length} new lines from ${transcriptPath}`);
   if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
     return;
   }
 
@@ -62,7 +58,7 @@ async function main() {
     try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
   }
   if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
     return;
   }
 
@@ -75,7 +71,7 @@ async function main() {
   const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
   if (success) {
     logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
+    updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
   }
 }
 

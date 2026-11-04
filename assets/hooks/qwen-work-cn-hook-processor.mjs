@@ -11,14 +11,12 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import {
   appendRowsToHistory,
-  getLineRangeInfo,
   HOOKS_DIR,
   loadHookRuntimeConfig,
   logDebug,
   parseArgs,
   parseStdinPayload,
-  readTranscriptSnapshotLines,
-  sliceTranscriptLines,
+  readTranscriptIncrement,
   updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
@@ -36,12 +34,11 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const snapshot = readTranscriptSnapshotLines(payload.transcriptPath);
-  const range = getLineRangeInfo(agentId, payload.transcriptPath, payload.sessionId, snapshot.lineCount);
+  const range = readTranscriptIncrement(agentId, payload.transcriptPath, payload.sessionId);
   if (!range) return;
-  const lines = sliceTranscriptLines(snapshot.allLines, range.startLine, range.endLine);
+  const { lines } = range;
   if (!lines.length) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine, range.byteCursor, range.reason !== 'incremental');
     return;
   }
 
@@ -55,7 +52,7 @@ async function main() {
   });
   const serialized = rows.filter(Boolean).map(row => JSON.stringify(row));
   if (appendRowsToHistory(agentId, logPrefix, serialized)) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine);
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine, range.byteCursor, range.reason !== 'incremental');
     logDebug(agentId, `Mapped ${serialized.length} QwenWorkCN event(s)`);
   }
 }
