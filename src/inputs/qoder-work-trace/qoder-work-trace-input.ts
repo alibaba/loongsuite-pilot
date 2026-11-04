@@ -637,15 +637,18 @@ export class QoderWorkTraceInput extends BaseInput {
     } catch {
       return;
     }
-    const currentInode = stat.ino;
+    const currentInode = (stat as unknown as { ino: number }).ino;
     const previous = this.stateStore.get(stateKey);
+    const previousInode = (previous.extra as { inode?: number } | undefined)?.inode;
+    const replaced = previousInode !== undefined && previousInode !== currentInode;
     const savedOffset = previous.lastOffset ?? 0;
-    const reset = (previous.extra?.inode !== undefined && previous.extra.inode !== currentInode)
-      || stat.size < savedOffset;
+    const reset = replaced || stat.size < savedOffset;
     const offset = reset ? 0 : savedOffset;
+    if (reset) {
+      this.stateStore.update(stateKey, { lastOffset: 0, extra: { skippingLine: false } });
+    }
     if (stat.size <= offset) {
       this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-      if (reset) this.stateStore.update(stateKey, { lastOffset: 0, extra: { skippingLine: false } });
       return;
     }
 
