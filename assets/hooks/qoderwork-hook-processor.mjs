@@ -62,6 +62,9 @@ async function main() {
     return;
   }
 
+  // A capped bootstrap can start inside an old turn. Only a prompt
+  // present in the retained window can anchor a recovered turn.
+  if (range.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
     rangeReason,
   });

@@ -46,6 +46,9 @@ async function main() {
   for (const line of lines) {
     try { parsed.push(JSON.parse(line)); } catch { /* skip malformed transcript rows */ }
   }
+  // A capped bootstrap can start inside an old turn. Only a prompt
+  // present in the retained window can anchor a recovered turn.
+  if (range.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
   const rows = processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, {
     rangeReason: range.reason,

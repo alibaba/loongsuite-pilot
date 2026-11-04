@@ -328,6 +328,10 @@ export function readTranscriptSnapshotLines(transcriptPath) {
   }
 }
 
+const WORK_TRANSCRIPT_WINDOW = 32 * 1024 * 1024;
+const WORK_UNTERMINATED_ROW_LIMIT = 1024 * 1024;
+const WORK_TRANSCRIPT_SCAN_CHUNK = 256 * 1024;
+
 function readTranscriptBytes(fd, offset, length) {
   const buffer = Buffer.allocUnsafe(length);
   let read = 0;
@@ -340,6 +344,7 @@ function readTranscriptBytes(fd, offset, length) {
 }
 
 function isCompleteTranscriptRow(bytes) {
+  if (bytes.length > WORK_UNTERMINATED_ROW_LIMIT) return false;
   try {
     const value = JSON.parse(bytes.toString('utf8'));
     return value && typeof value === 'object' && !Array.isArray(value);
@@ -352,7 +357,7 @@ function offsetAtLine(fd, size, lines) {
   if (lines === 0) return { offset: 0, needsDelimiter: false };
   let lastBoundary = 0;
   for (let offset = 0; offset < size;) {
-    const chunk = readTranscriptBytes(fd, offset, Math.min(256 * 1024, size - offset));
+    const chunk = readTranscriptBytes(fd, offset, Math.min(WORK_TRANSCRIPT_SCAN_CHUNK, size - offset));
     if (!chunk.length) break;
     for (let i = chunk.indexOf(10); i >= 0; i = chunk.indexOf(10, i + 1)) {
       lastBoundary = offset + i + 1;
@@ -361,23 +366,48 @@ function offsetAtLine(fd, size, lines) {
     offset += chunk.length;
   }
   // Older cursors counted a final record even without a newline.
-  if (lines === 1 && lastBoundary < size
+  if (lines === 1 && lastBoundary < size && size - lastBoundary <= WORK_UNTERMINATED_ROW_LIMIT
     && isCompleteTranscriptRow(readTranscriptBytes(fd, lastBoundary, size - lastBoundary))) {
     return { offset: size, needsDelimiter: true };
   }
   return undefined;
 }
 
-function cursorWitness(fd, offset) {
-  const start = Math.max(0, offset - 64);
-  return crypto.createHash('sha256').update(readTranscriptBytes(fd, start, offset - start)).digest('hex');
+function bootstrapTailStart(fd, size) {
+  const cutoff = size - WORK_TRANSCRIPT_WINDOW;
+  let lines = 0;
+  for (let offset = 0; offset < size;) {
+    const chunk = readTranscriptBytes(fd, offset, Math.min(WORK_TRANSCRIPT_SCAN_CHUNK, size - offset));
+    if (!chunk.length) break;
+    for (let i = chunk.indexOf(10); i >= 0; i = chunk.indexOf(10, i + 1)) {
+      lines++;
+      if (offset + i + 1 >= cutoff) return { offset: offset + i + 1, lines };
+    }
+    offset += chunk.length;
+  }
+  return null;
+}
+
+function cursorWitness(fd, offset, length = Math.min(offset, 64)) {
+  return crypto.createHash('sha256').update(readTranscriptBytes(fd, offset - length, length)).digest('hex');
+}
+
+function matchesByteCursor(fd, stat, saved) {
+  if (saved.dev !== stat.dev || saved.ino !== stat.ino || !Number.isSafeInteger(saved.offset)
+    || saved.offset < 0 || saved.offset > stat.size || stat.size < (saved.size ?? 0)) return false;
+  const changed = saved.size !== stat.size || saved.mtimeMs !== stat.mtimeMs || saved.ctimeMs !== stat.ctimeMs;
+  if (saved.size === stat.size && changed) return false;
+  if (changed && saved.head && cursorWitness(fd, Math.min(saved.offset, 64)) !== saved.head) return false;
+  return cursorWitness(fd, saved.offset) === saved.witness;
 }
 
 /** The Work processors keep their legacy line counts but read only the unread bytes. */
 export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
   let fd;
   try {
-    fd = fs.openSync(transcriptPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    // Keep nonblocking protection for FIFOs on POSIX. Windows needs only O_RDONLY.
+    const nonblocking = process.platform === 'win32' ? 0 : (fs.constants.O_NONBLOCK ?? 0);
+    fd = fs.openSync(transcriptPath, fs.constants.O_RDONLY | nonblocking);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return null;
     const record = loadLineRecord(agentId, sessionId);
@@ -394,10 +424,10 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
       reason = 'transcript-changed';
     } else if (Number.isSafeInteger(count) && count >= 0) {
       if (saved) {
-        if (saved.dev === stat.dev && saved.ino === stat.ino && Number.isSafeInteger(saved.offset)
-          && saved.offset >= 0 && saved.offset <= stat.size && cursorWitness(fd, saved.offset) === saved.witness) {
+        if (matchesByteCursor(fd, stat, saved)) {
           offset = saved.offset;
           needsDelimiter = saved.needsDelimiter === true;
+          migrated = saved.size === undefined;
           startLine = count;
           reason = 'incremental';
         } else {
@@ -417,6 +447,20 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
       }
     }
 
+    let clipped = false;
+    if (stat.size - offset > WORK_TRANSCRIPT_WINDOW) {
+      if (reason === 'incremental') {
+        // A bounded slice may cut a turn in half. Keep the cursor recoverable
+        // instead of emitting partial turns or dropping unread records.
+        logDebug(agentId, 'Deferred Work transcript batch above the read limit');
+        return null;
+      }
+      const tail = bootstrapTailStart(fd, stat.size);
+      if (!tail) return null;
+      offset = tail.offset;
+      startLine = tail.lines;
+      clipped = true;
+    }
     let bytes = readTranscriptBytes(fd, offset, stat.size - offset);
     const separator = needsDelimiter ? bytes.indexOf(10) : -1;
     const consumedSeparator = separator >= 0 && !bytes.toString('utf8', 0, separator).trim();
@@ -433,17 +477,21 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
       needsDelimiter = false;
     }
     const endOffset = offset + complete;
-    if (!complete && !migrated && !consumedSeparator) return null;
+    if (!complete && !migrated && !consumedSeparator && !clipped) return null;
+    const after = fs.fstatSync(fd);
+    if (after.size < stat.size || (after.size === stat.size
+      && (after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs))) return null;
     const byteCursor = { dev: stat.dev, ino: stat.ino, offset: endOffset,
-      witness: cursorWitness(fd, endOffset), ...(needsDelimiter ? { needsDelimiter: true } : {}) };
+      size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+      head: cursorWitness(fd, Math.min(endOffset, 64)), witness: cursorWitness(fd, endOffset), ...(needsDelimiter ? { needsDelimiter: true } : {}) };
     if (!complete) {
-      updateLineRecord(agentId, transcriptPath, sessionId, startLine, byteCursor);
+      updateLineRecord(agentId, transcriptPath, sessionId, startLine, byteCursor, reason !== 'incremental');
       return null;
     }
     const textEnd = bytes[complete - 1] === 10 ? complete - 1 : complete;
     const lines = bytes.toString('utf8', 0, textEnd).split('\n');
     const endLine = startLine + lines.length;
-    return { lines: lines.map(line => line.trim()).filter(Boolean), endLine, byteCursor, reason };
+    return { lines: lines.map(line => line.trim()).filter(Boolean), endLine, byteCursor, reason, clipped };
   } catch {
     return null;
   } finally {
