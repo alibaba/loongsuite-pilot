@@ -71,7 +71,7 @@ export async function openCodeProducer({ calls = 8, cancelled = false, now = Dat
 
 export function hermesProducer(root, calls = 8) {
   const script = String.raw`
-import importlib.util, sys, types
+import importlib.util, sys, time, types
 spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])
 p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 h = {}; p.register(types.SimpleNamespace(register_hook=lambda name, cb: h.update({name: cb})))
@@ -81,14 +81,21 @@ h['pre_llm_call'](**base, user_message=history[0]['content'], conversation_histo
 for i in range(int(sys.argv[2])):
     call = dict(base, api_call_count=i+1, api_request_id='request-'+str(i))
     h['pre_api_request'](**call, conversation_history=history)
+    time.sleep(0.005)
+    assistant = dict(role='assistant', content='output-'+str(i))
+    if i+1<int(sys.argv[2]):
+        assistant['tool_calls'] = [dict(id='tool-'+str(i), type='function',
+            function=dict(name='read', arguments='{"index":'+str(i)+'}'))]
     h['post_api_request'](**call, finish_reason='tool_calls' if i+1<int(sys.argv[2]) else 'stop',
         usage=dict(input_tokens=100+i, output_tokens=10+i, cache_read_tokens=5, cache_creation_tokens=3, reasoning_tokens=2),
-        response=dict(assistant_message=dict(role='assistant', content='output-'+str(i))))
+        response=dict(assistant_message=assistant))
+    history.append(assistant)
     if i+1<int(sys.argv[2]):
         tool = dict(base, tool_call_id='tool-'+str(i), tool_name='read')
         h['pre_tool_call'](**tool, args=dict(index=i, nested=dict(ok=True)))
+        time.sleep(0.005)
         h['post_tool_call'](**tool, result='result-'+str(i), status='error' if i==1 else 'ok')
-    history += [dict(role='assistant', content='output-'+str(i)), dict(role='user', content='continue-'+str(i))]
+        history.append(dict(role='tool', tool_call_id='tool-'+str(i), content='result-'+str(i)))
 h['post_llm_call'](**base, assistant_response='done')
 h['on_session_end'](session_id='fixture-session')
 `;

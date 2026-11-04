@@ -463,25 +463,33 @@ An integration is ready only after all applicable gates below pass.
 
 ### Conversion resources for long turns
 
-Canonical long OpenClaw turns (at least 32 steps, one model request per step,
-with model responses in step order) convert complete step groups incrementally
-after the turn closes, awaiting export before proceeding. One ENTRY/AGENT pair,
+Completed canonical turns (one model request per step, with model responses in
+step order) share incremental conversion across Agent types. Existing adapters
+prepare native IDs, independent roots and delegated context before this choice.
+Finished spans are grouped under the estimated `maxExportBatchBytes` budget,
+awaiting the export callback and failed-log persistence before proceeding. Short
+turns can share one export. One ENTRY/AGENT pair,
 complete message deltas, per-call usage and turn aggregates are preserved. No
 content is truncated and no turn is closed early to reduce memory. Grouping
 complete steps retains late tool records; independent delegated turns retain
 their real upstream context.
 
-Inline child trees, missing steps and incompatible response order retain the
-batch conversion path. This bounds simultaneous accumulated message snapshots
+Preflight checks the entire turn before emitting spans. Inline child trees,
+missing steps, multiple requests in one step, incompatible response order or
+parent metadata unavailable in the first step retain the batch path. A partial
+stream never falls back and re-emits the turn. This bounds simultaneous accumulated message snapshots
 and completed spans, not RSS for arbitrary files, records or all inputs: source
-events and running input history still grow with input size. Compare peak
+events and running input history still grow with input size, and a single span
+can exceed the batch budget. Unsupported shapes retain the batch memory risk. Compare peak
 memory on identical payloads, unique received Span/call IDs, per-LLM and AGENT
 tokens, and duplicates after restart; process survival alone is insufficient.
 
-`npm run perf:openclaw-turn` runs a synthetic long turn in a separate Node
-process with a 256 MiB old-space limit, checking unique spans, model calls and token
-aggregates. Set `PILOT_PERF_CALLS` to vary its size. This conversion resource
-regression does not replace a real collector process and backend readback.
+`npm run perf:turn-stream` runs synthetic long turns through multiple Agent routes
+in separate Node processes with a 256 MiB old-space limit, checking unique spans,
+model calls and token aggregates. Set `PILOT_PERF_CALLS` to vary their size, or use
+`npm run perf:turn-stream -- codex qoder` to select routes. This common-converter
+regression does not prove native client reproduction or replace real producer,
+collector and backend validation.
 
 ### Field quality
 
