@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Invalid deployment state');
   const manager = new DeploymentManager({ dataDir, pilotDir: path.resolve(__dirname, '..') });
   const definitions = await manager.loadDefinitions();
-  for (const id of Object.keys(state).filter(id => supportsSystemTomlHooks(id))) {
+  for (const id of Object.keys(state).filter(id => supportsSystemTomlHooks(id) || (state[id] as { systemLauncher?: unknown })?.systemLauncher)) {
     const definition = definitions.find(def => def.id === id);
     if (!definition || !(await manager.undeployAgent(definition))) throw new Error(`Hook cleanup failed for ${id}`);
   }

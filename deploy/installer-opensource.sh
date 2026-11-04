@@ -2456,7 +2456,7 @@ remove_native_system_hooks() {
 const fs = require('fs');
 try {
   const state = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-  if (Object.values(state).some(r => r?.hookScope === 'system' || r?.hookPendingMigration)) {
+  if (Object.values(state).some(r => r?.installationScope === 'system' || r?.systemLauncher || r?.hookScope === 'system' || r?.hookPendingMigration)) {
     throw new Error('System hook cleanup helper missing; retain Pilot assets and retry with the installed package');
   }
 } catch (error) {

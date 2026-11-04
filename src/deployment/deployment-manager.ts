@@ -28,6 +28,7 @@ import {
 import { mergeDeployedAgentsState, mergeHookSettingsPaths, withDeployedStateLock } from './deployed-state-merge.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from './system-hook-assets.js';
 import { supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { activateSystemLauncher, planSystemLauncher, removeSystemLauncher, systemLauncherHealthy } from './system-launcher.js';
 
 const logger = createLogger('DeploymentManager');
 
@@ -151,6 +152,16 @@ export class DeploymentManager {
       skipped: true,
       reason: 'disabled',
     };
+    if (this.state[def.id]?.systemLauncher) {
+      try {
+        await removeSystemLauncher(def, this.dataDir, this.state[def.id].systemLauncher!);
+        delete this.state[def.id];
+        this.touchedIds.add(def.id);
+        return result;
+      } catch (error) {
+        return { ...result, success: false, skipped: false, error: String(error) };
+      }
+    }
 
     if (
       (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin')
@@ -205,6 +216,19 @@ export class DeploymentManager {
    */
   async undeployAgent(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
+    const launcher = this.state[def.id]?.systemLauncher;
+    if (launcher) {
+      try {
+        await removeSystemLauncher(def, this.dataDir, launcher);
+        delete this.state[def.id];
+        this.touchedIds.add(def.id);
+        await this.saveState();
+        return true;
+      } catch (error) {
+        logger.error('system CLI cleanup failed; keeping deployment record', { agentId: def.id, error: String(error) });
+        return false;
+      }
+    }
     if (supportsSystemTomlHooks(def.id)) {
       if (!(await this.recoverHookMigration(def))) return false;
       const paths = mergeHookSettingsPaths(this.state[def.id]);
@@ -258,7 +282,70 @@ export class DeploymentManager {
 
   isSystemInstallation(agentId: string): boolean {
     const record = this.state[agentId];
-    return record?.hookScope === 'system';
+    return record?.installationScope === 'system' || record?.hookScope === 'system';
+  }
+
+  systemLauncherPath(agentId: string): string | undefined {
+    return this.state[agentId]?.systemLauncher?.entryPath;
+  }
+
+  async launcherNeedsRedeploy(def: AgentDefinition): Promise<boolean> {
+    const record = this.state[def.id];
+    return Boolean(record?.cleanupRequired)
+      || !(await systemLauncherHealthy(def, this.dataDir, this.pilotDir, record?.systemLauncher));
+  }
+
+  deployLauncherScope(def: AgentDefinition, scope: 'user' | 'system'): Promise<DeployResult> {
+    return this.runExclusive(() => withDeployedStateLock(path.join(this.dataDir, `${def.id}-launcher-scope.lock`), async () => {
+      await this.loadState();
+      if (!def.systemLauncher) throw new Error('This agent has no public CLI launcher');
+      if (scope === 'user') {
+        const record = this.state[def.id];
+        if (record?.systemLauncher) {
+          await removeSystemLauncher(def, this.dataDir, record.systemLauncher);
+          record.systemLauncher = undefined;
+          record.installationScope = undefined;
+          record.cleanupRequired = false;
+          this.touchedIds.add(def.id);
+          await this.saveState();
+        }
+        const result = await this.deployAgent(def, { preservePluginConfig: true, assumeDetected: true });
+        await this.saveState();
+        return result;
+      }
+      return this.deploySystemLauncher(def);
+    }));
+  }
+
+  private async deploySystemLauncher(def: AgentDefinition): Promise<DeployResult> {
+    const previous = this.state[def.id];
+    const launcher = await planSystemLauncher(def, this.dataDir, previous?.systemLauncher);
+    this.state[def.id] = {
+      ...previous, deployMode: def.deployMode, deployedAt: new Date().toISOString(),
+      installationScope: 'system', systemLauncher: launcher, cleanupRequired: true,
+      ...(this.installedBy ? { installedBy: this.installedBy } : {}),
+    };
+    this.touchedIds.add(def.id);
+    await this.saveState();
+    // Retire only the known previous home registration before enabling the
+    // shared entry. A partial transaction stays pending for explicit retry.
+    if (previous && (!previous.systemLauncher || previous.pluginInjectConfigPath || previous.dshPatchPath)) {
+      const target = applyPersistedDeployTargets(def, previous);
+      if (target.deployMode === 'plugin-inject' && !(await this.pluginInjectStrategy.undeploy(target))) {
+        throw new Error('Previous home extension cleanup failed; system installation remains pending');
+      }
+      if (target.deployMode === 'dsh-yaml-patch' && !(await this.dshYamlPatchStrategy.undeploy(target, previous))) {
+        throw new Error('Previous home patch cleanup failed; system installation remains pending');
+      }
+    }
+    await activateSystemLauncher(def, this.dataDir, this.pilotDir, launcher);
+    const record = this.state[def.id]!;
+    record.cleanupRequired = false;
+    record.pluginInjectConfigPath = undefined;
+    record.dshPatchPath = undefined;
+    this.touchedIds.add(def.id);
+    await this.saveState();
+    return { success: true, agentId: def.id, deployMode: def.deployMode };
   }
 
   private pendingHookMigration(agentId: string) {
@@ -429,6 +516,7 @@ export class DeploymentManager {
     return this.runExclusive(async () => {
       await this.loadState();
       const target = applyPersistedDeployTargets(def, this.state[def.id]);
+      if (this.state[def.id]?.systemLauncher) return true;
       if (target.deployMode === 'dsh-yaml-patch') {
         return this.dshYamlPatchStrategy.detect(target, this.state[def.id]);
       }
@@ -445,6 +533,7 @@ export class DeploymentManager {
     return this.runExclusive(async () => {
       await this.loadState();
       const defTarget = applyPersistedDeployTargets(def, this.state[def.id]);
+      if (this.state[def.id]?.systemLauncher) return this.launcherNeedsRedeploy(def);
       if (supportsSystemTomlHooks(def.id) && this.pendingHookMigration(def.id)) return true;
       if (defTarget.deployMode === 'dsh-yaml-patch') {
         const target = await this.dshYamlPatchStrategy.resolveTarget(defTarget, this.state[def.id]);
@@ -488,6 +577,15 @@ export class DeploymentManager {
     def: AgentDefinition,
     opts?: { preserveHookSettings?: boolean; preservePluginConfig?: boolean; assumeDetected?: boolean; scopeInstall?: boolean },
   ): Promise<DeployResult> {
+    const launcherRecord = this.state[def.id];
+    if (launcherRecord?.systemLauncher) {
+      if (launcherRecord.cleanupRequired) return { success: false, agentId: def.id, deployMode: def.deployMode,
+        error: 'System CLI installation is pending; retry hook install --scope system' };
+      if (!(await this.launcherNeedsRedeploy(def))) return {
+        success: true, agentId: def.id, deployMode: def.deployMode, skipped: true, reason: 'up-to-date',
+      };
+      return this.deploySystemLauncher(def);
+    }
     if (supportsSystemTomlHooks(def.id) && this.pendingHookMigration(def.id) && !opts?.scopeInstall) {
       return { success: false, agentId: def.id, deployMode: def.deployMode,
         error: 'Hook scope installation is pending; retry hook install before starting collection' };

@@ -229,6 +229,23 @@ export interface PluginInjectConfig {
   createIfMissing?: boolean;
 }
 
+/** Shared CLI entry, explicitly selected by --scope system on Linux. */
+export interface SystemLauncherConfig {
+  command: string;
+  packageNames: string[];
+  argument: '--extension' | '--patch';
+  assetPath: string;
+  assetFiles: string[];
+}
+
+export interface SystemLauncherRecord {
+  schema: 1;
+  entryPath: string;
+  originalLink: string;
+  originalTarget: string;
+  wrapperPath: string;
+}
+
 export interface AgentRuntimeConfig {
   /** 运行时依赖的简述，如 "required-for-transcript" */
   nodeSqlite?: string;
@@ -313,6 +330,7 @@ export interface AgentDefinition {
   /** Runtime id used by local worker activation, e.g. "claude-code". */
   localWorkerRuntime?: string;
   hook?: AgentHookConfig;
+  systemLauncher?: SystemLauncherConfig;
   copilotPlugin?: CopilotPluginHookConfig;
   pluginProbe?: PluginProbeConfig;
   pluginInject?: PluginInjectConfig;
@@ -395,6 +413,9 @@ export interface DeployedAgentRecord {
   installedBy?: 'hook-install' | 'daemon' | 'build';
   /** Absolute Pi `settings.json` PluginInjectStrategy actually wrote. */
   pluginInjectConfigPath?: string;
+  /** Public CLI binding. Saved before mutating the command symlink. */
+  systemLauncher?: SystemLauncherRecord;
+  installationScope?: 'system';
 }
 
 export type DeployedAgentsState = Record<string, DeployedAgentRecord>;

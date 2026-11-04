@@ -82,6 +82,7 @@ shared installation; other detected Agents keep their home-local installation:
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
+| Pi | Public `pi` entry adds `--extension` | 0.73.1, 1.5.0 |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -90,7 +91,11 @@ later identities require no Pilot installation of their own. System configuratio
 runtime files and collection directories must be accessible in that business
 container. This does not provide tenant authorization or cross-container injection.
 
-Codex must have its hooks feature enabled.
+Pi require an installed official npm bin symlink on PATH. Pilot preserves the
+original executable and forwards business arguments, signals and exit codes.
+Missing/corrupt Pilot assets bypass injection. Another PATH entry, direct package
+execution or an embedded SDK does not pass through this launcher. Codex must have
+its hooks feature enabled.
 
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded

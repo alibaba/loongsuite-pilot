@@ -398,12 +398,12 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     // Scope changes choose a deployment strategy; they must not turn automatic
     // discovery into installation of agents that are absent from this machine.
     if (selection.kind === 'detect' && !(await manager.isAgentDetected(def))) continue;
-    const scope = supportsSystemTomlHooks(def.id) ? opts.deploymentScope : undefined;
+    const scope = supportsSystemTomlHooks(def.id) || def.systemLauncher ? opts.deploymentScope : undefined;
     const home = homes[def.id];
     if (home && manager.isSystemInstallation(def.id) && opts.deploymentScope === undefined) {
       throw new Error('An existing system hook installation requires explicit --scope user before --home');
     }
-    const targeted = scope === 'system'
+    const targeted = scope === 'system' && !def.systemLauncher
       ? systemTomlDefinition(def, opts.systemConfigPath)
       : home ? definitionAtInstallHome(def, home) : scope === 'user'
         ? { ...def, hook: def.hook ? { ...def.hook, scope: 'user' as const } : undefined } : def;
@@ -414,7 +414,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       continue;
     }
     const active = targeted ?? def;
-    const settingsPath = active.hook?.settingsPath ?? active.pluginInject?.configPaths?.[0] ?? null;
+    const settingsPath = manager.systemLauncherPath(def.id) ?? active.hook?.settingsPath ?? active.pluginInject?.configPaths?.[0] ?? null;
     const system = scope === 'system' || (scope === undefined && manager.isSystemInstallation(def.id));
     if (home) {
       const owner = await homeOwner(home);
@@ -440,7 +440,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
           if (selection.kind === 'named') agents.push(failed(def.id, 'not-detected', active.deployMode, settingsPath));
           continue;
         }
-        const needs = await manager.needsRedeploy(
+        const needs = system && active.systemLauncher ? await manager.launcherNeedsRedeploy(active) : await manager.needsRedeploy(
           active,
           (home || scope) && settingsPath ? { settingsPath, scope: active.hook?.scope } : undefined,
         );
@@ -456,7 +456,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       }
 
       const result = scope
-        ? await manager.deployHookScope(active)
+        ? active.systemLauncher ? await manager.deployLauncherScope(active, scope) : await manager.deployHookScope(active)
         : home ? await manager.deployPrepared(active, true)
         : await manager.deploySingle(active);
       if (selection.kind === 'detect' && result.skipped && result.reason === 'not-detected') continue;
@@ -468,11 +468,13 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
   for (const agent of agents) {
     const definition = byId.get(agent.id);
-    const system = Boolean(definition && supportsSystemTomlHooks(definition.id))
+    const system = Boolean(definition && (supportsSystemTomlHooks(definition.id) || definition.systemLauncher))
       && (opts.deploymentScope === 'system' || (opts.deploymentScope === undefined && manager.isSystemInstallation(agent.id)));
     if (system) {
       agent.hookScope = 'system';
-      agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
+      agent.runtimeHealthy = definition?.systemLauncher ? !(await manager.launcherNeedsRedeploy(definition))
+        : await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
+      if (definition?.systemLauncher) agent.settingsPath = manager.systemLauncherPath(agent.id) ?? null;
       agent.collectionStatus = 'not-verified';
     }
   }

@@ -2,6 +2,13 @@
   "id": "pi-coding-agent",
   "displayName": "Pi Coding Agent",
   "deployMode": "plugin-inject",
+  "systemLauncher": {
+    "command": "pi",
+    "packageNames": ["@mariozechner/pi-coding-agent", "@earendil-works/pi-coding-agent"],
+    "argument": "--extension",
+    "assetPath": "$PILOT_DATA/plugins/pi-coding-agent/index.mjs",
+    "assetFiles": ["pi-coding-agent/index.mjs", "shared/resource-context.mjs"]
+  },
   "detection": {
     "paths": ["$PI_CODING_AGENT_DIR"],
     "commands": ["pi"]

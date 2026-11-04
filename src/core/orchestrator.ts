@@ -836,6 +836,9 @@ export class Orchestrator extends EventEmitter {
         id: `plugin-inject:${def.id}`,
         enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () => {
+          if (this.deploymentManager.isSystemInstallation(def.id)) {
+            return this.deploymentManager.isAgentDetected(def);
+          }
           // Only self-heal when the plugin asset is actually deployed AND the
           // agent is present. Otherwise repair would inject a spec pointing at
           // a missing asset, or fail repeatedly when no config file exists.

@@ -40,6 +40,7 @@ import { HookWatchdog } from '../../../src/core/hook-watchdog.js';
 const DATA_DIR = '/tmp/orch-plugin-inject-test';
 
 function makeOrchestrator(mockDeploymentManager: unknown): Orchestrator {
+  (mockDeploymentManager as any).isSystemInstallation ??= vi.fn().mockReturnValue(false);
   const orch = new Orchestrator({ dataDir: DATA_DIR } as never);
   (orch as unknown as { deploymentManager: unknown }).deploymentManager = mockDeploymentManager;
   return orch;
