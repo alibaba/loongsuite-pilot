@@ -17,10 +17,8 @@ import { resolveDeploymentScope, type DeploymentScopeMode } from '../deployment/
 import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/hook-install-alarm.js';
 import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
 import { readContainerIdentity } from '../utils/container-identity.js';
-import {
-  areGrokBuildHookAssetsHealthy,
-  restoreGrokBuildHookAssets,
-} from '../deployment/grok-build-assets.js';
+import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from '../deployment/system-hook-assets.js';
+import { supportsSystemTomlHooks } from '../deployment/system-toml-hooks.js';
 import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
@@ -761,7 +759,7 @@ export class Orchestrator extends EventEmitter {
       if (def.deployMode !== 'hook' || !def.hook) continue;
       // Grok Build uses snake_case event keys and a multi-file hook runtime.
       // Its exact config and asset checks run through a dedicated intercept target.
-      if (def.id === 'grok-build') continue;
+      if (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
@@ -787,37 +785,32 @@ export class Orchestrator extends EventEmitter {
     return targets;
   }
 
-  /** Grok Build-specific config and hook-runtime integrity checks. */
+  /** Native TOML and multi-file runtime checks cannot use a JSON watchdog. */
   private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
-    const def = this.deploymentManager.getDefinitions().find(candidate => candidate.id === 'grok-build');
-    if (!def?.hook) return [];
     const pilotDir = this.resolvePilotDir();
-
-    return [{
-      id: 'hook:grok-build',
-      enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
-      precondition: () => this.deploymentManager.isAgentDetected(def),
-      check: async () =>
-        !(await this.deploymentManager.needsRedeploy(def))
-        && await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir),
-      repair: async () => {
-        await restoreGrokBuildHookAssets(pilotDir, this.dataDir);
-        const result = await this.deploymentManager.repairHookSettings(def);
-        if (!result.success) {
-          throw new Error(result.error ?? 'failed to restore Grok Build hook');
-        }
-        if (
-          await this.deploymentManager.needsRedeploy(def)
-          || !(await areGrokBuildHookAssetsHealthy(pilotDir, this.dataDir))
-        ) {
-          throw new Error('Grok Build hook remains unhealthy after repair');
-        }
-      },
-      cleanup: async () => {
-        const removed = await this.deploymentManager.undeployAgent(def);
-        if (!removed) throw new Error('failed to remove Grok Build hook');
-      },
-    }];
+    return this.deploymentManager.getDefinitions()
+      .filter(def => supportsSystemTomlHooks(def.id) && def.hook
+        && (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system'))
+      .map(def => ({
+        id: `hook:${def.id}`,
+        enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
+        precondition: () => this.deploymentManager.isAgentDetected(def),
+        check: async () =>
+          !(await this.deploymentManager.needsRedeploy(def))
+          && await areSystemHookAssetsHealthy(def.id, pilotDir, this.dataDir),
+        repair: async () => {
+          await restoreSystemHookAssets(def.id, pilotDir, this.dataDir);
+          const result = await this.deploymentManager.repairHookSettings(def);
+          if (!result.success || await this.deploymentManager.needsRedeploy(def)) {
+            throw new Error(result.error ?? `Failed to restore ${def.id} hook`);
+          }
+        },
+        cleanup: async () => {
+          if (!(await this.deploymentManager.undeployAgent(def))) {
+            throw new Error(`Failed to remove ${def.id} hook`);
+          }
+        },
+      }));
   }
 
   /**

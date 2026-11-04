@@ -1,6 +1,4 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import { writeTextFileAtomic } from '../utils/fs-utils.js';
+import { areHookRuntimeAssetsHealthy, restoreHookRuntimeAssets } from './hook-runtime-assets.js';
 
 /**
  * Runtime files imported by the Grok Build hook entry points.
@@ -32,48 +30,10 @@ export const GROK_BUILD_HOOK_ASSETS = [
   'shared/stdin-reader.mjs',
 ] as const;
 
-async function sameFile(source: string, target: string): Promise<boolean> {
-  try {
-    const [sourceBytes, targetBytes] = await Promise.all([
-      fs.readFile(source),
-      fs.readFile(target),
-    ]);
-    if (!sourceBytes.equals(targetBytes)) return false;
-    if (process.platform !== 'win32' && source.endsWith('.sh')) {
-      const stat = await fs.stat(target);
-      return (stat.mode & 0o111) !== 0;
-    }
-    return true;
-  } catch {
-    return false;
-  }
+
+export function areGrokBuildHookAssetsHealthy(pilotDir: string, dataDir: string): Promise<boolean> {
+  return areHookRuntimeAssetsHealthy(pilotDir, dataDir, GROK_BUILD_HOOK_ASSETS);
 }
-
-export async function areGrokBuildHookAssetsHealthy(
-  pilotDir: string,
-  dataDir: string,
-): Promise<boolean> {
-  const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
-  const targetRoot = path.join(dataDir, 'hooks');
-  const results = await Promise.all(GROK_BUILD_HOOK_ASSETS.map(relativePath =>
-    sameFile(path.join(sourceRoot, relativePath), path.join(targetRoot, relativePath))));
-  return results.every(Boolean);
-}
-
-export async function restoreGrokBuildHookAssets(
-  pilotDir: string,
-  dataDir: string,
-): Promise<void> {
-  const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
-  const targetRoot = path.join(dataDir, 'hooks');
-
-  for (const relativePath of GROK_BUILD_HOOK_ASSETS) {
-    const source = path.join(sourceRoot, relativePath);
-    const target = path.join(targetRoot, relativePath);
-    await fs.access(source);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const content = await fs.readFile(source, 'utf8');
-    await writeTextFileAtomic(target, content);
-    await fs.chmod(target, relativePath.endsWith('.sh') ? 0o755 : 0o644).catch(() => {});
-  }
+export function restoreGrokBuildHookAssets(pilotDir: string, dataDir: string): Promise<void> {
+  return restoreHookRuntimeAssets(pilotDir, dataDir, GROK_BUILD_HOOK_ASSETS);
 }

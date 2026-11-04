@@ -8,6 +8,8 @@ import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
 import { postAlarm } from '../internal/post-alarm.js';
+import { systemTomlDefinition, supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { areSystemHookAssetsHealthy } from './system-hook-assets.js';
 
 const logger = createLogger('HookInstall');
 
@@ -40,6 +42,10 @@ export interface HookInstallAgentResult {
   hint: string | null;
   settingsPath: string | null;
   deployMode: string | null;
+  /** Installation scope, distinct from the report's detected/named selection. */
+  hookScope?: 'system';
+  runtimeHealthy?: boolean;
+  collectionStatus?: 'not-verified';
 }
 
 export interface HookInstallReport {
@@ -211,6 +217,9 @@ export interface HookInstallRunOptions {
   agentsFlag?: string;
   envAgents?: string;
   homes?: Record<string, string>;
+  deploymentScope?: 'user' | 'system';
+  /** Test/staging target; the public CLI always uses /etc/grok/managed_config.toml. */
+  systemConfigPath?: string;
   /** When true, write last-hook-install.json and touch the signal. Eager injection leaves this false. */
   writeResult: boolean;
   /** Restrict which deploy modes run. Eager injection keeps hook and plugin-inject only. */
@@ -253,7 +262,9 @@ function fromDeploy(def: AgentDefinition, result: DeployResult, settingsPath: st
   if (result.success && !result.skipped) {
     return { id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: def.deployMode };
   }
-  return failed(def.id, classifyDeployError(result.error), def.deployMode, settingsPath);
+  const failure = failed(def.id, classifyDeployError(result.error), def.deployMode, settingsPath);
+  if (result.error) failure.hint = `${failure.hint} ${String(result.error).replace(/[\r\n]/g, ' ').slice(0, 350)}`;
+  return failure;
 }
 
 export function classifyDeployError(error: unknown): HookInstallReason {
@@ -264,7 +275,7 @@ export function classifyDeployError(error: unknown): HookInstallReason {
   if (code === 'ENOENT' || /\bENOENT\b/.test(text) || text.includes('settings directory')) return 'settings-dir-missing';
   if (/\bactivation\b/i.test(text) && /\bpending\b/i.test(text)) return 'activation-pending';
   if (/\bactivation\b/i.test(text) && /\bfail/i.test(text)) return 'activation-failed';
-  if (error instanceof SyntaxError || text.includes('SyntaxError') || /\binvalid JSONC?\b/i.test(text) || text.includes('invalid settings')) {
+  if (error instanceof SyntaxError || text.includes('SyntaxError') || /\binvalid (JSONC?|TOML)\b/i.test(text) || text.includes('invalid settings')) {
     return 'invalid-settings';
   }
   return 'deploy-failed';
@@ -305,6 +316,12 @@ async function defaultHomeOwner(home: string): Promise<number | null> {
 
 export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookInstallRunResult> {
   const selection = selectAgents(opts.agentsFlag, opts.envAgents);
+  if (opts.systemConfigPath && selection.kind === 'named' && selection.ids.length !== 1) {
+    throw new Error('A system config override requires exactly one agent');
+  }
+  if (opts.deploymentScope === 'system' && Object.keys(opts.homes ?? {}).length) {
+    throw new Error('System scope cannot be combined with --home');
+  }
   const warnings: string[] = [];
   if (selection.kind !== 'skip' && selection.warnLiteralNull) {
     warnings.push('LOONGSUITE_PILOT_AGENTS or --agents is the literal "null"; detecting all agents.');
@@ -344,6 +361,10 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
   });
   const defs = await manager.loadDefinitions();
   const byId = new Map(defs.map(def => [def.id, def]));
+  // An unqualified status/install follows the persisted target after restart.
+  for (const [id, def] of byId) {
+    if (supportsSystemTomlHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
+  }
   const homes = opts.homes ?? {};
   const enabled = opts.enabled ?? (() => true);
   const euid = opts.euid ?? (typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.() ?? 0);
@@ -363,7 +384,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       selected.push(def);
     }
   } else {
-    for (const def of defs) {
+    for (const def of byId.values()) {
       if (opts.deployModes && !opts.deployModes.has(def.deployMode)) continue;
       selected.push(def);
     }
@@ -374,8 +395,18 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       if (selection.kind === 'named') agents.push(failed(def.id, 'disabled', def.deployMode));
       continue;
     }
+    // Scope changes choose a deployment strategy; they must not turn automatic
+    // discovery into installation of agents that are absent from this machine.
+    if (selection.kind === 'detect' && !(await manager.isAgentDetected(def))) continue;
+    const scope = supportsSystemTomlHooks(def.id) ? opts.deploymentScope : undefined;
     const home = homes[def.id];
-    const targeted = home ? definitionAtInstallHome(def, home) : def;
+    if (home && manager.isSystemInstallation(def.id) && opts.deploymentScope === undefined) {
+      throw new Error('An existing system hook installation requires explicit --scope user before --home');
+    }
+    const targeted = scope === 'system'
+      ? systemTomlDefinition(def, opts.systemConfigPath)
+      : home ? definitionAtInstallHome(def, home) : scope === 'user'
+        ? { ...def, hook: def.hook ? { ...def.hook, scope: 'user' as const } : undefined } : def;
     if (home && !targeted) {
       const unsupported = failed(def.id, 'deploy-failed', def.deployMode);
       unsupported.hint = `--home cannot be applied to ${def.id}. The definition has no settings path under its detection home.`;
@@ -384,6 +415,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     }
     const active = targeted ?? def;
     const settingsPath = active.hook?.settingsPath ?? active.pluginInject?.configPaths?.[0] ?? null;
+    const system = scope === 'system' || (scope === undefined && manager.isSystemInstallation(def.id));
     if (home) {
       const owner = await homeOwner(home);
       if (euid === 0 && owner !== null && owner !== 0) {
@@ -391,7 +423,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
         continue;
       }
     }
-    if (settingsPath) {
+    if (settingsPath && !system) {
       const invalid = await settingsDocumentError(settingsPath, settingsSyntax(active, settingsPath));
       if (invalid) {
         const result = failed(def.id, 'invalid-settings', active.deployMode, settingsPath);
@@ -410,26 +442,38 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
         }
         const needs = await manager.needsRedeploy(
           active,
-          home && settingsPath ? { settingsPath } : undefined,
+          (home || scope) && settingsPath ? { settingsPath, scope: active.hook?.scope } : undefined,
         );
         if (!needs) {
           agents.push({ id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: active.deployMode });
           continue;
         }
-        const known = def.id === 'grok-build' && settingsPath
+        const known = supportsSystemTomlHooks(def.id) && settingsPath
           ? manager.recordedSettingsPaths(def.id).includes(path.resolve(settingsPath))
           : manager.hasRecord(def.id);
         agents.push(failed(def.id, known ? 'overwritten' : 'not-detected', active.deployMode, settingsPath));
         continue;
       }
 
-      const result = home
-        ? await manager.deployPrepared(active, true)
+      const result = scope
+        ? await manager.deployHookScope(active)
+        : home ? await manager.deployPrepared(active, true)
         : await manager.deploySingle(active);
       if (selection.kind === 'detect' && result.skipped && result.reason === 'not-detected') continue;
       agents.push(fromDeploy(def, result, settingsPath));
     } catch (err) {
       agents.push(failed(def.id, classifyDeployError(err), active.deployMode, settingsPath));
+    }
+  }
+
+  for (const agent of agents) {
+    const definition = byId.get(agent.id);
+    const system = Boolean(definition && supportsSystemTomlHooks(definition.id))
+      && (opts.deploymentScope === 'system' || (opts.deploymentScope === undefined && manager.isSystemInstallation(agent.id)));
+    if (system) {
+      agent.hookScope = 'system';
+      agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
+      agent.collectionStatus = 'not-verified';
     }
   }
 
