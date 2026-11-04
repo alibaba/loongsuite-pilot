@@ -177,6 +177,7 @@ function updateAggregateShadow(file, transcriptPath, record, reset) {
       session_id: record.session_id,
       last_line_count: record.last_line_count,
       updated_at: record.updated_at,
+      ...(record.byte_cursor ? { byte_cursor: record.byte_cursor } : {}),
     };
     return saveJsonObject(file, records);
   });
@@ -353,6 +354,14 @@ function isCompleteTranscriptRow(bytes) {
   }
 }
 
+function isWhitespacePrefix(bytes, end) {
+  for (let i = 0; i < end; i++) {
+    const byte = bytes[i];
+    if (byte !== 0x20 && (byte < 0x09 || byte > 0x0d)) return false;
+  }
+  return true;
+}
+
 function offsetAtLine(fd, size, lines) {
   if (lines === 0) return { offset: 0, needsDelimiter: false };
   let lastBoundary = 0;
@@ -465,7 +474,7 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
     }
     let bytes = readTranscriptBytes(fd, offset, stat.size - offset);
     const separator = needsDelimiter ? bytes.indexOf(10) : -1;
-    const consumedSeparator = separator >= 0 && !bytes.toString('utf8', 0, separator).trim();
+    const consumedSeparator = separator >= 0 && isWhitespacePrefix(bytes, separator);
     if (consumedSeparator) {
       offset += separator + 1;
       bytes = bytes.subarray(separator + 1);

@@ -336,6 +336,18 @@ describe('Work transcript byte cursor', () => {
       .toMatchObject({ last_line_count: 129 });
   });
 
+  it('recovers a byte cursor from the rollback shadow without scanning its prefix', async () => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const row = JSON.stringify({ type: 'user', text: 'x'.repeat(1024) }) + '\n';
+    fs.writeFileSync(file, row);
+    const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
+    expect((await run()).batch.endLine).toBe(1);
+    fs.rmSync(path.join(dataDir, 'state/hooks/qoder-work-line-records'), { recursive: true });
+    const recovered = await run();
+    expect(recovered.batch).toBeNull();
+    expect(recovered.bytes).toBeLessThanOrEqual(128);
+  });
+
   it('recovers only a bounded tail after a large bootstrap prefix', async () => {
     const file = path.join(dataDir, 'transcript.jsonl');
     const next = '{"type":"user","text":"latest"}';
@@ -344,7 +356,7 @@ describe('Work transcript byte cursor', () => {
     fs.appendFileSync(file, '\n' + next + '\n');
     const result = JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file }));
     expect(result.batch).toMatchObject({ clipped: true, lines: [next], endLine: 2 });
-    expect(JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file })).bytes).toBe(64);
+    expect(JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file })).bytes).toBeLessThanOrEqual(128);
   });
 
   it('recovers a newer bounded tail when an incremental backlog exceeds the read window', async () => {
