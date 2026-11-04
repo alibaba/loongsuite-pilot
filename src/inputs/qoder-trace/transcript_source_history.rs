@@ -224,7 +224,10 @@ async fn source_l75_l104_l162_late_progress_idle_and_restart() {
         f.wake("Stop", json!({}));
         let idle = f.collect().await;
         assert!(idle.records.is_empty());
-        assert_eq!(idle.metrics.bytes_read, 0);
+        // Legacy L104:C3 required 0B even after a fresh Stop. That projection
+        // is superseded: an unresolved Stop must retry the bounded witness so
+        // a same-version rewrite arriving after the notice cannot be lost.
+        assert_eq!(idle.metrics.bytes_read, 256);
         f.restart().await;
         f.append(&turn(1, true));
         f.wake("Stop", json!({}));

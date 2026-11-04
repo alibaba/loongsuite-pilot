@@ -2098,7 +2098,7 @@
     {
       "legacy": "tests/unit/inputs/qoder-transcript-collector.test.mjs",
       "source_hash": "d1d64411f85041a8b78be0f841c495d9c2d51e9ebf4118888afb65c77fab2fff",
-      "coverage": "complete",
+      "coverage": "partial",
       "rust": [
         {
           "file": "src/inputs/qoder-trace/transcript_source_history.rs",
@@ -2199,6 +2199,18 @@
         {
           "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
           "test": "collector_l301_real_same_watermark_publication_after_old_read_survives_ack_and_collects_new_generation"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "same_version_stop_rewrites_real_content_and_completed_idle_reads_zero_bytes"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "same_version_stop_before_late_rewrite_retries_without_another_notice"
+        },
+        {
+          "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+          "test": "same_version_stop_insufficient_fingerprint_budget_keeps_progress_and_retries"
         }
       ],
       "cases": [
@@ -2325,8 +2337,8 @@
               "describe.each(['qoder', 'qoder-cn'])"
             ]
           },
-          "coverage": "complete",
-          "behavior": "已完成后重复同水位Stop notice，真实Source空records且body bytesRead=0。",
+          "coverage": "partial",
+          "behavior": "正常completed/no-fresh pendingStop轮询仍空records且0B，新增真实Source合同验证；fresh未完成Stop为避免同FileVersion同size改写及Stop先到/晚写漏采，允许至多256B witness重试并从原4MiB轮读取预算扣除，预算不足不推进/不ACK且可恢复重试。原Node duplicate-notification后0B投影未通过、未退役，由本次防漏采正确性修复显式替换；因此仅本AST记partial。",
           "platforms": [
             "linux",
             "macos",
@@ -2338,6 +2350,18 @@
               {
                 "file": "src/inputs/qoder-trace/transcript_source_history.rs",
                 "test": "source_l75_l104_l162_late_progress_idle_and_restart"
+              },
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "same_version_stop_rewrites_real_content_and_completed_idle_reads_zero_bytes"
+              },
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "same_version_stop_before_late_rewrite_retries_without_another_notice"
+              },
+              {
+                "file": "src/inputs/qoder-trace/transcript_source_collector_remaining_history.rs",
+                "test": "same_version_stop_insufficient_fingerprint_budget_keeps_progress_and_retries"
               }
             ]
           }
@@ -2975,7 +2999,7 @@
           }
         }
       ],
-      "note": "累计28/28精确源声明，Source3原16+V12剩12；Linux实际运行，Windows/macOS仍待平台CI。无retired/跳过/预算放宽；Source.read自动durable ACK与JS显式ack边界差异在L301逐条说明。"
+      "note": "28个精确来源声明中27 complete、L104:C3 partial；Source3原16+V12剩12的来源、其它27完整节点（含L75/L162）均保留。L104原fresh duplicate Stop后0B投影未通过且未退役：正常completed/no-fresh idle仍0B，fresh pendingStop防同版本改写/晚到内容需至多256B有界witness重试并扣原4MiB轮预算；所有超时、数据量、prompt/tool/turn/restart/ACK语义不变。Source.read自动durable ACK与JS显式ack边界差异仍见L301；实际GNU/物理平台结果另见本片receipt。"
     },
     {
       "legacy": "tests/integration/qoder-recovery-ownership.test.ts",

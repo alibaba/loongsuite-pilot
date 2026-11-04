@@ -709,9 +709,29 @@ impl Collector {
                 }
                 let old = next.get(&key).cloned();
                 let mut cp = old.clone().unwrap_or(Value::Null);
-                let rewritten = old.as_ref().is_some_and(|o| o.get("fingerprint").is_some())
-                    && cp.get("fileVersion") != Some(&serde_json::to_value(&stat)?)
-                    && !self.matches_fingerprint(&file, &cp, &mut budget)?;
+                let saved = cp.get("receipts").and_then(Value::as_array);
+                let pending_stop = contexts.iter().any(|context| {
+                    text(context, "event") == "Stop"
+                        && context.get("receipt").is_some_and(|receipt| {
+                            !saved.is_some_and(|receipts| receipts.contains(receipt))
+                        })
+                });
+                // A new Stop can precede a same-size rewrite whose filesystem
+                // timestamps collide. Until completed, keep retrying the bounded
+                // witness; checking it once would miss a later transcript write.
+                let check_fingerprint =
+                    old.as_ref().is_some_and(|o| o.get("fingerprint").is_some())
+                        && (cp.get("fileVersion") != Some(&serde_json::to_value(&stat)?)
+                            || pending_stop);
+                let rewritten = if check_fingerprint {
+                    let witness_bytes = number(&cp, "offset").min(128) * 2;
+                    if budget.remaining < witness_bytes as i64 {
+                        return Ok(());
+                    }
+                    !self.matches_fingerprint(&file, &cp, &mut budget)?
+                } else {
+                    false
+                };
                 if old.is_none()
                     || number(&cp, "inode") != stat.ino
                     || stat.size < number(&cp, "offset")

@@ -596,3 +596,108 @@ async fn default_cache_hint_collision_preserves_unsaved_ack_gate_and_saved_notic
         assert!(f.collect().await.records.is_empty());
     }
 }
+
+// Real file contents and the real Source.read pipeline are used below. Only the
+// serialized checkpoint file metadata is aligned with the new native stat to
+// model a cache-key collision deterministically on every platform; these cases
+// do not claim to freeze a filesystem's physical change time.
+#[tokio::test]
+async fn same_version_stop_rewrites_real_content_and_completed_idle_reads_zero_bytes() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        f.wake("Stop", json!({}));
+        let previous = f.settle().await;
+        assert_eq!(user_texts(&previous), ["prompt 0"]);
+        let before = scanner::version(&scanner::open_regular(&f.file).unwrap()).unwrap();
+        f.write(&turn(1, false));
+        f.wake("Stop", json!({}));
+        let after = scanner::version(&scanner::open_regular(&f.file).unwrap()).unwrap();
+        assert_eq!(after.ino, before.ino);
+        assert_eq!(after.size, before.size);
+        f.state[&f.key]["fileVersion"] = serde_json::to_value(&after).unwrap();
+        f.state[&f.key]["stableMtime"] = json!(mtime(&after));
+        let next = f.settle().await;
+        assert_eq!(user_texts(&next), ["prompt 1"]);
+        assert_ne!(next[0]["gen_ai.turn.id"], previous[0]["gen_ai.turn.id"]);
+        assert_eq!(number(&f.state[&f.key], "committedOffset"), after.size);
+        let idle = f.collect().await;
+        assert!(idle.records.is_empty());
+        assert_eq!(idle.metrics.bytes_read, 0);
+    }
+}
+
+#[tokio::test]
+async fn same_version_stop_before_late_rewrite_retries_without_another_notice() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        f.wake("Stop", json!({}));
+        let previous = f.settle().await;
+        assert_eq!(user_texts(&previous), ["prompt 0"]);
+        assert_eq!(f.collect().await.metrics.bytes_read, 0);
+        let committed = number(&f.state[&f.key], "committedOffset");
+        f.wake("Stop", json!({}));
+        let early = f.collect().await;
+        assert!(early.records.is_empty());
+        assert_eq!(number(&early.state[&f.key], "committedOffset"), committed);
+        assert!(early.state[&f.key]["receipts"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let pending = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("events");
+        assert_eq!(std::fs::read_dir(&pending).unwrap().count(), 1);
+        f.write(&turn(1, false));
+        let after = scanner::version(&scanner::open_regular(&f.file).unwrap()).unwrap();
+        assert_eq!(after.size, committed);
+        f.state[&f.key]["fileVersion"] = serde_json::to_value(&after).unwrap();
+        f.state[&f.key]["stableMtime"] = json!(mtime(&after));
+        // No new wakeup: the unresolved Stop must remain eligible for a retry.
+        let next = f.settle().await;
+        assert_eq!(user_texts(&next), ["prompt 1"]);
+        assert_ne!(next[0]["gen_ai.turn.id"], previous[0]["gen_ai.turn.id"]);
+        assert!(f.collect().await.records.is_empty());
+        assert_eq!(f.collect().await.metrics.bytes_read, 0);
+    }
+}
+
+#[tokio::test]
+async fn same_version_stop_insufficient_fingerprint_budget_keeps_progress_and_retries() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        f.wake("Stop", json!({}));
+        assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
+        assert_eq!(f.collect().await.metrics.bytes_read, 0);
+        f.write(&turn(1, false));
+        f.wake("Stop", json!({}));
+        let after = scanner::version(&scanner::open_regular(&f.file).unwrap()).unwrap();
+        f.state[&f.key]["fileVersion"] = serde_json::to_value(&after).unwrap();
+        f.state[&f.key]["stableMtime"] = json!(mtime(&after));
+        let before = f.state.clone();
+        let original_budget = f.source.inner.lock().await.scan_bytes;
+        f.source.inner.lock().await.scan_bytes = 255;
+        let blocked = f.collect().await;
+        assert!(blocked.records.is_empty());
+        assert_eq!(blocked.metrics.bytes_read, 0);
+        assert_eq!(blocked.state, before);
+        let pending = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key)
+            .join("events");
+        assert_eq!(std::fs::read_dir(&pending).unwrap().count(), 1);
+        f.source.inner.lock().await.scan_bytes = original_budget;
+        assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
+        assert_eq!(number(&f.state[&f.key], "committedOffset"), after.size);
+        assert_eq!(f.collect().await.metrics.bytes_read, 0);
+    }
+}
