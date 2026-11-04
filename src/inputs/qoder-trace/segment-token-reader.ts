@@ -168,6 +168,9 @@ async function readSegmentTokensOnce(
       changed = true;
     }
 
+    // ctime provides an extra invalidation signal on filesystems where a
+    // rewrite can preserve mtime. Identity, size and mtime remain checked
+    // independently on platforms that report a stable ctime.
     const incomplete = fileState.incomplete;
     if (file.size > fileState.committedOffset && !(incomplete
       && incomplete.dev === file.dev && incomplete.ino === file.ino
@@ -215,6 +218,7 @@ async function readAppendedEvents(
   const startOffset = state.committedOffset;
   let position = startOffset;
   let committedOffset = startOffset;
+  let lineStartOffset = startOffset;
   let parts: Buffer[] = [];
   let lineBytes = 0;
   let skippingLine = state.skippingLine ?? false;
@@ -252,7 +256,7 @@ async function readAppendedEvents(
             skippingLine = true;
             parts = [];
             logger.warn('oversized segment JSONL record; skipping it', {
-              sessionId, filePath: snapshot.filePath, offset: chunkStart + cursor + part.length - lineBytes,
+              sessionId, filePath: snapshot.filePath, offset: lineStartOffset,
               maxRecordBytes: MAX_RECORD_BYTES, recordBytes,
             });
           } else {
@@ -271,7 +275,7 @@ async function readAppendedEvents(
                 }
               } catch (err) {
                 logger.warn('invalid complete segment JSONL record; skipping it', {
-                  sessionId, filePath: snapshot.filePath, offset: chunkStart + end - lineBytes, error: String(err),
+                  sessionId, filePath: snapshot.filePath, offset: lineStartOffset, error: String(err),
                 });
               }
             }
@@ -280,6 +284,7 @@ async function readAppendedEvents(
           lineBytes = 0;
           skippingLine = false;
           committedOffset = chunkStart + end;
+          lineStartOffset = committedOffset;
         } else if (skippingLine) {
           committedOffset = position;
         }
