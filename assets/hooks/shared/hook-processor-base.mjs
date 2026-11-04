@@ -339,15 +339,31 @@ function readTranscriptBytes(fd, offset, length) {
   return buffer.subarray(0, read);
 }
 
+function isCompleteTranscriptRow(bytes) {
+  try {
+    const value = JSON.parse(bytes.toString('utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
 function offsetAtLine(fd, size, lines) {
-  if (lines === 0) return 0;
+  if (lines === 0) return { offset: 0, needsDelimiter: false };
+  let lastBoundary = 0;
   for (let offset = 0; offset < size;) {
     const chunk = readTranscriptBytes(fd, offset, Math.min(256 * 1024, size - offset));
     if (!chunk.length) break;
     for (let i = chunk.indexOf(10); i >= 0; i = chunk.indexOf(10, i + 1)) {
-      if (--lines === 0) return offset + i + 1;
+      lastBoundary = offset + i + 1;
+      if (--lines === 0) return { offset: lastBoundary, needsDelimiter: false };
     }
     offset += chunk.length;
+  }
+  // Older cursors counted a final record even without a newline.
+  if (lines === 1 && lastBoundary < size
+    && isCompleteTranscriptRow(readTranscriptBytes(fd, lastBoundary, size - lastBoundary))) {
+    return { offset: size, needsDelimiter: true };
   }
   return undefined;
 }
@@ -371,6 +387,7 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
     let startLine = 0;
     let reason = 'missing-cursor';
     let migrated = false;
+    let needsDelimiter = false;
     if (record.session_id && record.session_id !== sessionId) {
       reason = 'session-changed';
     } else if (record.transcript_path && record.transcript_path !== transcriptPath) {
@@ -380,6 +397,7 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
         if (saved.dev === stat.dev && saved.ino === stat.ino && Number.isSafeInteger(saved.offset)
           && saved.offset >= 0 && saved.offset <= stat.size && cursorWitness(fd, saved.offset) === saved.witness) {
           offset = saved.offset;
+          needsDelimiter = saved.needsDelimiter === true;
           startLine = count;
           reason = 'incremental';
         } else {
@@ -387,8 +405,9 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
         }
       } else {
         const legacyOffset = offsetAtLine(fd, stat.size, count);
-        if (legacyOffset !== undefined) {
-          offset = legacyOffset;
+        if (legacyOffset) {
+          offset = legacyOffset.offset;
+          needsDelimiter = legacyOffset.needsDelimiter;
           startLine = count;
           reason = 'incremental';
           migrated = true;
@@ -398,16 +417,31 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
       }
     }
 
-    const bytes = readTranscriptBytes(fd, offset, stat.size - offset);
-    const complete = bytes.lastIndexOf(10) + 1;
+    let bytes = readTranscriptBytes(fd, offset, stat.size - offset);
+    const separator = needsDelimiter ? bytes.indexOf(10) : -1;
+    const consumedSeparator = separator >= 0 && !bytes.toString('utf8', 0, separator).trim();
+    if (consumedSeparator) {
+      offset += separator + 1;
+      bytes = bytes.subarray(separator + 1);
+      needsDelimiter = false;
+    }
+    let complete = bytes.lastIndexOf(10) + 1;
+    if (complete < bytes.length && isCompleteTranscriptRow(bytes.subarray(complete))) {
+      complete = bytes.length;
+      needsDelimiter = true;
+    } else if (complete) {
+      needsDelimiter = false;
+    }
     const endOffset = offset + complete;
-    if (!complete && !migrated) return null;
-    const byteCursor = { dev: stat.dev, ino: stat.ino, offset: endOffset, witness: cursorWitness(fd, endOffset) };
+    if (!complete && !migrated && !consumedSeparator) return null;
+    const byteCursor = { dev: stat.dev, ino: stat.ino, offset: endOffset,
+      witness: cursorWitness(fd, endOffset), ...(needsDelimiter ? { needsDelimiter: true } : {}) };
     if (!complete) {
       updateLineRecord(agentId, transcriptPath, sessionId, startLine, byteCursor);
       return null;
     }
-    const lines = bytes.toString('utf8', 0, complete - 1).split('\n');
+    const textEnd = bytes[complete - 1] === 10 ? complete - 1 : complete;
+    const lines = bytes.toString('utf8', 0, textEnd).split('\n');
     const endLine = startLine + lines.length;
     return { lines: lines.map(line => line.trim()).filter(Boolean), endLine, byteCursor, reason };
   } catch {

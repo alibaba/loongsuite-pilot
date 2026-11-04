@@ -336,6 +336,20 @@ describe('Work transcript byte cursor', () => {
       .toMatchObject({ last_line_count: 129 });
   });
 
+  it.each([true, false])('preserves a complete final row without a delimiter (legacy: %s)', async legacy => {
+    const file = path.join(dataDir, 'transcript.jsonl');
+    const run = extra => runWorker(worker, { TEST_TRANSCRIPT: file, ...extra }).then(JSON.parse);
+    const first = '{"type":"user"}';
+    fs.writeFileSync(file, first);
+    const initial = await run(legacy ? { TEST_LEGACY_COUNT: '1' } : {});
+    if (legacy) expect(initial.batch).toBeNull();
+    else expect(initial.batch).toMatchObject({ endLine: 1, lines: [first] });
+    expect((await run()).batch).toBeNull();
+    const next = '{"type":"assistant"}';
+    fs.appendFileSync(file, '\n' + next + '\n');
+    expect((await run()).batch).toMatchObject({ endLine: 2, lines: [next] });
+  });
+
   it('keeps a partial final row and invalidates the cursor after replacement', async () => {
     const file = path.join(dataDir, 'transcript.jsonl');
     const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
