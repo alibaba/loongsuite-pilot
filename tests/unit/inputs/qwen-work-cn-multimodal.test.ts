@@ -71,6 +71,26 @@ describe('qwen-work-cn multimodal', () => {
     ]);
   });
 
+  it('reads a spaced path and ignores a long run of unclosed paste tags', async () => {
+    const dir = makeTempDir();
+    const spaced = writePng(dir, 'my image.png', 'spaced');
+    const open = '<user-pasted-image file="a.png" x';
+    const text = open.repeat(8000)
+      + `<user-pasted-image file="${spaced}" source="local-path" source-version="1" ordinal="0" />`;
+    const other = textMessage(text);
+    const request = textMessage(text);
+    request['event.name'] = 'llm.request';
+
+    const started = performance.now();
+    await enrichQwenWorkCNMultimodal([other, request], { uploadMode: 'input', pathToUri: fakePathToUri });
+    expect(performance.now() - started).toBeLessThan(500);
+
+    for (const event of [other, request]) {
+      const parts = (event['gen_ai.input.messages_delta'] as Array<{ parts: unknown[] }>)[0].parts;
+      expect(uriParts(parts).map(part => part.uri)).toEqual(['oss://test/spaced']);
+    }
+  });
+
   it('leaves a bare filename and a reminder reference unchanged', async () => {
     const bare = textMessage('assets/hero.png');
     const reminder = textMessage('<system-reminder>@[image:base64:older]</system-reminder>');

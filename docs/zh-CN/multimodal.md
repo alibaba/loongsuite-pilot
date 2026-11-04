@@ -165,14 +165,6 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 
 千问办公（`qwen-work-cn`）在 `qwen-work-cn-trace` 上、turn 富化之后做写时转换。配置键为 `agents.qwen-work-cn.multimodal`。Hook 不改。用户粘贴和工具里的本地图片路径转成 `uri`。失败 fail-open。
 
-用户文本只匹配：
-
-```
-<user-pasted-image\s+file="([^"]+)"[^>]*/>
-```
-
-选择文件和拖入是同一条，`file` 后面可以有 `source="local-path"`。工具先看 `gen_ai.tool.name`，再取一个字段。相对路径用 `agent.qwenworkcn.cwd` 拼接，但 cwd 不加入允许根。
-
 | `uploadMode` | 千问办公采集表面 | 典型用户操作 / 事件 |
 |--------------|------------------|---------------------|
 | `none` | 不转换 | — |

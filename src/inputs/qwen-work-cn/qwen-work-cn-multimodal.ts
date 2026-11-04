@@ -9,6 +9,7 @@ import {
   matchAll,
   takeUniqueExtractedPaths,
   timeUnixNanoToMillis,
+  MAX_MULTIMODAL_PATH_CHARS,
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
@@ -20,8 +21,13 @@ const logger = createLogger('QwenWorkCNMultimodal');
 /** Pasted image only. Process-local LRU: `gen_ai.turn.id` + path → uri parts. An empty array means that pair already failed. */
 const pathUriCache = new LruMap<UriPart[]>(MULTIMODAL_LRU_LIMIT);
 
-/** Local path inside a pasted, selected, or dragged image tag. Extra attributes may follow `file`. */
-const PASTED_IMAGE_RE = /<user-pasted-image\s+file="([^"]+)"[^>]*\/>/gi;
+/** Attributes after `file`. A missing `>` cannot scan past this. */
+const MAX_PASTED_ATTR_CHARS = 512;
+/** Local path inside a pasted, selected, or dragged image tag. `file` is the first attribute. */
+const PASTED_IMAGE_RE = new RegExp(
+  `<user-pasted-image\\s+file="([^"<>]{1,${MAX_MULTIMODAL_PATH_CHARS}})"[^<>]{0,${MAX_PASTED_ATTR_CHARS}}\\/>`,
+  'gi',
+);
 
 /** Internal class for an image-bearing tool. Mapped from the transcript tool name. */
 enum ToolKind {

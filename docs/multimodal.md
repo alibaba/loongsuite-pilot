@@ -167,14 +167,6 @@ Notes:
 
 Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Pasted images and local image paths on tools become `uri` parts. Failures are fail-open.
 
-User text matches only:
-
-```
-<user-pasted-image\s+file="([^"]+)"[^>]*/>
-```
-
-Selecting a file and dragging a file use the same tag; attributes such as `source="local-path"` may follow `file`. Tools are chosen by `gen_ai.tool.name`, then one field. Relative paths join `agent.qwenworkcn.cwd`. That cwd is not added to the allowlist.
-
 | `uploadMode` | Qwen Work CN surface | Typical user action / event |
 |--------------|----------------------|-----------------------------|
 | `none` | No conversion | — |
