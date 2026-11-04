@@ -309,7 +309,7 @@ describe('Work transcript byte cursor', () => {
       if (args[0] === transcriptFd) bytes += read;
       return read;
     };
-    if (process.env.TEST_LEGACY_COUNT) {
+    if (process.env.TEST_LEGACY_COUNT !== undefined) {
       updateLineRecord('qoder-work', file, 'session', Number(process.env.TEST_LEGACY_COUNT));
     }
     const batch = readTranscriptIncrement('qoder-work', file, 'session');
@@ -347,17 +347,17 @@ describe('Work transcript byte cursor', () => {
     expect(JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file })).bytes).toBe(64);
   });
 
-  it('retains the committed cursor when an incremental backlog exceeds the read window', async () => {
+  it('recovers a newer bounded tail when an incremental backlog exceeds the read window', async () => {
     const file = path.join(dataDir, 'transcript.jsonl');
     fs.writeFileSync(file, '{"type":"user"}\n');
     const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
     expect((await run()).batch.endLine).toBe(1);
     fs.truncateSync(file, 33 * 1024 * 1024);
+    const next = '{"type":"user","text":"latest"}';
+    fs.appendFileSync(file, '\n' + next + '\n');
     const result = await run();
-    expect(result.batch).toBeNull();
-    expect(result.bytes).toBeLessThanOrEqual(128);
-    const persisted = JSON.parse(fs.readFileSync(path.join(dataDir, 'state/hooks/qoder-work-line-records.json'), 'utf8'));
-    expect(persisted[file].last_line_count).toBe(1);
+    expect(result.batch).toMatchObject({ clipped: true, reason: 'oversized-backlog', lines: [next], endLine: 3 });
+    expect((await run()).batch).toBeNull();
   });
 
   it('rechecks a same-size rewrite even if the saved boundary bytes match', async () => {

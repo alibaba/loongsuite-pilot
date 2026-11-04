@@ -373,14 +373,16 @@ function offsetAtLine(fd, size, lines) {
   return undefined;
 }
 
-function bootstrapTailStart(fd, size) {
+function bootstrapTailStart(fd, size, startOffset, lines, needsDelimiter) {
   const cutoff = size - WORK_TRANSCRIPT_WINDOW;
-  let lines = 0;
-  for (let offset = 0; offset < size;) {
+  // Count the skipped lines for the legacy rollback cursor. A tail-only
+  // search would find a byte boundary but could not recover the line count.
+  for (let offset = startOffset; offset < size;) {
     const chunk = readTranscriptBytes(fd, offset, Math.min(WORK_TRANSCRIPT_SCAN_CHUNK, size - offset));
     if (!chunk.length) break;
     for (let i = chunk.indexOf(10); i >= 0; i = chunk.indexOf(10, i + 1)) {
-      lines++;
+      if (needsDelimiter) needsDelimiter = false;
+      else lines++;
       if (offset + i + 1 >= cutoff) return { offset: offset + i + 1, lines };
     }
     offset += chunk.length;
@@ -449,16 +451,16 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
 
     let clipped = false;
     if (stat.size - offset > WORK_TRANSCRIPT_WINDOW) {
-      if (reason === 'incremental') {
-        // A bounded slice may cut a turn in half. Keep the cursor recoverable
-        // instead of emitting partial turns or dropping unread records.
-        logDebug(agentId, 'Deferred Work transcript batch above the read limit');
+      const tail = bootstrapTailStart(fd, stat.size, offset, startLine, needsDelimiter);
+      if (!tail) {
+        logDebug(agentId, 'Work transcript recovery is waiting for a line boundary');
         return null;
       }
-      const tail = bootstrapTailStart(fd, stat.size);
-      if (!tail) return null;
+      if (reason === 'incremental') reason = 'oversized-backlog';
+      logDebug(agentId, `Work transcript recovery (${reason}): skipped ${tail.offset - offset} bytes and ${tail.lines - startLine} lines before bounded tail`);
       offset = tail.offset;
       startLine = tail.lines;
+      needsDelimiter = false;
       clipped = true;
     }
     let bytes = readTranscriptBytes(fd, offset, stat.size - offset);
@@ -492,7 +494,8 @@ export function readTranscriptIncrement(agentId, transcriptPath, sessionId) {
     const lines = bytes.toString('utf8', 0, textEnd).split('\n');
     const endLine = startLine + lines.length;
     return { lines: lines.map(line => line.trim()).filter(Boolean), endLine, byteCursor, reason, clipped };
-  } catch {
+  } catch (error) {
+    if (error?.code !== 'ENOENT') logDebug(agentId, `Work transcript read failed: ${String(error)}`);
     return null;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);

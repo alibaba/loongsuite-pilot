@@ -43,10 +43,10 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const range = readTranscriptIncrement(agentId, transcriptPath, sessionId);
-  if (!range) return;
+  const batch = readTranscriptIncrement(agentId, transcriptPath, sessionId);
+  if (!batch) return;
 
-  const { lines, endLine, byteCursor, reason: rangeReason } = range;
+  const { lines, endLine, byteCursor, reason: rangeReason } = batch;
   logDebug(agentId, `Read ${lines.length} new lines from ${transcriptPath}`);
   if (!lines.length) {
     updateLineRecord(agentId, transcriptPath, sessionId, endLine, byteCursor, rangeReason !== 'incremental');
@@ -64,7 +64,7 @@ async function main() {
 
   // A capped bootstrap can start inside an old turn. Only a prompt
   // present in the retained window can anchor a recovered turn.
-  if (range.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
+  if (batch.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
     rangeReason,
   });

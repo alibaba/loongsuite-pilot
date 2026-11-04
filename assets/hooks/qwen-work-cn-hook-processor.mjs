@@ -34,11 +34,11 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const range = readTranscriptIncrement(agentId, payload.transcriptPath, payload.sessionId);
-  if (!range) return;
-  const { lines } = range;
+  const batch = readTranscriptIncrement(agentId, payload.transcriptPath, payload.sessionId);
+  if (!batch) return;
+  const { lines } = batch;
   if (!lines.length) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine, range.byteCursor, range.reason !== 'incremental');
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
     return;
   }
 
@@ -48,14 +48,14 @@ async function main() {
   }
   // A capped bootstrap can start inside an old turn. Only a prompt
   // present in the retained window can anchor a recovered turn.
-  if (range.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
+  if (batch.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
   const rows = processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, {
-    rangeReason: range.reason,
+    rangeReason: batch.reason,
   });
   const serialized = rows.filter(Boolean).map(row => JSON.stringify(row));
   if (appendRowsToHistory(agentId, logPrefix, serialized)) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, range.endLine, range.byteCursor, range.reason !== 'incremental');
+    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
     logDebug(agentId, `Mapped ${serialized.length} QwenWorkCN event(s)`);
   }
 }
