@@ -238,6 +238,213 @@ describe('qwen-work-cn multimodal', () => {
     expect(pasted['gen_ai.input.multimodal_metadata']).toBeUndefined();
   });
 
+  it('reuses one pasted-image conversion for other and the first llm.request', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'paste.png', 'paste');
+    const text = `<user-pasted-image file="${file}" />`;
+    const other = textMessage(text);
+    const request = textMessage(text);
+    request['event.name'] = 'llm.request';
+    let calls = 0;
+
+    await enrichQwenWorkCNMultimodal([other, request], {
+      uploadMode: 'input',
+      pathToUri: async (filePath, timeMs) => {
+        calls += 1;
+        if (calls > 1) return null;
+        return fakePathToUri(filePath, timeMs);
+      },
+    });
+
+    expect(calls).toBe(1);
+    const otherParts = (other['gen_ai.input.messages_delta'] as Array<{ parts: unknown[] }>)[0].parts;
+    const requestParts = (request['gen_ai.input.messages_delta'] as Array<{ parts: unknown[] }>)[0].parts;
+    expect(uriParts(otherParts).map(part => part.uri)).toEqual(['oss://test/paste']);
+    expect(uriParts(requestParts).map(part => part.uri)).toEqual(['oss://test/paste']);
+  });
+
+  it('reuses a path uri inside one turn and converts it again for another turn', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'paste.png', 'paste');
+    const text = `<user-pasted-image file="${file}" />`;
+    let calls = 0;
+    const pathToUri = async (filePath: string, timeMs: number) => {
+      calls += 1;
+      return fakePathToUri(filePath, timeMs);
+    };
+
+    const first = textMessage(text);
+    first['gen_ai.turn.id'] = 'turn-a';
+    const second = textMessage(text);
+    second['gen_ai.turn.id'] = 'turn-a';
+    const nextTurn = textMessage(text);
+    nextTurn['gen_ai.turn.id'] = 'turn-b';
+
+    await enrichQwenWorkCNMultimodal([first], { uploadMode: 'input', pathToUri });
+    await enrichQwenWorkCNMultimodal([second], { uploadMode: 'input', pathToUri });
+    await enrichQwenWorkCNMultimodal([nextTurn], { uploadMode: 'input', pathToUri });
+
+    expect(calls).toBe(2);
+    for (const entry of [first, second, nextTurn]) {
+      const parts = (entry['gen_ai.input.messages_delta'] as Array<{ parts: unknown[] }>)[0].parts;
+      expect(uriParts(parts).map(part => part.uri)).toEqual(['oss://test/paste']);
+    }
+  });
+
+  it('copies a Read uri onto the model messages that repeat the call', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'upstream.jpg', 'read');
+    const callId = 'msg_read';
+    const callArguments = { file_path: file };
+    const ossResult = { type: 'image', file: { url: 'https://example.oss/upstream.jpg' } };
+    const response = entry({
+      'event.name': 'llm.response',
+      'gen_ai.output.messages': [{
+        role: 'assistant',
+        parts: [{ type: 'tool_call', id: callId, name: 'Read', arguments: { ...callArguments } }],
+      }],
+    } as Partial<AgentActivityEntry>);
+    const call = entry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'Read',
+      'gen_ai.tool.call.id': callId,
+      'gen_ai.tool.call.arguments': { ...callArguments },
+    } as Partial<AgentActivityEntry>);
+    const request = entry({
+      'event.name': 'llm.request',
+      'gen_ai.input.messages_delta': [
+        {
+          role: 'assistant',
+          parts: [{ type: 'tool_call', id: callId, name: 'Read', arguments: { ...callArguments } }],
+        },
+        {
+          role: 'tool',
+          parts: [{ type: 'tool_call_response', id: callId, response: ossResult }],
+        },
+      ],
+    } as Partial<AgentActivityEntry>);
+    let calls = 0;
+
+    await enrichQwenWorkCNMultimodal([response, call, request], {
+      uploadMode: 'all',
+      pathToUri: async (filePath, timeMs) => {
+        calls += 1;
+        return fakePathToUri(filePath, timeMs);
+      },
+    });
+
+    expect(calls).toBe(3);
+    const responseArgs = ((response['gen_ai.output.messages'] as Array<{ parts: Array<{ arguments: unknown }> }>)[0].parts[0].arguments);
+    const requestArgs = ((request['gen_ai.input.messages_delta'] as Array<{ parts: Array<{ arguments?: unknown, response?: unknown }> }>)[0].parts[0].arguments);
+    expect(uriParts(call['gen_ai.tool.call.arguments']).map(part => part.uri)).toEqual(['oss://test/read']);
+    expect(uriParts(responseArgs).map(part => part.uri)).toEqual(['oss://test/read']);
+    expect(uriParts(requestArgs).map(part => part.uri)).toEqual(['oss://test/read']);
+    expect((request['gen_ai.input.messages_delta'] as Array<{ parts: Array<{ response?: unknown }> }>)[1].parts[0].response).toEqual(ossResult);
+    expect(response['gen_ai.output.multimodal_metadata']).toEqual([
+      { uri: 'oss://test/read', mime_type: 'image/jpeg', modality: 'image' },
+    ]);
+  });
+
+  it('copies a completed media task uri onto the next tool_call_response', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'poster.jpg', 'poster');
+    const callId = 'msg_task';
+    const resultBody = { status: 'completed', files: [file] };
+    const completed = entry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'mcp__qw-builtin__qwenwork_media_task',
+      'gen_ai.tool.call.id': callId,
+      'gen_ai.tool.call.result': { ...resultBody, files: [file] },
+    } as Partial<AgentActivityEntry>);
+    const request = entry({
+      'event.name': 'llm.request',
+      'gen_ai.input.messages_delta': [
+        {
+          role: 'assistant',
+          parts: [{
+            type: 'tool_call',
+            id: callId,
+            name: 'mcp__qw-builtin__qwenwork_media_task',
+            arguments: { action: 'wait', output_name: 'poster' },
+          }],
+        },
+        {
+          role: 'tool',
+          parts: [{ type: 'tool_call_response', id: callId, response: { status: 'completed', files: [file] } }],
+        },
+      ],
+    } as Partial<AgentActivityEntry>);
+    let calls = 0;
+
+    await enrichQwenWorkCNMultimodal([completed, request], {
+      uploadMode: 'input',
+      pathToUri: async (filePath, timeMs) => {
+        calls += 1;
+        return fakePathToUri(filePath, timeMs);
+      },
+    });
+
+    expect(calls).toBe(2);
+    const response = (request['gen_ai.input.messages_delta'] as Array<{ parts: Array<{ response?: unknown }> }>)[1].parts[0].response;
+    expect(uriParts(completed['gen_ai.tool.call.result']).map(part => part.uri)).toEqual(['oss://test/poster']);
+    expect(uriParts(response).map(part => part.uri)).toEqual(['oss://test/poster']);
+    expect(request['gen_ai.input.multimodal_metadata_delta']).toEqual([
+      { uri: 'oss://test/poster', mime_type: 'image/jpeg', modality: 'image' },
+    ]);
+  });
+
+  it('rewrites a request tool call in input mode and leaves the response unchanged', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'upstream.jpg', 'read');
+    const request = entry({
+      'event.name': 'llm.request',
+      'gen_ai.input.messages_delta': [{
+        role: 'assistant',
+        parts: [{ type: 'tool_call', id: 'msg_read', name: 'Read', arguments: { file_path: file } }],
+      }],
+    } as Partial<AgentActivityEntry>);
+    const response = entry({
+      'event.name': 'llm.response',
+      'gen_ai.output.messages': [{
+        role: 'assistant',
+        parts: [{ type: 'tool_call', id: 'msg_read', name: 'Read', arguments: { file_path: file } }],
+      }],
+    } as Partial<AgentActivityEntry>);
+    const beforeResponse = JSON.stringify(response);
+
+    await enrichQwenWorkCNMultimodal([request, response], { uploadMode: 'input', pathToUri: fakePathToUri });
+    const requestArgs = ((request['gen_ai.input.messages_delta'] as Array<{ parts: Array<{ arguments?: unknown }> }>)[0].parts[0].arguments);
+    expect(uriParts(requestArgs).map(part => part.uri)).toEqual(['oss://test/read']);
+    expect(JSON.stringify(response)).toBe(beforeResponse);
+
+    const outputRequest = entry({
+      'event.name': 'llm.request',
+      'gen_ai.input.messages_delta': [
+        {
+          role: 'assistant',
+          parts: [{
+            type: 'tool_call',
+            id: 'msg_task',
+            name: 'mcp__qw-builtin__qwenwork_media_task',
+            arguments: { action: 'wait' },
+          }],
+        },
+        {
+          role: 'tool',
+          parts: [{
+            type: 'tool_call_response',
+            id: 'msg_task',
+            response: { status: 'completed', files: [file] },
+          }],
+        },
+      ],
+    } as Partial<AgentActivityEntry>);
+    const beforeOutputRequest = JSON.stringify(outputRequest);
+
+    await enrichQwenWorkCNMultimodal([outputRequest], { uploadMode: 'output', pathToUri: fakePathToUri });
+    expect(JSON.stringify(outputRequest)).toBe(beforeOutputRequest);
+  });
+
   it('does nothing when uploadMode is none', async () => {
     const dir = makeTempDir();
     const file = writePng(dir, 'a.png');

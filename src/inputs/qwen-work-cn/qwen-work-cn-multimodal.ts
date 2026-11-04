@@ -12,9 +12,13 @@ import {
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
+import { LruMap, MULTIMODAL_LRU_LIMIT } from '../../multimodal/uploader/lru-set.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('QwenWorkCNMultimodal');
+
+/** Pasted image only. Process-local LRU: `gen_ai.turn.id` + path → uri parts. An empty array means that pair already failed. */
+const pathUriCache = new LruMap<UriPart[]>(MULTIMODAL_LRU_LIMIT);
 
 /** Local path inside a pasted, selected, or dragged image tag. Extra attributes may follow `file`. */
 const PASTED_IMAGE_RE = /<user-pasted-image\s+file="([^"]+)"[^>]*\/>/gi;
@@ -64,22 +68,40 @@ async function enrichInner(
   if (entries.length === 0) return;
   if (opts.uploadMode === 'none') return;
 
-  const touched = new Set<AgentActivityEntry>();
   const stats: EnrichStats = { inputUri: 0, outputUri: 0, skipped: 0 };
+  const includeInput = multimodalUploadIncludesInput(opts.uploadMode);
+  const includeOutput = multimodalUploadIncludesOutput(opts.uploadMode);
+  let touchedEntries = 0;
 
-  if (multimodalUploadIncludesInput(opts.uploadMode)) {
-    await enrichInputImages(entries, opts.pathToUri, touched, stats);
-    await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesOutput(opts.uploadMode)) {
-    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
-  }
-
-  for (const entry of touched) {
-    try {
-      attachMultimodalMetadataForEntry(entry);
-    } catch (err) {
-      logger.debug('attach multimodal metadata failed', { error: String(err) });
+  for (const entry of entries) {
+    const name = entry['event.name'];
+    let n = 0;
+    if (includeInput && (name === 'llm.request' || name === 'other')) {
+      n = await enrichInputImages(entry, opts.pathToUri, stats);
+      stats.inputUri += n;
+    } else if (includeInput && name === 'tool.result') {
+      n = await rewriteToolResult(
+        entry, 'gen_ai.tool.call.result', entry['gen_ai.tool.name'], entry,
+        opts.pathToUri, stats,
+      );
+      stats.inputUri += n;
+    } else if (includeOutput && name === 'tool.call') {
+      n = await rewriteToolCall(
+        entry, 'gen_ai.tool.call.arguments', entry['gen_ai.tool.name'], entry,
+        opts.pathToUri, stats,
+      );
+      stats.outputUri += n;
+    } else if (includeOutput && name === 'llm.response') {
+      n = await enrichOutputImages(entry, opts.pathToUri, stats);
+      stats.outputUri += n;
+    }
+    if (n > 0) {
+      touchedEntries += 1;
+      try {
+        attachMultimodalMetadataForEntry(entry);
+      } catch (err) {
+        logger.debug('attach multimodal metadata failed', { error: String(err) });
+      }
     }
   }
 
@@ -88,91 +110,63 @@ async function enrichInner(
       uploadMode: opts.uploadMode,
       sessionId: sessionIdOf(entries),
       ...stats,
-      touchedEntries: touched.size,
+      touchedEntries,
     });
   }
 }
 
 async function enrichInputImages(
-  entries: AgentActivityEntry[],
+  entry: AgentActivityEntry,
   pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
   stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    const name = entry['event.name'];
-    if (name !== 'llm.request' && name !== 'other') continue;
-    if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
-    const paths = extractQwenWorkCNInputImagePaths(entry, cwdOf(entry));
-    if (paths.length === 0) continue;
-    const n = await appendUriPartsToMessagesDelta(entry, paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
-    if (n > 0) {
-      stats.inputUri += n;
-      touched.add(entry);
+): Promise<number> {
+  if (!Array.isArray(entry['gen_ai.input.messages_delta'])) return 0;
+  const cwd = cwdOf(entry);
+  const timeMs = timeUnixNanoToMillis(entry.time_unix_nano);
+  const grouped = partsByRole(entry['gen_ai.input.messages_delta']);
+  let n = 0;
+  if (grouped.user.length > 0) {
+    const chunks: string[] = [];
+    for (const part of grouped.user) {
+      if (part.type === 'text' && typeof part.content === 'string') chunks.push(part.content);
+    }
+    const pasted = takeUniqueExtractedPaths(matchAll(PASTED_IMAGE_RE, chunks.join('\n')), cwd);
+    if (pasted.length > 0) {
+      n += await appendUriPartsToMessagesDelta(entry, pasted, pathToUri, timeMs, stats);
     }
   }
-}
-
-async function enrichToolResultImages(
-  entries: AgentActivityEntry[],
-  pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
-  stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    if (entry['event.name'] !== 'tool.result') continue;
-    const raw = entry['gen_ai.tool.call.result'];
-    if (raw === undefined || raw === null || raw === '') continue;
-    if (Array.isArray(raw)) continue;
-
-    const paths = extractQwenWorkCNToolResultPaths(entry['gen_ai.tool.name'], raw, cwdOf(entry));
-    if (paths.length === 0) continue;
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
-    if (uriParts.length === 0) continue;
-
-    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
-    entry['gen_ai.tool.call.result'] = [
-      { type: 'text', content: original },
-      ...uriParts,
-    ] as unknown as JsonValue;
-    stats.inputUri += uriParts.length;
-    touched.add(entry);
+  const toolIdToName = new Map<string, string>();
+  if (grouped.assistant.length > 0) {
+    for (const partRecord of grouped.assistant) {
+      if (partRecord.type !== 'tool_call') continue;
+      if (typeof partRecord.id === 'string' && typeof partRecord.name === 'string') {
+        toolIdToName.set(partRecord.id, partRecord.name);
+      }
+      n += await rewriteToolCall(partRecord, 'arguments', partRecord.name, entry, pathToUri, stats);
+    }
   }
-}
-
-async function enrichToolCallImages(
-  entries: AgentActivityEntry[],
-  pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
-  stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    if (entry['event.name'] !== 'tool.call') continue;
-    const raw = entry['gen_ai.tool.call.arguments'];
-    if (raw === undefined || raw === null || raw === '') continue;
-    if (Array.isArray(raw)) continue;
-
-    const paths = extractQwenWorkCNToolCallPaths(entry['gen_ai.tool.name'], raw, cwdOf(entry));
-    if (paths.length === 0) continue;
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
-    if (uriParts.length === 0) continue;
-
-    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
-    entry['gen_ai.tool.call.arguments'] = [
-      { type: 'text', content: original },
-      ...uriParts,
-    ] as unknown as JsonValue;
-    stats.outputUri += uriParts.length;
-    touched.add(entry);
+  if (grouped.tool.length > 0) {
+    for (const partRecord of grouped.tool) {
+      if (partRecord.type !== 'tool_call_response') continue;
+      const name = typeof partRecord.id === 'string' ? toolIdToName.get(partRecord.id) : undefined;
+      n += await rewriteToolResult(partRecord, 'response', name, entry, pathToUri, stats);
+    }
   }
+  return n;
 }
 
-export function extractQwenWorkCNInputImagePaths(
-  source: AgentActivityEntry | string,
-  cwd?: string,
-): string[] {
-  const text = typeof source === 'string' ? source : collectMessageDeltaTexts(source);
-  return takeUniqueExtractedPaths(matchAll(PASTED_IMAGE_RE, text), cwd);
+async function enrichOutputImages(
+  entry: AgentActivityEntry,
+  pathToUri: PathToUriFn,
+  stats: EnrichStats,
+): Promise<number> {
+  if (!Array.isArray(entry['gen_ai.output.messages'])) return 0;
+  let n = 0;
+  for (const partRecord of partsByRole(entry['gen_ai.output.messages']).assistant) {
+    if (partRecord.type !== 'tool_call') continue;
+    n += await rewriteToolCall(partRecord, 'arguments', partRecord.name, entry, pathToUri, stats);
+  }
+  return n;
 }
 
 export function extractQwenWorkCNToolCallPaths(
@@ -252,6 +246,70 @@ function fieldList(
   return out;
 }
 
+function isValidValue(raw: unknown): raw is string | Record<string, unknown> {
+  return raw !== undefined && raw !== null && raw !== '' && !Array.isArray(raw);
+}
+
+function uriPayload(raw: unknown, uriParts: UriPart[]): JsonValue {
+  const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+  return [{ type: 'text', content: original }, ...uriParts] as unknown as JsonValue;
+}
+
+async function rewriteToolCall(
+  record: { [key: string]: unknown },
+  field: string,
+  name: unknown,
+  entry: AgentActivityEntry,
+  pathToUri: PathToUriFn,
+  stats: EnrichStats,
+): Promise<number> {
+  const raw = record[field];
+  if (!isValidValue(raw)) return 0;
+  const paths = extractQwenWorkCNToolCallPaths(name, raw, cwdOf(entry));
+  if (paths.length === 0) return 0;
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  if (uriParts.length === 0) return 0;
+  record[field] = uriPayload(raw, uriParts);
+  return uriParts.length;
+}
+
+async function rewriteToolResult(
+  record: { [key: string]: unknown },
+  field: string,
+  name: unknown,
+  entry: AgentActivityEntry,
+  pathToUri: PathToUriFn,
+  stats: EnrichStats,
+): Promise<number> {
+  const raw = record[field];
+  if (!isValidValue(raw)) return 0;
+  const paths = extractQwenWorkCNToolResultPaths(name, raw, cwdOf(entry));
+  if (paths.length === 0) return 0;
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  if (uriParts.length === 0) return 0;
+  record[field] = uriPayload(raw, uriParts);
+  return uriParts.length;
+}
+
+function partsByRole(messages: unknown[]): Record<'user' | 'assistant' | 'tool', Record<string, unknown>[]> {
+  const grouped = {
+    user: [] as Record<string, unknown>[],
+    assistant: [] as Record<string, unknown>[],
+    tool: [] as Record<string, unknown>[],
+  };
+  for (const message of messages) {
+    const record = asRecord(message);
+    if (!record || !Array.isArray(record.parts)) continue;
+    const role = record.role;
+    if (role !== 'user' && role !== 'assistant' && role !== 'tool') continue;
+    for (const part of record.parts) {
+      const partRecord = asRecord(part);
+      if (partRecord) grouped[role].push(partRecord);
+    }
+  }
+  return grouped;
+}
+
 async function appendUriPartsToMessagesDelta(
   entry: AgentActivityEntry,
   paths: string[],
@@ -260,12 +318,20 @@ async function appendUriPartsToMessagesDelta(
   stats: EnrichStats,
 ): Promise<number> {
   const messages = entry['gen_ai.input.messages_delta'];
-  if (!Array.isArray(messages) || messages.length === 0) return 0;
+  const turnId = typeof entry['gen_ai.turn.id'] === 'string' ? entry['gen_ai.turn.id'].trim() : '';
+  if (!Array.isArray(messages) || messages.length === 0 || paths.length === 0) return 0;
   const first = messages[0];
   if (!first || typeof first !== 'object') return 0;
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+  // `other` and `llm.request` carry the same pasted image. Reuse this uri so
+  // deleting the file later does not leave one event with the image and the other without.
+  const cacheKey = `${turnId}\0${paths.join('\0')}`;
+  let uriParts = pathUriCache.get(cacheKey);
+  if (!uriParts) {
+    uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+    pathUriCache.set(cacheKey, uriParts);
+  }
   if (uriParts.length === 0) return 0;
   record.parts = [...parts, ...uriParts];
   return uriParts.length;
@@ -304,23 +370,6 @@ async function convertPathsToUriParts(
     });
   }
   return parts;
-}
-
-function collectMessageDeltaTexts(entry: AgentActivityEntry): string {
-  const messages = entry['gen_ai.input.messages_delta'];
-  if (!Array.isArray(messages)) return '';
-  const chunks: string[] = [];
-  for (const message of messages) {
-    if (!message || typeof message !== 'object') continue;
-    const parts = (message as Record<string, unknown>).parts;
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts) {
-      if (!part || typeof part !== 'object') continue;
-      const p = part as Record<string, unknown>;
-      if (p.type === 'text' && typeof p.content === 'string') chunks.push(p.content);
-    }
-  }
-  return chunks.join('\n');
 }
 
 function cwdOf(entry: AgentActivityEntry): string | undefined {

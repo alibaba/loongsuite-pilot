@@ -100,7 +100,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 |-------|----------|
 | `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
-| `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. The session `cwd` is not included. |
+| `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. |
 
 UNC/device paths, symlinks, and non-image magic bytes are skipped. Local paths are treated as filesystem paths. A URL query after the image extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to `a.png`.
 
@@ -165,7 +165,7 @@ Notes:
 
 ### Qwen Work CN
 
-Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Paste paths are already in user text, and tool paths are already on `tool.call` / `tool.result`. Failures are logged and the batch is still returned. A field is left unchanged when no `uri` is produced.
+Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Pasted images and local image paths on tools become `uri` parts. Failures are fail-open.
 
 User text matches only:
 

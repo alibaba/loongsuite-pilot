@@ -98,7 +98,7 @@ loongsuite-pilot restart
 |-------|--------|
 | `qoder` | `~/.qoder/tmp`（CLI 粘贴）、`~/.qoder/vibe_images`（ImageGen），以及桌面 IDE 粘贴缓存 `…/Qoder/SharedClientCache/cache/images`（`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`；远端 Linux hashed profile 是 `<appRoot>/<hash>/SharedClientCache/cache/images`）。 |
 | `codex` | `~/.codex`（预留；Codex 目前走内联 base64，不读盘）。 |
-| `qwen-work-cn` | `~/.qwenworkcn/workspace`（剪贴板粘贴的 `uploads/`）、`~/.qwenworkcn/tmp`。不包含会话 `cwd`。 |
+| `qwen-work-cn` | `~/.qwenworkcn/workspace`（剪贴板粘贴的 `uploads/`）、`~/.qwenworkcn/tmp`。 |
 
 UNC/设备路径、符号链接、非图片 magic 都会跳过。本地路径一律按文件系统路径处理；图片后缀后的 URL query（例如 markdown 里的 `a.png?x=1`）不会剥掉，`pathToUri` 不会回退到 `a.png`。
 
@@ -163,7 +163,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 
 ### 千问办公
 
-千问办公（`qwen-work-cn`）在 `qwen-work-cn-trace` 上、turn 富化之后做写时转换。配置键为 `agents.qwen-work-cn.multimodal`。Hook 不改。用户粘贴路径已经在文本里，工具路径已经在 `tool.call` / `tool.result` 里。失败只记日志，本批事件照常返回，没有产出 `uri` 的原字段保持不变。
+千问办公（`qwen-work-cn`）在 `qwen-work-cn-trace` 上、turn 富化之后做写时转换。配置键为 `agents.qwen-work-cn.multimodal`。Hook 不改。用户粘贴和工具里的本地图片路径转成 `uri`。失败 fail-open。
 
 用户文本只匹配：
 
