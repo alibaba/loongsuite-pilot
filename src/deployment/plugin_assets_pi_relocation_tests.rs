@@ -10,8 +10,8 @@ async fn interrupted_pi_state_last_transaction_recovers_before_fresh_manager_loa
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
     let defs = temp.path().join("defs");
-    let current = temp.path().join("current-home/settings.json");
-    let old = temp.path().join("old-home/settings.json");
+    let current = temp.path().join("current-home").join("settings.json");
+    let old = temp.path().join("old-home").join("settings.json");
     for path in [
         &data,
         &defs,

@@ -490,7 +490,7 @@ async fn manager_l606_l675_stale_recorded_pi_path_does_not_silently_adopt_anothe
         let def = f.pi();
         f.save(&def);
         let current = PathBuf::from(&def.plugin_inject.as_ref().unwrap().config_paths[0]);
-        let stale = f.root.join("stale-pi/settings.json");
+        let stale = f.root.join("stale-pi").join("settings.json");
         let manager = f.manager();
         assert!(manager.deploy_single(&def).await.success);
         let spec = f
