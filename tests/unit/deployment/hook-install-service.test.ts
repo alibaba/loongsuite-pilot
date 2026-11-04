@@ -297,6 +297,47 @@ describe('hook install service', () => {
     await expect(fs.access(path.join(other, 'settings.json'))).rejects.toThrow();
   });
 
+  it('reuses DSH shared patch registration and reports the persisted target for system requests', async () => {
+    const dshHome = path.join(tmp, 'shared-dsh-root');
+    const plugin = path.join(dataDir, 'plugins/dsh/plugin.mjs');
+    await fs.mkdir(dshHome);
+    await fs.mkdir(path.dirname(plugin), { recursive: true });
+    await fs.writeFile(plugin, 'export default function () {}\n');
+    const patchPath = path.join(dshHome, 'cordis.patch.yml');
+    const original = '# customer configuration\n- id: customer-plugin\n  name: customer-plugin\n';
+    await fs.writeFile(patchPath, original);
+    const definitionPath = path.join(pilotDir, 'agents.d/dsh.json');
+    const definition = {
+      id: 'dsh', displayName: 'DSH', deployMode: 'dsh-yaml-patch',
+      detection: { paths: [dshHome], commands: [] },
+      dshYamlPatch: {
+        patchPath, pluginSource: plugin,
+        entryId: 'loongsuite-pilot-observability', marker: 'PILOT-OBSERVABILITY-MANAGED',
+      },
+    };
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const normal = await run({ agentsFlag: 'dsh' });
+    expect(normal.report.agents[0].hint).toBeNull();
+    const registered = await fs.readFile(patchPath, 'utf8');
+    expect(registered.startsWith(original)).toBe(true);
+
+    const system = await run({ deploymentScope: 'system' });
+    const dsh = system.report.agents.find(agent => agent.id === 'dsh')!;
+    expect(dsh).toMatchObject({ status: 'up-to-date', settingsPath: patchPath, collectionStatus: 'not-verified' });
+    expect(dsh.hookScope).toBeUndefined();
+    expect(dsh.hint).toContain('independent roots do not inherit');
+    expect(await fs.readFile(patchPath, 'utf8')).toBe(registered);
+
+    const other = path.join(tmp, 'other-dsh-root');
+    await fs.mkdir(other);
+    definition.dshYamlPatch.patchPath = path.join(other, 'cordis.patch.yml');
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const status = await run({ agentsFlag: 'dsh', deploymentScope: 'system', mode: 'status' });
+    expect(status.report.agents[0].settingsPath).toBe(patchPath);
+    expect(status.report.agents[0].hint).toContain(patchPath);
+    await expect(fs.access(definition.dshYamlPatch.patchPath)).rejects.toThrow();
+  });
+
   it('keeps an earlier named agent when a later install names a different one', async () => {
     const otherHome = path.join(tmp, 'other-home');
     await fs.mkdir(otherHome, { recursive: true });

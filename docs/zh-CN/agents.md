@@ -79,6 +79,7 @@ loongsuite-pilot hook status --json
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
+| DSH | 现有 `$DSH_HOME/cordis.patch.yml` 的 Pilot 标记块 | 0.2.1-rc.5 |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
@@ -91,7 +92,12 @@ Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后�
 这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立
 `agentDir` 的身份不会继承。Pilot 不修改 `pi` 命令、业务启动参数或根目录环境变量。
 system 请求会报告实际共享配置路径；它表示当前配置根的覆盖范围，不是 Pi 原生机器级策略。
-不传 `--scope` 时保持现有 home 安装行为。
+
+DSH 同样复用现有 `DSH_HOME`（默认 `~/.dsh`），该 home 下的各个 profile 都读取
+这份公共 patch。新身份保留相同 `DSH_HOME` 就会继承插件；Pilot 报告实际 patch 路径，
+不修改 `dsh` 命令、启动参数或 `DSH_HOME`。Pi/DSH 从插件安装位置推导默认输出目录，
+新身份不需要额外继承 Pilot 数据目录环境变量；显式数据目录覆盖仍然生效。
+不传 `--scope` 时保持现有 home 注册行为。
 
 运行资产和 Pi 配置采用原子替换，写入失败保留原文件；Pi 配置清理未完成时停止卸载，
 保留运行资产供重试。这些保护同样适用于默认 home 安装。
