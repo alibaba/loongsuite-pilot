@@ -51,6 +51,20 @@ export function convertQoderTurn(
   records: EventLogRecord[],
   options: ConvertOptions & { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
 ) {
+  const prepared = prepareQoderTurn(records, options);
+  try {
+    return convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler });
+  } finally {
+    prepared.cleanup?.();
+  }
+}
+
+/** Keep the existing entry wrapper until either conversion path completes.
+ * The flusher serializes turns sharing this handler through convertLocks. */
+export function prepareQoderTurn(
+  records: EventLogRecord[],
+  options: { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
+) {
   const roots = independentTraceIds(records);
   const { handler, idGenerator } = options;
   const original = handler.startEntry;
@@ -66,10 +80,8 @@ export function convertQoderTurn(
       idGenerator.clearTraceId();
     }
   };
-  try {
-    return convertEventLogToTrace(records, options);
-  } finally {
+  return { records, handler, removedEntryCount: 0, cleanup() {
     handler.startEntry = original;
     idGenerator.clearTraceId();
-  }
+  } };
 }

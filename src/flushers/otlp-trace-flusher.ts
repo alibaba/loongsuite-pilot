@@ -4,7 +4,6 @@ import { Resource } from '@opentelemetry/resources';
 import { SpanKind } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
-  InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -15,9 +14,11 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
-import { convertDelegatedTurn } from './delegated-turn-converter.js';
-import { convertCodexTurn } from './codex-turn-converter.js';
-import { convertQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { planTurnStream } from './turn-stream.js';
+import { prepareCodexTurn } from './codex-turn-converter.js';
+import { prepareDelegatedTurn } from './delegated-turn-converter.js';
+import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
+import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
@@ -143,11 +144,18 @@ interface TurnBuffer {
 interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
-  inMem: InMemorySpanExporter;
+  inMem: DrainingInMemorySpanExporter;
   toolSpanIds: SpanIdReservations;
   llmSpanIds: SpanIdReservations;
   idGenerator: ReservedSpanIdGenerator;
   active: number;
+}
+
+interface PreparedConversion {
+  records: EventLogRecord[];
+  handler: ExtendedTelemetryHandler;
+  readonly removedEntryCount: number;
+  cleanup?: () => void;
 }
 
 interface GrokConversionMetadata {
@@ -1216,12 +1224,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     this.turnBuffers.delete(buf.key);
     this.recordBufferRemoval(buf);
+    void this.trackTurnExport(buf);
+  }
+
+  private trackTurnExport(buf: TurnBuffer): Promise<void> {
     const p = this.flushSingleTurn(buf).catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
       this.inFlightExports.delete(p);
     });
     this.inFlightExports.add(p);
+    return p;
   }
 
   private async flushCompleted(): Promise<void> {
@@ -1235,7 +1248,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     await Promise.allSettled(
-      completed.map((buf) => this.flushSingleTurn(buf)),
+      completed.map((buf) => this.trackTurnExport(buf)),
     );
   }
 
@@ -1315,6 +1328,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
+    let streamedExportSucceeded: boolean | undefined;
 
     try {
       try {
@@ -1391,26 +1405,74 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
+        let streamExportDurationMs = 0;
         let succeeded = false;
+        let cleanup: (() => void) | undefined;
         try {
-          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
-            : agentType === 'codex' ? convertCodexTurn
-            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? convertQoderTurn
-            : agentType === 'doubao-work' ? convertDoubaoWorkTurn
-            : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
-            : convertEventLogToTrace;
-          result = convert(
-            sanitized as unknown as EventLogRecord[],
-            { handler, strict: false, passthroughKeys, idGenerator,
-              ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
-          );
+          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
+            : { records: sanitized, handler, removedEntryCount: 0 };
+          cleanup = prepared.cleanup;
+          const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
+          if (stream) {
+            streamedExportSucceeded = true;
+            const reasoning = { seen: false, total: 0 };
+            let pending: ReadableSpan[] = [];
+            let pendingBytes = 0;
+            let grokInstructionsApplied = false;
+            const limit = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+            const exportPending = async () => {
+              if (!pending.length) return;
+              const batch = pending;
+              pending = [];
+              pendingBytes = 0;
+              const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
+              const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
+                metadata, openClawIdentity, reasoning);
+              if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
+              streamedExportSucceeded = exported && streamedExportSucceeded;
+            };
+            result = await stream(async final => {
+              const exportStarted = performance.now();
+              try {
+                await provider.forceFlush();
+                // Native forceFlush does not await InMemorySpanExporter's timer
+                // callbacks. Drain explicitly only for incremental execution.
+                await inMem.drain();
+                const spans = inMem.getFinishedSpans();
+                inMem.reset();
+                for (const span of spans) {
+                  const size = estimateSpanSize(span);
+                  if (pending.length && pendingBytes + size > limit) await exportPending();
+                  pending.push(span);
+                  pendingBytes += size;
+                  if (pendingBytes >= limit) await exportPending();
+                }
+                if (final) await exportPending();
+              } finally {
+                streamExportDurationMs += performance.now() - exportStarted;
+              }
+            });
+          } else {
+            const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+              : agentType === 'doubao-work' ? convertDoubaoWorkTurn
+              : convertEventLogToTrace;
+            result = convert(
+              prepared.records,
+              { handler: prepared.handler, strict: false, passthroughKeys,
+                ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
+            );
+          }
+          result.spanCount -= prepared.removedEntryCount;
           succeeded = true;
         } finally {
+          cleanup?.();
           toolSpanIds.clear();
           llmSpanIds.clear();
           if (counters) {
             counters.converter_calls_total++;
-            counters.converter_duration_ms_total += performance.now() - convertStarted;
+            counters.converter_duration_ms_total += Math.max(0, performance.now() - convertStarted - streamExportDurationMs);
             if (!succeeded) counters.converter_failed_total++;
           }
         }
@@ -1430,47 +1492,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return false;
       }
 
+      if (streamedExportSucceeded !== undefined) return streamedExportSucceeded;
       await provider.forceFlush();
-      let spans = inMem.getFinishedSpans();
+      const spans = inMem.getFinishedSpans();
       inMem.reset();
-
-      if (spans.length === 0) return true;
-      applyQoderWorkStepTiming(records, spans);
-      this.enrichToolSkillAttributes(records, spans);
-      if (agentType === 'openclaw') {
-        this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
-        this.enrichOpenClawSessionKey(records, spans);
-        this.enrichOpenClawToolAttributes(records, spans);
-        this.enrichOpenClawLlmAttributes(records, spans);
-      }
-      if (agentType === 'claude-code') {
-        this.enrichClaudeCodeLlmAttributes(records, spans);
-      }
-      if (agentType === 'grok-build') {
-        this.enrichGrokBuildSpans(records, spans, grokMetadata);
-      }
-      if (agentType === 'doubao-work') {
-        this.enrichDoubaoWorkSpans(records, spans);
-        enrichDoubaoClientRequest(records, spans);
-      }
-
-      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
-      // Post-convert patch: the otel-util-genai converter auto-creates ENTRY
-      // and LLM spans but does not natively pass through Copilot-specific
-      // `gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
-      // `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`,
-      // or `gen_ai.llm.reasoning.text` fields from the input records. Copy
-      // them onto the auto-created spans here so otlp-debug + downstream
-      // consumers see them on the exported span attributes.
-      this.patchCopilotCustomAttributes(spans, records);
-
-      const exportState = this.getOrCreateExportState(agentType, serviceName);
-
-      if (this.cfg.debug) {
-        await this.writeDebugLog(agentType, spans);
-      }
-
-      return await this.exportInBatches(exportState, agentType, spans);
+      return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity);
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
       return false;
@@ -1478,6 +1504,56 @@ export class OtlpTraceFlusher extends BaseFlusher {
       convertState.active -= 1;
       this.evictConvertStates();
     }
+  }
+
+  /** The same enrichment and fan-out contract for batch and streamed spans. */
+  private async exportConvertedSpans(
+    agentType: string,
+    serviceName: string,
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+    grokMetadata: GrokConversionMetadata,
+    openClawIdentity: OpenClawIdentityMetadata,
+    reasoning?: { seen: boolean; total: number },
+  ): Promise<boolean> {
+    if (spans.length === 0) return true;
+    applyQoderWorkStepTiming(records, spans);
+    this.enrichToolSkillAttributes(records, spans);
+    if (agentType === 'openclaw') {
+      this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
+      this.enrichOpenClawSessionKey(records, spans);
+      this.enrichOpenClawToolAttributes(records, spans);
+      this.enrichOpenClawLlmAttributes(records, spans);
+      if (reasoning) {
+        for (const span of spans) {
+          const value = span.attributes['gen_ai.usage.reasoning_tokens'];
+          if (span.attributes['gen_ai.span.kind'] === 'LLM' && typeof value === 'number') {
+            reasoning.seen = true;
+            reasoning.total += value;
+          }
+        }
+        if (reasoning.seen) {
+          for (const span of spans) {
+            if (span.attributes['gen_ai.span.kind'] === 'AGENT') span.attributes['gen_ai.usage.reasoning_tokens'] = reasoning.total;
+          }
+        }
+      }
+    }
+    if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
+    if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (agentType === 'doubao-work') {
+      this.enrichDoubaoWorkSpans(records, spans);
+      enrichDoubaoClientRequest(records, spans);
+    }
+
+    spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
+    this.patchCopilotCustomAttributes(spans, records);
+
+    const exportState = this.getOrCreateExportState(agentType, serviceName);
+
+    if (this.cfg.debug) await this.writeDebugLog(agentType, spans);
+
+    return this.exportInBatches(exportState, agentType, spans);
   }
 
   private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
@@ -1586,10 +1662,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
           if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
-          this.writeFailedLog(agentType, endpointName, spans, {
+          // Keep failed persistence within the same bounded batch lifetime.
+          // A fast-failing endpoint must not enqueue an entire turn of strings
+          // behind asynchronous file writes and recreate the memory spike.
+          void this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
-          }).catch(() => undefined);
+          }).catch(() => undefined).then(() => resolve(false));
+          return;
         } else if (counter) {
           counter.outSpans += spans.length;
           counter.outBytes += batchBytes;
@@ -1769,7 +1849,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
-    const inMem = new InMemorySpanExporter();
+    // All compatible event shapes can stream. Batch fallback retains native
+    // forceFlush scheduling; only the stream invokes the explicit drain barrier.
+    const inMem = new DrainingInMemorySpanExporter();
     const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
