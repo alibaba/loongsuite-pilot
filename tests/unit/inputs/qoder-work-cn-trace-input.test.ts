@@ -57,6 +57,32 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(input.agentType).toBe(ClientType.QoderWorkCN);
   });
 
+  it('keeps a split SDK record unread until its newline arrives', async () => {
+    const now = Date.now();
+    const rows = buildFullSessionLines({ sessionId: 'split', messageId: 'msg', startMs: now,
+      endMs: now + 1000, stopReason: 'end_turn', inputTokens: 1, outputTokens: 2, text: 'response' });
+    const split = 30;
+    await fs.writeFile(logFile, rows[0].slice(0, split));
+    seedOffset(0);
+    const input = makeInput();
+    expect(await collectOnce(input)).toEqual([]);
+    expect(stateStore.getOffset(`qoder-work-cn-trace:${logFile}`)).toBe(0);
+    await fs.appendFile(logFile, [rows[0].slice(split), ...rows.slice(1)].join('\n') + '\n');
+    expect((await collectOnce(input)).some(entry => entry['event.name'] === 'llm.response')).toBe(true);
+  });
+
+  it('collects a smaller replacement log after in-place truncation', async () => {
+    const now = Date.now();
+    await fs.writeFile(logFile, 'old log\n'.repeat(1024));
+    seedOffset((await fs.stat(logFile)).size);
+    const input = makeInput();
+    expect(await collectOnce(input)).toEqual([]);
+    const rows = buildFullSessionLines({ sessionId: 'after-truncate', messageId: 'msg', startMs: now,
+      endMs: now + 1000, stopReason: 'end_turn', inputTokens: 1, outputTokens: 2, text: 'response' });
+    await fs.writeFile(logFile, rows.join('\n') + '\n');
+    expect((await collectOnce(input)).some(entry => entry['gen_ai.session.id'] === 'after-truncate')).toBe(true);
+  });
+
   it('emits span tree with BigInt nanosecond timestamps', async () => {
     const startMs = 1717950000123;
     const endMs = 1717950005456;

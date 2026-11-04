@@ -11,6 +11,7 @@ import {
   BaseSessionInput,
   type SessionInputOptions,
 } from '../base/base-session-input.js';
+import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_QODERWORK_ROOT_MAC = '~/Library/Application Support/QoderWork';
@@ -19,7 +20,6 @@ const DEFAULT_QODERWORK_CN_ROOT_MAC = '~/Library/Application Support/QoderWork C
 const DEFAULT_QODERWORK_CN_ROOT_LINUX = '~/.config/QoderWork CN';
 const SOURCE = 'qoder-work-sdk-log';
 const UNKNOWN_MODEL = 'unknown';
-const MAX_READ_BYTES = 16 * 1024 * 1024;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
 const RECEIVED_MSG_RE =
@@ -331,49 +331,32 @@ export class QoderWorkLogInput extends BaseSessionInput {
     }
 
     const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode as number | undefined;
-    const currentInode = (stat as unknown as { ino: number }).ino;
-
-    if (prevInode !== undefined && prevInode !== currentInode) {
-      this.stateStore.setOffset(stateKey, 0);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+    const currentInode = stat.ino;
+    const savedOffset = prevState.lastOffset ?? 0;
+    const reset = (prevState.extra?.inode !== undefined && prevState.extra.inode !== currentInode)
+      || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (reset) {
       this.fileModelPolicies.delete(filePath);
       this.currentModelPolicy = { chat: '', compact: '', scene: '' };
-    } else if (prevInode === undefined) {
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+    }
+    if (stat.size <= offset) {
+      if (reset || prevState.extra?.inode === undefined) {
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: currentInode, skippingLine: false } });
+      }
+      return [];
     }
 
-    const offset = this.stateStore.getOffset(stateKey);
-    if (stat.size <= offset) return [];
-
-    const handle = await fs.open(filePath, 'r');
-    let text: string;
-    try {
-      const readSize = Math.min(stat.size - offset, MAX_READ_BYTES);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      text = buf.toString('utf-8');
-
-      // When capped by MAX_READ_BYTES the last "line" is likely truncated.
-      // Roll back to the last complete newline so the partial line is re-read
-      // next cycle.
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) {
-          text = text.substring(0, lastNL);
-          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; // +1 for the \n
-        }
-      }
-
-      this.stateStore.setOffset(stateKey, offset + consumedBytes);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-    } finally {
-      await handle.close();
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && prevState.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || prevState.extra?.inode === undefined) {
+      this.stateStore.update(stateKey, { lastOffset: batch.offset,
+        extra: { inode: currentInode, skippingLine: batch.skippingLine } });
     }
 
     const out: AgentActivityEntry[] = [];
-    for (const line of text.split('\n')) {
+    for (const line of batch.text.split('\n')) {
       if (!line.trim()) continue;
       const event = parseSdkLogLine(line);
       if (!event) continue;
