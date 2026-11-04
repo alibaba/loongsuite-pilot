@@ -28,7 +28,15 @@ export class CodexTurnJournal {
   private readonly initialized = new Set<string>();
   private acknowledgements?: Promise<Map<string, number>>;
 
-  constructor(private readonly dir: string) {}
+  /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
+  constructor(
+    private readonly dir: string,
+    private readonly acknowledgementLimit = MAX_ACKNOWLEDGED_TURNS,
+  ) {
+    if (!Number.isSafeInteger(acknowledgementLimit) || acknowledgementLimit < 1) {
+      throw new RangeError('acknowledgementLimit must be a positive safe integer');
+    }
+  }
 
   append(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
@@ -179,7 +187,7 @@ export class CodexTurnJournal {
   }
 
   private async trimAcknowledgements(acknowledged: Map<string, number>): Promise<void> {
-    const excess = acknowledged.size - MAX_ACKNOWLEDGED_TURNS;
+    const excess = acknowledged.size - this.acknowledgementLimit;
     if (excess <= 0) return;
     for (const [key] of [...acknowledged].sort((a, b) => a[1] - b[1]).slice(0, excess)) {
       // A crash may leave pending content behind the ACK; remove it before forgetting the ACK.
