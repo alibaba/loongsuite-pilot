@@ -349,6 +349,7 @@ export class QoderWorkLogInput extends BaseSessionInput {
 
     const batch = await readBoundedLineTail(filePath, stat, offset,
       !reset && prevState.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
     if (batch.offset !== savedOffset || reset || prevState.extra?.inode === undefined) {
       this.stateStore.update(stateKey, { lastOffset: batch.offset,

@@ -177,14 +177,16 @@ export class QoderWorkTraceInput extends BaseInput {
     const reset = stat.size < savedOffset;
     const offset = reset ? 0 : savedOffset;
     if (stat.size <= offset) {
-      if (reset || (state.lastFile === logFileName && !sameFile)) {
-        this.setState({ lastOffset: 0, extra: { hookInode: stat.ino, hookSkippingLine: false } });
+      if (state.lastFile === logFileName && (reset || !sameFile || state.extra?.hookInode === undefined)) {
+        this.setState({ lastOffset: offset, extra: { ...state.extra,
+          hookInode: stat.ino, hookSkippingLine: sameFile && !reset && state.extra?.hookSkippingLine === true } });
       }
       return [];
     }
 
     const batch = await readBoundedLineTail(logFile, stat, offset,
       sameFile && !reset && state.extra?.hookSkippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work Hook line skipped', { file: logFile, offset });
     if (batch.offset !== savedOffset || reset || !sameFile || state.extra?.hookInode === undefined) {
       this.setState({ lastFile: logFileName, lastOffset: batch.offset,
@@ -303,6 +305,7 @@ export class QoderWorkTraceInput extends BaseInput {
 
     const batch = await readBoundedLineTail(filePath, stat, offset,
       !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work segment line skipped', { file: filePath, offset });
     if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
       this.stateStore.update(fileStateKey, { lastOffset: batch.offset,
@@ -644,7 +647,7 @@ export class QoderWorkTraceInput extends BaseInput {
     const savedOffset = previous.lastOffset ?? 0;
     const reset = replaced || stat.size < savedOffset;
     const offset = reset ? 0 : savedOffset;
-    if (reset) {
+    if (reset && stat.size === 0) {
       this.stateStore.update(stateKey, { lastOffset: 0, extra: { skippingLine: false } });
     }
     if (stat.size <= offset) {
@@ -654,6 +657,7 @@ export class QoderWorkTraceInput extends BaseInput {
 
     const batch = await readBoundedLineTail(filePath, stat, offset,
       !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
     if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
       this.stateStore.update(stateKey, { lastOffset: batch.offset,

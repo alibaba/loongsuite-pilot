@@ -13,11 +13,18 @@ export async function readBoundedLineTail(
   runtime: InputRuntimeAccumulator | null,
 ) {
   runtime?.observeBacklog(stat.size - offset);
-  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  let handle: fs.FileHandle;
+  try {
+    handle = await fs.open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
   try {
     const current = await handle.stat();
     if (!current.isFile() || current.dev !== stat.dev || current.ino !== stat.ino || current.size < stat.size) {
-      throw new Error('log source changed before reading');
+      // Retry from a fresh stat next cycle without invalidating sibling files.
+      return null;
     }
     const buffer = Buffer.allocUnsafe(Math.min(stat.size - offset, LINE_TAIL_READ_BYTES));
     const started = runtime?.now();

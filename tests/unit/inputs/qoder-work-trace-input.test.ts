@@ -239,6 +239,24 @@ describe('QoderWorkTraceInput', () => {
     await second.stop();
   });
 
+  it('records the inode of an idle legacy Hook checkpoint before a larger replacement', async () => {
+    const name = todayFileName();
+    const file = path.join(hookLogDir, name);
+    const old = JSON.stringify(buildHookEntry({ 'event.id': 'already-consumed' })) + '\n';
+    await fs.writeFile(file, old);
+    stateStore.set('qoder-work-trace', { lastFile: name, lastOffset: Buffer.byteLength(old) });
+    const input = makeInput();
+    expect(await startAndCollect(input)).toEqual([]);
+    expect(stateStore.get(input.id).lastOffset).toBe(Buffer.byteLength(old));
+    expect(stateStore.get(input.id).extra?.hookInode).toBe((await fs.stat(file)).ino);
+
+    const replacement = JSON.stringify(buildHookEntry({ 'event.id': 'new-' + 'x'.repeat(old.length) })) + '\n';
+    await fs.writeFile(file + '.new', replacement);
+    await fs.rename(file + '.new', file);
+    expect((await triggerCycle(input)).map(entry => entry['event.id'])).toEqual(['new-' + 'x'.repeat(old.length)]);
+    await input.stop();
+  });
+
   it('resumes from offset on second poll', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const entry1 = buildHookEntry({ 'event.id': 'e1', 'gen_ai.turn.id': 'turn-1' });

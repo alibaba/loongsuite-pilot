@@ -231,19 +231,21 @@ export class QoderWorkTraceInput extends BaseSessionInput {
       { chat?: string; compact?: string; scene?: string } | undefined;
     this.currentModelPolicy = this.fileModelPolicies.get(filePath)
       ?? { chat: persistedPolicy?.chat ?? '', compact: persistedPolicy?.compact ?? '', scene: persistedPolicy?.scene ?? '' };
+    const resetPolicy = reset ? { modelPolicy: null } : {};
     if (stat.size <= offset) {
       if (reset || prevState.extra?.inode === undefined) {
-        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: currentInode, skippingLine: false } });
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: currentInode, skippingLine: false, ...resetPolicy } });
       }
       return [];
     }
 
     const batch = await readBoundedLineTail(filePath, stat, offset,
       !reset && prevState.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
     if (batch.offset !== savedOffset || reset || prevState.extra?.inode === undefined) {
       this.stateStore.update(stateKey, { lastOffset: batch.offset,
-        extra: { inode: currentInode, skippingLine: batch.skippingLine } });
+        extra: { inode: currentInode, skippingLine: batch.skippingLine, ...resetPolicy } });
     }
 
     const completed: CompletedSessionWindow[] = [];
