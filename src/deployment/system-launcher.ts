@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import type { AgentDefinition, SystemLauncherRecord } from '../types/deployment.js';
 import { writeTextFileAtomic } from '../utils/fs-utils.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
@@ -102,6 +103,17 @@ async function runtimeAssets(def: AgentDefinition, dataDir: string, pilotDir: st
   const assets = (await assetBytes(def, pilotDir)).map(({ relative, bytes }) => ({
     file: path.join(dataDir, 'plugins', relative), bytes,
   }));
+  if (def.systemLauncher!.argument === '--patch') {
+    const cfg = def.dshYamlPatch;
+    const file = def.systemLauncher!.assetPath;
+    if (!cfg || file !== path.join(locations(def, dataDir).root, 'pilot.patch.yml')
+      || path.resolve(cfg.pluginSource) !== path.join(dataDir, 'plugins/dsh/plugin.mjs')) {
+      throw new Error('Invalid system DSH patch ownership');
+    }
+    assets.push({ file, bytes: Buffer.from('- insert:\n    - id: ' + JSON.stringify(cfg.entryId)
+      + '\n      name: ' + JSON.stringify(pathToFileURL(cfg.pluginSource).href) + '\n') });
+    assets.push({ file: path.join(path.dirname(cfg.pluginSource), '.collection-enabled'), bytes: Buffer.from('enabled\n') });
+  }
   return assets;
 }
 
@@ -166,6 +178,10 @@ export async function removeSystemLauncher(
   const paths = locations(def, dataDir);
   if (record.wrapperPath !== paths.wrapper) throw new Error('Unexpected launcher owner');
   await fs.rm(paths.enabled, { force: true });
+  if (def.dshYamlPatch && def.systemLauncher?.argument === '--patch') {
+    const marker = path.join(dataDir, 'plugins/dsh/.collection-enabled');
+    await fs.rm(marker, { force: true });
+  }
   await withDeployedStateLock(record.entryPath + '.pilot-lock', async () => {
     if (!pointsTo(record.entryPath, await link(record.entryPath), record.wrapperPath)) return;
     await fs.access(record.originalTarget, fs.constants.X_OK);

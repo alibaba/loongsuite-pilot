@@ -2,6 +2,13 @@
   "id": "dsh",
   "displayName": "DeepSeek Harness",
   "deployMode": "dsh-yaml-patch",
+  "systemLauncher": {
+    "command": "dsh",
+    "packageNames": ["@deepseek-ai/dsh"],
+    "argument": "--patch",
+    "assetPath": "$PILOT_DATA/system-launchers/dsh/pilot.patch.yml",
+    "assetFiles": ["dsh/plugin.mjs", "shared/resource-context.mjs"]
+  },
   "detection": {
     "paths": ["$DSH_HOME"],
     "commands": ["dsh"]

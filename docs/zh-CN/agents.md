@@ -79,13 +79,14 @@ loongsuite-pilot hook status --json
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | 公共 `pi` 入口追加 `--extension` | 0.73.1、1.5.0 |
+| DSH | 公共 `dsh` 入口追加 `--patch` | 0.2.1-rc.5 |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
 重复安装 Pilot。系统配置、运行文件和采集目录必须对业务容器中的相应进程可见、可访问。
 此能力不提供租户授权隔离或跨容器自动注入。
 
-Pi 需先安装官方 npm CLI，公共命令应为 PATH 中的官方 bin 符号链接。
+Pi/DSH 需先安装官方 npm CLI，公共命令应为 PATH 中的官方 bin 符号链接。
 Pilot 保留原始程序，传递业务参数、信号和退出码；插件缺失或损坏时跳过注入。
 其他 PATH 入口、直接运行包内文件或内嵌 SDK 不经过此启动器。
 Codex 自身的 hooks 功能需保持启用。

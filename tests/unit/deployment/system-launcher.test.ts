@@ -156,4 +156,43 @@ describe('public system CLI launcher lifecycle', () => {
     expect(await fs.readlink(entry)).toBe(original);
   });
 
+  it('installs a DSH patch and marker, retires the recorded home, and repairs a missing marker', async () => {
+    const dshEntry = path.join(root, 'bin/dsh');
+    await fs.symlink(original, dshEntry);
+    await fs.writeFile(path.join(root, 'package/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', bin: { dsh: 'cli.mjs' } }));
+    const pluginSource = path.join(dataDir, 'plugins/dsh/plugin.mjs');
+    await fs.mkdir(path.dirname(pluginSource), { recursive: true });
+    await fs.copyFile(path.resolve('assets/plugins/dsh/plugin.mjs'), pluginSource);
+    const patchPath = path.join(root, 'base/cordis.patch.yml');
+    await fs.mkdir(path.dirname(patchPath), { recursive: true });
+    await fs.writeFile(patchPath, '# preserve organization patch\n');
+    def = { id: 'dsh', displayName: 'DSH', deployMode: 'dsh-yaml-patch',
+      detection: { paths: [], commands: ['dsh'] },
+      dshYamlPatch: { pluginSource, patchPath, entryId: 'loongsuite-pilot-observability', marker: 'PILOT-OBSERVABILITY-MANAGED' },
+      systemLauncher: { command: 'dsh', packageNames: ['@deepseek-ai/dsh'], argument: '--patch',
+        assetPath: path.join(dataDir, 'system-launchers/dsh/pilot.patch.yml'),
+        assetFiles: ['dsh/plugin.mjs', 'shared/resource-context.mjs'] } };
+    expect((await manager.deployPrepared(def, true)).success).toBe(true);
+    const builtin = path.join(root, 'agents.d');
+    await fs.mkdir(builtin);
+    await fs.writeFile(path.join(builtin, 'dsh.json'), JSON.stringify(def));
+    expect((await runHookInstall({ dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin,
+      deploymentScope: 'system', writeResult: true })).exitCode).toBe(0);
+    expect(await fs.readFile(patchPath, 'utf8')).toBe('# preserve organization patch\n');
+    const patch = await fs.readFile(def.systemLauncher!.assetPath, 'utf8');
+    expect(patch).toContain('- insert:');
+    expect(patch).toContain('loongsuite-pilot-observability');
+    expect(patch).toContain('file://');
+    const marker = path.join(path.dirname(pluginSource), '.collection-enabled');
+    expect(await manager.needsRedeploy(def)).toBe(false);
+    await fs.unlink(marker);
+    entry = dshEntry;
+    expect(business().args[0]).toBe('--print');
+    expect(await manager.needsRedeploy(def)).toBe(true);
+    expect((await manager.deploySingle(def)).success).toBe(true);
+    expect(business().args.slice(0, 2)).toEqual(['--patch', def.systemLauncher!.assetPath]);
+    expect(await manager.undeployAgent(def)).toBe(true);
+    expect(await fs.readFile(marker).catch(() => null)).toBeNull();
+    expect(await fs.readlink(dshEntry)).toBe(original);
+  });
 });

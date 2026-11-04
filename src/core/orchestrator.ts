@@ -931,7 +931,7 @@ export class Orchestrator extends EventEmitter {
         id: `dsh-yaml-patch:${def.id}`,
         enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
-          (await fileExists(pluginPath))
+          (Boolean(def.systemLauncher && this.deploymentManager.isSystemInstallation(def.id)) || await fileExists(pluginPath))
           && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
