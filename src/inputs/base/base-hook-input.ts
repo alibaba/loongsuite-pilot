@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
@@ -38,6 +39,7 @@ export abstract class BaseHookInput extends BaseInput {
 
   protected readonly logDir: string;
   protected readonly logPrefix: string;
+  private readonly incompleteTails = new Map<string, { stat: Stats; offset: number }>();
 
   /**
    * Cold-start replay protection. When true and the input has no prior state
@@ -69,12 +71,19 @@ export abstract class BaseHookInput extends BaseInput {
     const state = this.getState();
     const isColdStart = !state.lastFile;
     const fileNames = await this.listHookLogFiles();
-    if (fileNames.length === 0) return entries;
+    if (fileNames.length === 0) {
+      this.incompleteTails.clear();
+      return entries;
+    }
 
     const persistedOffsets = this.getPersistedOffsetMap(state);
     const shouldPersistOffsets = !persistedOffsets;
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
     const candidateFileNames = this.getCandidateFileNames(fileNames, state.lastFile, today);
+    const candidates = new Set(candidateFileNames.map(name => path.join(this.logDir, name)));
+    for (const file of this.incompleteTails.keys()) {
+      if (!candidates.has(file)) this.incompleteTails.delete(file);
+    }
 
     for (const logFileName of candidateFileNames) {
       const logFile = path.join(this.logDir, logFileName);
@@ -140,6 +149,7 @@ export abstract class BaseHookInput extends BaseInput {
     try {
       stat = await fs.stat(logFile);
     } catch {
+      this.incompleteTails.delete(logFile);
       return { entries, offset: startOffset };
     }
 
@@ -154,8 +164,17 @@ export abstract class BaseHookInput extends BaseInput {
       });
       offset = 0;
     }
+    const tail = this.incompleteTails.get(logFile);
+    if (stat.size > offset) {
+      runtime?.observeBacklog(stat.size - offset);
+      if (tail?.offset === offset && tail.stat.dev === stat.dev && tail.stat.ino === stat.ino
+        && tail.stat.size === stat.size && tail.stat.mtimeMs === stat.mtimeMs
+        && tail.stat.ctimeMs === stat.ctimeMs) {
+        return { entries, offset };
+      }
+    }
+    this.incompleteTails.delete(logFile);
     if (stat.size <= offset) return { entries, offset: stat.size };
-    runtime?.observeBacklog(stat.size - offset);
 
     const handle = await fs.open(logFile, 'r');
     let checkpointOffset = offset;
@@ -172,6 +191,9 @@ export abstract class BaseHookInput extends BaseInput {
       // newline; otherwise a transient half-line would be rejected as invalid
       // JSON and the persisted offset would skip its remaining bytes forever.
       const lastNewline = snapshot.lastIndexOf(0x0a);
+      if (bytesRead === stat.size - offset && lastNewline + 1 < bytesRead) {
+        this.incompleteTails.set(logFile, { stat, offset: offset + lastNewline + 1 });
+      }
       if (lastNewline < 0) {
         return { entries, offset };
       }
