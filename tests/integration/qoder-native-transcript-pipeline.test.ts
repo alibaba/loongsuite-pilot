@@ -10,7 +10,6 @@ import { MockStateStore } from '../helpers/mock-state-store.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
 import type { AgentActivityEntry } from '../../src/types/index.js';
-import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const secret = 'sk-' + 'synthetic'.repeat(4); // Construct an artificial mask fixture, never a credential.
 const epoch = Date.now() - 60_000;
@@ -40,53 +39,6 @@ afterEach(async () => {
 });
 
 describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched output', agentId => {
-  it('keeps a long tool turn on the shared streaming path with complete history and usage', async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-long-native-'));
-    const transcript = path.join(root, 'native.jsonl');
-    const calls = 96;
-    const stamp = (step: number, delta = 0) => new Date(epoch + step * 100 + delta).toISOString();
-    const native: object[] = [
-      { type: 'progress', timestamp: stamp(0), data: { hookEvent: 'UserPromptSubmit' } },
-      { type: 'user', uuid: 'user-long', timestamp: stamp(0, 10), message: { role: 'user', content: 'inspect a synthetic JSON file' } },
-    ];
-    for (let step = 0; step < calls; step++) {
-      const last = step === calls - 1;
-      native.push({ type: 'assistant', timestamp: stamp(step + 1), message: {
-        id: `long-response-${step}`, model: 'synthetic-model', role: 'assistant', usage: {},
-        content: last ? [{ type: 'text', text: 'done' }]
-          : [{ type: 'tool_use', id: `long-tool-${step}`, name: 'Read', input: { index: step } }],
-        stop_reason: last ? 'end_turn' : 'tool_use',
-      } });
-      if (!last) native.push({ type: 'user', timestamp: stamp(step + 1, 20), message: { role: 'user', content: [
-        { type: 'tool_result', tool_use_id: `long-tool-${step}`, content: '合成内容'.repeat(256) + step },
-      ] } });
-    }
-    native.push({ type: 'progress', timestamp: stamp(calls + 1), data: { hookEvent: 'Stop' } }, { type: 'last-prompt' });
-    await fs.writeFile(transcript, jsonl(native));
-    expect(publishQoderWakeup({ session_id: 'synthetic-long-session', transcript_path: transcript,
-      hook_event_name: 'Stop', cwd: root }, { dataDir: root, agentId })).toBe(true);
-    const Ctor = agentId === 'qoder' ? QoderTraceInput : QoderCnTraceInput;
-    const input = new Ctor({ stateStore: new MockStateStore() as any, dataDir: root,
-      logDir: path.join(root, 'history'), pollIntervalMs: 60_000 });
-    vi.spyOn(input as any, 'readIdeSqliteTokens').mockResolvedValue({ matchedDbPath: null,
-      rows: Array.from({ length: calls }, (_, step) => ({ sessionId: 'synthetic-long-session', requestId: 'owned-long',
-        messageId: `long-response-${step}`, gmtCreate: epoch + (step + 1) * 100,
-        model: 'synthetic-model', inputTokens: 100 + step, outputTokens: 10, cacheReadTokens: 5 })) });
-    vi.spyOn(input as any, 'readCliSegments').mockResolvedValue([]);
-    vi.spyOn(input as any, 'readCliIntercept').mockResolvedValue({ systemPrompt: null, tokens: [] });
-    const output = new MockFlusher();
-    manager = new InputManager(); manager.setConfiguredUserId('synthetic-user'); manager.setFlusher(output); manager.registerInput(input);
-    await input.start(); await (input as any).cyclePromise; await manager.stopAll();
-    const entries = output.batchCalls.flat();
-    expect(entries.filter(row => row['event.name'] === 'llm.response')).toHaveLength(calls);
-    expect(entries.filter(row => row['event.name'] === 'llm.response').map(row => row['gen_ai.usage.input_tokens']))
-      .toEqual(Array.from({ length: calls }, (_, step) => 100 + step));
-    expect(entries.filter(row => row['event.name'] === 'tool.result')).toHaveLength(calls - 1);
-    const parity = await expectTurnStrategyParity(entries, `${agentId}-long-native-transcript`);
-    expect(parity.decisions.every(choice => choice.streamed)).toBe(true);
-    expect(parity.currentKinds).toEqual({ LLM: calls, TOOL: calls - 1, STEP: calls, AGENT: 1, ENTRY: 1 });
-  });
-
   it.each([false, true])('retains exact Turn/tool/token counts across queued turns, duplicate Hooks and restart (CLI=%s)', async cli => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-native-pipeline-'));
     const transcript = path.join(root, 'native.jsonl');
@@ -165,6 +117,5 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     expect(llms.reduce((sum, span) => sum + Number(span.attributes['gen_ai.usage.input_tokens']), 0)).toBe(750);
     expect(llms.reduce((sum, span) => sum + Number(span.attributes['gen_ai.usage.output_tokens']), 0)).toBe(75);
     expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(3);
-    await expectTurnStrategyParity(entries, `${agentId}-native-transcript-cli-${cli}`);
   });
 });

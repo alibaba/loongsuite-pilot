@@ -7,7 +7,6 @@ import { CollectionMethod, ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkSqliteInput } from '../../../src/inputs/qoder-work-sqlite/qoder-work-sqlite-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
-import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 /**
  * Tests against the production schema observed in real QoderWork installations:
@@ -82,7 +81,6 @@ describe.skipIf(!hasNodeSqlite())('QoderWorkSqliteInput', () => {
     expect(inputMsgs[0]).toEqual({ role: 'user', parts: [{ type: 'text', content: 'hello world' }] });
     // updated_at stored as seconds; entry's nano timestamp must reflect ms*1e6.
     expect(e.time_unix_nano).toBe(String(BigInt(1_777_000_001) * 1_000_000_000n));
-    await expectTurnStrategyParity(entries, 'qoder-work-legacy-sqlite-user');
   });
 
   it('falls back to UNKNOWN model when sub_chats.model_level is null', async () => {

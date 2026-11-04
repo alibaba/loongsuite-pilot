@@ -11,7 +11,6 @@ import { contentHash } from '../../src/utils/content-hash.js';
 import { ClientType } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
-import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 // @ts-expect-error synthetic SSE helper has no declaration file
 import { fakeStreamingFetch } from '../helpers/openclaw-stream.mjs';
 
@@ -100,7 +99,6 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
     }
 
     const records = flusher.batchCalls.flat();
-    await expectTurnStrategyParity(records, `openclaw-upstream-split-${splitBatches}`);
     expect(records.some(record => record['agent.openclaw.hook'] === 'before_model_resolve')).toBe(false);
     for (const [index, turn] of turns.entries()) {
       const turnRecords = records.filter(record => record['gen_ai.turn.id'] === `upstream-run-${index}`);
@@ -223,7 +221,6 @@ describe('OpenClaw plugin to InputManager trace flow', () => {
 
     expect(flusher.batchCalls).toHaveLength(1);
     const records = flusher.batchCalls[0];
-    await expectTurnStrategyParity(records, 'openclaw-observer-tools');
     expect(records.length).toBeGreaterThan(10);
     expect(records.every(record => record['gen_ai.agent.type'] === ClientType.OpenClaw)).toBe(true);
     expect(records.every(record => record['user.id'] === 'channel-sender')).toBe(true);

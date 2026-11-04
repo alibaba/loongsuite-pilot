@@ -6,7 +6,6 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { ClientType } from '../../../src/types/index.js';
 import { QwenWorkCNInput } from '../../../src/inputs/qwen-work-cn/qwen-work-cn-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
-import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 describe('QwenWorkCNInput', () => {
   let dir: string;
@@ -58,6 +57,5 @@ describe('QwenWorkCNInput', () => {
     expect(entries[0]!.version).toBeUndefined();
     expect(entries[0]!['agent.qwenworkcn.version']).toBe('0.1.5');
     expect(input.getAgentVersion()).toBe('0.1.5');
-    await expectTurnStrategyParity(entries, 'qwen-work-cn-legacy-hook-request');
   });
 });

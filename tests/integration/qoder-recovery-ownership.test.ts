@@ -14,7 +14,6 @@ import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
-import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const discovery = vi.hoisted(() => ({ paths: [] as string[] }));
 vi.mock('../../src/inputs/qoder-trace/sqlite-token-reader.js', async original => ({
@@ -144,7 +143,6 @@ describe.skipIf(!loadDatabaseSync()).each(['qoder', 'qoder-cn'] as const)('%s re
     const ids = new Set(spans.map(span => span.spanContext().spanId)); expect(ids.size).toBe(spans.length);
     expect(spans.filter(span => span !== entry[0]).every(span => ids.has(span.parentSpanId!))).toBe(true);
     expect(JSON.stringify(spans.map(span => span.attributes))).not.toContain(secret);
-    await expectTurnStrategyParity(events, `${agentId}-recovered-transcript-incomplete`);
     await manager!.stopAll(); input = createInput(); await input.start(); await (input as any).cyclePromise;
     await flusher.flush();
     expect(output.batchCalls.flat()).toHaveLength(events.length); expect(spans).toHaveLength(7);

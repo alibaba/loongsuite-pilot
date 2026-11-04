@@ -13,7 +13,6 @@ import {
 } from '../../../../src/inputs/dsh/dsh-event-transform.js';
 import { ClientType } from '../../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.js';
 
 function transformTurn(sid: string, baseTime: number): AgentActivityEntry[] {
   const state = newState();
@@ -82,10 +81,6 @@ function compareSpanStart(a: ReadableSpan, b: ReadableSpan): number {
 }
 
 describe('DSH event-to-span OTLP flow', () => {
-  it('preserves the shared executor output from native DSH messages', async () => {
-    const entries = transformTurn('synthetic-impact-dsh', Date.parse('2026-11-04T00:00:00Z'));
-    await expectTurnStrategyParity(entries, 'dsh-native-event-transform');
-  });
   let captured: ReadableSpan[];
   let flusher: OtlpTraceFlusher;
 

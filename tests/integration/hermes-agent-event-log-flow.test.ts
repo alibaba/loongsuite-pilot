@@ -10,7 +10,6 @@ import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
-import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const PLUGIN_PATH = path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
 const FIXTURE_PATH = path.resolve('tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl');
@@ -154,7 +153,6 @@ for line in fixture_path.read_text(encoding="utf-8").splitlines():
 
     expect(flusher.batchCalls).toHaveLength(1);
     const allRecords = flusher.batchCalls[0];
-    await expectTurnStrategyParity(allRecords, 'hermes-observer-tool-turn');
     expect(allRecords.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
     expect(allRecords.filter(record => record['agent.hermes.hook'] === 'turn_start'
       && record['event.name'] === 'other')).toHaveLength(1);

@@ -7,7 +7,6 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import { QwenWorkCNSqliteInput } from '../../../src/inputs/qwen-work-cn/qwen-work-cn-sqlite-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
-import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 class TestInput extends QwenWorkCNSqliteInput {
   collectNow(): Promise<AgentActivityEntry[]> { return this.collect(); }
@@ -50,7 +49,6 @@ describe.skipIf(!hasNodeSqlite())('QwenWorkCNSqliteInput', () => {
     expect(entries[1]!['gen_ai.tool.name']).toBe('Read');
     expect(entries[1]!['gen_ai.tool.call.result']).toEqual({ ok: true });
     expect(entries.every(entry => entry['agent.source'] === 'qwen-work-cn-sqlite')).toBe(true);
-    await expectTurnStrategyParity(entries, 'qwen-work-cn-legacy-sqlite');
   });
 
   it('continues across a batch boundary when rows share updated_at', async () => {

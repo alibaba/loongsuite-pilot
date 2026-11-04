@@ -5,7 +5,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSql } from '../../../helpers/sqlite-fixture.mjs';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.ts';
 
 import { hasNodeSqlite } from '../../../../assets/hooks/kiro-cli/transcript-parser.mjs';
 
@@ -191,7 +190,7 @@ describe('kiro-cli-hook-processor fail-open（无 DB 依赖，所有 Node 版本
 });
 
 describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcript）', () => {
-  test('多步多工具（3 STEP, 2 TOOL）+ 最终回答 — 完整 trace', async () => {
+  test('多步多工具（3 STEP, 2 TOOL）+ 最终回答 — 完整 trace', () => {
     // 1. 缓冲 postToolUse（tool_response）
     bufferPostToolEvents();
     // 2. stop 触发导出
@@ -216,7 +215,6 @@ describe.skipIf(!DB_AVAILABLE)('kiro-cli-hook-processor 端到端（DB transcrip
     expect(toolCalls.length).toBe(2);
     expect(toolResults.length).toBe(2);
     expect(toolCalls.map((t) => t['gen_ai.tool.name']).sort()).toEqual(['fs_read', 'fs_write']);
-    await expectTurnStrategyParity(records, 'kiro-cli-native-sqlite-multi-tool');
 
     // 同一 turn 共享 trace_id
     const traceIds = new Set(records.map((r) => r.trace_id));

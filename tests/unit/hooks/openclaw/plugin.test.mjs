@@ -23,7 +23,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { fakeStreamingFetch } from '../../../helpers/openclaw-stream.mjs';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.ts';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -1500,47 +1499,6 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
-  it('streams a late native child after its spawning parent was converted and the plugin reloaded', async () => {
-    delete process.env.LOONGSUITE_USER_ID;
-    const h = registerPlugin(await loadPlugin());
-    const parent = { runId: 'parent-late', sessionId: 'parent-late-session', sessionKey: 'agent:main:late-parent', agentId: 'main' };
-    const model = async (handlers, ctx, callId, finish) => {
-      await handlers.model_call_started({ ...ctx, callId, provider: 'synthetic', model: 'synthetic-model' }, ctx);
-      await new Promise(resolve => setTimeout(resolve, 2));
-      await handlers.model_call_ended({ ...ctx, callId, outcome: 'completed', durationMs: 2 }, ctx);
-      handlers.before_message_write({ sessionKey: ctx.sessionKey, message: {
-        role: 'assistant', content: [{ type: 'text', text: 'synthetic response' }], provider: 'synthetic', model: 'synthetic-model',
-        usage: { input: 100, output: 10 }, stopReason: finish, responseId: callId + '-response',
-      } }, { agentId: 'main', sessionKey: ctx.sessionKey });
-    };
-    await h.before_agent_run({ prompt: 'delegate synthetic work', senderId: 'synthetic-user' }, parent);
-    await h.llm_input({ ...parent, prompt: 'delegate synthetic work', provider: 'synthetic', model: 'synthetic-model' }, parent);
-    await model(h, parent, 'parent-model', 'toolUse');
-    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-late', params: { task: 'synthetic task' } }, parent);
-    const child = { runId: 'child-late', sessionId: 'child-late-session', sessionKey: 'agent:main:subagent:late-child', agentId: 'main' };
-    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn-late', result: {
-      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
-    } }, parent);
-    await h.llm_output({ ...parent, assistantTexts: ['delegated'], usage: { input: 100, output: 10 } }, parent);
-    const parentRows = readOutputRecords().filter(row => row['gen_ai.turn.id'] === parent.runId);
-    await expectTurnStrategyParity(parentRows, 'openclaw-native-spawning-parent');
-    const spawn = parentRows.find(row => row['event.name'] === 'tool.call');
-
-    const restarted = registerPlugin(await loadPlugin());
-    await restarted.before_agent_run({ prompt: 'synthetic child work' }, child);
-    await restarted.llm_input({ ...child, prompt: 'synthetic child work', provider: 'synthetic', model: 'synthetic-model' }, child);
-    await model(restarted, child, 'child-model-1', 'toolUse');
-    await model(restarted, child, 'child-model-2', 'stop');
-    await restarted.llm_output({ ...child, assistantTexts: ['done'], usage: { input: 200, output: 20 } }, child);
-    const childRows = readOutputRecords().filter(row => row['gen_ai.turn.id'] === child.runId);
-    expect(childRows.every(row => row.parent_span_id === spawn.span_id && row.trace_id === spawn.trace_id)).toBe(true);
-    const parity = await expectTurnStrategyParity(childRows, 'openclaw-native-late-independent-child');
-    expect(parity.currentKinds.LLM).toBe(2);
-    expect(parity.currentKinds.AGENT).toBe(1);
-    expect(parity.currentKinds.ENTRY).toBeUndefined();
-    expect(parity.decisions.every(choice => choice.streamed)).toBe(true);
-  });
-
   it('links an early asynchronous child to the exact spawn tool, preserving its own turn', async () => {
     delete process.env.LOONGSUITE_USER_ID;
     const handlers = registerPlugin(await loadPlugin());

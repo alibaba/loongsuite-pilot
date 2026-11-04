@@ -461,37 +461,17 @@ If your integration follows an existing hook or plugin record shape, keep the co
 
 An integration is ready only after all applicable gates below pass.
 
-### Conversion resources for long turns
+### Memory use when converting long turns
 
-`npm run test:turn-strategies` exercises the shipped producer/Input protocols across the currently registered integrations, including recovery, upstream context, tools and child agents. It compares spans at Pilot's full conversion boundary and records whether streaming was selected; incompatible shapes such as Copilot's `react.step` and inline child trees retain batch conversion. This protocol regression does not imply native CLI/GUI installation acceptance for every client.
+Compatible completed turns use shared step-by-step conversion and await each
+bounded export before releasing finished spans. Existing adapters retain native
+IDs, parent relationships, full messages and per-call/turn token aggregates.
+Unsupported event shapes keep the existing batch path and its memory risk;
+source events, current history and a single large span can still grow.
 
-Completed canonical turns (one model request per step, with model responses in
-step order) share incremental conversion across Agent types. Existing adapters
-prepare native IDs, independent roots and delegated context before this choice.
-Finished spans are grouped under the estimated `maxExportBatchBytes` budget,
-awaiting the export callback and failed-log persistence before proceeding. Short
-turns can share one export. One ENTRY/AGENT pair,
-complete message deltas, per-call usage and turn aggregates are preserved. No
-content is truncated and no turn is closed early to reduce memory. Grouping
-complete steps retains late tool records; independent delegated turns retain
-their real upstream context.
-
-Preflight checks the entire turn before emitting spans. Inline child trees,
-missing steps, multiple requests in one step, incompatible response order or
-parent metadata unavailable in the first step retain the batch path. A partial
-stream never falls back and re-emits the turn. This bounds simultaneous accumulated message snapshots
-and completed spans, not RSS for arbitrary files, records or all inputs: source
-events and running input history still grow with input size, and a single span
-can exceed the batch budget. Unsupported shapes retain the batch memory risk. Compare peak
-memory on identical payloads, unique received Span/call IDs, per-LLM and AGENT
-tokens, and duplicates after restart; process survival alone is insufficient.
-
-`npm run perf:turn-stream` runs synthetic long turns through multiple Agent routes
-in separate Node processes with a 256 MiB old-space limit, checking unique spans,
-model calls and token aggregates. Set `PILOT_PERF_CALLS` to vary their size, or use
-`npm run perf:turn-stream -- codex qoder` to select routes. This common-converter
-regression does not prove native client reproduction or replace real producer,
-collector and backend validation.
+`npm run perf:turn-stream` checks long-turn memory, unique spans and token totals
+in separate Node processes with a 256 MiB old-space limit. It is a converter
+regression, separate from native-client and collector/backend validation.
 
 ### Field quality
 

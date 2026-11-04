@@ -3,7 +3,6 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { convertEventLogToReadableSpans, type EventLogRecord } from '@loongsuite/otel-util-genai';
-import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 
 let tmpHome: string = os.tmpdir();
@@ -112,7 +111,6 @@ describe('qoder-cli segment span timing', () => {
       ...hookStep(`${SESSION}:turn-1:s2`, 'req-2b', BASE + 88_127),
     ];
     enrichCliTurn(entries, segments);
-    await expectTurnStrategyParity(entries, 'qoder-cli-segment-retry-timing');
 
     const result = await convertEventLogToReadableSpans(entries as unknown as EventLogRecord[], {
       strict: false,

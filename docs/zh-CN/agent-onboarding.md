@@ -403,15 +403,11 @@ worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的�
 
 只有通过以下全部适用门禁，Agent 集成才能标记为 ready。
 
-### 长 turn 的转换资源
+### 长 turn 的转换内存
 
-`npm run test:turn-strategies` 覆盖当前注册集成的实际 producer/Input 协议、跨批恢复、上游关联、工具及子 Agent，并在 Pilot 的完整转换入口比较新策略和批量策略的 Span。它会验证是否真正进入增量路径；Copilot 的 `react.step`、内联子树等不兼容输入仍回退。该协议回归不代表全部原生 CLI/GUI 均完成了安装态验收。
+符合条件的已完成 turn 使用公共逐 step 转换，等待有界批次导出后释放已结束 Span；既有适配器保留原生 ID、父子关系、完整消息和逐调用／整轮 Token 汇总。不兼容的事件结构保留原批量路径及其内存风险；源事件、当前历史和单个巨大 Span 仍会随输入增长。
 
-已完成的规范 turn（每步一次模型请求、模型响应顺序一致）统一按完整 step 使用流式转换，不按 Agent 类型开关。各 Agent 的 ID、独立根和委派父上下文仍由原适配器准备。已结束 Span 按 `maxExportBatchBytes` 的估算体积组批，等待当前批次导出回调后继续；失败落盘也等待完成。短 turn 可合并为一次导出。ENTRY/AGENT 仍各只有一个，消息增量、逐调用 usage 和整轮聚合保持完整；不通过截断正文或提前结束 turn 降低内存。完整分组也保留晚到的工具记录。
-
-转换前先检查整轮结构；内联子树、无 step、一步多次请求、响应顺序不适用或首步无法确定相同父级元数据的输入保留原整轮转换语义。部分 Span 发出后不会回退重发整轮。该路径限制累计消息快照和已结束 Span 的同时驻留，不是任意大文件、单条记录或所有输入的固定 RSS 上限；原始事件和运行中的消息历史仍随输入体积增长，单个 Span 也可能超过组批预算。不满足流式条件的输入仍有原整轮转换的内存风险。验收须比较同一载荷的内存峰值、真实接收端的唯一 Span/调用 ID、逐 LLM 和 AGENT Token，以及重启后的重复量，不能只检查进程没有退出。
-
-`npm run perf:turn-stream` 在老生代上限为 256 MiB 的独立 Node 子进程中，分别对多种 Agent 路由运行合成长 turn，核对唯一 Span、模型调用数和 Token 汇总；可通过 `PILOT_PERF_CALLS` 调整调用数，或用 `npm run perf:turn-stream -- codex qoder` 选择路由。它是公共转换资源回归，不代表各原生客户端已复现，也不替代真实插件输出、collector 进程与后端回读。
+`npm run perf:turn-stream` 在老生代上限 256 MiB 的独立 Node 进程中核对长 turn 内存、唯一 Span 和 Token 汇总。这是公共转换器回归，不替代原生客户端、collector 及后端验收。
 
 ### 字段质量
 

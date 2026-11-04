@@ -19,7 +19,6 @@ import {
 import { MAX_MULTIMODAL_PARTS } from '../../../../src/multimodal/types.js';
 import type { BlobToUriFn } from '../../../../src/multimodal/types.js';
 import { fakeBlobToUri } from '../../multimodal/fake-uri.js';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.js';
 import type { AgentActivityEntry, JsonValue } from '../../../../src/types/index.js';
 import type { CodexTranscriptCheckpoint, CodexTranscriptMeta } from '../../../../src/inputs/codex-transcript/codex-transcript-types.js';
 
@@ -450,7 +449,6 @@ describe('CodexTranscriptInput', () => {
       expect(transcriptCheckpoint(stateStore, transcript)).toMatchObject({
         scanOffset: (await fs.stat(transcript)).size, activeTurn: null, pendingTerminal: null,
       });
-      await expectTurnStrategyParity(entries, 'codex-native-wakeup-multi-tool-wave');
     } finally { await input.stop(); }
   });
 

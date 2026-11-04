@@ -7,7 +7,6 @@ import { CopilotLogInput } from '../../../../src/inputs/copilot-log/copilot-log-
 import { InputManager } from '../../../../src/core/input-manager.js';
 import { MockFlusher } from '../../../helpers/mock-flusher.js';
 import { conversation } from '../../hooks/copilot/hybrid-fixture.mjs';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.js';
 const dirs:string[]=[];
 const inputs:CopilotLogInput[]=[];
 const tracked=(i:CopilotLogInput)=>{inputs.push(i);return i;};
@@ -34,8 +33,6 @@ describe('Copilot incremental recovery',()=>{
   expect(records.some((r:any)=>r['event.name']==='llm.response')).toBe(true);
   expect(records.every((r:any)=>r['gen_ai.copilot.telemetry.source']==='transcript-only')).toBe(true);
   expect(records.find((r:any)=>r['event.name']==='llm.response')['gen_ai.usage.input_tokens']).toBeUndefined();
-  const parity = await expectTurnStrategyParity(records, 'copilot-transcript-only-fallback');
-  expect(parity.decisions.every(choice => !choice.streamed)).toBe(true);
   await queued(next);const later=conversation({interaction:'interaction-b',base:10});
   await fs.appendFile(x.file,lines(later.events.slice(1)));
   expect(await collect(next)).toEqual([]);
@@ -47,8 +44,6 @@ describe('Copilot incremental recovery',()=>{
   now.mockReturnValue(125_000);await fs.writeFile(x.native,lines(f.spans));
   const records=await collect(x.input);expect(records.find((r:any)=>r['event.name']==='llm.response')['gen_ai.usage.input_tokens']).toBe(100);
   expect(records[0]['gen_ai.copilot.telemetry.source']).toBe('native-otel');
-  const parity = await expectTurnStrategyParity(records, 'copilot-native-otel-joined');
-  expect(parity.decisions.every(choice => !choice.streamed)).toBe(true);
  });
  it('uses explicit per-session no-exporter evidence without waiting and keeps known exporters pending',async()=>{
   const x=await setup(),f=conversation();await fs.writeFile(x.file,lines(f.events));

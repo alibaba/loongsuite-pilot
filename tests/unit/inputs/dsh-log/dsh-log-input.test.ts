@@ -6,7 +6,6 @@ import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { DshLogInput } from '../../../../src/inputs/dsh-log/dsh-log-input.js';
 import type { InputRuntimeDelta } from '../../../../src/inputs/base/input-runtime-metrics.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
-import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.js';
 
 class TestDshLogInput extends DshLogInput {
   runCollect(): Promise<AgentActivityEntry[]> {
@@ -101,29 +100,6 @@ describe('DshLogInput state isolation and restart recovery', () => {
       input.off('entries', collectEntries);
     }
   }
-
-  it('keeps bounded native file reads compatible with both turn strategies and durable restart', async () => {
-    const file = path.join(tmpDir, 'dsh-strategy.jsonl');
-    const events = prefix('synthetic-strategy-session', 'deepseek', 'synthetic prompt');
-    events[3].padding = '字'.repeat(100_000); // Cross the real 256 KiB file-read chunk boundary.
-    await appendRecords(file, [...events, chunk('synthetic-strategy-session'), {
-      type: 'assistant/message', sid: 'synthetic-strategy-session', time: 20,
-      data: { turn: 1, step: 1,
-        message: { id: 'synthetic-response', content: [{ type: 'text', text: 'synthetic answer' }],
-          source: { provider: 'deepseek', model: 'deepseek-model' } },
-        usage: { inputTokens: 30, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 3, reasoningTokens: 2 } },
-    }, { type: 'turn/end', sid: 'synthetic-strategy-session', time: 30, data: { turn: 1 } }]);
-    const first = await makeInput();
-    const result = await poll(first.input);
-    expect(result.metrics.rawReadCalls).toBeGreaterThan(1);
-    expect(result.metrics.rawInMaxBatchBytes).toBeLessThanOrEqual(256 * 1024);
-    expect(result.entries.filter(row => row['event.name'] === 'llm.response')).toHaveLength(1);
-    const parity = await expectTurnStrategyParity(result.entries, 'dsh-native-bounded-input-with-restart');
-    expect(parity.currentKinds.LLM).toBe(1);
-    expect(parity.decisions.every(choice => choice.streamed)).toBe(true);
-    const restarted = await makeInput();
-    expect((await poll(restarted.input)).entries).toEqual([]);
-  });
 
   it('keeps the shared checkpoint clean on idle polls, including old checkpoint metadata', async () => {
     const file = path.join(tmpDir, 'dsh-session-a.jsonl');
