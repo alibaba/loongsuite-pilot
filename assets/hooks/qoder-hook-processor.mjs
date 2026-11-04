@@ -527,12 +527,23 @@ export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
       }
     }
     if (startLine >= 0) {
-      for (let i = startLine - 1; i >= 0; i--) {
+      let hasCurrentUser = false;
+      for (let i = startLine; i < stopLine; i++) {
         if (isRealUserPrompt(rows[i])) {
-          startLine = i;
+          hasCurrentUser = true;
           break;
         }
-        if (rows[i]?.type === 'assistant' || hookEventOf(rows[i]) === 'Stop') break;
+      }
+      if (!hasCurrentUser) {
+        for (let i = startLine - 1; i >= 0; i--) {
+          const event = hookEventOf(rows[i]);
+          if (rows[i]?.type === 'assistant' || rows[i]?.type === 'last-prompt'
+            || event === 'Stop' || event === 'SessionEnd') break;
+          if (isRealUserPrompt(rows[i])) {
+            startLine = i;
+            break;
+          }
+        }
       }
     }
     if (startLine < 0) {

@@ -664,6 +664,46 @@ describe('findTriggeredTurnWindow', () => {
     expect(snapshot.rows.slice(second.startLine, second.endLine).some(row => row.message?.content === 'second prompt')).toBe(true);
   });
 
+  it.each(['none', 'SessionEnd', 'last-prompt'])('keeps the current user with normal progress ordering after %s', boundary => {
+    const previous = user('previous prompt');
+    const current = user('current prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      ...(boundary === 'none' ? [] : [boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary)]),
+      promptProgress,
+      current,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('normal-progress.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    const windowRows = snapshot.rows.slice(window.startLine, window.endLine);
+    expect(windowRows).toContainEqual(current);
+    expect(windowRows).not.toContainEqual(previous);
+  });
+
+  it.each(['SessionEnd', 'last-prompt'])('does not reuse a previous user across %s when the current user is missing', boundary => {
+    const previous = user('previous prompt');
+    const promptProgress = progress('UserPromptSubmit');
+    const stop = progress('Stop');
+    const rows = [
+      previous,
+      boundary === 'last-prompt' ? { type: 'last-prompt' } : progress(boundary),
+      promptProgress,
+      assistant('current answer'),
+      stop,
+      progress('SessionEnd'),
+    ];
+    const snapshot = readTranscriptSnapshot(writeTranscript('missing-current-user.jsonl', rows));
+    const window = findTriggeredTurnWindow(snapshot, rows.indexOf(stop));
+    expect(window).toMatchObject({ status: 'complete', startLine: rows.indexOf(promptProgress) });
+    expect(snapshot.rows.slice(window.startLine, window.endLine)).not.toContainEqual(previous);
+  });
+
   it('uses the next prompt as a boundary when SessionEnd is missing', () => {
     const rows = [
       progress('UserPromptSubmit'),
