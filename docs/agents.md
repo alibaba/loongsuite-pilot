@@ -82,6 +82,7 @@ shared installation; other detected Agents keep their home-local installation:
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
+| Pi | Existing `$PI_CODING_AGENT_DIR/settings.json` (`extensions`) | 0.73.1, 1.5.0 |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -91,6 +92,14 @@ runtime files and collection directories must be accessible in that business
 container. This does not provide tenant authorization or cross-container injection.
 
 Codex must have its hooks feature enabled.
+
+Pi reuses its existing configuration root (`PI_CODING_AGENT_DIR`, default
+`~/.pi/agent`). Later sessions using that root load the same extension, even
+when their session files live in subdirectories. An independently selected
+`agentDir` does not inherit this registration. Pilot does not change `pi`, its
+arguments, or the root environment variable. A system request reports the actual
+shared configuration path; this is configuration-root coverage, not a native
+machine-wide Pi policy. Omitting `--scope` retains the existing home behavior.
 
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded

@@ -348,6 +348,11 @@ export class DeploymentManager {
     return mergeHookSettingsPaths(this.state[agentId]);
   }
 
+  recordedConfigPath(agentId: string): string | undefined {
+    const record = this.state[agentId];
+    return record?.pluginInjectConfigPath ?? record?.dshPatchPath ?? record?.hookSettingsPath;
+  }
+
   recordInstalledBy(agentId: string): 'hook-install' | 'daemon' | 'build' | undefined {
     return this.state[agentId]?.installedBy;
   }

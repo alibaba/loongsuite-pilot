@@ -13,10 +13,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  agentBaseFieldPatch,
-  collectResourceAttributesFromEnv,
-} from '../shared/resource-context.mjs';
+// Worker labels are optional. A missing helper during a partial update must not
+// turn telemetry into a Pi startup dependency or prevent ordinary collection.
+const resourceContext = await import('../shared/resource-context.mjs').catch(() => null);
+const agentBaseFieldPatch = typeof resourceContext?.agentBaseFieldPatch === 'function'
+  ? resourceContext.agentBaseFieldPatch : () => ({});
+const collectResourceAttributesFromEnv = typeof resourceContext?.collectResourceAttributesFromEnv === 'function'
+  ? resourceContext.collectResourceAttributesFromEnv : () => ({});
 
 const LOG_PREFIX = 'pi-coding-agent';
 const DEFAULT_IDENTITY = Object.freeze({
