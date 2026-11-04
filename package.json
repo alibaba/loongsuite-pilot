@@ -32,6 +32,7 @@
     "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
     "typecheck": "cargo check --workspace --all-targets --all-features --locked",
     "test": "cargo test --workspace --all-features --locked",
+    "test:host:node-worker": "vitest run tests/host/node-worker-native.test.mjs --cache=false",
     "test:host:shortcut": "vitest run tests/unit/scripts/dashboard-shortcut.test.mjs",
     "test:host:openclaw": "vitest run tests/unit/hooks/openclaw/first-token.test.mjs tests/unit/hooks/openclaw/runtime-version.test.mjs tests/unit/hooks/openclaw/legacy-utils.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
     "test:host:openclaw-native": "vitest run tests/host/openclaw-native-interceptor.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",

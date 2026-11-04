@@ -53,6 +53,13 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run test:host:shortcut -- --reporter=default --reporter=./scripts/testing/migration-reporter.mjs
+      - name: 可选 Node worker 实际入口回归
+        env:
+          PILOT_NATIVE_NODE_WORKER_BRIDGE: ${{ github.workspace }}/target/debug/examples/host_node_worker_bridge
+        run: |
+          set -euo pipefail
+          cargo build --locked --all-features --example host_node_worker_bridge
+          npm run test:host:node-worker
       - name: Hermes 宿主插件回归（Python 仅用于宿主测试）
         env:
           PILOT_MIGRATION_REPORT: target/migration-audit/hermes-host-linux.json

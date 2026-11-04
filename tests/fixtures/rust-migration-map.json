@@ -22629,7 +22629,7 @@
             "parameters": []
           },
           "coverage": "partial",
-          "behavior": "Original default Pilot process.execPath is a Node runtime and executes an MJS worker. Rust Pilot cannot provide Node by pretending its own binary is Node. Existing real resolver explicitly requires external PILOT_NODE_BIN and refuses the Pilot binary; new native binary worker executes a real isolated Rust child with exact Unicode argument. The original automatic bundled-Node guarantee stays partial; no placeholder-only pass is claimed.",
+          "behavior": "The exact controlled Node placeholder now resolves an absent/empty override from absolute host-process PATH in order; a nonempty explicit PILOT_NODE_BIN remains authoritative and invalid overrides never fall back. Manifest PATH, relative/implicit cwd, bundle/cwd entries, and Pilot canonical/symlink/hardlink aliases cannot become discovered Node. Six optional real-Node host contracts execute the public supervisor start/capture/exit path, preserve the original L92 runtime/argument JSON and exit assertions, and verify the real Win32-mode HOME projection without changing the parent environment (GNU evidence; physical platforms verified separately). Native default Cargo tests remain Node-free. The original assertion that Pilot itself necessarily supplies a bundled Node runtime remains partial because the Rust core has no Node dependency; a host without Node receives a typed actionable failure.",
           "platforms": [
             "linux",
             "macos",
@@ -22641,6 +22641,10 @@
               {
                 "file": "src/deployment/worker_manifest_supervisor.rs",
                 "test": "pilot_binary_and_external_node_are_distinct_runtimes"
+              },
+              {
+                "file": "src/deployment/worker_manifest_node_discovery_tests.rs",
+                "test": "external_node_resolution_does_not_use_manifest_path_or_change_native_commands"
               }
             ]
           }

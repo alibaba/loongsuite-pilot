@@ -487,6 +487,31 @@ impl WorkerManifestSupervisor {
         manifest: &WorkerManifest,
         options: &WorkerManifestOptions,
     ) -> Result<(String, Vec<String>), (&'static str, String)> {
+        let host_path = if self.node_executable.is_empty()
+            && manifest.command.first().map(String::as_str) == Some("${pilot:node}")
+        {
+            std::env::var_os("PATH")
+        } else {
+            None
+        };
+        self.resolve_command_with_host_path(
+            bundle_root,
+            cwd,
+            manifest,
+            options,
+            host_path.as_deref(),
+        )
+        .await
+    }
+
+    async fn resolve_command_with_host_path(
+        &self,
+        bundle_root: &str,
+        cwd: &str,
+        manifest: &WorkerManifest,
+        options: &WorkerManifestOptions,
+        host_path: Option<&std::ffi::OsStr>,
+    ) -> Result<(String, Vec<String>), (&'static str, String)> {
         validate_placeholders(manifest)?;
         let command: Vec<String> = manifest
             .command
@@ -494,34 +519,7 @@ impl WorkerManifestSupervisor {
             .map(|part| expand(part, bundle_root, options))
             .collect();
         let executable = if manifest.command.first().map(String::as_str) == Some("${pilot:node}") {
-            if !Path::new(&self.node_executable).is_absolute() {
-                return Err((
-                    "WorkerManifestPlaceholderInvalid",
-                    "外部 Agent 需要显式配置 PILOT_NODE_BIN 绝对路径；Pilot 不提供 Node 运行时"
-                        .into(),
-                ));
-            }
-            if !tokio::fs::metadata(&self.node_executable)
-                .await
-                .ok()
-                .is_some_and(|meta| meta.is_file())
-            {
-                return Err((
-                    "WorkerManifestPlaceholderInvalid",
-                    "外部 Agent Node 运行时不可用".into(),
-                ));
-            }
-            let node = std::fs::canonicalize(&self.node_executable).ok();
-            let pilot = std::env::current_exe()
-                .ok()
-                .and_then(|path| std::fs::canonicalize(path).ok());
-            if node.is_some() && node == pilot {
-                return Err((
-                    "WorkerManifestPlaceholderInvalid",
-                    "不能将 Pilot 二进制用作 Agent Node 运行时".into(),
-                ));
-            }
-            self.node_executable.clone()
+            resolve_external_node(&self.node_executable, host_path, bundle_root, cwd)?
         } else if manifest.command.first().map(String::as_str) == Some("${pilot:binary}") {
             std::env::current_exe()
                 .map_err(|err| ("WorkerManifestPlaceholderInvalid", err.to_string()))?
@@ -1045,6 +1043,110 @@ fn camel_to_kebab(value: &str) -> String {
         out.push(ch.to_ascii_lowercase());
     }
     out
+}
+
+/// Discover only an explicitly requested external Node runtime. PATH belongs to
+/// the host process, never the manifest or the worker's environment overrides.
+fn resolve_external_node(
+    configured: &str,
+    host_path: Option<&std::ffi::OsStr>,
+    bundle_root: &str,
+    cwd: &str,
+) -> Result<String, (&'static str, String)> {
+    let invalid = |message: &str| ("WorkerManifestPlaceholderInvalid", message.to_string());
+    let pilot = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| invalid("无法校验外部 Agent Node 运行时"))?;
+    if !configured.is_empty() {
+        let path = Path::new(configured);
+        if !path.is_absolute() {
+            return Err(invalid("PILOT_NODE_BIN 必须是外部 Node 运行时的绝对路径"));
+        }
+        if checked_node_path(path, false, &pilot).is_none() {
+            return Err(invalid(
+                "PILOT_NODE_BIN 不可用或指向 Pilot 二进制；需要外部 Node 运行时",
+            ));
+        }
+        return Ok(configured.into());
+    }
+    let excluded = [bundle_root, cwd]
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect::<Vec<_>>();
+    if let Some(host_path) = host_path {
+        for directory in std::env::split_paths(host_path) {
+            // Empty, ".", drive-relative and other relative PATH components
+            // would introduce implicit current-directory command execution.
+            if !directory.is_absolute() {
+                continue;
+            }
+            let Ok(directory) = std::fs::canonicalize(directory) else {
+                continue;
+            };
+            if excluded.contains(&directory) {
+                continue;
+            }
+            let candidate = directory.join(if cfg!(windows) { "node.exe" } else { "node" });
+            let Some(node) = checked_node_path(&candidate, true, &pilot) else {
+                continue;
+            };
+            if node
+                .parent()
+                .is_some_and(|parent| excluded.iter().any(|dir| dir == parent))
+            {
+                continue;
+            }
+            if let Some(node) = node.to_str() {
+                return Ok(node.to_string());
+            }
+        }
+    }
+    Err(invalid(
+        "未找到可用的外部 Node 运行时；请将 Node 加入宿主绝对 PATH 或设置 PILOT_NODE_BIN",
+    ))
+}
+
+fn checked_node_path(
+    path: &Path,
+    require_executable: bool,
+    pilot: &Path,
+) -> Option<std::path::PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    if !metadata.is_file() || path == pilot {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if require_executable && metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
+        let pilot = std::fs::metadata(pilot).ok()?;
+        if metadata.dev() == pilot.dev() && metadata.ino() == pilot.ino() {
+            return None;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+        let open = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .open(path)
+                .ok()
+        };
+        let node_file = open(&path)?;
+        let pilot_file = open(pilot)?;
+        let node = crate::utils::file_identity::identity_from_open(&node_file).ok()?;
+        let pilot = crate::utils::file_identity::identity_from_open(&pilot_file).ok()?;
+        if node.dev == pilot.dev && node.ino == pilot.ino {
+            return None;
+        }
+        let _ = require_executable; // Native Windows has no POSIX executable bits.
+    }
+    Some(path)
 }
 
 fn resolve_command_path(bundle_root: &str, command: &str) -> String {
@@ -2172,7 +2274,7 @@ mod tests {
         .unwrap();
         let missing = WorkerManifestSupervisor::with_platform("linux", "");
         assert!(missing
-            .resolve_command(root, root, &manifest, &options)
+            .resolve_command_with_host_path(root, root, &manifest, &options, None)
             .await
             .is_err());
         let incorrect = WorkerManifestSupervisor::with_platform("linux", pilot.to_str().unwrap());
@@ -2226,3 +2328,7 @@ mod history_contract_tests;
 #[cfg(test)]
 #[path = "worker_manifest_snapshot_retry_tests.rs"]
 mod snapshot_retry_contract_tests;
+
+#[cfg(test)]
+#[path = "worker_manifest_node_discovery_tests.rs"]
+mod node_discovery_contract_tests;
