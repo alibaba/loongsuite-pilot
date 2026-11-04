@@ -77,11 +77,14 @@ loongsuite-pilot hook status --json
 | Agent | 公共注册方式 | 已验证 CLI 版本 |
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+| Codex | `/etc/codex/config.toml` | 0.166.0 |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
 重复安装 Pilot。系统配置、运行文件和采集目录必须对业务容器中的相应进程可见、可访问。
 此能力不提供租户授权隔离或跨容器自动注入。
+
+Codex 自身的 hooks 功能需保持启用。
 
 安装、修复、升级、禁用和卸载沿用已记录目标，保留第三方配置。显式迁移仅清理已登记
 的旧 Pilot 注册，不扫描未登记的 home。配置无效、所有权冲突、只读或外部挂载且需要

@@ -8,6 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.codex/hooks.json",
+    "systemSettingsPath": "/etc/codex/config.toml",
     "events": ["SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop"],
     "retiredEvents": ["PreToolUse", "PostToolUse", "PostToolUseFailure"],
     "hookCommand": "$PILOT_DATA/hooks/codex-loongsuite-pilot-hook.sh",
