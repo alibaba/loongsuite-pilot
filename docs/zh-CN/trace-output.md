@@ -41,7 +41,7 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
       "deployment.environment": "prod"
     },
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```
@@ -55,7 +55,7 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
-| `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
+| `otlpTrace.turnIdleTimeoutMs` | 未完整结束的 turn buffer 的空闲兜底超时。默认 `300000`（5 分钟），显著大于默认 30 秒轮询周期；设为 `0` 可禁用。 |
 
 环境变量：
 

@@ -80,6 +80,32 @@ const OPENCLAW_COMPAT_PASSTHROUGH_KEYS = [
   'agent.openclaw.collection.end_reason',
   'agent.openclaw.correlation.ambiguous',
 ] as const;
+const TRAE_FLUSH_ONLY_MARKER = 'agent.trajectory.flush_only';
+const TRAE_COLLECTION_PASSTHROUGH_KEYS = [
+  'agent.trajectory.collection.incomplete',
+  'agent.trajectory.completion.reason',
+] as const;
+
+function isTraeFlushOnlyMarker(record: AgentActivityEntry): boolean {
+  return normalizeAgentType(String(record['gen_ai.agent.type'] ?? '')) === 'trae-agent'
+    && record['event.name'] === 'other'
+    && record['gen_ai.turn.end'] === true
+    && record[TRAE_FLUSH_ONLY_MARKER] === true;
+}
+
+function prepareTraeCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
+  const incompleteMarker = records.find(record =>
+    isTraeFlushOnlyMarker(record)
+    && record['agent.trajectory.collection.incomplete'] === true);
+  if (!incompleteMarker) return records;
+  const diagnostics = {
+    'agent.trajectory.collection.incomplete': true,
+    'agent.trajectory.completion.reason': incompleteMarker['agent.trajectory.completion.reason'],
+  };
+  return records.map(record => isTraeFlushOnlyMarker(record)
+    ? record
+    : { ...record, ...diagnostics });
+}
 
 function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentActivityEntry[] {
   const key = (r: AgentActivityEntry) => JSON.stringify([r.trace_id, r['gen_ai.turn.id']]);
@@ -1168,6 +1194,15 @@ export class OtlpTraceFlusher extends BaseFlusher {
           CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
         );
     }
+    // trae-agent trajectories are polled incrementally, so an intermediate step
+    // can carry a natural finish_reason='stop' (the model returned plain text
+    // mid-run) while trae-agent keeps going to a later task_done step. Only the
+    // converter-stamped gen_ai.turn.end on the finalized last step is the real
+    // turn boundary; flushing on the intermediate 'stop' would split one ReAct
+    // run into two duplicate traces under the same traceId.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'trae-agent') {
+      return entry['gen_ai.turn.end'] === true;
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
@@ -1258,7 +1293,18 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    const exported = await this.convertAndExport(buf.agentType, buf.records);
+    // A late trae-agent finalize poll emits a control-plane marker when the
+    // actual last llm.response was already buffered in an earlier cycle. The
+    // marker closes the turn, but must never reach EventLog-to-Trace conversion:
+    // the downstream library aggregates usage and selects parent output before
+    // response-id merging, so a second response double-counts tokens or clears
+    // ENTRY/AGENT output. A marker-only buffer has no reconstructible payload.
+    const preparedRecords = buf.agentType === 'trae-agent'
+      ? prepareTraeCollectionRecords(buf.records)
+      : buf.records;
+    const recordsForConversion = preparedRecords.filter(record => !isTraeFlushOnlyMarker(record));
+    if (recordsForConversion.length === 0) return;
+    const exported = await this.convertAndExport(buf.agentType, recordsForConversion);
     if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
     }
@@ -1343,6 +1389,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
           : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : agentType === 'trae-agent' ? TRAE_COLLECTION_PASSTHROUGH_KEYS
           : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
