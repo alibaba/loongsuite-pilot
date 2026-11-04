@@ -175,13 +175,24 @@ describe('QoderWorkTraceInput', () => {
 
   it('leaves the shared checkpoint clean after consuming an unchanged SDK file', async () => {
     await writeSdkLog('old-session', ['already consumed']);
+    const file = path.join(sdkLogDir, 'old-session', 'main.log');
+    const stat = await fs.stat(file);
     const input = makeInput();
-    expect(await startAndCollect(input)).toEqual([]);
     const update = vi.spyOn(stateStore, 'update');
-    expect(await triggerCycle(input)).toEqual([]);
-    expect(await triggerCycle(input)).toEqual([]);
-    expect(update).not.toHaveBeenCalled();
-    await input.stop();
+    try {
+      expect(await startAndCollect(input)).toEqual([]);
+      expect(stateStore.get(`${input.id}:sdk-token:${file}`)).toMatchObject({
+        lastOffset: stat.size,
+        extra: { inode: stat.ino },
+      });
+      update.mockClear();
+      expect(await triggerCycle(input)).toEqual([]);
+      expect(await triggerCycle(input)).toEqual([]);
+      expect(update).not.toHaveBeenCalled();
+    } finally {
+      await input.stop();
+      update.mockRestore();
+    }
   });
 
   it('reads hook JSONL and injects trace_id', async () => {
