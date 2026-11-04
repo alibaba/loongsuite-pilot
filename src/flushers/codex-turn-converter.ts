@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { ROOT_CONTEXT, trace, TraceFlags } from '@opentelemetry/api';
 import { convertEventLogToTrace, type EventLogRecord, type ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import type { ReservedSpanIdGenerator } from './span-id-reservation.js';
-import type { PreparedTurn } from './prepared-turn.js';
 
 type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]>;
 const WORK_KEYS = [
@@ -41,7 +40,7 @@ export function convertCodexTurn(
 export function prepareCodexTurn(
   records: EventLogRecord[],
   options: { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
-): PreparedTurn {
+) {
   const first = records[0];
   if (!first) return { records, handler: options.handler, removedEntryCount: 0 };
   const attachment = first['agent.codex.parent_span_id'];

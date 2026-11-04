@@ -12,11 +12,13 @@ import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
 import {
   convertEventLogToTrace,
   ExtendedTelemetryHandler,
+  type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
-import { prepareTurnConversion } from './prepare-turn-conversion.js';
+import { prepareCodexTurn } from './codex-turn-converter.js';
+import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
-import { QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
@@ -147,6 +149,13 @@ interface AgentConvertState {
   llmSpanIds: SpanIdReservations;
   idGenerator: ReservedSpanIdGenerator;
   active: number;
+}
+
+interface PreparedConversion {
+  records: EventLogRecord[];
+  handler: ExtendedTelemetryHandler;
+  readonly removedEntryCount: number;
+  cleanup?: () => void;
 }
 
 interface GrokConversionMetadata {
@@ -1400,7 +1409,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let succeeded = false;
         let cleanup: (() => void) | undefined;
         try {
-          const prepared = prepareTurnConversion(agentType, sanitized, handler, idGenerator);
+          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
+            : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
           if (stream) {

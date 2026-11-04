@@ -169,7 +169,7 @@ describe('Shared completed-turn streaming', () => {
     }
   });
 
-  it('isolates a failed streamed batch and the following turn on every endpoint', async () => {
+  it.each(['openclaw', 'qoder'])('isolates a failed streamed batch and the following %s turn on every endpoint', async agentType => {
     const received = new Map<string, ReadableSpan[]>();
     let attempts = 0;
     let failedSpans = 0;
@@ -183,9 +183,9 @@ describe('Shared completed-turn streaming', () => {
         callback(fail ? { code: 1, error: new Error('synthetic rejection') } : { code: 0 });
       }, shutdown: async () => {} }));
     const failed = vi.spyOn(flusher as any, 'writeFailedLog').mockResolvedValue(undefined);
-    const next = turn(2).map(r => ({ ...r, trace_id: 'abcdef1234567890abcdef1234567890', 'gen_ai.turn.id': 'next-turn' }));
+    const next = turn(2, false, agentType).map(r => ({ ...r, trace_id: 'abcdef1234567890abcdef1234567890', 'gen_ai.turn.id': 'next-turn' }));
     try {
-      await flusher.sendBatch(turn());
+      await flusher.sendBatch(turn(40, false, agentType));
       await flusher.sendBatch(next);
     } finally { await flusher.shutdown(); }
     expect(failed).toHaveBeenCalledTimes(1);
@@ -195,7 +195,7 @@ describe('Shared completed-turn streaming', () => {
       const agent = spans.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT'
         && s.spanContext().traceId === 'abcdef1234567890abcdef1234567890')!;
       expect(agent.attributes['gen_ai.usage.input_tokens']).toBe(201);
-      expect(agent.attributes['gen_ai.usage.reasoning_tokens']).toBe(1);
+      expect(agent.attributes['gen_ai.usage.reasoning_tokens']).toBe(agentType === 'openclaw' ? 1 : undefined);
     }
     expect(failedSpans).toBeGreaterThan(0);
     expect(flusher.getEndpointCounters().get('a')?.outFailed).toBe(failedSpans);
