@@ -2847,6 +2847,11 @@ impl Orchestrator {
         live.set_runtime_probe(move || observed.runtime_info());
         let id = live.id.clone();
         self.inputs.register_input(Arc::clone(&live));
+        let delta_manager = Arc::clone(&self.inputs);
+        let delta_id = id.clone();
+        input.surface_on_runtime_delta(move |delta| {
+            delta_manager.record_runtime_delta(&delta_id, delta);
+        });
         let manager = Arc::clone(&self.inputs);
         input.surface_on_entries(move |batch| manager.bind_entries(&id, batch.to_vec()));
         self.push_detection(entries, live, watch, available, 1, None);
@@ -3252,6 +3257,11 @@ trait HookSurface: Send + Sync {
         -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
     fn surface_stop(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
     fn surface_on_entries(&self, listener: impl Fn(&[AgentActivityEntry]) + Send + Sync + 'static);
+    fn surface_on_runtime_delta(
+        &self,
+        _listener: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
+    ) {
+    }
 }
 
 macro_rules! hook_surface {
@@ -3300,7 +3310,34 @@ hook_surface!(MimoCodeLogInput);
 hook_surface!(QwenCodeCliLogInput);
 hook_surface!(OpenClawPluginInput);
 hook_surface!(HermesLogInput);
-hook_surface!(DshLogInput, DshLogInput::runtime_info);
+impl HookSurface for DshLogInput {
+    fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
+        DshLogInput::runtime_info(self)
+    }
+    fn collection_method_name(&self) -> String {
+        self.collection_method().as_str().to_string()
+    }
+    fn surface_running(&self) -> bool {
+        self.running()
+    }
+    fn surface_start(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.start())
+    }
+    fn surface_stop(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.stop())
+    }
+    fn surface_on_entries(&self, listener: impl Fn(&[AgentActivityEntry]) + Send + Sync + 'static) {
+        self.on_entries(listener);
+    }
+    fn surface_on_runtime_delta(
+        &self,
+        listener: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
+    ) {
+        self.on_runtime_delta(listener);
+    }
+}
 
 fn live_from_parts<T: Send + Sync + 'static>(
     id: &str,
@@ -5582,3 +5619,7 @@ mod deployment_history_contract_tests;
 #[cfg(test)]
 #[path = "orchestrator_trace_runtime_main541_tests.rs"]
 mod trace_runtime_main541_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_dsh_runtime_main553_tests.rs"]
+mod dsh_runtime_main553_tests;

@@ -158,7 +158,12 @@ async fn actual_dsh_header_replay_and_new_bytes_use_the_same_opened_file_after_p
     append(&replacement, &turn("synthetic-new"));
     std::fs::rename(&replacement, &path).expect("atomic replacement after open");
     let entries = runtime
-        .process_opened_dsh_file(&path.to_string_lossy(), &mut held, &identity)
+        .process_opened_dsh_file(
+            &path.to_string_lossy(),
+            &mut held,
+            &identity,
+            &mut InputRuntimeAccumulator::new(),
+        )
         .await
         .expect("actual replay and read");
     assert_turn(&entries, "synthetic-old", false);

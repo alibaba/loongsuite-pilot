@@ -114,6 +114,14 @@ jobs:
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           cargo test -p loongsuite-pilot --all-features --locked --lib inputs::qoder_trace::transcript_source:: -- --test-threads=2 --nocapture
+      - name: Bounded DSH reads and the real runtime metrics caller
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for selector in inputs::dsh_log:: core::orchestrator::dsh_runtime_main553_tests::; do
+            test "$(cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --list | grep -c ': test$')" -gt 0
+            cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --test-threads=1 --nocapture
+          done
       - name: Build precompiled Swift UI and run its tests without launching it
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: ./target/debug/xtask build-status-bar --arch "${{ matrix.ui_arch }}" --output "$RUNNER_TEMP/pilot-native-statusbar/LoongSuitePilotMenuBarApp"
