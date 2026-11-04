@@ -6,6 +6,7 @@ import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkTraceInput } from '../../../src/inputs/qoder-work-log/qoder-work-trace-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 describe('QoderWorkTraceInput (CN variant)', () => {
   let tmpRoot: string;
@@ -97,6 +98,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(endNano).toMatch(/^\d{16,}$/);
     expect(endNano.endsWith('000000')).toBe(true);
     expect(BigInt(endNano)).toBeGreaterThan(BigInt(startNano));
+    await expectTurnStrategyParity(entries, 'qoder-work-cn-native-sdk');
   });
 
   it('caps tool.result timestamp at next step boundary', async () => {
@@ -133,6 +135,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     const toolResultNano = BigInt(toolResult!.time_unix_nano);
     const step2StartNano = BigInt(step2Request!.time_unix_nano);
     expect(toolResultNano).toBeLessThan(step2StartNano);
+    await expectTurnStrategyParity(entries, 'qoder-work-cn-sdk-overlap-clamp');
   });
 
   it('includes assistant tool calls before tool results in subsequent input deltas', async () => {

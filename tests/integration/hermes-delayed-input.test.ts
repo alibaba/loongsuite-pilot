@@ -13,6 +13,7 @@ import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { contentHash } from '../../src/utils/content-hash.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }); });
@@ -97,6 +98,7 @@ it.each([
       await manager.startInput(input.id); await manager.stopInput(input.id);
     }
     const canonical = capture.batchCalls.flat();
+    await expectTurnStrategyParity(canonical, `hermes-delayed-${stage}-${initial}`);
     expect(canonical.every(r => r.trace_id === traceId)).toBe(true);
     expect(new Set(canonical.map(r => r['event.id'])).size).toBe(canonical.length);
     expect(spans).toHaveLength(7); // ENTRY, AGENT, two STEP/LLM pairs, TOOL

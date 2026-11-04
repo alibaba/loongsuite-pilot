@@ -6,6 +6,7 @@ import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import * as stream from '../../src/flushers/turn-stream.js';
 import { openCodeProducer, hermesProducer, claudeProducer } from '../helpers/completed-turn-producers.mjs';
+import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -51,6 +52,7 @@ describe('Shipped producers through shared completed-turn conversion', () => {
         const sum = llms.reduce((total, s) => total + Number(s.attributes[key] ?? 0), 0);
         if (sum > 0) expect(aggregate.attributes[key]).toBe(sum);
       }
+      await expectTurnStrategyParity(records, `${agent}-shipped-producer`);
     },
   );
 });

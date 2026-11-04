@@ -8,6 +8,7 @@ import { QoderWorkTraceInput } from '../../../src/inputs/qoder-work-trace/qoder-
 import { applyQoderWorkStepTiming } from '../../../src/flushers/otlp-trace-flusher.js';
 import * as interceptReader from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 
 describe('QoderWorkTraceInput', () => {
@@ -480,6 +481,7 @@ describe('QoderWorkTraceInput', () => {
     expect(reqOut['gen_ai.request.model']).toBe('qwork-ultimate');
     expect(respOut['gen_ai.request.model']).toBe('qwork-ultimate');
     expect(respOut['gen_ai.response.model']).toBe('qwork-ultimate');
+    await expectTurnStrategyParity(entries, 'qoder-work-segment-model-timing');
   });
 
   it('enriches response usage from a matched segment pair', async () => {
@@ -716,6 +718,7 @@ describe('QoderWorkTraceInput', () => {
     expect(s1Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:01.000Z')) * 1_000_000n));
     expect(s2Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:03.000Z')) * 1_000_000n));
     expect(s3Resp.time_unix_nano).toBe(String(BigInt(Date.parse('2026-06-16T10:00:05.000Z')) * 1_000_000n));
+    await expectTurnStrategyParity(entries, 'qoder-work-segment-fifo');
   });
 
   it('pairs a retried logical LLM by loop_id when request_id changes', async () => {

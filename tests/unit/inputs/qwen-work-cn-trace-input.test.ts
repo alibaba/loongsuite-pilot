@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { QwenWorkCNTraceInput } from '../../../src/inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../../src/types/index.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 describe('QwenWorkCNTraceInput', () => {
   let root: string;
@@ -159,6 +160,7 @@ describe('QwenWorkCNTraceInput', () => {
     expect(entries.every(value => value['gen_ai.request.model'] === 'qmodel_latest')).toBe(true);
     expect(entries.every(value => value['gen_ai.agent.type'] === ClientType.QwenWorkCN)).toBe(true);
     expect(entries[0]?.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    await expectTurnStrategyParity(entries, 'qwen-work-cn-native-zero-token');
   });
 
   it('collects native token and cache usage without intercept overlays', async () => {
@@ -184,6 +186,7 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.cache_creation.input_tokens']).toBe(10);
     expect(response['gen_ai.usage.reasoning_tokens']).toBeUndefined();
     expect(interceptReader.readInterceptFile).not.toHaveBeenCalled();
+    await expectTurnStrategyParity(entries, 'qwen-work-cn-native-cache-usage');
   });
 
   it('does not read the QoderWork intercept file', async () => {

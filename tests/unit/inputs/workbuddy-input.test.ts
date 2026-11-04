@@ -18,6 +18,7 @@ import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { buildWorkBuddyEvents } from '../../../src/inputs/workbuddy/workbuddy-event-builder.js';
 import { WorkBuddyInput } from '../../../src/inputs/workbuddy/workbuddy-input.js';
 import type { WorkBuddyRecord } from '../../../src/inputs/workbuddy/workbuddy-types.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 const TRACE_ID = '0123456789abcdef0123456789abcdef';
 const MULTI_TOOL_FIXTURE = fileURLToPath(
@@ -84,6 +85,7 @@ function spanDurationNanos(span: {
 describe('WorkBuddy audit-event builder', () => {
   it('merges a multi-tool response wave into stable, uniquely identified audit events', async () => {
     const built = await buildWorkBuddyEvents(fixtureRecords(), { sessionId: 'session-1' });
+    await expectTurnStrategyParity(built, 'workbuddy-native-multi-tool-wave');
     const entries = built;
     expect(entries.map(entry => entry['event.name'])).toEqual([
       'llm.request',

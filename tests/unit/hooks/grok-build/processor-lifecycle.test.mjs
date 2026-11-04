@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expectTurnStrategyParity } from '../../../helpers/turn-strategy-parity.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const PROCESSOR = path.join(ROOT, 'assets/hooks/grok-build-hook-processor.mjs');
@@ -100,7 +101,7 @@ const basePayload = {
 };
 
 describe('Grok Build hook lifecycle', () => {
-  test('accepts the current Grok camelCase hook envelope', () => {
+  test('accepts the current Grok camelCase hook envelope', async () => {
     const result = runHook('stop', {
       hookEventName: 'stop',
       sessionId: 'session-redacted',
@@ -118,6 +119,7 @@ describe('Grok Build hook lifecycle', () => {
     expect(emitted).toHaveLength(8);
     expect(new Set(emitted.map(record => record['gen_ai.turn.id'])))
       .toEqual(new Set(['prompt-redacted']));
+    await expectTurnStrategyParity(emitted, 'grok-three-source-native-hook');
   });
 
   test('exports exactly one deterministic current turn across prompt, stop, session end, and shutdown', () => {

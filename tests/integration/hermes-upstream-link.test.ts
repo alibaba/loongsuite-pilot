@@ -11,6 +11,7 @@ import { TraceLinker } from '../../src/core/upstream-link/trace-linker.js';
 import { contentHash } from '../../src/utils/content-hash.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 const PLUGIN_PATH = path.resolve('assets/plugins/hermes-agent/loongsuite-pilot/__init__.py');
 const FIXTURE_PATH = path.resolve('tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl');
@@ -126,6 +127,7 @@ for event in json.loads(pathlib.Path(sys.argv[2]).read_text()):
       await manager.stopInput(input.id);
     }
     const records = flusher.batchCalls.flat();
+    await expectTurnStrategyParity(records, `hermes-upstream-${inputCase}-split-${splitBatches}`);
     for (const turn of turns) {
       const turnRecords = records.filter(record => record['gen_ai.turn.id'] === turn.id);
       expect(turnRecords.length).toBeGreaterThan(0);

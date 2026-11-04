@@ -39,6 +39,7 @@
     "perf:openclaw-turn": "node tests/performance/long-turn.perf.mjs openclaw",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:turn-strategies": "vitest run --config vitest.turn-strategies.config.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "bash scripts/e2e/run-e2e.sh",

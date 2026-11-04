@@ -12,6 +12,7 @@ import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { JsonlFlusher } from '../../src/flushers/jsonl-flusher.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, DOUBAO_NATIVE_FILES, doubaoCommandLine, doubaoFirstOutputLine, doubaoLine, doubaoToolLine } from '../helpers/doubao-work-fixture.js';
+import { expectTurnStrategyParity } from '../helpers/turn-strategy-parity.js';
 
 class ProbeInput extends DoubaoWorkInput {
   constructor(opts: ConstructorParameters<typeof DoubaoWorkInput>[0]) { super({ nativeScanIntervalMs: 0, ...opts }); }
@@ -144,6 +145,8 @@ it('routes watched native-shaped metadata through identity, mask, JSONL projecti
     expect(events.filter(e => e['event.name'] === 'tool.call')).toHaveLength(1);
     expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
     expect(events.filter(e => e['loongsuite.doubao_work.trace_role'] === 'log_only')).toHaveLength(2);
+    const parity = await expectTurnStrategyParity(events, 'doubao-native-passive-execution');
+    expect(parity.decisions.every(choice => !choice.streamed)).toBe(true);
     expect(new Set(events.map(e => e['event.id'])).size).toBe(events.length);
     expect(JSON.stringify({ events, spans: spans.map(s => ({ attributes: s.attributes, resource: s.resource.attributes })) }))
       .not.toMatch(/SYNTHETIC_SECRET|SYNTHETIC_CAPACITY_NOTICE/);

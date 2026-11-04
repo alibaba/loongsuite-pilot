@@ -7,6 +7,7 @@ import { QoderCnSqliteInput } from '../../../src/inputs/qoder-cn-sqlite/qoder-cn
 import { SQLITE_SYNC_PAGE } from '../../../src/utils/node-sqlite.ts';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
   let tmpDir: string;
@@ -61,6 +62,7 @@ describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
 
     const second = await collectOnce(makeInput());
     expect(second).toHaveLength(1);
+    await expectTurnStrategyParity(second, 'qoder-cn-legacy-sqlite-response');
     expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(total);
   });
 

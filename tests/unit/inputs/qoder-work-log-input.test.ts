@@ -6,6 +6,7 @@ import { CollectionMethod, ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkLogInput } from '../../../src/inputs/qoder-work-log/qoder-work-log-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 describe('QoderWorkLogInput', () => {
   let tmpRoot: string;
@@ -59,6 +60,7 @@ describe('QoderWorkLogInput', () => {
     // single metadata-only llm.response per turn (no thinking/text content).
     expect(llmResponses).toHaveLength(1);
     expect(toolCalls).toHaveLength(1);
+    await expectTurnStrategyParity(entries, 'qoder-work-legacy-sdk-metadata');
 
     const resp = llmResponses[0];
     expect(resp['gen_ai.output.messages']).toBeUndefined();

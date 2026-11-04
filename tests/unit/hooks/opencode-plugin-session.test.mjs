@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.ts';
 import {
   INVOCATION_SESSION_ID_FIELD,
   INVOCATION_USER_ID_FIELD,
@@ -191,6 +192,7 @@ describe('opencode plugin session turnSeq persistence', () => {
 
   it('emits the first full input as a delta baseline for later LLM steps', async () => {
     const records = await replayPluginFixture();
+    await expectTurnStrategyParity(records.filter(record => record['event.name']), 'opencode-v1-native-events');
     const requests = records.filter(record => record['event.name'] === 'llm.request');
 
     expect(requests).toHaveLength(5);

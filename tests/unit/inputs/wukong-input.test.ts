@@ -5,6 +5,7 @@ import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { WukongInput } from '../../../src/inputs/wukong/wukong-input.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { expectTurnStrategyParity } from '../../helpers/turn-strategy-parity.js';
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
@@ -179,6 +180,7 @@ describe('WukongInput', () => {
     expect(reqEntry!['gen_ai.agent.name']).toBe('wukong');
     expect(reqEntry!['gen_ai.provider.name']).toBe('dingtalk_deap');
     expect(reqEntry!['gen_ai.turn.id']).toBe('sess-1:t1');
+    await expectTurnStrategyParity(entries, 'wukong-cli-api-native-messages');
   });
 
   it('maps assistant events to llm.response with token usage', async () => {

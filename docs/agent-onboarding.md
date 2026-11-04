@@ -463,6 +463,8 @@ An integration is ready only after all applicable gates below pass.
 
 ### Conversion resources for long turns
 
+`npm run test:turn-strategies` exercises the shipped producer/Input protocols across the currently registered integrations, including recovery, upstream context, tools and child agents. It compares spans at Pilot's full conversion boundary and records whether streaming was selected; incompatible shapes such as Copilot's `react.step` and inline child trees retain batch conversion. This protocol regression does not imply native CLI/GUI installation acceptance for every client.
+
 Completed canonical turns (one model request per step, with model responses in
 step order) share incremental conversion across Agent types. Existing adapters
 prepare native IDs, independent roots and delegated context before this choice.
