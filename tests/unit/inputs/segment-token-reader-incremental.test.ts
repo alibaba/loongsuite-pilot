@@ -88,6 +88,32 @@ beforeEach(async () => {
 });
 
 describe('readSegmentTokensForSession incremental JSONL reading', () => {
+  it('does not read an unchanged partial record and collects it after append', async () => {
+    const sessionId = nextSessionId();
+    const [start, end] = requestLines('req-partial', 1000, 2000);
+    const file = await writeSegment(sessionId, start + '\n' + end.slice(0, -1));
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    const before = hoisted.segmentReadBytes;
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    expect(hoisted.segmentReadBytes).toBe(before);
+    await fs.appendFile(file, end.slice(-1) + '\n');
+    expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-partial']);
+  });
+
+  it('skips a 32 MiB unterminated prefix once and resumes at its delimiter', async () => {
+    const sessionId = nextSessionId();
+    const file = await writeSegment(sessionId, 'x'.repeat(32 * 1024 * 1024));
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    const before = hoisted.segmentReadBytes;
+    expect(before).toBe(32 * 1024 * 1024);
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    expect(hoisted.segmentReadBytes).toBe(before);
+    const suffix = '\n' + requestLines('req-after', 1000, 2000).join('\n') + '\n';
+    await fs.appendFile(file, suffix);
+    expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-after']);
+    expect(hoisted.segmentReadBytes - before).toBe(Buffer.byteLength(suffix));
+  });
+
   it('reads only bytes appended after the last complete record', async () => {
     const sessionId = nextSessionId();
     const firstBody = `${requestLines('req-a', 1000, 2000).join('\n')}\n`;

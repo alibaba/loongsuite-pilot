@@ -7,6 +7,7 @@ import { createLogger } from '../../utils/logger.js';
 const logger = createLogger('SegmentTokenReader');
 
 const READ_CHUNK_SIZE = 1024 * 1024;
+const MAX_RECORD_BYTES = 32 * 1024 * 1024;
 const EXPECTED_ID_RETRY_DELAY_MS = 25;
 const SESSION_IDLE_MS = 60_000;
 const SESSION_MAX_SIZE = 50;
@@ -42,6 +43,8 @@ interface SegmentFileState {
   dev: number;
   ino: number;
   committedOffset: number;
+  skippingLine?: boolean;
+  incomplete?: SegmentFileSnapshot;
   events: SegmentEvent[];
 }
 
@@ -56,6 +59,8 @@ interface SegmentFileSnapshot {
   dev: number;
   ino: number;
   size: number;
+  mtimeMs: number;
+  ctimeMs: number;
 }
 
 interface SegmentFileScan {
@@ -163,7 +168,10 @@ async function readSegmentTokensOnce(
       changed = true;
     }
 
-    if (file.size > fileState.committedOffset) {
+    const incomplete = fileState.incomplete;
+    if (file.size > fileState.committedOffset && !(incomplete
+      && incomplete.size === file.size && incomplete.mtimeMs === file.mtimeMs
+      && incomplete.ctimeMs === file.ctimeMs)) {
       const read = await readAppendedEvents(file, fileState, sessionId);
       changed = read.changed || changed;
       stableFailure = read.stableFailure || stableFailure;
@@ -206,8 +214,10 @@ async function readAppendedEvents(
   const startOffset = state.committedOffset;
   let position = startOffset;
   let committedOffset = startOffset;
-  let pending = Buffer.alloc(0);
-  let pendingStartOffset = startOffset;
+  let parts: Buffer[] = [];
+  let lineBytes = 0;
+  let skippingLine = state.skippingLine ?? false;
+  state.incomplete = undefined;
   const appendedEvents: SegmentEvent[] = [];
   let stableFailure = false;
 
@@ -225,47 +235,52 @@ async function readAppendedEvents(
         });
         break;
       }
+      const chunkStart = position;
       position += bytesRead;
-
-      const data = pending.length > 0
-        ? Buffer.concat([pending, chunk.subarray(0, bytesRead)])
-        : chunk.subarray(0, bytesRead);
-      const dataStartOffset = pendingStartOffset;
+      const data = chunk.subarray(0, bytesRead);
       let cursor = 0;
-
       while (cursor < data.length) {
         const newline = data.indexOf(0x0a, cursor);
-        if (newline < 0) break;
-
-        const lineStartOffset = dataStartOffset + cursor;
-        const text = data.subarray(cursor, newline).toString('utf8').trim();
-        if (text) {
-          try {
-            const record: unknown = JSON.parse(text);
-            if (record && typeof record === 'object' && !Array.isArray(record)) {
-              const event = toSegmentEvent(record as Record<string, unknown>);
-              if (event) appendedEvents.push(event);
-            }
-          } catch (err) {
-            // A newline-terminated malformed record cannot be repaired by a
-            // later append. Consume it so one bad line cannot stall the file.
-            logger.warn('invalid complete segment JSONL record; skipping it', {
-              sessionId,
-              filePath: snapshot.filePath,
-              offset: lineStartOffset,
-              error: String(err),
+        const end = newline < 0 ? data.length : newline + 1;
+        if (!skippingLine) {
+          const part = data.subarray(cursor, end);
+          lineBytes += part.length;
+          if (lineBytes > MAX_RECORD_BYTES || (lineBytes === MAX_RECORD_BYTES && newline < 0)) {
+            skippingLine = true;
+            parts = [];
+            logger.warn('oversized segment JSONL record; skipping it', {
+              sessionId, filePath: snapshot.filePath, offset: chunkStart + cursor + part.length - lineBytes,
             });
+          } else {
+            parts.push(part);
           }
         }
-
-        committedOffset = dataStartOffset + newline + 1;
-        cursor = newline + 1;
+        if (newline >= 0) {
+          if (!skippingLine) {
+            const text = (parts.length === 1 ? parts[0] : Buffer.concat(parts, lineBytes)).toString('utf8').trim();
+            if (text) {
+              try {
+                const record: unknown = JSON.parse(text);
+                if (record && typeof record === 'object' && !Array.isArray(record)) {
+                  const event = toSegmentEvent(record as Record<string, unknown>);
+                  if (event) appendedEvents.push(event);
+                }
+              } catch {
+                logger.warn('invalid complete segment JSONL record; skipping it', {
+                  sessionId, filePath: snapshot.filePath, offset: chunkStart + end - lineBytes,
+                });
+              }
+            }
+          }
+          parts = [];
+          lineBytes = 0;
+          skippingLine = false;
+          committedOffset = chunkStart + end;
+        } else if (skippingLine) {
+          committedOffset = position;
+        }
+        cursor = end;
       }
-
-      pending = cursor < data.length
-        ? Buffer.from(data.subarray(cursor))
-        : Buffer.alloc(0);
-      pendingStartOffset = dataStartOffset + cursor;
     }
   } catch (err) {
     stableFailure = !isTransientSegmentError(err);
@@ -290,6 +305,8 @@ async function readAppendedEvents(
     }
   }
 
+  if (position === snapshot.size && committedOffset < position) state.incomplete = snapshot;
+  state.skippingLine = skippingLine;
   if (committedOffset === startOffset) return { changed: false, stableFailure };
   state.events.push(...appendedEvents);
   state.committedOffset = committedOffset;
@@ -460,6 +477,8 @@ async function findSegmentFilesForSession(
           dev: stat.dev,
           ino: stat.ino,
           size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
         });
       } catch (err) {
         if (!isMissingPath(err)) {
