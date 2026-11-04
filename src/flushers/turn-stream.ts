@@ -63,8 +63,13 @@ export function planTurnStream(
   }
   // Streaming folds responses step by step. Preserve the batch converter's
   // source-order choice of final output/model/id for interleaved responses.
+  // Requests must also follow step order: batch ENTRY takes the first source
+  // request, and same-millisecond accumulated deltas retain source order.
+  let requestStep = 0;
   let responseStep = -1;
   for (const record of source) {
+    if (record['event.name'] === 'llm.request'
+      && stepIndexes.get(String(record['gen_ai.step.id'])) !== requestStep++) return undefined;
     if (record['event.name'] !== 'llm.response') continue;
     const index = stepIndexes.get(String(record['gen_ai.step.id']))!;
     if (index < responseStep) return undefined;

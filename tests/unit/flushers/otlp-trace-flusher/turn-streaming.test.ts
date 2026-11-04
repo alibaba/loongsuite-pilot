@@ -61,7 +61,9 @@ function snapshot(spans: ReadableSpan[]) {
   const key = (s: ReadableSpan) => `${s.attributes['gen_ai.span.kind']}:${s.attributes['gen_ai.response.id'] ?? s.attributes['gen_ai.tool.call.id'] ?? s.attributes['gen_ai.react.round'] ?? ''}`;
   return spans.map(s => ({ key: key(s), name: s.name, trace: s.spanContext().traceId,
     parent: byId.has(s.parentSpanId!) ? key(byId.get(s.parentSpanId!)!) : s.parentSpanId,
-    start: s.startTime, end: s.endTime, status: s.status,
+    kind: s.kind, start: s.startTime, end: s.endTime, status: s.status,
+    resource: Object.fromEntries(Object.entries(s.resource.attributes).filter(([key]) => key !== 'service.instance.id').sort(([a], [b]) => a.localeCompare(b))),
+    scope: s.instrumentationLibrary,
     attributes: Object.fromEntries(Object.entries(s.attributes).sort(([a], [b]) => a.localeCompare(b))),
   })).sort((a, b) => a.key.localeCompare(b.key));
 }
@@ -154,6 +156,59 @@ describe('Shared completed-turn streaming', () => {
     const inline = turn();
     inline[2] = { ...inline[2], 'gen_ai.agent.scope': 'subagent', 'gen_ai.subagent.parent_tool_call.id': 'tool-0' };
     expect(stream.planTurnStream(inline, { handler, passthroughKeys: [] })).toBeUndefined();
+  });
+
+  it.each([
+    { tied: false, anchored: false, ordered: false },
+    { tied: true, anchored: false, ordered: false },
+    { tied: true, anchored: true, ordered: false },
+    { tied: false, anchored: false, ordered: true },
+    { tied: true, anchored: false, ordered: true },
+  ])('preserves source request order with an early tool event (%j)', async ({ tied, anchored, ordered }) => {
+    const common = { trace_id: '1234567890abcdef1234567890abcdef', 'gen_ai.agent.type': 'qoder',
+      'gen_ai.agent.name': 'test-agent', 'gen_ai.session.id': 'session', 'gen_ai.turn.id': 'request-order',
+      'user.id': 'test-user', 'gen_ai.provider.name': 'test' };
+    const start = BigInt(Date.now() - 10_000) * 1_000_000n;
+    const message = (role: string, content: string) => [{ role, parts: [{ type: 'text', content }] }];
+    const event = (name: string, time: number, fields: Record<string, unknown> = {}) => ({ ...common,
+      'event.name': name, 'event.id': `${name}-${time}-${fields['gen_ai.step.id'] ?? 'control'}`,
+      ...(fields['gen_ai.step.id'] ? { 'gen_ai.react.round': fields['gen_ai.step.id'] === 'A' ? 0 : 1 } : {}),
+      time_unix_nano: String(start + BigInt(time) * 1_000_000n), ...fields } as AgentActivityEntry);
+    const request = (step: string, time: number) => event('llm.request', time, { 'gen_ai.step.id': step,
+      'gen_ai.response.id': `response-${step}`, 'gen_ai.request.model': 'test-model',
+      'gen_ai.input.messages_delta': message('user', step) });
+    const a = request('A', 5), b = request('B', tied ? 5 : 10);
+    const records = [
+      ...(anchored ? [event('other', 0, { 'gen_ai.input.messages_delta': message('user', 'task') })] : []),
+      // Arrival order can differ from source time; opening A does not make its request first.
+      event('tool.call', 21, { 'gen_ai.step.id': 'A', 'gen_ai.tool.call.id': 'tool-A',
+        'gen_ai.tool.name': 'read', 'gen_ai.tool.call.arguments': { path: 'test.txt' } }),
+      ...(ordered ? [a, b] : [b, a]),
+      event('llm.response', 20, { 'gen_ai.step.id': 'A', 'gen_ai.response.id': 'response-A',
+        'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'tool_call', id: 'tool-A',
+          name: 'read', arguments: { path: 'test.txt' } }] }],
+        'gen_ai.usage.input_tokens': 100, 'gen_ai.usage.output_tokens': 10 }),
+      event('tool.result', 22, { 'gen_ai.step.id': 'A', 'gen_ai.tool.call.id': 'tool-A',
+        'gen_ai.tool.name': 'read', 'gen_ai.tool.call.result': { text: 'result' } }),
+      event('llm.response', 30, { 'gen_ai.step.id': 'B', 'gen_ai.response.id': 'response-B',
+        'gen_ai.output.messages': message('assistant', 'done'),
+        'gen_ai.usage.input_tokens': 200, 'gen_ai.usage.output_tokens': 20 }),
+      event('other', 40, { 'gen_ai.turn.end': true }),
+    ];
+    const before = JSON.stringify(records);
+    const expected = (await collect(records, true)).flat();
+    const actual = (await collect(records)).flat();
+    // Compare the full output before checking the planner so a regression exposes changed data.
+    expect(snapshot(actual)).toEqual(snapshot(expected));
+    expect(typeof stream.planTurnStream(records, { handler: {} as any, passthroughKeys: [] })).toBe(ordered ? 'function' : 'undefined');
+    const inputs = (span: ReadableSpan) => JSON.parse(span.attributes['gen_ai.input.messages'] as string);
+    for (const span of actual.filter(s => ['ENTRY', 'AGENT'].includes(String(s.attributes['gen_ai.span.kind'])))) {
+      expect(inputs(span)).toEqual(message('user', anchored ? 'task' : ordered ? 'A' : 'B'));
+    }
+    const llms = new Map(actual.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM').map(s => [s.attributes['gen_ai.response.id'], s]));
+    expect(inputs(llms.get('response-A')!)).toEqual(tied && !ordered ? [...message('user', 'B'), ...message('user', 'A')] : message('user', 'A'));
+    expect(inputs(llms.get('response-B')!)).toEqual(tied && !ordered ? message('user', 'B') : [...message('user', 'A'), ...message('user', 'B')]);
+    expect(JSON.stringify(records)).toBe(before);
   });
 
   it('preflights missing steps, legacy multi-request steps and late parent metadata before emission', async () => {
