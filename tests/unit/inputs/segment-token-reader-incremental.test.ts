@@ -71,7 +71,7 @@ function requestLines(requestId: string, startTs: number, endTs: number, inputTo
   ];
 }
 
-async function writeSegment(sessionId: string, content: string, name = 'segment-0.jsonl'): Promise<string> {
+async function writeSegment(sessionId: string, content: string | Buffer, name = 'segment-0.jsonl'): Promise<string> {
   const dir = segmentsDir(sessionId);
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, name);
@@ -102,7 +102,7 @@ describe('readSegmentTokensForSession incremental JSONL reading', () => {
 
   it('skips a 32 MiB unterminated prefix once and resumes at its delimiter', async () => {
     const sessionId = nextSessionId();
-    const file = await writeSegment(sessionId, 'x'.repeat(32 * 1024 * 1024));
+    const file = await writeSegment(sessionId, Buffer.alloc(32 * 1024 * 1024, 0x78));
     expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
     const before = hoisted.segmentReadBytes;
     expect(before).toBe(32 * 1024 * 1024);

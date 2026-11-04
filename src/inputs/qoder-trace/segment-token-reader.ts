@@ -266,9 +266,9 @@ async function readAppendedEvents(
                   const event = toSegmentEvent(record as Record<string, unknown>);
                   if (event) appendedEvents.push(event);
                 }
-              } catch {
+              } catch (err) {
                 logger.warn('invalid complete segment JSONL record; skipping it', {
-                  sessionId, filePath: snapshot.filePath, offset: chunkStart + end - lineBytes,
+                  sessionId, filePath: snapshot.filePath, offset: chunkStart + end - lineBytes, error: String(err),
                 });
               }
             }
