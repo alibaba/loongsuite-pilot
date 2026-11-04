@@ -3,6 +3,7 @@
 import { convertEventLogToTrace, type ExtendedTelemetryHandler, type EventLogRecord } from '@loongsuite/otel-util-genai';
 
 import { ROOT_CONTEXT, trace, TraceFlags } from '@opentelemetry/api';
+import type { PreparedTurn } from './prepared-turn.js';
 
 type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]>;
 
@@ -17,7 +18,7 @@ export function convertDelegatedTurn(records: EventLogRecord[], options: Options
 }
 
 /** Share the transparent child ENTRY contract with incremental conversion. */
-export function prepareDelegatedTurn(records: EventLogRecord[], handler: ExtendedTelemetryHandler) {
+export function prepareDelegatedTurn(records: EventLogRecord[], handler: ExtendedTelemetryHandler): PreparedTurn {
   const marker = records.find(r => r['gen_ai.agent.scope'] === 'subagent' && r['parent_span_id']);
   if (!marker || !/^[0-9a-f]{32}$/.test(String(marker.trace_id))
     || !/^[0-9a-f]{16}$/.test(String(marker.parent_span_id))

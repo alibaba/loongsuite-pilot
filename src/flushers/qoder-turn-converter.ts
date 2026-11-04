@@ -7,6 +7,7 @@ import {
   type ExtendedTelemetryHandler,
 } from '@loongsuite/otel-util-genai';
 import type { ReservedSpanIdGenerator } from './span-id-reservation.js';
+import type { PreparedTurn } from './prepared-turn.js';
 
 const SYNTHETIC_PARENT = '0000000000000001';
 export const QODER_TRANSCRIPT_AGENT_TYPES = new Set(['qoder', 'qoder-cli', 'qoder-cn', 'qoder-idea']);
@@ -51,10 +52,23 @@ export function convertQoderTurn(
   records: EventLogRecord[],
   options: ConvertOptions & { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
 ) {
+  const prepared = prepareQoderTurn(records, options);
+  try {
+    return convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler });
+  } finally {
+    prepared.cleanup?.();
+  }
+}
+
+/** A scoped proxy also remains valid across awaited streaming exports. */
+export function prepareQoderTurn(
+  records: EventLogRecord[],
+  options: { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
+): PreparedTurn {
   const roots = independentTraceIds(records);
   const { handler, idGenerator } = options;
   const original = handler.startEntry;
-  handler.startEntry = function startQoderEntry(invocation: EntryInvocation, parentContext, startTime) {
+  const startEntry: ExtendedTelemetryHandler['startEntry'] = function startQoderEntry(invocation: EntryInvocation, parentContext, startTime) {
     const parent = parentContext && trace.getSpanContext(parentContext);
     if (!parent || parent.spanId !== SYNTHETIC_PARENT || !roots.has(parent.traceId)) {
       return original.call(handler, invocation, parentContext, startTime);
@@ -66,10 +80,12 @@ export function convertQoderTurn(
       idGenerator.clearTraceId();
     }
   };
-  try {
-    return convertEventLogToTrace(records, options);
-  } finally {
-    handler.startEntry = original;
-    idGenerator.clearTraceId();
-  }
+  const wrapped = new Proxy(handler, {
+    get(target, key) {
+      if (key === 'startEntry') return startEntry;
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { records, handler: wrapped, removedEntryCount: 0, cleanup: () => idGenerator.clearTraceId() };
 }

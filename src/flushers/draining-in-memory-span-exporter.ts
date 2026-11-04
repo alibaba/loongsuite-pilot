@@ -25,7 +25,8 @@ export class DrainingInMemorySpanExporter extends InMemorySpanExporter {
     }
   }
 
-  override async forceFlush(): Promise<void> {
+  /** Explicit streaming barrier; inherited forceFlush keeps batch scheduling. */
+  async drain(): Promise<void> {
     await Promise.all(this.pending);
   }
 }

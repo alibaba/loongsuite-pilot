@@ -4,7 +4,6 @@ import { Resource } from '@opentelemetry/resources';
 import { SpanKind } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
-  InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -13,13 +12,11 @@ import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
 import {
   convertEventLogToTrace,
   ExtendedTelemetryHandler,
-  type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
-import { convertDelegatedTurn } from './delegated-turn-converter.js';
-import { planOpenClawTurnStream } from './openclaw-turn-stream.js';
+import { planTurnStream } from './turn-stream.js';
+import { prepareTurnConversion } from './prepare-turn-conversion.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
-import { convertCodexTurn } from './codex-turn-converter.js';
-import { convertQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
@@ -145,7 +142,7 @@ interface TurnBuffer {
 interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
-  inMem: InMemorySpanExporter;
+  inMem: DrainingInMemorySpanExporter;
   toolSpanIds: SpanIdReservations;
   llmSpanIds: SpanIdReservations;
   idGenerator: ReservedSpanIdGenerator;
@@ -1218,12 +1215,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     this.turnBuffers.delete(buf.key);
     this.recordBufferRemoval(buf);
+    void this.trackTurnExport(buf);
+  }
+
+  private trackTurnExport(buf: TurnBuffer): Promise<void> {
     const p = this.flushSingleTurn(buf).catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
       this.inFlightExports.delete(p);
     });
     this.inFlightExports.add(p);
+    return p;
   }
 
   private async flushCompleted(): Promise<void> {
@@ -1237,7 +1239,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     await Promise.allSettled(
-      completed.map((buf) => this.flushSingleTurn(buf)),
+      completed.map((buf) => this.trackTurnExport(buf)),
     );
   }
 
@@ -1396,39 +1398,64 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const convertStarted = performance.now();
         let streamExportDurationMs = 0;
         let succeeded = false;
+        let cleanup: (() => void) | undefined;
         try {
-          const stream = agentType === 'openclaw' ? planOpenClawTurnStream(sanitized, { handler, passthroughKeys }) : undefined;
+          const prepared = prepareTurnConversion(agentType, sanitized, handler, idGenerator);
+          cleanup = prepared.cleanup;
+          const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
-            result = await stream(async () => {
+            let pending: ReadableSpan[] = [];
+            let pendingBytes = 0;
+            let grokInstructionsApplied = false;
+            const limit = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+            const exportPending = async () => {
+              if (!pending.length) return;
+              const batch = pending;
+              pending = [];
+              pendingBytes = 0;
+              const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
+              const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
+                metadata, openClawIdentity, reasoning);
+              if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
+              streamedExportSucceeded = exported && streamedExportSucceeded;
+            };
+            result = await stream(async final => {
               const exportStarted = performance.now();
               try {
                 await provider.forceFlush();
+                // Native forceFlush does not await InMemorySpanExporter's timer
+                // callbacks. Drain explicitly only for incremental execution.
+                await inMem.drain();
                 const spans = inMem.getFinishedSpans();
                 inMem.reset();
-                const exported = await this.exportConvertedSpans(agentType, serviceName, records, spans,
-                  grokMetadata, openClawIdentity, reasoning);
-                streamedExportSucceeded = exported && streamedExportSucceeded;
+                for (const span of spans) {
+                  const size = estimateSpanSize(span);
+                  if (pending.length && pendingBytes + size > limit) await exportPending();
+                  pending.push(span);
+                  pendingBytes += size;
+                  if (pendingBytes >= limit) await exportPending();
+                }
+                if (final) await exportPending();
               } finally {
                 streamExportDurationMs += performance.now() - exportStarted;
               }
             });
           } else {
             const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
-              : agentType === 'codex' ? convertCodexTurn
-              : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? convertQoderTurn
               : agentType === 'doubao-work' ? convertDoubaoWorkTurn
-              : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
               : convertEventLogToTrace;
             result = convert(
-              sanitized as unknown as EventLogRecord[],
-              { handler, strict: false, passthroughKeys, idGenerator,
+              prepared.records,
+              { handler: prepared.handler, strict: false, passthroughKeys,
                 ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
           }
+          result.spanCount -= prepared.removedEntryCount;
           succeeded = true;
         } finally {
+          cleanup?.();
           toolSpanIds.clear();
           llmSpanIds.clear();
           if (counters) {
@@ -1623,10 +1650,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
           if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
-          this.writeFailedLog(agentType, endpointName, spans, {
+          // Keep failed persistence within the same bounded batch lifetime.
+          // A fast-failing endpoint must not enqueue an entire turn of strings
+          // behind asynchronous file writes and recreate the memory spike.
+          void this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
-          }).catch(() => undefined);
+          }).catch(() => undefined).then(() => resolve(false));
+          return;
         } else if (counter) {
           counter.outSpans += spans.length;
           counter.outBytes += batchBytes;
@@ -1806,11 +1837,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
-    // Only OpenClaw's incremental conversion needs a per-step callback barrier.
-    // Preserve the existing flush scheduling for other Agent adapters.
-    const inMem = agentType === 'openclaw'
-      ? new DrainingInMemorySpanExporter()
-      : new InMemorySpanExporter();
+    // All compatible event shapes can stream. Batch fallback retains native
+    // forceFlush scheduling; only the stream invokes the explicit drain barrier.
+    const inMem = new DrainingInMemorySpanExporter();
     const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
