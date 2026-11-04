@@ -82,6 +82,8 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     const parsed = this.splitOnPilotBlock(fileBytes, cfg.marker);
     const block = parsed.existingBlock;
     if (parsed.conflictBlock || !block) return true;
+    const flowOffset = this.emptyFlowPatchOffset(Buffer.concat([parsed.before, parsed.after]));
+    if (flowOffset !== undefined && !block.startsWith(' ')) return true;
     if (!this.hasMetadataLine(block, `# entryId=${cfg.entryId}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginSource=${pluginUrl}`)) return true;
     if (!this.hasMetadataLine(block, `# pluginHash=${pluginHash}`)) return true;
@@ -161,9 +163,13 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         } else {
           createdFileFlag = !existedBefore;
         }
-        const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag);
+        const outside = Buffer.concat([parsed.before, parsed.after]);
+        const flowOffset = this.emptyFlowPatchOffset(outside);
+        const newBlock = this.composePilotBlock(cfg, pluginHash, createdFileFlag, flowOffset !== undefined);
         let nextBytes: Buffer;
-        if (parsed.existingBlock) {
+        if (flowOffset !== undefined) {
+          nextBytes = Buffer.concat([outside.subarray(0, flowOffset), Buffer.from(newBlock), outside.subarray(flowOffset)]);
+        } else if (parsed.existingBlock) {
           nextBytes = Buffer.concat([parsed.before, Buffer.from(newBlock), parsed.after]);
         } else {
           const sep = originalBytes.length > 0 && !originalBytes.toString('utf-8').endsWith('\n')
@@ -195,6 +201,8 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         deployMode: 'dsh-yaml-patch',
         error: 'concurrent modification detected; aborting after retry',
       };
+    } catch (error) {
+      return { success: false, agentId: def.id, deployMode: 'dsh-yaml-patch', error: String(error) };
     } finally {
       await this.releasePatchLock(patchPath, lockToken);
     }
@@ -263,17 +271,31 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
   // ─── Block composition / parsing ───
 
-  private composePilotBlock(cfg: DshYamlPatchConfig, pluginHash: string, createdFile?: boolean): string {
+  /** Empty flow sequences need an entry inside their brackets, not another YAML root. */
+  private emptyFlowPatchOffset(bytes: Buffer): number | undefined {
+    const text = bytes.toString('utf8');
+    const prefix = /^(?:\uFEFF)?(?:[ \t]*(?:#[^\r\n]*|---)?\r?\n)*[ \t]*/.exec(text)![0];
+    const body = text.slice(prefix.length);
+    if (!body.startsWith('[')) return undefined;
+    const empty = /^\[\s*\]/.exec(body);
+    if (!empty || body.slice(empty[0].length).split(/\r?\n/).some(line => line.trim() && !line.trimStart().startsWith('#'))) {
+      throw new Error('Non-empty flow-style DSH patch is unsupported; original preserved. Use a block sequence.');
+    }
+    return Buffer.byteLength(prefix) + 1;
+  }
+
+  private composePilotBlock(cfg: DshYamlPatchConfig, pluginHash: string, createdFile?: boolean, flow = false): string {
     const pluginUrl = pathToFileURL(this.resolvePluginPath(cfg)).href;
     const flag = createdFile === undefined ? '' : ` (created-file: ${createdFile ? 'true' : 'false'})`;
-    return [
+    const entry = flow
+      ? [`{insert: [{id: "loongsuite-pilot-observability", name: ${JSON.stringify(pluginUrl)}}]}`]
+      : ['- insert:', `  - id: 'loongsuite-pilot-observability'`, `    name: ${pluginUrl}`];
+    return (flow ? ' ' : '') + [
       `${BEGIN_PREFIX}${cfg.marker}${flag}`,
       `# entryId=${cfg.entryId}`,
       `# pluginSource=${pluginUrl}`,
       `# pluginHash=${pluginHash}`,
-      '- insert:',
-      `  - id: 'loongsuite-pilot-observability'`,
-      `    name: ${pluginUrl}`,
+      ...entry,
       `${END_PREFIX}${cfg.marker}`,
       '',
     ].join('\n');
@@ -302,7 +324,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
     const beginLineEnd = this.lineEndOffset(bytes, beginIdx);
     const endLineEnd = this.lineEndOffset(bytes, endIdx);
-    const beginLine = bytes.subarray(beginIdx, beginLineEnd).toString('utf-8').replace(/\r$/, '');
+    const beginLine = bytes.subarray(beginIdx, beginLineEnd).toString('utf-8').replace(/\r$/, '').trimStart();
     const endLine = bytes.subarray(endIdx, endLineEnd).toString('utf-8').replace(/\r$/, '');
     const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const validBegin = new RegExp(`^${BEGIN_PREFIX}${escapedMarker}(?: \\(created-file: (?:true|false)\\))?$`)
@@ -332,13 +354,15 @@ export class DshYamlPatchStrategy implements DeployStrategy {
       const index = bytes.indexOf(needle, from);
       if (index < 0) break;
       const atLineStart = index === 0 || bytes[index - 1] === 0x0a;
+      const flowBegin = marker.startsWith(BEGIN_PREFIX) && index >= 2
+        && bytes[index - 2] === 0x5b && bytes[index - 1] === 0x20;
       const next = index + needle.length;
       const boundary = next === bytes.length
         || bytes[next] === 0x20
         || bytes[next] === 0x09
         || bytes[next] === 0x0d
         || bytes[next] === 0x0a;
-      if (atLineStart && boundary) offsets.push(index);
+      if ((atLineStart || flowBegin) && boundary) offsets.push(flowBegin ? index - 1 : index);
       from = index + needle.length;
     }
     return offsets;

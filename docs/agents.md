@@ -114,6 +114,10 @@ Runtime assets and Pi settings are replaced atomically. A failed write preserves
 the previous file; incomplete Pi configuration cleanup stops uninstall before
 runtime removal so it can be retried. These safeguards also apply to home installs.
 
+DSH supports block-sequence patches and an empty `[]` root; uninstall restores
+the original empty-root bytes. A non-empty flow-style patch is preserved and
+reported as unsupported, so installation cannot append a second YAML root.
+
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded
 Pilot home registrations; unrecorded homes are not scanned. Invalid, conflicting,

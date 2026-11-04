@@ -73,6 +73,19 @@ describe('DSH uninstall cleanup helper', () => {
       .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('removes an inline flow-sequence block and restores the original brackets and comments', async () => {
+    const before = '# shared root\r\n  [';
+    const after = ' \n ] # original empty root\r\n';
+    const managed = block(false).replace(
+      "- insert:\n  - id: 'loongsuite-pilot-observability'\n    name: file:///pilot/plugins/dsh/plugin.mjs",
+      '{insert: [{id: "loongsuite-pilot-observability", name: "file:///pilot/plugins/dsh/plugin.mjs"}]}',
+    );
+    await fs.writeFile(patchPath, before + ' ' + managed + after);
+    const result = await cleanupDshIntegration({ patchPath, pluginDir, marker: MARKER });
+    expect(result).toMatchObject({ success: true, changed: true });
+    expect(await fs.readFile(patchPath, 'utf8')).toBe(before + after);
+  });
+
   it('fails closed and preserves an incomplete marker block', async () => {
     const invalid = `# BEGIN ${MARKER}\n- insert: []\n`;
     await fs.writeFile(patchPath, invalid);
