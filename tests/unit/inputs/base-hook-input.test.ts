@@ -137,10 +137,10 @@ describe('BaseHookInput', () => {
       const file = path.join(tmpDir, `test-hook-${getTodayDateString()}.jsonl`);
       const initial = JSON.stringify({ file_path: '/already-complete.ts' }) + '\n';
       const prefix = '{"file_path":"/finished.ts","padding":"';
-      const padding = Buffer.alloc(1024 * 1024, 0x78);
+      const padding = Buffer.alloc(8 * 1024 * 1024, 0x78);
       await fs.writeFile(file, initial + prefix);
-      for (let i = 0; i < 32; i++) await fs.appendFile(file, padding);
-      const partialBytes = Buffer.byteLength(prefix) + 32 * padding.length;
+      for (let i = 0; i < 4; i++) await fs.appendFile(file, padding);
+      const partialBytes = Buffer.byteLength(prefix) + 4 * padding.length;
       const deltas: Array<Record<string, number>> = [];
       const entries: AgentActivityEntry[] = [];
       input.on('input-runtime-delta', delta => deltas.push(delta));

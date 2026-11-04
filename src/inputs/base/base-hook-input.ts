@@ -10,6 +10,7 @@ const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
 const RECENT_LOG_FILE_LIMIT = 3;
 
 type OffsetMap = Record<string, number>;
+type IncompleteTail = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> & { offset: number };
 
 export interface HookInputOptions extends InputOptions {
   /** Directory containing the JSONL hook log files. */
@@ -39,7 +40,7 @@ export abstract class BaseHookInput extends BaseInput {
 
   protected readonly logDir: string;
   protected readonly logPrefix: string;
-  private readonly incompleteTails = new Map<string, { stat: Stats; offset: number }>();
+  private readonly incompleteTails = new Map<string, IncompleteTail>();
 
   /**
    * Cold-start replay protection. When true and the input has no prior state
@@ -167,9 +168,9 @@ export abstract class BaseHookInput extends BaseInput {
     const tail = this.incompleteTails.get(logFile);
     if (stat.size > offset) {
       runtime?.observeBacklog(stat.size - offset);
-      if (tail?.offset === offset && tail.stat.dev === stat.dev && tail.stat.ino === stat.ino
-        && tail.stat.size === stat.size && tail.stat.mtimeMs === stat.mtimeMs
-        && tail.stat.ctimeMs === stat.ctimeMs) {
+      if (tail?.offset === offset && tail.dev === stat.dev && tail.ino === stat.ino
+        && tail.size === stat.size && tail.mtimeMs === stat.mtimeMs
+        && tail.ctimeMs === stat.ctimeMs) {
         return { entries, offset };
       }
     }
@@ -194,7 +195,8 @@ export abstract class BaseHookInput extends BaseInput {
       // This is a single read at offset. Cache the tail only if that read
       // reached the observed EOF; a short read must be retried.
       if (bytesRead === stat.size - offset && lastNewline + 1 < bytesRead) {
-        this.incompleteTails.set(logFile, { stat, offset: offset + lastNewline + 1 });
+        const { dev, ino, size, mtimeMs, ctimeMs } = stat;
+        this.incompleteTails.set(logFile, { dev, ino, size, mtimeMs, ctimeMs, offset: offset + lastNewline + 1 });
       }
       if (lastNewline < 0) {
         return { entries, offset };
