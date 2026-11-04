@@ -1,8 +1,8 @@
 # Query Syntax
 
-`chartQueries[].query` / `chartQueries[].tokenQuery` 的构造规则。
+SLS 搜索、SQL、SPL 与 PromQL 的查询字符串写法。
 
-本文档负责查询字符串的写法；`datasources.md` 负责 `chartQueries` 的 JSON 结构。两者互补，不重复定义。
+本文档负责搜索、SQL、SPL 与 PromQL 的写法；[datasources.md](datasources.md) 负责 `chartQueries` 结构；[筛选器与变量替换](filters-and-variables.md) 负责参数语法、模板与执行查询的关系及控件配置。
 
 ## 快速决策：选哪种 datasource
 
@@ -406,9 +406,7 @@ ORDER BY __time__ DESC LIMIT ALL
 
 ### 过滤器候选值（droplistpro）
 
-```sql
-* | SELECT DISTINCT status ORDER BY status
-```
+候选查询的结构、返回列与过滤继承见 [筛选器与变量替换：动态候选列表](filters-and-variables.md#动态候选列表)。
 
 ### 地图聚合（chinadistrictmap / worlddistrictmap）
 
@@ -464,7 +462,7 @@ SQL + PromQL（`metricsql`）：
 ## 5. 常见坑
 
 - **过滤条件放错位置**：有索引的过滤条件应放在 `|` 前面（搜索条件），不要全部塞进 SQL 的 `WHERE`
-- **`query` 和 `tokenQuery`**：无变量替换时两者相同；有过滤器变量时 `tokenQuery` 保留原始模板，`query` 是替换后的值
+- **查询模板与执行值**：按 [筛选器与变量替换](filters-and-variables.md#query-与-tokenquery) 同步维护 `query` 和 `tokenQuery`
 - **Scan SQL 不是 SPL**：`set session mode=scan; SELECT ...` 是扫描分析（SQL），`| where ... | project ...` 是扫描查询（SPL），两者语法不同
 - **SPL 字段类型**：SPL 中所有字段视为 text，数值比较必须 `cast`
 - **MetricStore 表名引号**：SQL 直查时序表，表名 `"{store}.prom"` 的双引号不能省
