@@ -34,10 +34,12 @@ fn isolated(c: &mut tokio::process::Command, root: &Path) {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 }
-async fn finish(c: &mut tokio::process::Command, input: &Value) -> Output {
+async fn finish(c: &mut tokio::process::Command, input: Option<&Value>) -> Output {
     let mut child = c.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(input.to_string().as_bytes()).await.unwrap();
+    if let Some(input) = input {
+        stdin.write_all(input.to_string().as_bytes()).await.unwrap();
+    }
     drop(stdin);
     let out = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
         .await
@@ -150,7 +152,7 @@ if [[ "$valid" != true && "${3-}" != --allow-missing ]]; then exit 2; fi
     if !resources.is_empty() {
         c.env("LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES", resources);
     }
-    let hook = finish(&mut c, &payload).await;
+    let hook = finish(&mut c, Some(&payload)).await;
     let response: Value = serde_json::from_slice(&hook.stdout).unwrap();
     let updated = response.pointer("/hookSpecificOutput/updatedInput");
     if mode == 3 {
@@ -168,7 +170,7 @@ if [[ "$valid" != true && "${3-}" != --allow-missing ]]; then exit 2; fi
     let mut run = tokio::process::Command::new("/bin/bash");
     isolated(&mut run, r);
     run.args(["-c", effective]);
-    let downstream = finish(&mut run, &json!({})).await;
+    let downstream = finish(&mut run, None).await;
     let raw = std::fs::read(&output).unwrap();
     let parts = raw
         .split(|b| *b == 0)
@@ -219,7 +221,7 @@ if [[ "$valid" != true && "${3-}" != --allow-missing ]]; then exit 2; fi
         stop.env("TRACEPARENT", format!("00-{TRACE}-{UPSTREAM}-01"))
             .env("TRACESTATE", STATE);
     }
-    let out=finish(&mut stop,&json!({"session_id":"flow-session","prompt_id":"prompt-1","stop_reason":"end_turn","transcript_path":transcript})).await;
+    let out=finish(&mut stop,Some(&json!({"session_id":"flow-session","prompt_id":"prompt-1","stop_reason":"end_turn","transcript_path":transcript}))).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&out.stdout).unwrap(),
         json!({})
