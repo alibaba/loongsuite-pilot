@@ -173,6 +173,17 @@ describe('QoderWorkTraceInput', () => {
     expect(input.collectionMethod).toBe(CollectionMethod.HookJsonl);
   });
 
+  it('leaves the shared checkpoint clean after consuming an unchanged SDK file', async () => {
+    await writeSdkLog('old-session', ['already consumed']);
+    const input = makeInput();
+    expect(await startAndCollect(input)).toEqual([]);
+    const update = vi.spyOn(stateStore, 'update');
+    expect(await triggerCycle(input)).toEqual([]);
+    expect(await triggerCycle(input)).toEqual([]);
+    expect(update).not.toHaveBeenCalled();
+    await input.stop();
+  });
+
   it('reads hook JSONL and injects trace_id', async () => {
     const hookFile = path.join(hookLogDir, todayFileName());
     const entry = buildHookEntry();
