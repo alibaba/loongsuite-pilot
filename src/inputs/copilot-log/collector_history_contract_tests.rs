@@ -760,3 +760,6 @@ async fn rejected_progress_cannot_leak_through_an_older_save_when_another_global
         accepted.stop_all().await;
     }
 }
+
+#[path = "polling_wakeup_history_tests.rs"]
+mod polling_wakeup_history_tests;

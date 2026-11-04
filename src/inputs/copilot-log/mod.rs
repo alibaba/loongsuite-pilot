@@ -381,8 +381,9 @@ impl InputBody for CopilotLogBody {
     async fn on_start(&self, _rt: &InputRuntime) -> Result<()> {
         tokio::fs::create_dir_all(&self.wakeup_dir).await?;
         self.apply_history_policy().await?;
-        if let Some(host) = self.host.lock().expect("Copilot host").clone() {
-            let watcher = spawn_copilot_wakeup_watcher(&self.wakeup_dir, host);
+        let host = self.host.lock().expect("Copilot host").clone();
+        if let Some(host) = host {
+            let watcher = spawn_copilot_wakeup_watcher(&self.wakeup_dir, host).await;
             *self.watcher.lock().expect("Copilot watcher") = Some(watcher);
         }
         Ok(())
@@ -486,7 +487,7 @@ impl Drop for CopilotWakeupWatcher {
         self.task.abort();
     }
 }
-fn spawn_copilot_wakeup_watcher(
+async fn spawn_copilot_wakeup_watcher(
     directory: &Path,
     host: Weak<HostedInput<CopilotLogBody>>,
 ) -> CopilotWakeupWatcher {
@@ -494,9 +495,22 @@ fn spawn_copilot_wakeup_watcher(
     if let Some(watcher) = spawn_copilot_inotify(directory, host.clone()) {
         return watcher;
     }
+    spawn_copilot_polling_wakeup_watcher(directory, host, || {}).await
+}
+
+async fn spawn_copilot_polling_wakeup_watcher(
+    directory: &Path,
+    host: Weak<HostedInput<CopilotLogBody>>,
+    on_polled: impl Fn() + Send + 'static,
+) -> CopilotWakeupWatcher {
+    // Capture the existing generation before on_start returns and the first
+    // collection begins. An immediate first tick is observation, not a change.
+    let mut previous = tokio::fs::metadata(directory)
+        .await
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
     let directory = directory.to_owned();
     let task = tokio::spawn(async move {
-        let mut previous = None;
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         loop {
             interval.tick().await;
@@ -511,6 +525,9 @@ fn spawn_copilot_wakeup_watcher(
                 };
                 host.request_collection();
             }
+            // Observer is a no-op in production; tests use completed real polls
+            // rather than sleeps to verify both absence and delivery of wakeups.
+            on_polled();
         }
     });
     CopilotWakeupWatcher { task }
@@ -692,7 +709,7 @@ mod tests {
         });
         let directory = root.path().join("markers");
         tokio::fs::create_dir(&directory).await.unwrap();
-        let watcher = spawn_copilot_wakeup_watcher(&directory, Arc::downgrade(&input.inner));
+        let watcher = spawn_copilot_wakeup_watcher(&directory, Arc::downgrade(&input.inner)).await;
         let task = watcher.task.abort_handle();
         drop(watcher);
         tokio::time::timeout(Duration::from_secs(1), async {

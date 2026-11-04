@@ -114,6 +114,16 @@ jobs:
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
           cargo test -p loongsuite-pilot --all-features --locked --lib inputs::qoder_trace::transcript_source:: -- --test-threads=2 --nocapture
+      - name: Copilot fallback wakeup and queue acknowledgement
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          prefix=inputs::copilot_log::history_policy_tests::collector_history_contract_tests::
+          for leaf in input_l175_real_shared_lifecycle_commits_only_after_synchronous_queue_acceptance polling_wakeup_history_tests::polling_wakeup_existing_directory_is_quiet_and_real_markers_retry_once_after_restart; do
+            selector="$prefix$leaf"
+            test "$(cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --list | grep -c ': test$')" -eq 1
+            cargo test -p loongsuite-pilot --all-features --locked --lib "$selector" -- --exact --test-threads=1 --nocapture
+          done
       - name: Optional Node worker resolution policy
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         run: |
