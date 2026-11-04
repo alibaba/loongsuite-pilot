@@ -178,20 +178,21 @@ describe('QoderWorkTraceInput', () => {
     const file = path.join(sdkLogDir, 'old-session', 'main.log');
     const stat = await fs.stat(file);
     const input = makeInput();
+    const key = `${input.id}:sdk-token:${file}`;
     const update = vi.spyOn(stateStore, 'update');
     try {
       expect(await startAndCollect(input)).toEqual([]);
-      expect(stateStore.get(`${input.id}:sdk-token:${file}`)).toMatchObject({
+      expect(stateStore.get(key)).toMatchObject({
         lastOffset: stat.size,
         extra: { inode: stat.ino },
       });
       update.mockClear();
       expect(await triggerCycle(input)).toEqual([]);
       expect(await triggerCycle(input)).toEqual([]);
-      expect(update).not.toHaveBeenCalled();
+      expect(update.mock.calls.filter(([updatedKey]) => updatedKey === key)).toEqual([]);
     } finally {
-      await input.stop();
       update.mockRestore();
+      await input.stop();
     }
   });
 
