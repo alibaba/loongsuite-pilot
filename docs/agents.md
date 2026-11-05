@@ -83,6 +83,7 @@ shared installation; other detected Agents keep their home-local installation:
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | Existing `$PI_CODING_AGENT_DIR/settings.json` (`extensions`) | 0.73.1, 1.5.0 |
+| DSH | Existing `$DSH_HOME/cordis.patch.yml` (Pilot-owned block) | 0.2.1-rc.5 |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -99,11 +100,23 @@ when their session files live in subdirectories. An independently selected
 `agentDir` does not inherit this registration. Pilot does not change `pi`, its
 arguments, or the root environment variable. A system request reports the actual
 shared configuration path; this is configuration-root coverage, not a native
-machine-wide Pi policy. Omitting `--scope` retains the existing home behavior.
+machine-wide Pi policy.
+
+DSH similarly reuses its existing `DSH_HOME` (default `~/.dsh`). All profiles
+under that home read the shared patch; new identity homes must retain that
+`DSH_HOME` to inherit the plugin. Pilot reports the resolved patch path and does
+not change `dsh`, its arguments, or `DSH_HOME`. Pi/DSH derive the default output
+directory from the installed plugin, so new identities do not need Pilot data
+directory environment variables. Explicit data directory overrides still apply.
+Omitting `--scope` retains the existing home registration behavior.
 
 Runtime assets and Pi settings are replaced atomically. A failed write preserves
 the previous file; incomplete Pi configuration cleanup stops uninstall before
 runtime removal so it can be retried. These safeguards also apply to home installs.
+
+DSH supports block-sequence patches and an empty `[]` root; uninstall restores
+the original empty-root bytes. A non-empty flow-style patch is preserved and
+reported as unsupported, so installation cannot append a second YAML root.
 
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded

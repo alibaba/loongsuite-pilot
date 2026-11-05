@@ -17,18 +17,18 @@
  */
 import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
 const ENABLED_MARKER = path.join(path.dirname(fileURLToPath(import.meta.url)), '.collection-enabled');
+const INSTALLED_DATA_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function dataDir() {
   return process.env.LOONGSUITE_PILOT_DATA_DIR
     || process.env.PILOT_DATA
-    || path.join(os.homedir(), '.loongsuite-pilot');
+    || INSTALLED_DATA_DIR;
 }
 function logDir() { return path.join(dataDir(), 'logs', 'dsh'); }
 function collectionEnabled() { return existsSync(ENABLED_MARKER); }
@@ -51,9 +51,22 @@ function redact(value) {
   return out;
 }
 function appendLine(file, obj) {
-  if (!existsSync(file)) ensureDir(path.dirname(file));
-  appendFileSync(file, JSON.stringify(obj) + '\n');
-  if (process.platform !== 'win32') chmodSync(file, 0o600);
+  try {
+    if (!existsSync(file)) ensureDir(path.dirname(file));
+    appendFileSync(file, JSON.stringify(obj) + '\n');
+    if (process.platform !== 'win32') chmodSync(file, 0o600);
+  } catch {
+    // Collection is best effort. Retry only when another business event arrives.
+  }
+}
+function observe(handler) {
+  return (...args) => {
+    try {
+      if (collectionEnabled()) handler(...args);
+    } catch {
+      // Malformed or unserializable telemetry must not interrupt a DSH session.
+    }
+  };
 }
 function workerFields() {
   const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: 'dsh' });
@@ -65,7 +78,6 @@ export default function apply(ctx) {
     ctx.logger(AGENT).info('loongsuite-pilot-observability collection is disabled');
     return;
   }
-  ensureDir(logDir());
   const identity = workerFields();
   appendLine(path.join(logDir(), `dsh-${process.pid}.jsonl`), {
     type: `${AGENT}/loaded`,
@@ -73,15 +85,13 @@ export default function apply(ctx) {
     time: Date.now(),
     ...identity,
   });
-  ctx.on('session/created', (s) => {
-    if (!collectionEnabled()) return;
+  ctx.on('session/created', observe((s) => {
     appendLine(sessionFile(s.id), {
       type: 'session/created', sid: String(s.id), time: Date.now(),
       ...identity,
     });
-  });
-  ctx.on('session/event', (s, e) => {
-    if (!collectionEnabled()) return;
+  }));
+  ctx.on('session/event', observe((s, e) => {
     appendLine(sessionFile(s.id), {
       sid: String(s.id),
       seq: e.seq,
@@ -90,6 +100,6 @@ export default function apply(ctx) {
       data: redact(e.data),
       ...identity,
     });
-  });
+  }));
   ctx.logger(AGENT).info('loongsuite-pilot-observability plugin loaded; logDir=%s', logDir());
 }

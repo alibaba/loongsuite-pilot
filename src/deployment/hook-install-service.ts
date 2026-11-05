@@ -474,7 +474,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       agent.hookScope = 'system';
       agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
       agent.collectionStatus = 'not-verified';
-    } else if (opts.deploymentScope === 'system' && agent.id === 'pi-coding-agent'
+    } else if (opts.deploymentScope === 'system' && (agent.id === 'pi-coding-agent' || agent.id === 'dsh')
       && (agent.status === 'ok' || agent.status === 'up-to-date')) {
       agent.settingsPath = manager.recordedConfigPath(agent.id) ?? agent.settingsPath;
       agent.hint = `Registered in shared config ${agent.settingsPath}. New sessions must use the same configuration root; independent roots do not inherit it.`;
