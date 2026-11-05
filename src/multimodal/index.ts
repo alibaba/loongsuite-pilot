@@ -6,7 +6,7 @@ export { MultimodalProcessor } from './processor.js';
 export {
   asRecord,
   matchAll,
-  resolveImagePath,
+  resolveLocalPath,
   takeUniqueExtractedPaths,
   timeUnixNanoToMillis,
 } from './resolve.js';

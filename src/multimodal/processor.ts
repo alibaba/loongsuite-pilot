@@ -5,9 +5,10 @@ import {
   extFromMime,
   isRealPathInsideRoots,
   joinStorageUri,
-  lstatRegularImageFile,
-  normalizeLocalImagePath,
-  openNormalizedLocalImage,
+  lstatRegularFile,
+  modalityFromMime,
+  normalizeLocalMediaPath,
+  openNormalizedLocalMedia,
   yyyymmddFromUnixMs,
 } from './resolve.js';
 import type {
@@ -155,7 +156,7 @@ export class MultimodalProcessor {
     token: { timedOut: boolean } = { timedOut: false },
     signal?: AbortSignal,
   ): Promise<UriResult | null> {
-    const key = normalizeLocalImagePath(filePath);
+    const key = normalizeLocalMediaPath(filePath);
     if (!key) return null;
 
     const roots = (opts?.allowedRootPaths ?? []).map(r => r.trim()).filter(Boolean);
@@ -164,7 +165,7 @@ export class MultimodalProcessor {
       return null;
     }
 
-    const stated = await lstatRegularImageFile(key, signal);
+    const stated = await lstatRegularFile(key, signal);
     if (!stated) {
       if (!signal?.aborted) logger.warn('multimodal file read failed', { path: key });
       return null;
@@ -198,7 +199,7 @@ export class MultimodalProcessor {
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
+        const loaded = await openNormalizedLocalMedia(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
         if (!loaded || token.timedOut) {
           if (!loaded && !token.timedOut) logger.warn('multimodal file read failed', { path: key });
           return null;
@@ -215,7 +216,7 @@ export class MultimodalProcessor {
 
         const result = this.bytesToUri(loaded.bytes, {
           mime_type: loaded.mime_type,
-          modality: 'image',
+          modality: modalityFromMime(loaded.mime_type),
           ...(typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0
             ? { time_unix_ms: timeUnixMs }
             : {}),

@@ -218,7 +218,7 @@ function toolCallRawPaths(kind: ToolKind | null, record: Record<string, unknown>
 
 function toolResultRawPaths(kind: ToolKind | null, record: Record<string, unknown>): string[] {
   if (kind === ToolKind.MEDIA_READ) {
-    return fieldList(asRecord(record.data)?.files, 'source', item => item.kind === 'image');
+    return fieldList(asRecord(record.data)?.files, 'source', item => item.kind === 'image' || item.kind === 'video');
   }
   if (kind === ToolKind.MEDIA_TASK) {
     return record.status === 'completed' ? stringList(record.files) : [];
@@ -371,7 +371,7 @@ async function convertPathsToUriParts(
     parts.push({
       type: 'uri',
       mime_type: result.mime_type,
-      modality: 'image',
+      modality: result.modality,
       uri: result.uri,
     });
   }

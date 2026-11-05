@@ -221,7 +221,7 @@ async function convertPathsToUriParts(
     parts.push({
       type: 'uri',
       mime_type: result.mime_type,
-      modality: 'image',
+      modality: result.modality,
       uri: result.uri,
     });
   }

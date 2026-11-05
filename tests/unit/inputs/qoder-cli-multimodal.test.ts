@@ -9,7 +9,7 @@ import {
   extractToolImagePaths,
 } from '../../../src/inputs/qoder-trace/qoder-cli-multimodal.js';
 import { withDeadline } from '../../../src/multimodal/processor.js';
-import { resolveImagePath } from '../../../src/multimodal/resolve.js';
+import { resolveLocalPath } from '../../../src/multimodal/resolve.js';
 import { fakePathToUri } from '../multimodal/fake-uri.js';
 import { MAX_MULTIMODAL_PARTS } from '../../../src/multimodal/types.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
@@ -212,15 +212,15 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
     )).toEqual([]);
   });
 
-  it('resolveImagePath joins cwd only for relative paths', () => {
+  it('resolveLocalPath joins cwd only for relative paths', () => {
     if (process.platform === 'win32') {
-      expect(resolveImagePath('C:\\abs\\a.png', 'C:\\cwd')).toBe(path.win32.normalize('C:\\abs\\a.png'));
-      expect(resolveImagePath('rel\\a.png', 'C:\\cwd')).toBe(path.win32.resolve('C:\\cwd', 'rel\\a.png'));
+      expect(resolveLocalPath('C:\\abs\\a.png', 'C:\\cwd')).toBe(path.win32.normalize('C:\\abs\\a.png'));
+      expect(resolveLocalPath('rel\\a.png', 'C:\\cwd')).toBe(path.win32.resolve('C:\\cwd', 'rel\\a.png'));
       return;
     }
 
-    expect(resolveImagePath('/abs/a.png', '/cwd')).toBe(path.normalize('/abs/a.png'));
-    expect(resolveImagePath('rel/a.png', '/cwd')).toBe(path.resolve('/cwd', 'rel/a.png'));
+    expect(resolveLocalPath('/abs/a.png', '/cwd')).toBe(path.normalize('/abs/a.png'));
+    expect(resolveLocalPath('rel/a.png', '/cwd')).toBe(path.resolve('/cwd', 'rel/a.png'));
   });
 });
 
