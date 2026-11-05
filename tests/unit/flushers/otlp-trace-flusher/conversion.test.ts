@@ -335,6 +335,102 @@ describe('OtlpTraceFlusher - conversion', () => {
     expect(llmSpan.attributes).not.toHaveProperty('gen_ai.skill.name');
   });
 
+  it('copies multimodal summaries onto the matching tool and llm spans', () => {
+    const image = [{ uri: 'oss://bucket/a.png', mime_type: 'image/png', modality: 'image' }];
+    const records = [
+      {
+        'event.name': 'tool.call',
+        'gen_ai.tool.call.id': 'tool-1',
+        'gen_ai.output.multimodal_metadata': image,
+      },
+      {
+        'event.name': 'tool.result',
+        'gen_ai.tool.call.id': 'tool-1',
+        'gen_ai.input.multimodal_metadata': image,
+        'gen_ai.input.multimodal_metadata_delta': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.response.id': 'resp-1',
+        'gen_ai.output.multimodal_metadata': image,
+      },
+    ] as unknown as AgentActivityEntry[];
+    const toolSpan = {
+      attributes: { 'gen_ai.span.kind': 'TOOL', 'gen_ai.tool.call.id': 'tool-1' },
+    };
+    const otherTool = {
+      attributes: { 'gen_ai.span.kind': 'TOOL', 'gen_ai.tool.call.id': 'tool-2' },
+    };
+    const llmSpan = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-1', 'gen_ai.tool.call.id': 'tool-1' },
+    };
+    const encoded = JSON.stringify(image);
+
+    (flusher as any).enrichMultimodalAttributes(records, [toolSpan, otherTool, llmSpan]);
+
+    expect(toolSpan.attributes).toMatchObject({
+      'gen_ai.output.multimodal_metadata': encoded,
+      'gen_ai.input.multimodal_metadata': encoded,
+      'gen_ai.input.multimodal_metadata_delta': encoded,
+    });
+    expect(otherTool.attributes).not.toHaveProperty('gen_ai.output.multimodal_metadata');
+    expect(llmSpan.attributes).toMatchObject({ 'gen_ai.output.multimodal_metadata': encoded });
+    expect(llmSpan.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata');
+  });
+
+  it('attaches a request summary through the single response in its step', () => {
+    const image = [{ uri: 'oss://bucket/b.png', mime_type: 'image/png' }];
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.input.multimodal_metadata': image,
+        'gen_ai.input.multimodal_metadata_delta': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-1',
+        'gen_ai.response.id': 'resp-1',
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.input.multimodal_metadata': image,
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.response.id': 'resp-2',
+      },
+      {
+        'event.name': 'llm.response',
+        'gen_ai.step.id': 'step-2',
+        'gen_ai.response.id': 'resp-3',
+      },
+    ] as unknown as AgentActivityEntry[];
+    const matched = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-1' },
+    };
+    const ambiguous = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-2' },
+    };
+    const untouched = {
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.response.id': 'resp-9' },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [matched, ambiguous, untouched]);
+
+    expect(matched.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata': JSON.stringify(image),
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(image),
+    });
+    expect(ambiguous.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata');
+    expect(untouched.attributes).toEqual({
+      'gen_ai.span.kind': 'LLM',
+      'gen_ai.response.id': 'resp-9',
+    });
+  });
+
   it('enriches OpenClaw LLM and AGENT spans with per-call reasoning tokens and error status', () => {
     const records = [
       {

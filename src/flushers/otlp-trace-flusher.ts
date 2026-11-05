@@ -117,6 +117,11 @@ const SKILL_ATTRIBUTE_KEYS = [
   'gen_ai.skill.description',
   'gen_ai.skill.version',
 ] as const;
+const MULTIMODAL_METADATA_KEYS = [
+  'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
+  'gen_ai.output.multimodal_metadata',
+] as const;
 
 interface TurnBuffer {
   key: string;
@@ -1519,6 +1524,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     if (spans.length === 0) return true;
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
+    this.enrichMultimodalAttributes(records, spans);
     if (agentType === 'openclaw') {
       this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
       this.enrichOpenClawSessionKey(records, spans);
@@ -1891,6 +1897,69 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const callId = span.attributes['gen_ai.tool.call.id'];
       if (typeof callId !== 'string') continue;
       const attributes = attributesByCallId.get(callId);
+      if (attributes) Object.assign(span.attributes, attributes);
+    }
+  }
+
+  private enrichMultimodalAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const responseIdByStep = new Map<string, string>();
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response') continue;
+      const stepId = record['gen_ai.step.id'];
+      const responseId = record['gen_ai.response.id'];
+      if (typeof stepId !== 'string' || stepId.length === 0) continue;
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const prior = responseIdByStep.get(stepId);
+      responseIdByStep.set(stepId, prior === undefined || prior === responseId ? responseId : '');
+    }
+
+    const attributesByCallId = new Map<string, Record<string, string>>();
+    const attributesByResponseId = new Map<string, Record<string, string>>();
+    for (const record of records) {
+      const name = record['event.name'];
+      let target: Map<string, Record<string, string>> | undefined;
+      let id: string | undefined;
+      if (name === 'tool.call' || name === 'tool.result') {
+        const callId = record['gen_ai.tool.call.id'];
+        if (typeof callId === 'string' && callId.length > 0) {
+          target = attributesByCallId;
+          id = callId;
+        }
+      } else if (name === 'llm.request' || name === 'llm.response') {
+        const responseId = record['gen_ai.response.id'];
+        const resolved = typeof responseId === 'string' && responseId.length > 0
+          ? responseId
+          : name === 'llm.request' && typeof record['gen_ai.step.id'] === 'string'
+            ? responseIdByStep.get(record['gen_ai.step.id'])
+            : undefined;
+        if (resolved) {
+          target = attributesByResponseId;
+          id = resolved;
+        }
+      }
+      if (!target || !id) continue;
+
+      const attributes = target.get(id) ?? {};
+      for (const key of MULTIMODAL_METADATA_KEYS) {
+        const value = record[key];
+        if (value == null || typeof value !== 'object') continue;
+        attributes[key] = JSON.stringify(value);
+      }
+      if (Object.keys(attributes).length > 0) target.set(id, attributes);
+    }
+
+    for (const span of spans) {
+      const kind = span.attributes['gen_ai.span.kind'];
+      const id = kind === 'TOOL'
+        ? span.attributes['gen_ai.tool.call.id']
+        : kind === 'LLM'
+          ? span.attributes['gen_ai.response.id']
+          : undefined;
+      if (typeof id !== 'string') continue;
+      const attributes = (kind === 'TOOL' ? attributesByCallId : attributesByResponseId).get(id);
       if (attributes) Object.assign(span.attributes, attributes);
     }
   }
