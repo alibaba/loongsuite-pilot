@@ -72,6 +72,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Performance smoke cases keep their original CPU budgets against compiled code.
+# Optimize this package only; unrelated test dependencies keep their profiles.
+[profile.test.package.loongsuite-pilot]
+opt-level = 1
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 

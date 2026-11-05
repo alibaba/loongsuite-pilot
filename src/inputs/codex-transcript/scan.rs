@@ -425,27 +425,25 @@ pub async fn find_owner_session_meta_probe(
     runtime: Option<&InputRuntime>,
 ) -> anyhow::Result<(Option<i64>, bool)> {
     let mut owner_offset = None;
-    let mut saw_session_meta = false;
     let mut stop = false;
     let stats = scan_json_lines(file_path, 0, end_offset, runtime, |line| {
         if stop {
             return false;
         }
         if line.record.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
-            if saw_session_meta {
+            if owner_offset.is_some() {
                 stop = true;
                 return false;
             }
             return true;
         }
-        saw_session_meta = true;
         owner_offset = select_owner_session_meta_offset(file_path, owner_offset, &line);
         true
     })
     .await?;
     Ok((
         owner_offset,
-        stats.next_offset == end_offset && !stats.quarantined,
+        stats.next_offset == end_offset && !stats.quarantined && stats.incomplete_tail.is_none(),
     ))
 }
 

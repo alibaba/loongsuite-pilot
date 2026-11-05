@@ -49,7 +49,9 @@ impl Fixture {
             snapshot_root: Some(root.path().join("snapshots").to_string_lossy().into_owned()),
             native_scan_interval_ms: Some(0),
             work_budget: budget.or(Some(DoubaoWorkBudgetOptions {
-                milliseconds: 1000,
+                // Main #565: these cases test correlation, not host preemption.
+                // The original byte/record limits remain active.
+                milliseconds: u64::MAX,
                 ..Default::default()
             })),
             ..DoubaoWorkInputOptions::new(store)
@@ -474,6 +476,24 @@ async fn terminal_without_start_and_ambiguous_tool_receipts_stay_unexported() {
 async fn missing_parent_write_wait_is_durable_and_bounded_then_emitted_once() {
     let f = Fixture::new().await;
     let execution = f.parent_fixture(false).await;
+    // A cycle exhausted before observing the child must not start its grace.
+    let exhausted = Fixture::make(
+        &f.root,
+        &f.logs,
+        f.store.clone(),
+        Some(DoubaoWorkBudgetOptions {
+            bytes: 0,
+            milliseconds: u64::MAX,
+            ..Default::default()
+        }),
+    );
+    assert!(poll(&exhausted).await.is_empty());
+    assert!(f
+        .checkpoint()
+        .await
+        .execution_first_seen
+        .get(&execution.execution_key)
+        .is_none());
     let first = wire(&f.poll().await);
     assert!(!js_encode(&first).contains("local_execution_phase"));
     let mut checkpoint = f.checkpoint().await;

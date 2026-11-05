@@ -148,6 +148,13 @@ async fn source_l93_writer_change_during_probe_cannot_memoize_a_negative_result(
         assert_eq!(probe_owner(&f, &path, None).await, None);
         assert!(changed.load(Ordering::SeqCst));
         assert_eq!(owner_cache_len(&f), 0);
+        assert!(f
+            .rt()
+            .state_store
+            .get(&f.engine().state_key(&path))
+            .extra()
+            .and_then(|extra| extra.get("codexOwnerAbsentVersion").cloned())
+            .is_none());
         assert!(probe_owner(&f, &path, None).await.is_some());
     })
     .await;
@@ -430,3 +437,6 @@ async fn source_l737_live_fork_owner_ahead_of_parked_scan_survives_restart_witho
     })
     .await;
 }
+
+#[path = "engine_main565_owner_probe_tests.rs"]
+mod main565_contracts;

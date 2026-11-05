@@ -1,7 +1,7 @@
 //! Pending native Codex turns and metadata-only export acknowledgements.
 //! File names, group hashes and schema are compatible with main's Node journal.
 use crate::types::AgentActivityEntry;
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use indexmap::{IndexMap, IndexSet};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
@@ -47,6 +47,7 @@ struct JournalState {
 
 pub struct CodexTurnJournal {
     dir: PathBuf,
+    acknowledgement_limit: usize,
     state: Mutex<JournalState>,
 }
 
@@ -80,8 +81,26 @@ impl CodexTurnJournal {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
+            acknowledgement_limit: MAX_ACKNOWLEDGED_TURNS,
             state: Mutex::new(JournalState::default()),
         }
+    }
+
+    /// Mirrors the source Number option: only positive JavaScript safe integers
+    /// are accepted. Normal production callers retain the 10,000-ACK bound.
+    pub fn with_acknowledgement_limit(
+        dir: impl Into<PathBuf>,
+        acknowledgement_limit: f64,
+    ) -> Result<Self> {
+        ensure!(
+            acknowledgement_limit.is_finite()
+                && acknowledgement_limit.fract() == 0.0
+                && (1.0..=9_007_199_254_740_991.0).contains(&acknowledgement_limit),
+            "acknowledgementLimit must be a positive safe integer"
+        );
+        let mut journal = Self::new(dir);
+        journal.acknowledgement_limit = acknowledgement_limit as usize;
+        Ok(journal)
     }
 
     fn file(&self, key: &str) -> PathBuf {
@@ -341,7 +360,7 @@ impl CodexTurnJournal {
         let acknowledgements = state.acknowledgements.as_mut().expect("loaded");
         let excess = acknowledgements
             .len()
-            .saturating_sub(MAX_ACKNOWLEDGED_TURNS);
+            .saturating_sub(self.acknowledgement_limit);
         if excess == 0 {
             return Ok(());
         }
@@ -797,12 +816,15 @@ mod tests {
     #[tokio::test]
     async fn ack_cap_removes_residual_before_forgetting_proof_and_preserves_ack_on_cleanup_failure()
     {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let root = tempfile::tempdir().unwrap();
+            // main #565: three existing ACKs plus the fourth acknowledgement
+            // exercise the original eviction policy without 10,000 real files.
+            let limit = 3;
             let crashed = entry("crashed", "old-turn");
             let oldest = codex_turn_journal_group_key(&crashed);
-            for key in std::iter::once(oldest.clone())
-                .chain((0..MAX_ACKNOWLEDGED_TURNS - 1).map(|i| format!("{i:064x}")))
+            for key in
+                std::iter::once(oldest.clone()).chain((0..limit - 1).map(|i| format!("{i:064x}")))
             {
                 tokio::fs::write(
                     root.path().join(format!("codex-done-{key}.json")),
@@ -818,7 +840,9 @@ mod tests {
                 .unwrap()
                 .set_modified(SystemTime::UNIX_EPOCH)
                 .unwrap();
-            let journal = Arc::new(CodexTurnJournal::new(root.path()));
+            let journal = Arc::new(
+                CodexTurnJournal::with_acknowledgement_limit(root.path(), limit as f64).unwrap(),
+            );
             tokio::fs::write(
                 journal.file(&oldest),
                 format!("{}\n", serde_json::to_string(&crashed).unwrap()),
@@ -831,10 +855,11 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!oldest_file.exists() && !journal.file(&oldest).exists());
-            assert_eq!(
-                std::fs::read_dir(root.path()).unwrap().count(),
-                MAX_ACKNOWLEDGED_TURNS
+            let reloaded = Arc::new(
+                CodexTurnJournal::with_acknowledgement_limit(root.path(), limit as f64).unwrap(),
             );
+            assert!(read(&reloaded, None).await.is_empty());
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), limit);
             let blocked_key = format!("{0:064x}", 0);
             let blocked_ack = journal.done_file(&blocked_key);
             std::fs::OpenOptions::new()
@@ -846,7 +871,9 @@ mod tests {
             tokio::fs::create_dir(journal.file(&blocked_key))
                 .await
                 .unwrap();
-            let restarted = Arc::new(CodexTurnJournal::new(root.path()));
+            let restarted = Arc::new(
+                CodexTurnJournal::with_acknowledgement_limit(root.path(), limit as f64).unwrap(),
+            );
             assert!(restarted
                 .acknowledge(&[entry("next", "next-turn")])
                 .await
@@ -862,8 +889,38 @@ mod tests {
             assert!(restarted.is_acknowledged(&latest).await.unwrap());
         })
         .await
-        .expect("source30s ACK retention budget");
+        .expect("source15s ACK retention budget");
     }
+    fn assert_main565_invalid_limit(limit: f64) {
+        let error = CodexTurnJournal::with_acknowledgement_limit("unused", limit)
+            .err()
+            .expect("original invalid limit must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "acknowledgementLimit must be a positive safe integer"
+        );
+    }
+
+    #[test]
+    fn main565_rejects_zero_acknowledgement_limit() {
+        assert_main565_invalid_limit(0.0);
+    }
+
+    #[test]
+    fn main565_rejects_negative_acknowledgement_limit() {
+        assert_main565_invalid_limit(-1.0);
+    }
+
+    #[test]
+    fn main565_rejects_fractional_acknowledgement_limit() {
+        assert_main565_invalid_limit(1.5);
+    }
+
+    #[test]
+    fn main565_rejects_infinite_acknowledgement_limit() {
+        assert_main565_invalid_limit(f64::INFINITY);
+    }
+
     #[tokio::test]
     async fn native_input_multi_flusher_holds_shared_checkpoint_until_prefix_is_on_disk() {
         use crate::checkpoints::StateStore;

@@ -328,6 +328,42 @@ impl WorkerManifestSupervisor {
         options: &WorkerManifestOptions,
     ) -> bool {
         let paths = resolve_paths(bundle_root, manifest, options);
+        let generation = read_status(&paths.status)
+            .await
+            .and_then(|status| status.get("runId").cloned());
+        let recorded_pid = read_pid(&paths.pid).await;
+        // Public start/stop and exit share WorkerLock: exit waits for this
+        // attempt, and a successful stop owns its final cleanup/status.
+        let stopped = self
+            .stop_process(agent_id, bundle_root, manifest, options)
+            .await;
+        if !stopped && recorded_pid.is_some() && read_pid(&paths.pid).await == recorded_pid {
+            if let (Some(generation), Some(mut status)) =
+                (generation, read_status(&paths.status).await)
+            {
+                if status
+                    .get("runId")
+                    .is_none_or(|current| current == &generation)
+                {
+                    // A failed stop still cancels restart. Preserve ownership
+                    // so its late exit can remove its own PID/identity records.
+                    status["runId"] = generation;
+                    status["stopRequested"] = json!(true);
+                    write_status(&paths.status, &status).await;
+                }
+            }
+        }
+        stopped
+    }
+
+    async fn stop_process(
+        &self,
+        agent_id: &str,
+        bundle_root: &str,
+        manifest: &WorkerManifest,
+        options: &WorkerManifestOptions,
+    ) -> bool {
+        let paths = resolve_paths(bundle_root, manifest, options);
         let previous = match read_status_checked(&paths.status).await {
             Ok(status) => status,
             Err(_) => return false,
@@ -703,10 +739,21 @@ fn monitor_exit(
     supervisor: WorkerManifestSupervisor,
     mut child: tokio::process::Child,
     pid: u32,
-    mut run: WorkerRun,
+    run: WorkerRun,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let result = child.wait().await;
+        handle_exit(supervisor, pid, run, result).await;
+    })
+}
+
+fn handle_exit(
+    supervisor: WorkerManifestSupervisor,
+    pid: u32,
+    mut run: WorkerRun,
+    result: std::io::Result<std::process::ExitStatus>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
         let paths = resolve_paths(&run.bundle_root, &run.manifest, &run.options);
         let restart;
         {
@@ -716,9 +763,11 @@ fn monitor_exit(
             let Some(status) = read_status(&paths.status).await else {
                 return;
             };
-            // 旧进程的迟到退出回调不能清除新一代 PID，也不能覆盖 stop 留下的诊断。
+            let stop_requested = status["stopRequested"] == true;
+            // A successful stop or a replacement owns its records. A failed
+            // stop leaves this generation cleanup to exit, without restarting.
             if status["runId"] != run.generation.id
-                || status["state"] != "running"
+                || (status["state"] != "running" && !stop_requested)
                 || read_pid(&paths.pid).await != Some(pid)
             {
                 return;
@@ -732,6 +781,7 @@ fn monitor_exit(
             }
             let failed = result.as_ref().is_ok_and(|exit| !exit.success()) || result.is_err();
             restart = failed
+                && !stop_requested
                 && run.manifest.restart_policy.as_ref().is_some_and(|policy| {
                     policy.r#type.as_deref() == Some("on-failure")
                         && run.generation.restarts < policy.max_restarts.unwrap_or(0)
@@ -753,8 +803,15 @@ fn monitor_exit(
                     other => format!("signal:{other}"),
                 })
             });
-            let status = json!({"state":if restart {"restarting"} else {"exited"}, "name":run.manifest.name,"agentId":run.agent_id,"exitCode":code,"signal":signal,"error":result.err().map(|e| e.to_string()),"restartCount":run.generation.restarts,"runId":run.generation.id,"exitedAt":iso()});
-            if !write_status(&paths.status, &status).await {
+            let exited = json!({"state":if restart {"restarting"} else {"exited"}, "name":run.manifest.name,"agentId":run.agent_id,"exitCode":code,"signal":signal,"error":result.err().map(|e| e.to_string()),"restartCount":run.generation.restarts,"runId":run.generation.id,"exitedAt":iso()});
+            let mut final_status = if stop_requested { status } else { json!({}) };
+            // Keep exact descendant recovery identities from a failed stop;
+            // an exited root must not erase still-owned descendant cleanup.
+            final_status
+                .as_object_mut()
+                .unwrap()
+                .extend(exited.as_object().unwrap().clone());
+            if !write_status(&paths.status, &final_status).await {
                 return;
             }
         }
@@ -1423,6 +1480,7 @@ mod tests {
         deny_query: bool,
         deny_signal: bool,
         deny_tree: bool,
+        on_signal: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     fn fake_identity(pid: u32) -> ProcessIdentity {
@@ -1455,6 +1513,9 @@ mod tests {
         }
         fn signal(&self, expected: &ProcessIdentity, force: bool) -> std::io::Result<()> {
             self.signals.lock().unwrap().push((expected.pid, force));
+            if let Some(on_signal) = self.on_signal.lock().unwrap().take() {
+                on_signal();
+            }
             if self.deny_signal {
                 return Err(std::io::ErrorKind::PermissionDenied.into());
             }
@@ -2069,6 +2130,140 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(std::fs::read(&status_path).unwrap(), before);
         assert_eq!(std::fs::read_to_string(pid_path).unwrap(), "40002\n");
+    }
+
+    fn main565_failed_exit() -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            Ok(std::process::ExitStatus::from_raw(1 << 8))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            Ok(std::process::ExitStatus::from_raw(1))
+        }
+    }
+
+    // main#565: does not overwrite explicit stop status from a late exit callback.
+    #[tokio::test]
+    async fn main565_late_exit_preserves_explicit_stop_and_replacement_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, paths) = tracked_fixture(dir.path(), None).await;
+        assert!(write_status(&paths.status, &json!({"state":"stopped"})).await);
+        std::fs::write(&paths.pid, "replacement-pid").unwrap();
+        let run = WorkerRun {
+            agent_id: "test".into(),
+            bundle_root: dir.path().to_str().unwrap().into(),
+            manifest,
+            env: HashMap::new(),
+            options: WorkerManifestOptions::default(),
+            generation: RunGeneration::default(),
+        };
+        handle_exit(
+            WorkerManifestSupervisor::new(),
+            40001,
+            run,
+            main565_failed_exit(),
+        )
+        .await;
+        assert_eq!(
+            read_status(&paths.status).await.unwrap(),
+            json!({"state":"stopped"})
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.pid).unwrap(),
+            "replacement-pid"
+        );
+    }
+
+    // main#565 original it.each(["after-stop", "during-stop"]): cleanup must
+    // complete after a failed explicit stop, without consuming restart budget.
+    #[tokio::test(start_paused = true)]
+    async fn main565_failed_stop_exit_cleans_owned_records_and_suppresses_restart() {
+        for timing in ["after-stop", "during-stop"] {
+            let dir = tempfile::tempdir().unwrap();
+            let expected = fake_identity(40001);
+            let (mut manifest, paths) = tracked_fixture(dir.path(), Some(&expected)).await;
+            manifest.restart_policy = Some(RestartPolicy {
+                r#type: Some("on-failure".into()),
+                max_restarts: Some(1),
+                backoff_seconds: Some(0),
+            });
+            let mut definition: Value = serde_json::from_slice(
+                &std::fs::read(dir.path().join("worker.manifest.json")).unwrap(),
+            )
+            .unwrap();
+            definition["restartPolicy"] = json!({"type":"on-failure","maxRestarts":1});
+            std::fs::write(
+                dir.path().join("worker.manifest.json"),
+                definition.to_string(),
+            )
+            .unwrap();
+            let generation = RunGeneration::default();
+            assert!(
+                write_status(
+                    &paths.status,
+                    &json!({"state":"running","runId":generation.id,"pid":40001})
+                )
+                .await
+            );
+            let processes = Arc::new(FakeProcesses {
+                deny_signal: true,
+                ..Default::default()
+            });
+            processes.alive.lock().unwrap().insert(40001, expected);
+            let mut supervisor = WorkerManifestSupervisor::with_platform("darwin", "");
+            supervisor.processes = processes.clone();
+            let options = WorkerManifestOptions::default();
+            let mut run = Some(WorkerRun {
+                agent_id: "test".into(),
+                bundle_root: dir.path().to_str().unwrap().into(),
+                manifest,
+                env: HashMap::new(),
+                options: options.clone(),
+                generation,
+            });
+            let exited = Arc::new(std::sync::Mutex::new(None));
+            if timing == "during-stop" {
+                let supervisor = supervisor.clone();
+                let run = run.take().unwrap();
+                let exited = exited.clone();
+                *processes.on_signal.lock().unwrap() = Some(Box::new(move || {
+                    *exited.lock().unwrap() = Some(tokio::spawn(handle_exit(
+                        supervisor,
+                        40001,
+                        run,
+                        main565_failed_exit(),
+                    )));
+                }));
+            }
+            assert!(
+                !supervisor
+                    .stop_if_present("test", dir.path().to_str().unwrap(), &options)
+                    .await,
+                "{timing}"
+            );
+            if timing == "after-stop" {
+                *exited.lock().unwrap() = Some(tokio::spawn(handle_exit(
+                    supervisor,
+                    40001,
+                    run.take().unwrap(),
+                    main565_failed_exit(),
+                )));
+            }
+            let exited = exited.lock().unwrap().take().unwrap();
+            tokio::time::timeout(Duration::from_secs(20), exited)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!Path::new(&paths.pid).exists(), "{timing}");
+            assert!(!Path::new(&identity_path(&paths.pid)).exists(), "{timing}");
+            let status = read_status(&paths.status).await.unwrap();
+            assert_eq!(status["state"], "exited", "{timing}");
+            assert_eq!(status["exitCode"], 1, "{timing}");
+            assert_eq!(status["restartCount"], 0, "{timing}");
+        }
     }
 
     #[tokio::test]

@@ -621,10 +621,53 @@ mod tests {
         assert!(!masked.contains("sk-EXAMPLE0123456789abcdef"));
     }
 
+    #[cfg(unix)]
+    fn thread_cpu_ms() -> f64 {
+        let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: clock_gettime initializes this writable timespec on success.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: the successful call above initialized both fields.
+        let time = unsafe { time.assume_init() };
+        time.tv_sec as f64 * 1000.0 + time.tv_nsec as f64 / 1_000_000.0
+    }
+    #[cfg(windows)]
+    fn thread_cpu_ms() -> f64 {
+        use windows_sys::Win32::{
+            Foundation::FILETIME,
+            System::Threading::{GetCurrentThread, GetThreadTimes},
+        };
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        // SAFETY: the current-thread pseudo handle stays valid; all output
+        // pointers are distinct writable FILETIMEs and no handle is owned.
+        assert_ne!(
+            unsafe {
+                GetThreadTimes(
+                    GetCurrentThread(),
+                    &mut created,
+                    &mut exited,
+                    &mut kernel,
+                    &mut user,
+                )
+            },
+            0
+        );
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        (ticks(kernel) + ticks(user)) as f64 / 10_000.0
+    }
+
     #[test]
     fn masks_a_middle_position_secret_across_threshold_and_window_combinations() {
-        // The vitest case also asserts elapsed < 2000ms. That bound is scheduler-sensitive,
-        // so this port checks the same masking result without a strict timing assertion.
+        // Main #565 preserves the original budget using this synchronous thread's CPU.
         let plan = load_mask_plan(&all_config());
         let secret = "sk-EXAMPLE0123456789abcdef";
         let input = format!(
@@ -632,6 +675,7 @@ mod tests {
             "x".repeat(300 * 1024),
             "y".repeat(300 * 1024)
         );
+        let started = thread_cpu_ms();
         for threshold in [64 * 1024, 128 * 1024, 256 * 1024] {
             for window in [4 * 1024, 8 * 1024, 16 * 1024] {
                 let masked = mask_string(
@@ -647,6 +691,7 @@ mod tests {
                 assert!(!masked.contains(secret));
             }
         }
+        assert!(thread_cpu_ms() - started < 2000.0);
     }
 
     #[test]
@@ -663,6 +708,7 @@ mod tests {
             plain.clone(),
         ]
         .join("\n");
+        let started = thread_cpu_ms();
         for _ in 0..20 {
             assert_eq!(
                 mask_string(
@@ -684,6 +730,7 @@ mod tests {
             assert!(masked.contains("[IP_ADDRESS_MASKED]"));
             assert!(masked.contains("[CREDIT_CARD_MASKED]"));
         }
+        assert!(thread_cpu_ms() - started < 2000.0);
     }
 
     #[test]
@@ -692,12 +739,15 @@ mod tests {
         let chunk = format!("{}|", (0..64).map(|_| "1").collect::<Vec<_>>().join(" "));
         let fragmented = chunk.repeat(512);
         let input = format!("{fragmented}13800138000");
+        let started = thread_cpu_ms();
         let masked = mask_string(
             &input,
             PlanOrRules::Plan(&plan),
             &StringMaskOptions::default(),
         );
+        let elapsed_ms = thread_cpu_ms() - started;
         assert_eq!(&masked.as_ref()[..fragmented.len()], fragmented.as_str());
         assert_eq!(&masked.as_ref()[fragmented.len()..], "[PHONE_MASKED]");
+        assert!(elapsed_ms < 100.0);
     }
 }

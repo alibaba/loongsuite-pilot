@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "sourceCommit": "eb763691580423478216715455bbcdd698dc8384",
+  "previousSourceCommit": "2caaaf928c00c60386785f3efdd78d33207a881e",
+  "sourcePullRequest": 565,
+  "mappings": [
+    {
+      "sourceFile": "src/deployment/worker-manifest-supervisor.ts",
+      "sourceSha256": "8ea28cc8e33b1416a0bea5aebb0cc0787972511899b2e998177ee567bac2fcdd",
+      "rustFiles": [
+        {
+          "path": "src/deployment/worker_manifest_supervisor.rs",
+          "sha256": "c5172b80d0ffad58cdef740c794c274f6615d55a397b8c38ee975ca74317d528"
+        }
+      ]
+    },
+    {
+      "sourceFile": "src/flushers/codex-turn-journal.ts",
+      "sourceSha256": "7e8740bfdf25a9898ba6ad64010c8868f0d1b0b167d3b10fa46850e53750f656",
+      "rustFiles": [
+        {
+          "path": "src/flushers/codex_turn_journal.rs",
+          "sha256": "9f1d6b095c49bad589ab39be18345adf0ba4aceedc436449a10042f8e1f8793f"
+        }
+      ]
+    },
+    {
+      "sourceFile": "src/inputs/codex-transcript/codex-transcript-input.ts",
+      "sourceSha256": "94285c037ca7fc8cb53abe25b6288b4bda7055e679a56dcfc536e2ae7cf3fb11",
+      "rustFiles": [
+        {
+          "path": "src/inputs/codex-transcript/input/engine.rs",
+          "sha256": "349a59d41949ac4e34627336fcd53eebe371deb56c4a46e7e4e1d4b83c30a7cb"
+        },
+        {
+          "path": "src/inputs/codex-transcript/scan.rs",
+          "sha256": "8501e481b5603d171f9bd3a44202e674b5c0471f2e4abe74cea089491f765e17"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/performance/codex-owner-probe.perf.mjs",
+      "sourceSha256": "ef46dcf6294eaaa683231655fff23858816f200d19d52847010a86422bb17e29",
+      "rustFiles": [
+        {
+          "path": "src/inputs/codex-transcript/input/engine_main565_owner_probe_tests.rs",
+          "sha256": "81df5749223779e4894f7f08cd18d7572439e67942bfd9727936987186121368"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/unit/deployment/worker-manifest-supervisor.test.ts",
+      "sourceSha256": "e60f07e0db703bffb87fc59b0e6a4b397c3ac9647740e2974d08e6603d4cae77",
+      "rustFiles": [
+        {
+          "path": "src/deployment/worker_manifest_supervisor.rs",
+          "sha256": "c5172b80d0ffad58cdef740c794c274f6615d55a397b8c38ee975ca74317d528"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/unit/flushers/codex-turn-journal.test.ts",
+      "sourceSha256": "76ec495d4f27e47961c55b478a59268c85b4c500ed668416d2a0367aea36cdb6",
+      "rustFiles": [
+        {
+          "path": "src/flushers/codex_turn_journal.rs",
+          "sha256": "9f1d6b095c49bad589ab39be18345adf0ba4aceedc436449a10042f8e1f8793f"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/unit/inputs/codex-transcript/source-recovery.test.ts",
+      "sourceSha256": "a3bad3412785a0d7827f20345be36c2f34f0e28a90e931c0af0d01cfe0fc00d6",
+      "rustFiles": [
+        {
+          "path": "src/inputs/codex-transcript/input/engine_main543_owner_probe_tests.rs",
+          "sha256": "0686b4106d3d2f71aaecbead1f4461bed0e81c65e33a1a39b019817f93de0db7"
+        },
+        {
+          "path": "src/inputs/codex-transcript/input/engine_main565_owner_probe_tests.rs",
+          "sha256": "81df5749223779e4894f7f08cd18d7572439e67942bfd9727936987186121368"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/unit/inputs/doubao-work-input.test.ts",
+      "sourceSha256": "cd0f1bfb8aba57fccc01420e5a7dd187b722ab618a2440b36d2b8a018e9037ac",
+      "rustFiles": [
+        {
+          "path": "src/inputs/doubao-work/input_tests.rs",
+          "sha256": "28f7b823a05901a6f8733059a73a13b97123faf89e9b9f5b8b465b9e61214a70"
+        }
+      ]
+    },
+    {
+      "sourceFile": "tests/unit/mask/string-masker.performance.test.ts",
+      "sourceSha256": "ea9a7c8a55b3e616d1b4e18f9eb5848008489a70948f932d531a7aebc47bf941",
+      "rustFiles": [
+        {
+          "path": "src/mask/string_masker.rs",
+          "sha256": "8fb8e4cd21cb65420d61a75c7c3685068f849b3119b3860d094da4b30498c867"
+        }
+      ]
+    }
+  ],
+  "productionPolicy": "All three modified production TypeScript files remain removed; their changes are native Rust. Upstream historical test references are not product runtime dependencies.",
+  "ownerProbe": {
+    "originalNewRecoveryScenarios": 12,
+    "nativeParameterGroups": 5,
+    "originalDefaultPerformance": {
+      "files": 2056,
+      "bytesPerFile": 4096,
+      "cycles": 3,
+      "restart": true,
+      "requiredRepeatedContentReadBytes": 0
+    }
+  },
+  "worker": "WorkerLock serializes stop/exit, unique UUID atomic status publication already existed; failed-stop exit cleanup preserves descendant identities and suppresses restart. Original late-exit and after/during cases retained.",
+  "journal": "Production cap10000 unchanged. Source tiny-cap3+1 eviction, original4invalid Number limits, restart empty read and failed-cleanup proof preservation retained.",
+  "testScheduling": {
+    "doubao": "No wall budget in correlation fixtures; original bytes/records kept, exhausted cycle cannot start parent grace. Production budget unchanged.",
+    "mask": "Original3workloads and2000/2000/100ms budgets restored using OS current-thread CPU. Test package alone usesopt1; production and dependency profiles unchanged."
+  },
+  "validation": {
+    "environment": "Rust1.99.1 glibc2.34 locked/offline",
+    "workspaceAllTargetsAllFeaturesStrict": "PASS",
+    "format": "PASS",
+    "combinedAffectedNative": {
+      "codexTranscript": 296,
+      "worker": 39,
+      "journal": 23,
+      "stringMasker": 27,
+      "doubao": 98,
+      "failed": 0
+    },
+    "independentOriginalWorkerAtomic": 1,
+    "originalOwnerNewRecoveryCases": 12,
+    "originalOwnerInventory": {
+      "files": 2056,
+      "bytesPerFile": 4096,
+      "cycles": 3,
+      "restart": true,
+      "repeatedContentReads": 0
+    },
+    "nativeWindowsExecution": "not repeated"
+  },
+  "commercialContent": false
+}

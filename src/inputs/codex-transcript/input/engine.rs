@@ -3780,10 +3780,27 @@ impl CodexTranscriptEngine<'_> {
         // NUL cannot occur in a filesystem path; include the requested boundary
         // because a short prefix cannot establish absence beyond that prefix.
         let key = owner_probe_key(file_path, version, end);
-        if let Some(cached) = self
+        let previous = self
             .body
-            .with_shared(|shared| shared.owner_offset_probes.get_copied(&key))
+            .with_shared(|shared| shared.owner_offset_probes.get_copied(&key));
+        let state_key = self.state_key(file_path);
+        let version_key = source_version(version);
+        let absent_version = rt
+            .state_store
+            .get(&state_key)
+            .extra()
+            .and_then(|extra| extra.get("codexOwnerAbsentVersion").cloned());
+        // A full stable negative belongs to this file's checkpoint, outside the
+        // bounded shared LRU. It neither advances a cursor nor skips recovery.
+        if end == version.size
+            && absent_version
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_some_and(|known| known.len() <= 256 && known == version_key)
         {
+            return Ok(None);
+        }
+        if let Some(cached) = previous {
             return Ok(cached);
         }
         let (offset, complete) =
@@ -3808,6 +3825,25 @@ impl CodexTranscriptEngine<'_> {
                 complete.then_some((*version, end)),
             )
         });
+        if offset.is_none() && complete && end == version.size {
+            rt.state_store.update(
+                &state_key,
+                InputStatePatch {
+                    extra: Some(json!({"codexOwnerAbsentVersion": version_key})),
+                    ..InputStatePatch::default()
+                },
+            );
+        } else if offset.is_some() {
+            let current = rt.state_store.get(&state_key);
+            if let Some(mut extra) = current.extra() {
+                if extra
+                    .as_object_mut()
+                    .is_some_and(|object| object.remove("codexOwnerAbsentVersion").is_some())
+                {
+                    rt.state_store.set(&state_key, current.with_extra(extra));
+                }
+            }
+        }
         Ok(offset)
     }
 }
