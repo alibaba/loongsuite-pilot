@@ -172,6 +172,7 @@ export class Orchestrator extends EventEmitter {
   private acpCorrelateRetentionService?: AcpCorrelateRetentionService;
   private legacySlsFailedLogCleanupService: LegacySlsFailedLogCleanupService | null = null;
   private hookWatchdog!: HookWatchdog;
+  private hookWatchdogTargetKey = '';
   private deploymentScope: DeploymentScopeMode = 'auto';
   /** Agents a named install actually wrote. Raced deployAll records are not in this set. */
   private recordedAgentIds = new Set<string>();
@@ -346,16 +347,7 @@ export class Orchestrator extends EventEmitter {
     // Build the watchdog immediately after deployment so its constructor records
     // the exact post-deploy Codex config.toml fingerprint. The watchdog itself is
     // started later, after discovery and retention services are ready.
-    const hookWatchdogTargets = this.buildHookWatchdogTargets();
-    const interceptTargets = [
-      ...HookWatchdog.defaultInterceptTargets(this.dataDir, (id) => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
-      ...this.buildGrokBuildInterceptTargets(),
-      ...this.buildPluginInjectInterceptTargets(),
-      ...this.buildDirectoryPluginInterceptTargets(),
-      ...this.buildCopilotPluginInterceptTargets(),
-      ...this.buildDshYamlPatchInterceptTargets(),
-    ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
+    this.hookWatchdog = this.createHookWatchdog();
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,
@@ -708,6 +700,12 @@ export class Orchestrator extends EventEmitter {
       await this.deploymentManager.reloadState();
       await this.refreshDeploymentScope();
       await this.reconcileRecordedAgents();
+      if (this.hookWatchdog && this.currentHookWatchdogTargetKey() !== this.hookWatchdogTargetKey) {
+        const next = this.createHookWatchdog();
+        this.hookWatchdog.stop();
+        this.hookWatchdog = next;
+        this.hookWatchdog.start();
+      }
       this.hookInstallSignalMtime = mtime;
     } catch (err) {
       logger.warn('hook install signal handling failed', { error: String(err) });
@@ -749,6 +747,26 @@ export class Orchestrator extends EventEmitter {
     }
 
     return entries;
+  }
+
+  private currentHookWatchdogTargetKey(): string {
+    return JSON.stringify(this.deploymentManager.getDefinitions().filter(def => def.hook).map(def => {
+      const hook = this.deploymentManager.effectiveDefinition(def).hook!;
+      return [def.id, hook.scope ?? 'user', hook.settingsPath];
+    }));
+  }
+
+  private createHookWatchdog(): HookWatchdog {
+    const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
+      ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
+      ...this.buildGrokBuildInterceptTargets(),
+      ...this.buildPluginInjectInterceptTargets(),
+      ...this.buildDirectoryPluginInterceptTargets(),
+      ...this.buildCopilotPluginInterceptTargets(),
+      ...this.buildDshYamlPatchInterceptTargets(),
+    ]);
+    this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
+    return watchdog;
   }
 
   private buildHookWatchdogTargets(): PluginCheckTarget[] {
