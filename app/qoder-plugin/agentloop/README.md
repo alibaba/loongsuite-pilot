@@ -15,7 +15,13 @@
 
 安装时在对话中输入「安装采集器」，或使用 `/agentloop-collector-setup`。安装会生成一个 zip，对话返回文件路径。可以本地解压后安装试用，也可以到管理市场下发。
 
-查询时在对话中说明要查看的内容，或使用 `/agentloop-audit-query`。例如输入：「查询近期各 Agent 的使用情况」、「统计各 Agent 耗费的 Token」、「查看这些 Agent 大部分时间在处理什么工作」。
+查询时在对话中说明要查看的内容，或使用 `/agentloop-audit-query`。例如输入：「查询近期各 Agent 的使用情况」、「统计各 Agent 耗费的 Token」、「查看这些 Agent 大部分时间在处理什么工作」。助手会按查询技能里的筛选说明，用 `agent_type=__all__` 统计已观测 Token；再说「看其中某个 Agent 的会话」时，沿用同一时间窗口，把该 Agent 的原值带进下一次查询。
+
+问完几项后再要一份页面时，使用 `/agentloop-audit-dashboard`，或输入「把这些生成一份报表」。助手把这些结果渲染进同一份本地 HTML，并给出文件链接。用浏览器打开。这不是发布到 AgentLoop 或 SLS。
+
+也可以描述一整张大盘，例如「做一份最近 7 天的 Agent 事件洞察报表」。助手按报表技能的指标口径写出大盘定义，先生成本地预览；你确认之后才会发布到线上。
+
+查询会按能力选择 logstore：应用事实用 `agent-event`，意图用 `audit-event`，风险用 `incident-event`，运行时用 `ebpf-event`。当前空间没有部门花名册时，不会编造覆盖率。
 
 ## 身份凭证
 

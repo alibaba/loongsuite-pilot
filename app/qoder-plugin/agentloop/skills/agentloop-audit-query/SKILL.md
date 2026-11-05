@@ -1,15 +1,31 @@
 ---
 name: agentloop-audit-query
 description: |
-  查询审计日志。用户要看使用情况、人员、仓库、会话或一段时间内的日志时使用。
-  Triggers: "查询审计", "查日志", "审计日志", "loongsuite-pilot 日志", "agent-event".
+  查询审计日志。用户要看使用情况、人员、仓库、会话或一段时间内的日志时使用。按能力选择 logstore，覆盖应用事实、Token、工具、Skill、缓存、意图、风险和运行时。
+  Triggers: "查询审计", "查日志", "审计日志", "loongsuite-pilot 日志", "agent-event", "Token", "筛选", "下钻", "意图", "风险", "工具", "logstore".
 ---
 
 # 查询审计日志
 
 判断用户要查日志之后，不要自己调用阿里云。查询语句由用户给出，或由你写成 SLS 检索 / SQL，再交给脚本。脚本只负责取数。不要打印 license key、API key 或 AccessKey。
 
-用户还没有给出检索或 SQL 时，可以参考 `~/.loongsuite-pilot/audit/query-history.jsonl` 来写查询语句。这份记录每行一条，含时间、查询语句和时间范围，不含日志正文。新记录在文件末尾，只保留最近 50 条。
+用户只说想看什么。不要套某几句固定问法。时间、口径或范围不清楚时可以追问。用户没说时间、也不用再确认时，用最近 7 天。后一句没另给时间，就沿用上一问。用中文回答。
+
+先判断这句话在问哪一类事，再去 [references/capabilities.md](references/capabilities.md) 选表和口径。对不上就读能力表，不要猜一张表：
+
+- 用量、Token、活跃、各 Agent 用了多少：应用事实 `agent-event`。这是已观测用量，不是账单。
+- 在做什么、意图、用途：`audit-event` 里的意图事件。大类和子类都给，用中文。安全发现不要算进意图。
+- 安全方面的发现、有没有风险迹象：仍是 `audit-event`，限定安全域，按事件名汇总。先说明这是发现，不是已经确认的风险。
+- 接着问这些发现落在哪、主要是哪些 Agent：沿用上一问的时间和范围，按 Agent 拆开。
+- 已经确认的风险、高保真、要看明细：`incident-event`。给条数、Agent、严重性、类型、置信度、落点。原因和命中值可以给。`reason` 为空时，用 `evidence_values` 里的命中值填写原因，不要只写未记录。这个值在采集时已经脱敏，不要再去日志正文里找明文。不要贴日志正文。
+
+先读 [references/capabilities.md](references/capabilities.md)，选定功能和 `--logstore`，再写查询。字段、指标口径和公共 CTE 见 [agentloop-audit-dashboard/schema.md](../agentloop-audit-dashboard/schema.md)。要中文枚举时读 [value-labels.md](../agentloop-audit-dashboard/value-labels.md)。语句写法见 [query-syntax.md](../sls-dashboard-builder/references/query-syntax.md)。
+
+用户要筛选、看各 Agent 或人员的用量，或从汇总再看某一个对象时，再读 [references/plugin-usage.md](references/plugin-usage.md)、[filters-and-variables.md](../sls-dashboard-builder/references/filters-and-variables.md) 和 [drill-down-events.md](../sls-dashboard-builder/references/drill-down-events.md)。每次查询都带上能力表里的 `--logstore`。
+
+用户要报表、HTML 预览或一整张大盘时，改用 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md)。它决定口径并写 dashboard JSON，排版规则在 [sls-dashboard-builder](../sls-dashboard-builder/SKILL.md)，预览用下面的 `report` 子命令。两者和本技能共用同一个阿里云 CLI 和登录，不要另接阿里云接口。
+
+用户还没有给出检索或 SQL，也不是上面这种用量、筛选或下钻问题时，可以参考 `~/.loongsuite-pilot/audit/query-history.jsonl` 来写查询语句。这份记录每行一条，含时间、查询语句和时间范围，不含日志正文。新记录在文件末尾，只保留最近 50 条。
 
 在插件根目录执行。后面的重新执行沿用这一次的入口，只改参数。
 
@@ -45,6 +61,10 @@ powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scri
 - 统计：`--query '* | SELECT count(*)'`
 
 用户要看当前查询目标时，读 `~/.loongsuite-pilot/audit/config-record.json`。其中 `slsProject`、`slsLogstore`、`regionId` 就是当前的 project、logstore、region。不要为了列目标去跑查询命令。
+
+## 报表
+
+问了几项之后要一份报表，改用 [agentloop-audit-dashboard](../agentloop-audit-dashboard/SKILL.md)，按那个技能自己的 Workflow 做。取数和本技能是同一个 `GetLogsV2`，由 `report` 子命令按它写出的 dashboard JSON 渲染成本地 HTML。
 
 ## 报错
 

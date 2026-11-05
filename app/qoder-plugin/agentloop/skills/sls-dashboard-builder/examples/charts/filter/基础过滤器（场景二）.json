@@ -1,0 +1,167 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": " * | select request_method, count(*) as c where request_method like '%%' group by request_method ",
+                        "name": "A",
+                        "tokenQuery": " * | select request_method, count(*) as c where request_method like '${{method|%%}}' group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "yPos": 2,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "closeSearch": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "width": 16,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "新建图表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 6,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1.5,
+                    "seriesStyle": "lines"
+                },
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1734347012744",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "isInheritFilter": false,
+                "query": "@",
+                "start": "-900s",
+                "timeSpanType": "",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "",
+                        "name": "A",
+                        "tokenQuery": "* | select DISTINCT request_method",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "mixed"
+            },
+            "display": {
+                "yPos": 0,
+                "displayName": "",
+                "bindQuery": true,
+                "width": 6,
+                "showDropListChart": true,
+                "basicOptions": {
+                    "displayName": "method",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": false,
+                    "showBorder": true
+                },
+                "dropListOption": {
+                    "tokenDefault": [],
+                    "alias": "",
+                    "multipleToken": false,
+                    "showType": "select",
+                    "list": [],
+                    "type": "token",
+                    "listAlias": [],
+                    "key": "method",
+                    "multipleTokenKey": ""
+                },
+                "xPos": 0,
+                "version": "2",
+                "height": 2
+            },
+            "action": {},
+            "title": "charts-demo1734347038424",
+            "type": "droplistpro"
+        }
+    ],
+    "displayName": "基础过滤器（场景二）",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1734349439749-848098"
+}

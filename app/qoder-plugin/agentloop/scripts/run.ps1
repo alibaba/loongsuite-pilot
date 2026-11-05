@@ -1,4 +1,4 @@
-﻿# install, audit, and auth entry on Windows. A non-auth exit 3 runs auth, then retries.
+﻿# install, audit, report, publish, and auth entry on Windows. A non-auth exit 3 runs auth, then retries.
 $ErrorActionPreference = "Stop"
 $script:AUDIT_CHILD_STATUS = 1
 
@@ -23,7 +23,7 @@ function Invoke-AuditChild([string]$Script, [string[]]$ChildArgs, [bool]$Suppres
 }
 
 if ($args.Count -lt 1) {
-    Write-Error "Usage: run.ps1 install|audit|auth [arguments...]" -ErrorAction Continue
+    Write-Error "Usage: run.ps1 install|audit|report|publish|auth [arguments...]" -ErrorAction Continue
     exit 1
 }
 $command = [string]$args[0]
@@ -32,10 +32,12 @@ if ($args.Count -gt 1) { $rest = @($args[1..($args.Count - 1)]) }
 $scripts = @{
     install = (Join-Path $PSScriptRoot "install.ps1")
     audit = (Join-Path $PSScriptRoot "query.ps1")
+    report = (Join-Path $PSScriptRoot "render-report.ps1")
+    publish = (Join-Path $PSScriptRoot "publish-dashboard.ps1")
     auth = (Join-Path $PSScriptRoot "ensure-oauth.ps1")
 }
 if (-not ($scripts.Keys -contains $command)) {
-    Write-Error ("Unknown command: " + $command + ". Use install, audit, or auth") -ErrorAction Continue
+    Write-Error ("Unknown command: " + $command + ". Use install, audit, report, publish, or auth") -ErrorAction Continue
     exit 1
 }
 Invoke-AuditChild $scripts[$command] $rest

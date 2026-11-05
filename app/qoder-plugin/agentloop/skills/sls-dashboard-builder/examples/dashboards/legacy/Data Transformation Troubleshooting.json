@@ -1,0 +1,625 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect \"etl_context.project\" as project, \n\"etl_context.logstore\" as logstore, \"etl_context.shard_id\" as shard,\nsum(\"progress.accept\") as \"accept lines\",\nsum(\"progress.dropped\") as \"dropped lines\",\nsum(\"progress.delivered\") as \"delivered lines\",\nsum(\"progress.failed\") as \"failed lines\" \ngroup by project, logstore, shard order by project, logstore, \"accept lines\" desc limit 10000",
+                "start": "-3600s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_complete\" | select date_format(__time__ - __time__ % 30, '%Y-%m-%d %H:%i:%S') as dt, \"etl_context.shard_id\", \nsum(cast (\"extra_info_params.accept\" as bigint)) / 30.0 as accept_lines_per_sec group by dt, \"etl_context.shard_id\" order by dt asc limit 10000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "dt"
+                ],
+                "yPos": 15.159091,
+                "displayName": "Active shard",
+                "aggAxis": [
+                    "etl_context.shard_id"
+                ],
+                "pageSize": 20,
+                "showZebra": true,
+                "closeSort": false,
+                "xPos": 0.024534162,
+                "showBorder": false,
+                "closeDefault": false,
+                "highlight": false,
+                "yAxis": [
+                    "accept_lines_per_sec"
+                ],
+                "closeSearch": false,
+                "showTitle": true,
+                "highlightRules": [],
+                "showBackground": false,
+                "chartType": "line",
+                "width": 10.033824,
+                "legendPosition": "right",
+                "transpose": false,
+                "formatType": "number",
+                "height": 3.5568182,
+                "zIndex": 0
+            },
+            "action": {
+                "failed lines/s": {},
+                "accept lines/sec": {},
+                "project": {},
+                "failed lines": {},
+                "delivered lines/s": {},
+                "dropped lines/sec": {},
+                "dropped lines": {},
+                "dropped lines/s": {},
+                "delivered lines": {},
+                "delivered lines/sec": {},
+                "failed lines/sec": {},
+                "accept lines": {},
+                "shard": {},
+                "accept lines/s": {},
+                "logstore": {}
+            },
+            "title": "etl-log1556461020667",
+            "type": "table"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect time_series(__time__, '1m',  '%y/%m/%d %H:%i', '0') as dt,\nround(sum(\"progress.accept\") / 60.0, 3) as \"accept\",\nround(sum(\"progress.dropped\") / 60.0, 3) as \"dropped\",\nround(sum(\"progress.delivered\") / 60.0, 3) as \"delivered\",\nround(sum(\"progress.failed\") / 60.0, 3) as \"failed\" group by dt order by dt asc limit 10000",
+                "start": "-3600s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_complete\" | select date_format(__time__ - __time__ % 30, '%Y-%m-%d %H:%i:%S') as dt,\nsum(cast (\"extra_info_params.accept\" as bigint)) / 30.0 as \"accept lines/sec\",\nsum(cast (\"extra_info_params.dropped\" as bigint)) / 30.0 as \"dropped lines/sec\",\nsum(cast (\"extra_info_params.delivered\" as bigint)) / 30.0 as \"delivered lines/sec\",\nsum(cast (\"extra_info_params.failed\" as bigint)) / 30.0 as \"failed lines/sec\" group by dt order by dt asc limit 10000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "dt"
+                ],
+                "yPos": 2.409091,
+                "areaUpper": "",
+                "areaLower": "",
+                "displayName": "Transform speed (lines/s)",
+                "timing": {
+                    "useAutoFillPoint": true,
+                    "autoFillPoint": "avg",
+                    "useMachine": true
+                },
+                "yAxisRight": [],
+                "formatTypeRight": "number",
+                "xPos": 0.02,
+                "showBorder": false,
+                "lineShape": "rect",
+                "inputValRight": "",
+                "yAxis": [
+                    "accept",
+                    "dropped",
+                    "delivered",
+                    "failed"
+                ],
+                "intervalArray": [
+                    ""
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "pAxis": "",
+                "width": 10.02,
+                "inputVal": "",
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.5227273,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "etl-log1556962587322",
+            "type": "line"
+        },
+        {
+            "search": {
+                "isInheritFilter": false,
+                "query": "__topic__:  __etl-log-status__ | select distinct \"__tag__:__job_name__\"",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "yPos": -0.06818182,
+                "filterData": [
+                    {
+                        "alias": "Job Name",
+                        "list": [],
+                        "type": "filter",
+                        "key": "__tag__:__job_name__"
+                    }
+                ],
+                "displayName": "Filter jobs",
+                "showTitle": true,
+                "bindQuery": true,
+                "showBackground": false,
+                "width": 3.3,
+                "xPos": 0,
+                "showBorder": false,
+                "height": 1.25,
+                "zIndex": 2
+            },
+            "action": {},
+            "title": "etl-log1556962732056",
+            "type": "droplist"
+        },
+        {
+            "search": {
+                "isInheritFilter": false,
+                "query": "__topic__:  __etl-log-status__ | select distinct \"__tag__:__schedule_id__\"",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "yPos": -0.056818184,
+                "filterData": [
+                    {
+                        "alias": "Instance ID",
+                        "list": [],
+                        "type": "filter",
+                        "key": "__tag__:__schedule_id__"
+                    }
+                ],
+                "displayName": "Filter Instance",
+                "showTitle": true,
+                "bindQuery": true,
+                "showBackground": false,
+                "width": 3.3,
+                "xPos": 3.332546,
+                "showBorder": false,
+                "height": 1.25,
+                "zIndex": 3
+            },
+            "action": {},
+            "title": "etl-log1556962782288",
+            "type": "droplist"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__  not \"logging.levelname\": INFO | select date_format(__time__, '%Y-%m-%d %H:%i:%S') as time, \"logging.levelname\" as level, event_id as event, logging, etl_context, reason order by time desc limit 1000",
+                "start": "-3600s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND reason | select reason, \"logging.levelname\" as level, event_id, logging, etl_context order by __time__ desc limit 1000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "yPos": 9.386364,
+                "displayName": "Exception detail",
+                "pageSize": 20,
+                "closeSort": false,
+                "xPos": -0.000310559,
+                "showBorder": false,
+                "sparkline": false,
+                "closeDefault": false,
+                "highlight": false,
+                "closedKeys": [],
+                "closeSearch": false,
+                "showTitle": true,
+                "showBackground": false,
+                "width": 10.05,
+                "realWidth": true,
+                "transpose": false,
+                "height": 5.7954545,
+                "zIndex": 0
+            },
+            "action": {
+                "reason": {
+                    "type": "disabled"
+                },
+                "event_id": {
+                    "type": "disabled"
+                },
+                "level": {
+                    "type": "disabled"
+                },
+                "logging": {
+                    "type": "disabled"
+                },
+                "etl_context": {
+                    "type": "disabled"
+                },
+                "time": {},
+                "event": {}
+            },
+            "title": "etl-log1556968183570",
+            "type": "table"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect * from (select time_series(__time__, '1m',  '%y/%m/%d %H:%i', '0') as dt,\n\"etl_context.shard_id\" as shard, round(sum(\"progress.accept\") / 60.0, 3) as \"read\" from log \ngroup by dt, shard order by dt asc limit 10000) where shard is not null",
+                "start": "-900s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_start\" | select time_series(__time__, '30s',  '%H-%m-%d %H:%i:%S', '0') as dt,\n\"etl_context.shard_id\" as shard, sum(\"extra_info_params.log_count\") / 30.0 as \"read lines/sec\" \ngroup by dt, shard order by dt asc limit 10000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "dt"
+                ],
+                "yPos": 5.909091,
+                "aggSplit": false,
+                "displayName": "Shard consumption speed (lines/s)",
+                "aggAxis": [
+                    "shard"
+                ],
+                "xPos": 5.01,
+                "showBorder": false,
+                "yAxis": [
+                    "read"
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "chartType": "area",
+                "width": 5.04,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.5227273,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "etl-log1557021560478",
+            "type": "agg"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"read lines\", 86400) as diff from \n(select sum(\"progress.accept\") as \"read lines\" from log))",
+                "start": "-86400s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_start\" | select diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"read lines\", 86400) as diff from \n(select sum(\"extra_info_params.log_count\") as \"read lines\" from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 1.0909091,
+                "compareUnit": "%",
+                "displayName": "Total logs read",
+                "unitSize": 12,
+                "description": "Compare with yesterday",
+                "threshold": 0,
+                "xPos": 0.027352942,
+                "compareSize": 16,
+                "showBorder": false,
+                "unit": "Lines",
+                "yAxis": [
+                    "inc_ration"
+                ],
+                "bgColor": {
+                    "a": 1,
+                    "b": 255,
+                    "r": 255,
+                    "g": 255
+                },
+                "compareColors": [
+                    {
+                        "color": "rgba(245,34,45,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    },
+                    {
+                        "color": "rgba(55,214,122,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    }
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "width": 2.5,
+                "fontSize": 24,
+                "formatType": "number",
+                "fontColor": {
+                    "a": 1,
+                    "b": 85,
+                    "r": 85,
+                    "g": 85
+                },
+                "descriptionSize": 12,
+                "height": 1.2954545,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "etl-log1557026014179",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"delivered lines\", 86400) as diff from \n(select sum(\"progress.delivered\") as \"delivered lines\" from log))",
+                "start": "-86400s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_complete\" | select diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"delivered lines\", 86400) as diff from \n(select sum(\"extra_info_params.delivered\") / 30.0 as \"delivered lines\" from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 1.0909091,
+                "compareUnit": "%",
+                "displayName": "Total logs delivered",
+                "unitSize": 12,
+                "description": "Compare with yesterday",
+                "threshold": 0,
+                "xPos": 2.522353,
+                "compareSize": 16,
+                "showBorder": false,
+                "unit": "Lines",
+                "yAxis": [
+                    "inc_ration"
+                ],
+                "bgColor": {
+                    "a": 1,
+                    "b": 255,
+                    "r": 255,
+                    "g": 255
+                },
+                "compareColors": [
+                    {
+                        "color": "rgba(245,34,45,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    },
+                    {
+                        "color": "rgba(55,214,122,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    }
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "width": 2.5,
+                "fontSize": 24,
+                "formatType": "number",
+                "fontColor": {
+                    "a": 1,
+                    "b": 85,
+                    "r": 85,
+                    "g": 85
+                },
+                "descriptionSize": 12,
+                "height": 1.2954545,
+                "zIndex": 0
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "etl-log1557026347678",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect sum(\"progress.delivered\") * 100.0 / sum(\"progress.accept\") as \"deliver lines ratio\"",
+                "start": "-86400s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_complete\" | select sum(\"extra_info_params.delivered\") * 100.0 / (sum(\"extra_info_params.delivered\")\n+ sum(\"extra_info_params.accept\") + sum(\"extra_info_params.dropped\") + sum(\"extra_info_params.failed\")) as \"deliver lines ratio\"",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "xAxis": [
+                    "deliver lines ratio"
+                ],
+                "yPos": 1.0795455,
+                "thickness": 28,
+                "displayName": "Log delivered ratio",
+                "useVertical": false,
+                "xPos": 7.68,
+                "showBorder": false,
+                "colorType": "normal",
+                "maxval": 100,
+                "unit": "%",
+                "useCol": false,
+                "bgColor": "rgba(235,235,235,1)",
+                "progressColor": "rgba(24,144,255,1)",
+                "showTitle": true,
+                "showBackground": false,
+                "width": 2.36,
+                "strokeLinecap": "round",
+                "fontSize": 16,
+                "fontColor": "rgba(0,0,0,0.45)",
+                "height": 1.2727273,
+                "zIndex": 0
+            },
+            "action": {},
+            "title": "etl-log1557026789387",
+            "type": "progress"
+        },
+        {
+            "search": {
+                "isInheritFilter": false,
+                "query": "__topic__:  __etl-log-status__ AND etl_context:* | select distinct \"etl_context.logstore\"",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "yPos": -0.056818184,
+                "filterData": [
+                    {
+                        "alias": "logstore",
+                        "list": [],
+                        "type": "filter",
+                        "key": "etl_context.logstore"
+                    }
+                ],
+                "displayName": "Filter source",
+                "showTitle": true,
+                "bindQuery": true,
+                "showBackground": false,
+                "width": 3.3,
+                "xPos": 6.662174,
+                "showBorder": false,
+                "height": 1.25,
+                "zIndex": 11
+            },
+            "action": {},
+            "title": "etl-log1557029175879",
+            "type": "droplist"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"failed lines\", 86400) as diff from \n(select sum(\"progress.failed\") as \"failed lines\" from log))",
+                "start": "-86400s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"transform_data:process:iter_complete\" | select diff[1] as today, round((diff[1] - diff[2]) * 100.0 / diff[2], 3) as inc_ration from \n(select compare(\"delivered lines\", 86400) as diff from \n(select sum(\"extra_info_params.delivered\") / 30.0 as \"delivered lines\" from log))",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "numberType": "compare",
+                "xAxis": [
+                    "today"
+                ],
+                "yPos": 1.1136363,
+                "compareUnit": "%",
+                "displayName": "Toal logs failed",
+                "unitSize": 12,
+                "description": "Compare with yesterday",
+                "threshold": 0,
+                "xPos": 5.134118,
+                "compareSize": 16,
+                "showBorder": false,
+                "unit": "Lines",
+                "yAxis": [
+                    "inc_ration"
+                ],
+                "bgColor": {
+                    "a": 1,
+                    "b": 255,
+                    "r": 255,
+                    "g": 255
+                },
+                "compareColors": [
+                    {
+                        "color": "rgba(245,34,45,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    },
+                    {
+                        "color": "rgba(55,214,122,1)"
+                    },
+                    {
+                        "color": "rgba(255,255,255,1)"
+                    }
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "width": 2.5,
+                "fontSize": 24,
+                "formatType": "number",
+                "fontColor": {
+                    "a": 1,
+                    "b": 85,
+                    "r": 85,
+                    "g": 85
+                },
+                "descriptionSize": 12,
+                "height": 1.2954545,
+                "zIndex": 12
+            },
+            "action": {
+                "type": "disabled"
+            },
+            "title": "etl-log1557029405394",
+            "type": "number"
+        },
+        {
+            "search": {
+                "query": "__topic__:  __etl-log-status__ AND __tag__:__schedule_type__:  Resident and event_id:  \"shard_worker:metrics:checkpoint\" | \nselect * from (select time_series(__time__, '1m',  '%y/%m/%d %H:%i', '0') as dt, \n\"etl_context.shard_id\" as shard, round(avg(\"extra_info_params.latency_second\"), 3) as \"delay (s)\" from log \ngroup by dt, shard order by dt asc limit 10000) where shard is not null",
+                "start": "-900s",
+                "tokenQuery": "__topic__:  __etl-log-status__ AND event_id:  \"checkpoint:flush:saved_checkpoint\" | select time_series(__time__, '30s',  '%H-%m-%d %H:%i:%S', '0') as dt, \navg(\"extra_info_params.latency_second\") as delay group by dt order by dt asc limit 10000",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "logstore": "internal-etl-log"
+            },
+            "display": {
+                "margin": [
+                    "auto",
+                    100,
+                    "auto",
+                    "auto"
+                ],
+                "xAxis": [
+                    "dt"
+                ],
+                "yPos": 5.8977275,
+                "aggSplit": false,
+                "displayName": "shard consumption delay (seconds)",
+                "aggAxis": [
+                    "shard"
+                ],
+                "xPos": 0.01735294,
+                "showBorder": false,
+                "yAxis": [
+                    "delay (s)"
+                ],
+                "showTitle": true,
+                "showBackground": false,
+                "chartType": "line",
+                "width": 5.05,
+                "legendPosition": "right",
+                "formatType": "number",
+                "height": 3.5227273,
+                "zIndex": 0
+            },
+            "action": {
+                "delay (s)": {},
+                "dt": {},
+                "shard": {},
+                "type": "disabled"
+            },
+            "title": "etl-log1557153739538",
+            "type": "agg"
+        }
+    ],
+    "displayName": "Data Transformation Troubleshooting",
+    "description": "",
+    "attribute": {},
+    "dashboardName": "internal-etl-insight_en"
+}
