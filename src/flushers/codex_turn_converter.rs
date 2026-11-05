@@ -1,6 +1,7 @@
 //! Native Codex turn conversion: work identity belongs to the operation that
 //! proved it, while delegated turns attach through a unanimous external context.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
@@ -8,7 +9,6 @@ use sha2::{Digest, Sha256};
 
 use super::event_log_converter::valid_id;
 use super::{ConvertOptions, ConvertResult, EventLogConverter};
-use crate::normalization::entry_to_object;
 use crate::types::{AgentActivityEntry, AgentEventName};
 
 const WORK_KEYS: &[&str] = &[
@@ -25,17 +25,30 @@ fn stable_id(parts: &[&str]) -> String {
     hex::encode(Sha256::digest(parts.join("\0").as_bytes()))[..16].to_owned()
 }
 
+fn context_value<'a>(record: &'a AgentActivityEntry, key: &str) -> Option<Cow<'a, Value>> {
+    // Flattened extra fields follow typed fields in the serialized entry, so
+    // preserve their precedence while projecting only the requested metadata.
+    if let Some(value) = record.extra.get(key) {
+        return Some(Cow::Borrowed(value));
+    }
+    match key {
+        "gen_ai.agent.id" => record.agent_id.as_ref(),
+        "gen_ai.step.id" => record.step_id.as_ref(),
+        _ => None,
+    }
+    .map(|value| Cow::Owned(Value::String(value.clone())))
+}
+
 fn consensus(records: &[&AgentActivityEntry], keys: &[&str]) -> Map<String, Value> {
-    let objects: Vec<_> = records
-        .iter()
-        .map(|record| entry_to_object(record))
-        .collect();
     let mut fields = Map::new();
-    if let Some(first) = objects.first() {
+    if let Some(first) = records.first() {
         for &key in keys {
-            if let Some(value) = first.get(key) {
-                if objects.iter().all(|record| record.get(key) == Some(value)) {
-                    fields.insert(key.to_owned(), value.clone());
+            if let Some(value) = context_value(first, key) {
+                if records
+                    .iter()
+                    .all(|record| context_value(record, key).as_deref() == Some(value.as_ref()))
+                {
+                    fields.insert(key.to_owned(), value.into_owned());
                 }
             }
         }
@@ -56,6 +69,33 @@ pub fn convert_codex_turn(
     options: &ConvertOptions,
     converter: &dyn EventLogConverter,
 ) -> Result<ConvertResult, String> {
+    if records.is_empty() {
+        return Ok(ConvertResult::default());
+    }
+    let has_delegated_work = records
+        .iter()
+        .any(|record| record.get("agent.codex.delegated") == Some(&Value::Bool(true)));
+    let local: Vec<_> = records
+        .iter()
+        .map(|record| {
+            let mut copy = record.clone();
+            copy.extra.remove("gen_ai.agent.scope");
+            if has_delegated_work && copy.event_name == Some(AgentEventName::Other) {
+                copy.parent_span_id = None;
+            }
+            copy
+        })
+        .collect();
+    let result = converter.convert(&local, options)?;
+    map_codex_spans(records, result)
+}
+
+/// Apply native Codex ownership to spans already produced by a converter.
+/// Streaming leaves reuse this mapping without cloning their entire turn again.
+pub(super) fn map_codex_spans(
+    records: &[AgentActivityEntry],
+    mut result: ConvertResult,
+) -> Result<ConvertResult, String> {
     let Some(first) = records.first() else {
         return Ok(ConvertResult::default());
     };
@@ -73,21 +113,6 @@ pub fn convert_codex_turn(
                     == attachment
                 && record.get("agent.codex.delegated") == Some(&Value::Bool(true))
         });
-    let has_delegated_work = records
-        .iter()
-        .any(|record| record.get("agent.codex.delegated") == Some(&Value::Bool(true)));
-    let local: Vec<_> = records
-        .iter()
-        .map(|record| {
-            let mut copy = record.clone();
-            copy.extra.remove("gen_ai.agent.scope");
-            if has_delegated_work && copy.event_name == Some(AgentEventName::Other) {
-                copy.parent_span_id = None;
-            }
-            copy
-        })
-        .collect();
-    let mut result = converter.convert(&local, options)?;
     let all: Vec<_> = records.iter().collect();
     let work = consensus(&all, WORK_KEYS);
     let raw_turn = first

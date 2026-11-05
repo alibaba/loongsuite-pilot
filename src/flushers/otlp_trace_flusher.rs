@@ -1991,12 +1991,17 @@ impl OtlpInner {
         let converter = Arc::clone(&self.converter);
         let worker = tokio::task::spawn_blocking(move || {
             converter.convert_stream(&local, &options, &mut |spans, final_parents| {
-                let converter = StreamResult(Mutex::new(Some(ConvertResult {
+                let converted = ConvertResult {
                     span_count: spans.len(),
                     spans,
                     ..ConvertResult::default()
-                })));
-                let mut result = route_convert(&agent_type, &original, &passthrough, &converter)?;
+                };
+                let mut result = if agent_type == "codex" {
+                    super::codex_turn_converter::map_codex_spans(&original, converted)?
+                } else {
+                    let converter = StreamResult(Mutex::new(Some(converted)));
+                    route_convert(&agent_type, &original, &passthrough, &converter)?
+                };
                 if !final_parents {
                     result.spans.retain(|span| {
                         matches!(
