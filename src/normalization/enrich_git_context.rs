@@ -198,7 +198,23 @@ where
             continue;
         }
         let agent_type = entry.agent_type.clone();
-        let record = super::entry_to_object(entry);
+        // Canonical lookup reads only the workspace and producer probe fields.
+        // Preserve extra's fallback for missing/empty typed values without
+        // materializing message bodies and every unrelated event field.
+        let mut record = Map::new();
+        if let Some(value) = entry.extra.get("workspace.path") {
+            record.insert("workspace.path".to_owned(), value.clone());
+        }
+        for namespace in expand_namespaces(std::slice::from_ref(&agent_type)) {
+            for key in [
+                format!("agent.{namespace}.cwd"),
+                format!("agent.{namespace}.workspace_roots"),
+            ] {
+                if let Some(value) = entry.extra.get(&key) {
+                    record.insert(key, value.clone());
+                }
+            }
+        }
         if let Err(err) = enrich_entry_using(entry, &record, agent_type.as_str(), &mut infer) {
             tracing::warn!(
                 target: "GitContextEnrichment",

@@ -22,12 +22,16 @@ pub fn expand_agent_input_events(entries: Vec<AgentActivityEntry>) -> Vec<AgentA
 
     for entry in entries {
         let should_derive = is_input_other_event(&entry);
-        let derived_event_id = derive_agent_input_event_id(&entry.event_id);
         expanded.push(entry);
-        if !should_derive || !existing_event_ids.insert(derived_event_id.clone()) {
+        if !should_derive {
             continue;
         }
-        let mut derived = expanded.last().expect("source entry").clone();
+        let source = expanded.last().expect("source entry");
+        let derived_event_id = derive_agent_input_event_id(&source.event_id);
+        if !existing_event_ids.insert(derived_event_id.clone()) {
+            continue;
+        }
+        let mut derived = source.clone();
         derived.turn_start = None;
         derived.turn_end = None;
         derived.event_id = derived_event_id;
@@ -62,8 +66,22 @@ fn parse_uuid(text: &str) -> [u8; 16] {
 fn format_uuid(bytes: &[u8; 16]) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
-        bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
     )
 }
 

@@ -778,24 +778,25 @@ impl InputManager {
             }
             return Ok(());
         };
-        match flusher.send_batch(entries.clone(), Some(bytes)).await {
+        let entry_count = entries.len();
+        match flusher.send_batch(entries, Some(bytes)).await {
             Ok(()) => {
                 if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
-                    counter.out_events += entries.len() as u64;
+                    counter.out_events += entry_count as u64;
                 }
                 for listener in self.flushed.lock().expect("flushed").iter() {
-                    listener(entries.len(), batch_bytes);
+                    listener(entry_count, batch_bytes);
                 }
                 Ok(())
             }
             Err(err) => {
                 if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
-                    counter.out_failed += entries.len() as u64;
+                    counter.out_failed += entry_count as u64;
                 }
                 logger("InputManager").error(
                     "dispatch failed",
                     Some(&fields(
-                        serde_json::json!({ "count": entries.len(), "error": err.to_string() }),
+                        serde_json::json!({ "count": entry_count, "error": err.to_string() }),
                     )),
                 );
                 Err(err.to_string())

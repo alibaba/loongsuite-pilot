@@ -809,7 +809,7 @@ impl<'a> CodexTranscriptEngine<'a> {
                         None,
                     )
                     .await?;
-                emitted_count += self.body.emit_batches(recovered.entries.clone());
+                emitted_count += self.body.emit_batches(recovered.entries);
                 if !matches!(recovered.kind, RecoveryKind::Unparseable)
                     && checkpoint
                         .active_turn

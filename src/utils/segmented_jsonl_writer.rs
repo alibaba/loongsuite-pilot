@@ -1,9 +1,9 @@
 //! Shared serialization for append, sealing and retention of local JSONL files.
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::io::AsyncWriteExt;
 
 pub const DEFAULT_JSONL_SEGMENT_BYTES: u64 = 100 * 1024 * 1024;
 pub const LOCAL_LOG_EMERGENCY_FILE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
@@ -30,28 +30,29 @@ fn lock_key(path: &Path) -> PathBuf {
     }
     key
 }
+fn file_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut writes = WRITES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("JSONL file locks");
+    writes.retain(|_, owner| owner.strong_count() > 0);
+    let key = lock_key(path);
+    match writes.get(&key).and_then(Weak::upgrade) {
+        Some(owner) => owner,
+        None => {
+            let owner = Arc::new(tokio::sync::Mutex::new(()));
+            writes.insert(key, Arc::downgrade(&owner));
+            owner
+        }
+    }
+}
+
 pub async fn with_jsonl_file_lock<T, F, Fut>(path: &Path, action: F) -> T
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
-    let owner = {
-        let mut writes = WRITES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("JSONL file locks");
-        writes.retain(|_, owner| owner.strong_count() > 0);
-        let key = lock_key(path);
-        match writes.get(&key).and_then(Weak::upgrade) {
-            Some(owner) => owner,
-            None => {
-                let owner = Arc::new(tokio::sync::Mutex::new(()));
-                writes.insert(key, Arc::downgrade(&owner));
-                owner
-            }
-        }
-    };
-    let _guard = owner.lock().await;
+    let _guard = file_lock(path).lock_owned().await;
     action().await
 }
 
@@ -100,90 +101,107 @@ pub async fn append_segmented_jsonl(
     max_file_bytes: u64,
     failed_data: bool,
 ) -> std::io::Result<()> {
-    with_jsonl_file_lock(file, || async {
-        if let Some(parent) = file.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let mut size = match tokio::fs::symlink_metadata(file).await {
-            Ok(metadata) => {
-                if !metadata.is_file() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "JSONL output is not a regular file",
-                    ));
-                }
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    if metadata.file_attributes() & 0x400 != 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "JSONL output is a reparse point",
-                        ));
-                    }
-                }
-                metadata.len()
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error),
-        };
-        let bytes = (line.len() as u64).saturating_add(1);
-        let limit = max_file_bytes.max(1);
-        if size > LOCAL_LOG_EMERGENCY_FILE_BYTES {
-            tokio::fs::remove_file(file).await?;
-            crate::utils::create_logger("SegmentedJsonlWriter").warn(
-                "Deleted oversized local JSONL file",
-                Some(
-                    &serde_json::json!({"bytes":size,"discardedFailedData":failed_data})
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-            );
-            size = 0;
-        }
-        if size > 0 && size.saturating_add(bytes) > limit {
-            tokio::fs::rename(file, sealed_path(file)?).await?;
-        }
-        if bytes > limit {
-            crate::utils::create_logger("SegmentedJsonlWriter").warn(
-                "JSONL record exceeds file size limit",
-                Some(
-                    &serde_json::json!({"bytes":bytes,"maxFileBytes":limit})
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-            );
-        }
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        #[cfg(windows)]
-        {
-            options.custom_flags(0x0020_0000);
-        }
-        let mut output = options.open(file).await?;
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            if output.metadata().await?.file_attributes() & 0x400 != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "JSONL output is a reparse point",
-                ));
-            }
-        }
-        let mut data = Vec::with_capacity(line.len().saturating_add(1));
-        data.extend_from_slice(line.as_bytes());
-        data.push(b'\n');
-        output.write_all(&data).await?;
-        output.flush().await
+    let guard = file_lock(file).lock_owned().await;
+    let file = file.to_path_buf();
+    let mut data = Vec::with_capacity(line.len().saturating_add(1));
+    data.extend_from_slice(line.as_bytes());
+    data.push(b'\n');
+    // Keep the lock in the blocking task even if its async caller is cancelled.
+    // One task performs the complete append instead of scheduling each file API.
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        append_locked(&file, &data, max_file_bytes, failed_data)
     })
     .await
+    .map_err(|error| std::io::Error::other(format!("JSONL append task failed: {error}")))?
+}
+
+fn append_locked(
+    file: &Path,
+    data: &[u8],
+    max_file_bytes: u64,
+    failed_data: bool,
+) -> std::io::Result<()> {
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut size = match std::fs::symlink_metadata(file) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "JSONL output is not a regular file",
+                ));
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "JSONL output is a reparse point",
+                    ));
+                }
+            }
+            metadata.len()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    let bytes = data.len() as u64;
+    let limit = max_file_bytes.max(1);
+    if size > LOCAL_LOG_EMERGENCY_FILE_BYTES {
+        std::fs::remove_file(file)?;
+        crate::utils::create_logger("SegmentedJsonlWriter").warn(
+            "Deleted oversized local JSONL file",
+            Some(
+                &serde_json::json!({"bytes":size,"discardedFailedData":failed_data})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        );
+        size = 0;
+    }
+    if size > 0 && size.saturating_add(bytes) > limit {
+        std::fs::rename(file, sealed_path(file)?)?;
+    }
+    if bytes > limit {
+        crate::utils::create_logger("SegmentedJsonlWriter").warn(
+            "JSONL record exceeds file size limit",
+            Some(
+                &serde_json::json!({"bytes":bytes,"maxFileBytes":limit})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        );
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let mut output = options.open(file)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if output.metadata()?.file_attributes() & 0x400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "JSONL output is a reparse point",
+            ));
+        }
+    }
+    output.write_all(data)?;
+    output.flush()
 }
 
 #[cfg(test)]

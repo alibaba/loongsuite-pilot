@@ -84,10 +84,19 @@ impl BaseFlusher for MultiFlusher {
         logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError> {
         let mut set = tokio::task::JoinSet::new();
-        for flusher in &self.flushers {
-            let flusher = Arc::clone(flusher);
-            let entries = entries.clone();
-            let logical_bytes = logical_bytes.clone();
+        if let Some((last_flusher, other_flushers)) = self.flushers.split_last() {
+            for flusher in other_flushers {
+                let flusher = Arc::clone(flusher);
+                let entries = entries.clone();
+                let logical_bytes = logical_bytes.clone();
+                set.spawn(async move {
+                    let name = flusher.name().to_string();
+                    (name, flusher.send_batch(entries, logical_bytes).await)
+                });
+            }
+            // The final destination can own the original batch. Keep its task
+            // boundary so failure isolation and concurrent fan-out are unchanged.
+            let flusher = Arc::clone(last_flusher);
             set.spawn(async move {
                 let name = flusher.name().to_string();
                 (name, flusher.send_batch(entries, logical_bytes).await)
