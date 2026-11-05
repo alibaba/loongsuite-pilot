@@ -36,6 +36,7 @@ import {
 } from './deployment/persisted-deploy-paths.js';
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
+import { resolveHookInstallScope } from './deployment/hook-scope.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
@@ -190,7 +191,7 @@ export function isGateEnabled(
  * the daemon appends a duplicate hook.
  */
 
-async function main(): Promise<number> {
+export async function runEagerInjection(): Promise<number> {
   const args = parseInjectArgs(process.argv.slice(2));
 
   for (const flag of args.unknownFlags) {
@@ -204,6 +205,30 @@ async function main(): Promise<number> {
 
   const pilotDir = args.pilotDir ? resolveHome(args.pilotDir) : path.resolve(__inject_dirname, '..');
   const dataDir = resolveDataDir(args.dataDir);
+
+  // Existing container launchers already inherit business-Pod env. Opted-in
+  // scope uses the shared lifecycle service, including DSH's home patch; the
+  // unqualified startup path below keeps its historical eager-safe behavior.
+  const scope = resolveHookInstallScope();
+  if (scope !== undefined) {
+    if (scope === 'system' && process.platform !== 'linux') throw new Error('System hooks are supported only on Linux');
+    const { runHookInstall } = await import('./deployment/hook-install-service.js');
+    const gate = readConfigAgentsGate();
+    const result = await runHookInstall({
+      dataDir, pilotDir,
+      agentsFlag: args.agents.length ? args.agents.join(',') : undefined,
+      envAgents: args.agents.length ? undefined : process.env.LOONGSUITE_PILOT_AGENTS,
+      deploymentScope: scope,
+      deployModes: new Set([...EAGER_DEPLOY_MODES, 'dsh-yaml-patch']),
+      enabled: id => isGateEnabled(gate, id),
+      writeResult: true,
+    });
+    for (const warning of result.warnings) warn(warning);
+    for (const agent of result.report.agents) {
+      if (agent.status === 'failed') warn(`${agent.id}: ${agent.reason} ${agent.hint ?? ''}`);
+    }
+    return result.exitCode;
+  }
 
   // Constructed to match DeploymentManager argument for argument — see the
   // duplicate-hook hazard in resolveDataDir().
@@ -328,7 +353,7 @@ const isEntryPoint = typeof require !== 'undefined'
   && require.main === module;
 
 if (isEntryPoint) {
-  main()
+  runEagerInjection()
     .then(code => {
       // Explicit exit rather than falling off the end. This entry never calls
       // initFileLogging() (which is what starts pino-roll, whose rotation timer

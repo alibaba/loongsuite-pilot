@@ -48,6 +48,7 @@ Equivalent environment variables:
 | `AGENT_DATA_COLLECTION_CONFIG` | Custom config file path. |
 | `LOONGSUITE_PILOT_ENABLED` | Set `false` or `0` to disable the collector. |
 | `LOONGSUITE_PILOT_DATA_DIR` | Override the data directory. |
+| `LOONGSUITE_PILOT_HOOK_SCOPE` | Installation scope (`user` or Linux-only `system`) for hook CLI and container eager injection. Explicit `--scope` wins; unset preserves existing behavior and recorded targets. |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |

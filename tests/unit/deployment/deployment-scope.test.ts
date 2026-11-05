@@ -28,11 +28,8 @@ describe('deployment scope', () => {
     expect(resolveDeploymentScope(container(containerId), null)).toBe('auto');
   });
 
-  it('keeps build deploy and eager injection from writing the result file', () => {
+  it('keeps build deploy from writing the result file', () => {
     const deploy = fs.readFileSync('src/deployment/deploy-command.ts', 'utf8');
-    const eager = fs.readFileSync('src/inject-hooks.ts', 'utf8');
     expect(deploy).not.toContain('runHookInstall');
-    expect(eager).not.toContain('runHookInstall');
-    expect(eager).not.toContain('hook-install-service');
   });
 });
