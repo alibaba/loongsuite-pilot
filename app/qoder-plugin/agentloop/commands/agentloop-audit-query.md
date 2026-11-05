@@ -1,12 +1,12 @@
 ---
-description: 查询 loongsuite-pilot 上报的审计日志。
+description: 查询审计日志。
 ---
 
 # 查询审计日志
 
 用户要看 loongsuite-pilot 的审计日志时使用。
 
-按 [loongsuite-pilot-query](../skills/loongsuite-pilot-query/SKILL.md) 技能执行。在插件根目录执行。
+按 [agentloop-audit-query](../skills/agentloop-audit-query/SKILL.md) 技能执行。在插件根目录执行。
 
 ## 环境
 

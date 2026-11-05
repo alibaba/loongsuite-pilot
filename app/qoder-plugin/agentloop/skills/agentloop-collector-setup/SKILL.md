@@ -1,8 +1,8 @@
 ---
-name: loongsuite-pilot-setup
+name: agentloop-collector-setup
 description: |
-  安装 loongsuite-pilot。用户要安装、配置或重新获取 loongsuite-pilot 时使用。
-  Triggers: "安装 loongsuite-pilot", "安装 pilot", "loongsuite-pilot", "配置 loongsuite-pilot".
+  安装采集器（loongsuite-pilot）。用户要安装、配置或重新获取 loongsuite-pilot 时使用。
+  Triggers: "安装 loongsuite-pilot", "安装 pilot", "安装采集器", "loongsuite-pilot", "配置 loongsuite-pilot".
 ---
 
 # 安装 loongsuite-pilot

@@ -1,6 +1,6 @@
 # AgentLoop
 
-本插件面向 Agent 的排查与管理。在对话里选定 AgentSpace，生成 loongsuite-pilot 的安装包，并查询已经上报的使用记录。记录也可以到 AgentLoop 控制台查看。
+本插件面向 Agent 的排查与管理。在对话里选定 AgentSpace，生成采集器（loongsuite-pilot）的安装包，并查询已经上报的使用记录。记录也可以到 AgentLoop 控制台查看。
 
 ## 功能
 
@@ -13,9 +13,9 @@
 
 ## 使用方式
 
-安装时在对话中输入「安装 loongsuite-pilot」，或使用 `/loongsuite-pilot-setup`。安装会生成一个 zip，对话返回文件路径。可以本地解压后安装试用，也可以到管理市场下发。
+安装时在对话中输入「安装采集器」，或使用 `/agentloop-collector-setup`。安装会生成一个 zip，对话返回文件路径。可以本地解压后安装试用，也可以到管理市场下发。
 
-查询时在对话中说明要查看的内容，或使用 `/loongsuite-pilot-query`。例如输入：「查询近期各 Agent 的使用情况」、「统计各 Agent 耗费的 Token」、「查看这些 Agent 大部分时间在处理什么工作」。
+查询时在对话中说明要查看的内容，或使用 `/agentloop-audit-query`。例如输入：「查询近期各 Agent 的使用情况」、「统计各 Agent 耗费的 Token」、「查看这些 Agent 大部分时间在处理什么工作」。
 
 ## 身份凭证
 

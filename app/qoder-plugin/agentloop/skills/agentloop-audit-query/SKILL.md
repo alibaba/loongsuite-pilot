@@ -1,7 +1,7 @@
 ---
-name: loongsuite-pilot-query
+name: agentloop-audit-query
 description: |
-  查询 loongsuite-pilot 写入的审计日志。用户要看使用情况、人员、仓库、会话或一段时间内的日志时使用。
+  查询审计日志。用户要看使用情况、人员、仓库、会话或一段时间内的日志时使用。
   Triggers: "查询审计", "查日志", "审计日志", "loongsuite-pilot 日志", "agent-event".
 ---
 
