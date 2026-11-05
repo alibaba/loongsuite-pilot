@@ -71,7 +71,7 @@ function requestLines(requestId: string, startTs: number, endTs: number, inputTo
   ];
 }
 
-async function writeSegment(sessionId: string, content: string, name = 'segment-0.jsonl'): Promise<string> {
+async function writeSegment(sessionId: string, content: string | Buffer, name = 'segment-0.jsonl'): Promise<string> {
   const dir = segmentsDir(sessionId);
   await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, name);
@@ -88,6 +88,70 @@ beforeEach(async () => {
 });
 
 describe('readSegmentTokensForSession incremental JSONL reading', () => {
+  it('does not read an unchanged partial record and collects it after append', async () => {
+    const sessionId = nextSessionId();
+    const [start, end] = requestLines('req-partial', 1000, 2000);
+    const file = await writeSegment(sessionId, start + '\n' + end.slice(0, -1));
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    const before = hoisted.segmentReadBytes;
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    expect(hoisted.segmentReadBytes).toBe(before);
+    await fs.appendFile(file, end.slice(-1) + '\n');
+    expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-partial']);
+  });
+
+  it('skips an unterminated prefix over 32 MiB once and resumes at its delimiter', async () => {
+    const sessionId = nextSessionId();
+    const file = await writeSegment(sessionId, Buffer.alloc(32 * 1024 * 1024 + 1, 0x78));
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    const before = hoisted.segmentReadBytes;
+    expect(before).toBe(32 * 1024 * 1024 + 1);
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    expect(hoisted.segmentReadBytes).toBe(before);
+    const suffix = '\n' + requestLines('req-after', 1000, 2000).join('\n') + '\n';
+    await fs.appendFile(file, suffix);
+    expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-after']);
+    expect(hoisted.segmentReadBytes - before).toBe(Buffer.byteLength(suffix));
+  });
+
+  it('accepts a record of exactly 32 MiB when its newline arrives later', async () => {
+    const sessionId = nextSessionId();
+    const [start, end] = requestLines('req-limit', 1000, 2000);
+    const record = Buffer.alloc(32 * 1024 * 1024, 0x20);
+    record.write(end);
+    const file = await writeSegment(sessionId, start + '\n');
+    await fs.appendFile(file, record);
+    expect(await readSegmentTokensForSession(sessionId)).toEqual([]);
+    await fs.appendFile(file, '\n');
+    expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-limit']);
+  });
+
+  it('does not retain the requested backing capacity of many short reads', async () => {
+    const sessionId = nextSessionId();
+    const [start, end] = requestLines('req-short', 1000, 2000);
+    const largeEnd = end.slice(0, -1) + ',"padding":"' + 'x'.repeat(1024 * 1024) + '"}\n';
+    const size = Buffer.byteLength(largeEnd);
+    await writeSegment(sessionId, start + '\n' + largeEnd);
+    hoisted.maxBytesPerRead = 4 * 1024;
+
+    const originalConcat = Buffer.concat;
+    let retainedBytes = 0;
+    const concat = vi.spyOn(Buffer, 'concat').mockImplementation((parts, length) => {
+      if (length === size) {
+        retainedBytes = [...new Set(parts.map(part => part.buffer))]
+          .reduce((total, buffer) => total + buffer.byteLength, 0);
+      }
+      return originalConcat(parts, length);
+    });
+    try {
+      expect((await readSegmentTokensForSession(sessionId)).map(row => row.requestId)).toEqual(['req-short']);
+      expect(retainedBytes).toBeGreaterThanOrEqual(size);
+      expect(retainedBytes).toBeLessThanOrEqual(2 * size);
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
   it('reads only bytes appended after the last complete record', async () => {
     const sessionId = nextSessionId();
     const firstBody = `${requestLines('req-a', 1000, 2000).join('\n')}\n`;

@@ -177,5 +177,5 @@ describe('CodexTurnJournal', () => {
     const restarted = new CodexTurnJournal(directory);
     await expect(restarted.acknowledge([entry('next', { 'gen_ai.turn.id': 'next-turn' })])).rejects.toThrow();
     expect(JSON.parse(await fs.readFile(blockedAck, 'utf8'))).toEqual({ version: 1, key: keys[1] });
-  }, 30_000);
+  }, 120_000); // Loading 10,000 ACK files can exceed 30 seconds on CI.
 });
