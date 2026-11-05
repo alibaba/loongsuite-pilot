@@ -69,6 +69,18 @@ function validate(text: string): void {
   catch { throw new Error('Invalid TOML in system config; original file preserved'); }
 }
 
+/** END is only a comment: bare suffix keys still belong to our last table. */
+function assertSuffixTableOwnership(text: string, after: string): void {
+  if (!after.trim()) return;
+  const current = parse(text.replace(/^\uFEFF/, ''));
+  let key = '__loongsuite_pilot_tail__';
+  while (Object.hasOwn(current, key)) key += '_';
+  const probe = parse(`[${JSON.stringify(key)}]\n${after}`);
+  if (Object.keys(probe[key] as object).length) {
+    throw new Error('Keys after the Pilot block would change table ownership; move them to their intended table before retrying. Original preserved.');
+  }
+}
+
 async function read(file: string): Promise<{ text: string; exists: boolean; mode: number; symlink: boolean }> {
   let stat;
   try {
@@ -109,6 +121,7 @@ export async function updateSystemTomlHooks(def: AgentDefinition, install: boole
         : current.text + (current.text && !current.text.endsWith('\n') ? '\n' : '') + renderSystemTomlHooks(def)
       : outside;
     if (next === current.text) return;
+    if (owned.block) assertSuffixTableOwnership(current.text, owned.after);
     if (current.symlink || (current.exists && !(current.mode & 0o222))) {
       throw new Error('system config is read-only or externally mounted; update its deployment source');
     }

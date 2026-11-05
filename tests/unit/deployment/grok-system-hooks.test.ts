@@ -76,6 +76,31 @@ describe('Grok system managed configuration', () => {
     expect(result.stdout).toBe('stop');
   });
 
+  it.each(['sandbox_mode = "read-only"\n', 'note = """\n[not.a.table]\n"""\n'])('refuses removal that would reparent keys after the owned block', async suffix => {
+    const file = def.hook!.settingsPath;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, '[projects."/work"]\ntrust_level = "trusted"\n');
+    await updateSystemTomlHooks(def, true);
+    const installed = await fs.readFile(file, 'utf8') + suffix;
+    await fs.writeFile(file, installed);
+    expect(() => parse(installed)).not.toThrow();
+    await expect(updateSystemTomlHooks(def, false)).rejects.toThrow('table');
+    expect(await fs.readFile(file, 'utf8')).toBe(installed);
+  });
+
+  it.each(['[projects."/other"]\ntrust_level = "untrusted"\n', '[[hooks.stop]]\nmatcher = "third-party"\nhooks = []\n'])('preserves later explicit tables and comments when removing the owned block', async table => {
+    const file = def.hook!.settingsPath;
+    const prefix = '["__loongsuite_pilot_tail__"]\nkeep = true\n';
+    const suffix = '# [this is a comment]\n' + table;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, prefix);
+    await updateSystemTomlHooks(def, true);
+    await fs.appendFile(file, suffix);
+    await updateSystemTomlHooks(def, false);
+    expect(await fs.readFile(file, 'utf8')).toBe(prefix + suffix);
+    expect(parse(await fs.readFile(file, 'utf8'))).toEqual(parse(prefix + suffix));
+  });
+
   it('preserves malformed, foreign-owned, unmarked, and read-only files on failure', async () => {
     const file = def.hook!.settingsPath;
     await fs.mkdir(path.dirname(file), { recursive: true });
