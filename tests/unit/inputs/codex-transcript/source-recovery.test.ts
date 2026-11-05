@@ -69,6 +69,46 @@ it('does not repeat missing-owner probes after startup baselining', async () => 
   expect(checkpoint(f).ownerSessionMetaOffset).toBeNull();
 });
 
+it.each([false, true])('does not rescan an absent-owner inventory larger than the probe LRU, including after restart (invalid header: %s)', async invalidHeader => {
+  const f = await fixture();
+  const sessions = path.dirname(f.file);
+  const ordinary = row('event_msg', { type: 'historical_without_owner', padding: 'x'.repeat(128) });
+  const text = invalidHeader
+    ? JSON.stringify({ type: 'session_meta', payload: null }) + '\n' + ordinary.repeat(2)
+    : ordinary;
+  for (let start = 0; start < 2056; start += 64) {
+    await Promise.all(Array.from({ length: Math.min(64, 2056 - start) }, (_, i) =>
+      fs.writeFile(path.join(sessions, `rollout-missing-${start + i}.jsonl`), text)));
+  }
+  await f.probe.onStart();
+  const update = vi.spyOn(f.state, 'update');
+  for (let i = 0; i < 2; i++) {
+    const cycle = await measure(f, () => f.probe.collect());
+    expect(cycle.rawReadBytes).toBe(0);
+    expect(cycle.rawReadCalls).toBe(0);
+    expect(cycle.rawInBytes).toBe(0);
+  }
+  expect(update).not.toHaveBeenCalled();
+  expect(f.entries).toHaveLength(0);
+  await f.state.save();
+  await f.probe.onStop();
+  const restored = new StateStore(path.join(f.root, 'state.json'));
+  await restored.load();
+  const restarted = await fixture(f.root, restored);
+  const startup = await measure(restarted, () => restarted.probe.onStart());
+  expect(startup.rawReadBytes).toBe(0);
+  expect((await measure(restarted, () => restarted.probe.collect())).rawReadBytes).toBe(0);
+}, 30_000);
+
+it('continues past an invalid session header to find a later valid owner', async () => {
+  const f = await fixture();
+  const prefix = JSON.stringify({ type: 'session_meta', payload: null }) + '\n'
+    + row('event_msg', { type: 'ordinary_record' });
+  await fs.writeFile(f.file, prefix + meta() + diagnostic());
+  expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).toBe(Buffer.byteLength(prefix));
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
+});
+
 it('still consumes normal turns without a session header', async () => {
   const f = await fixture(); await fs.writeFile(f.file, completed('normal', false));
   await processFile(f);
@@ -90,6 +130,50 @@ it.each(['append', 'same-size', 'new-inode', 'truncate'])('invalidates an absent
     .toBe(mode === 'append' ? Buffer.byteLength(original) : 0);
 });
 
+it.each(['append', 'same-size', 'new-inode', 'truncate'])('invalidates persisted owner absence after %s repair with an empty LRU', async mode => {
+  const f = await fixture();
+  const original = diagnostic();
+  await fs.writeFile(f.file, original);
+  const stat = await fs.stat(f.file);
+  await f.probe.findOwnerOffset(f.file, stat);
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeTypeOf('string');
+  // An absence marker is not a checkpoint and must not skip first baseline.
+  expect(f.probe.readCheckpoint(key(f))).toBeNull();
+  f.probe.ownerOffsetProbes.clear();
+  if (mode === 'append') await fs.appendFile(f.file, meta());
+  else {
+    const body = mode === 'same-size'
+      ? meta() + ' '.repeat(Buffer.byteLength(original) - Buffer.byteLength(meta()) - 1) + '\n'
+      : meta();
+    if (mode === 'new-inode') {
+      await fs.writeFile(f.file + '.new', body);
+      await fs.rename(f.file + '.new', f.file);
+    } else await fs.writeFile(f.file, body);
+  }
+  // Restore mtime so ctime/inode/size must invalidate the persisted result.
+  await fs.utimes(f.file, stat.atime, stat.mtime);
+  expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file)))
+    .toBe(mode === 'append' ? Buffer.byteLength(original) : 0);
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
+});
+
+it.each(['prefix', 'incomplete'])('does not persist %s owner probes as full-file absence', async kind => {
+  const f = await fixture();
+  const prefix = diagnostic();
+  await fs.writeFile(f.file, prefix + (kind === 'prefix' ? meta() : '{"unfinished":'));
+  const stat = await fs.stat(f.file);
+  await f.probe.findOwnerOffset(f.file, stat, kind === 'prefix' ? Buffer.byteLength(prefix) : stat.size);
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
+});
+
+it.each([123, {}, 'x'.repeat(257)])('ignores malformed persisted owner absence %j', async value => {
+  const f = await fixture();
+  await fs.writeFile(f.file, meta());
+  f.state.update(key(f), { extra: { codexOwnerAbsentVersion: value } });
+  expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).toBe(0);
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
+});
+
 it('does not memoize a negative probe when a writer changes the file during its read', async () => {
   const f = await fixture(); await fs.writeFile(f.file, diagnostic()); const before = await fs.stat(f.file);
   const runtime = new InputRuntimeAccumulator(); f.probe.activeRuntimeAccumulator = runtime;
@@ -100,6 +184,7 @@ it('does not memoize a negative probe when a writer changes the file during its 
   });
   expect(await f.probe.findOwnerOffset(f.file, before)).toBeNull();
   expect(f.probe.ownerOffsetProbes.size).toBe(0);
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
   expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).not.toBeNull();
 });
 
