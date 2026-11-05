@@ -35,6 +35,8 @@ interface ManifestLocation {
 interface WorkerRuntime {
   restarts: number;
   stopping: boolean;
+  stopAttempt?: Promise<boolean>;
+  stopped?: boolean;
 }
 
 export interface WindowsProcessIdentity {
@@ -411,10 +413,37 @@ export class WorkerManifestSupervisor {
   ): Promise<boolean> {
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     const runtime = this.runtimes.get(paths.pid);
-    if (runtime) runtime.stopping = true;
+    if (!runtime) return this.stopProcess(agentId, bundleRoot, manifest, options);
+    if (runtime.stopAttempt) return runtime.stopAttempt;
+    runtime.stopping = true;
+    runtime.stopped = false;
+    const attempt = this.stopProcess(agentId, bundleRoot, manifest, options);
+    runtime.stopAttempt = attempt;
+    try {
+      runtime.stopped = await attempt;
+      return runtime.stopped;
+    } finally {
+      runtime.stopAttempt = undefined;
+    }
+  }
+
+  private async stopProcess(
+    agentId: string,
+    bundleRoot: string,
+    manifest: WorkerManifest,
+    options: WorkerManifestOptions,
+  ): Promise<boolean> {
+    const paths = this.resolvePaths(bundleRoot, manifest, options);
 
     const pid = await this.readPid(paths.pid);
     if (!pid) {
+      // Exit may already have removed the pid while this explicit stop was
+      // starting. Still publish the final state before taking over its cleanup.
+      if (this.runtimes.has(paths.pid)) {
+        await this.writeStatus(paths.status, {
+          state: 'stopped', name: manifest.name, agentId, stoppedAt: new Date().toISOString(),
+        });
+      }
       this.runtimes.delete(paths.pid);
       return true;
     }
@@ -959,13 +988,14 @@ if ($null -ne $process) {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Promise<void> {
-    // Explicit stop owns pid cleanup and the final status. A delayed exit
-    // callback must not remove a replacement pid or overwrite "stopped".
-    if (runtime.stopping) return;
+    // Wait for an active stop rather than discarding its exit notification.
+    // Only successful stop owns cleanup; a failed stop still suppresses restart
+    // via `stopping`, but must let this callback clean up the exited process.
+    if (runtime.stopped || await runtime.stopAttempt?.catch(() => false)) return;
     const paths = this.resolvePaths(bundleRoot, manifest, options);
     await fs.rm(paths.pid, { force: true });
     await fs.rm(this.processIdentityPath(paths.pid), { force: true });
-    if (runtime.stopping) return;
+    if (runtime.stopped || await runtime.stopAttempt?.catch(() => false)) return;
 
     const failed = code !== 0 || signal !== null;
     const policy = manifest.restartPolicy ?? {};

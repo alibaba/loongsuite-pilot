@@ -69,10 +69,13 @@ it('does not repeat missing-owner probes after startup baselining', async () => 
   expect(checkpoint(f).ownerSessionMetaOffset).toBeNull();
 });
 
-it('does not rescan an absent-owner inventory larger than the probe LRU, including after restart', async () => {
+it.each([false, true])('does not rescan an absent-owner inventory larger than the probe LRU, including after restart (invalid header: %s)', async invalidHeader => {
   const f = await fixture();
   const sessions = path.dirname(f.file);
-  const text = row('event_msg', { type: 'historical_without_owner', padding: 'x'.repeat(128) });
+  const ordinary = row('event_msg', { type: 'historical_without_owner', padding: 'x'.repeat(128) });
+  const text = invalidHeader
+    ? JSON.stringify({ type: 'session_meta', payload: null }) + '\n' + ordinary.repeat(2)
+    : ordinary;
   for (let start = 0; start < 2056; start += 64) {
     await Promise.all(Array.from({ length: Math.min(64, 2056 - start) }, (_, i) =>
       fs.writeFile(path.join(sessions, `rollout-missing-${start + i}.jsonl`), text)));
@@ -96,6 +99,15 @@ it('does not rescan an absent-owner inventory larger than the probe LRU, includi
   expect(startup.rawReadBytes).toBe(0);
   expect((await measure(restarted, () => restarted.probe.collect())).rawReadBytes).toBe(0);
 }, 30_000);
+
+it('continues past an invalid session header to find a later valid owner', async () => {
+  const f = await fixture();
+  const prefix = JSON.stringify({ type: 'session_meta', payload: null }) + '\n'
+    + row('event_msg', { type: 'ordinary_record' });
+  await fs.writeFile(f.file, prefix + meta() + diagnostic());
+  expect(await f.probe.findOwnerOffset(f.file, await fs.stat(f.file))).toBe(Buffer.byteLength(prefix));
+  expect(f.state.get(key(f)).extra?.codexOwnerAbsentVersion).toBeUndefined();
+});
 
 it('still consumes normal turns without a session header', async () => {
   const f = await fixture(); await fs.writeFile(f.file, completed('normal', false));

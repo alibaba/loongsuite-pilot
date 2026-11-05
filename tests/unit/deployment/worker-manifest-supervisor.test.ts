@@ -111,9 +111,39 @@ describe('WorkerManifestSupervisor', () => {
     const pidPath = path.join(stateDir, 'worker.pid');
     await fs.writeFile(pidPath, 'replacement-pid');
     await (supervisor as any).handleExit('test', bundleRoot, manifest, {}, options(),
-      pidPath, { restarts: 0, stopping: true }, 0, 'SIGTERM');
+      pidPath, { restarts: 0, stopping: true, stopped: true }, 0, 'SIGTERM');
     expect(await readStatus()).toEqual({ state: 'stopped' });
     expect(await fs.readFile(pidPath, 'utf8')).toBe('replacement-pid');
+  });
+
+  it.each(['after-stop', 'during-stop'])('cleans worker records when exit happens %s and stopping fails', async timing => {
+    const supervisor = new WorkerManifestSupervisor({ platform: 'darwin' });
+    const probe = supervisor as any;
+    await writeManifest(['unused'], { restartPolicy: { type: 'on-failure', maxRestarts: 1 } });
+    const manifest = JSON.parse(await fs.readFile(path.join(bundleRoot, 'worker.manifest.json'), 'utf8'));
+    await fs.mkdir(stateDir, { recursive: true });
+    const pidPath = path.join(stateDir, 'worker.pid');
+    await fs.writeFile(pidPath, '123456789\n');
+    await fs.writeFile(`${pidPath}.identity.json`, '{}');
+    const runtime = { restarts: 0, stopping: false };
+    probe.runtimes.set(pidPath, runtime);
+    let exited: Promise<void> | undefined;
+    const signal = vi.spyOn(probe, 'signalProcessGroup').mockImplementation(() => {
+      if (timing === 'during-stop') {
+        exited = probe.handleExit('test', bundleRoot, manifest, {}, options(), pidPath, runtime, 1, null);
+      }
+      throw new Error('simulated stop signal failure');
+    });
+    try {
+      expect(await supervisor.stopIfPresent('test', bundleRoot, options())).toBe(false);
+      if (!exited) exited = probe.handleExit('test', bundleRoot, manifest, {}, options(), pidPath, runtime, 1, null);
+      await exited;
+      await expect(fs.stat(pidPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.stat(`${pidPath}.identity.json`)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readStatus()).toMatchObject({ state: 'exited', exitCode: 1 });
+      expect(probe.runtimes.has(pidPath)).toBe(false);
+      expect(runtime.restarts).toBe(0);
+    } finally { signal.mockRestore(); }
   });
 
   function processIdentity(pid: number, creationTime = '2026-07-30T00:00:00.0000000Z'): WindowsProcessIdentity {

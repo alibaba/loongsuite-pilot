@@ -3280,14 +3280,13 @@ async function findOwnerSessionMetaOffset(
   runtime?: InputRuntimeAccumulator | null,
 ): Promise<{ offset: number | null; completeAbsence: boolean }> {
   let ownerOffset: number | null = null;
-  let sawSessionMeta = false;
   const scan = await scanJsonLines(filePath, 0, endOffset, line => {
     if (line.record.type !== 'session_meta') {
       // Codex writes the owning meta and any copied fork metadata as a header.
-      // Stop before scanning the potentially large inherited conversation.
-      return sawSessionMeta ? false : undefined;
+      // Only a valid owner closes that header. A malformed session_meta must
+      // not turn a partial probe into an uncacheable negative on every poll.
+      return ownerOffset !== null ? false : undefined;
     }
-    sawSessionMeta = true;
     ownerOffset = selectOwnerSessionMetaOffset(filePath, ownerOffset, line);
     return undefined;
   }, runtime);
