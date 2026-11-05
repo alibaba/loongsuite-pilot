@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentDefinition } from '../../../src/types/index.js';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -17,6 +20,8 @@ vi.mock('../../../src/deployment/system-hook-assets.js', () => ({
 }));
 
 import { Orchestrator } from '../../../src/core/orchestrator.js';
+import { HookWatchdog } from '../../../src/core/hook-watchdog.js';
+import { hookInstallSignalPath } from '../../../src/deployment/hook-install-service.js';
 import {
   areSystemHookAssetsHealthy,
   restoreSystemHookAssets,
@@ -105,6 +110,89 @@ describe('Grok Build watchdog target', () => {
     expect(restoreSystemHookAssets).toHaveBeenCalledWith('grok-build', expect.any(String), DATA_DIR);
     expect(repairHookSettings).toHaveBeenCalledWith(expect.objectContaining({ id: 'grok-build' }));
     expect(needsRedeploy).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes Codex system TOML through scoped checks and keeps it out of JSON repair', async () => {
+    const definition = { ...grokDefinition(), id: 'codex', hook: {
+      ...grokDefinition().hook!, settingsPath: '/home/base/.codex/hooks.json', events: ['SessionStart'],
+    } };
+    const manager = (orchestrator as any).deploymentManager;
+    manager.getDefinitions = () => [definition];
+    manager.effectiveDefinition = () => ({ ...definition, hook: { ...definition.hook, scope: 'system' } });
+    vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
+    expect((orchestrator as any).buildHookWatchdogTargets()).toEqual([]);
+    const [target] = targets(orchestrator);
+    expect(target.id).toBe('hook:codex');
+    await expect(target.check()).resolves.toBe(true);
+    expect(areSystemHookAssetsHealthy).toHaveBeenCalledWith('codex', expect.any(String), DATA_DIR);
+    await expect(target.repair()).resolves.toBeUndefined();
+  });
+
+  it('follows live Codex user/system migrations without restarting the collector', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-live-scope-'));
+    const defaults = vi.spyOn(HookWatchdog, 'defaultInterceptTargets').mockReturnValue([]);
+    const o = new Orchestrator({ dataDir: root, hookWatchdog: { enabled: true, intervalMs: 1000, repairCooldownMs: 0 } } as never) as any;
+    try {
+      const userPath = path.join(root, 'user/hooks.json');
+      await fs.mkdir(path.dirname(userPath));
+      const definition = { ...grokDefinition(), id: 'codex', hook: {
+        ...grokDefinition().hook!, settingsPath: userPath, events: ['SessionStart'], hookCommand: '/opt/pilot/codex-hook.sh',
+      } };
+      let scope = 'user';
+      let requestedScope = 'system';
+      const deploySingle = vi.fn().mockResolvedValue({ success: true });
+      const manager = {
+        getDefinitions: () => [definition],
+        effectiveDefinition: () => ({ ...definition, hook: { ...definition.hook, scope,
+          settingsPath: scope === 'system' ? path.join(root, 'etc/config.toml') : userPath } }),
+        reloadState: vi.fn(async () => { scope = requestedScope; }),
+        isAgentDetected, needsRedeploy, repairHookSettings, undeployAgent, deploySingle,
+      };
+      o.deploymentManager = manager;
+      vi.spyOn(o, 'refreshDeploymentScope').mockResolvedValue(undefined);
+      vi.spyOn(o, 'reconcileRecordedAgents').mockResolvedValue(undefined);
+      vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
+      const userConfig = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: '/opt/pilot/codex-hook.sh' }] }] } });
+      await fs.writeFile(userPath, userConfig);
+      o.hookWatchdog = new HookWatchdog(o.config.hookWatchdog, o.buildHookWatchdogTargets(), o.buildGrokBuildInterceptTargets());
+      await o.hookWatchdog.runCheck();
+
+      // A separate hook install migrates registration and signals the live collector.
+      await fs.unlink(userPath);
+      const signal = hookInstallSignalPath(root);
+      await fs.writeFile(signal, 'system');
+      await o.pollHookInstallSignal(signal);
+      expect((await o.hookWatchdog.runCheck()).repaired).toBe(0);
+      expect(deploySingle).not.toHaveBeenCalled();
+
+      needsRedeploy.mockResolvedValueOnce(true).mockResolvedValue(false);
+      expect((await o.hookWatchdog.runCheck()).repaired).toBe(1);
+      expect(repairHookSettings).toHaveBeenCalledTimes(1);
+      expect(deploySingle).not.toHaveBeenCalled();
+
+      for (let i = 0; i < 2; i++) {
+        needsRedeploy.mockResolvedValueOnce(true).mockResolvedValue(false);
+        expect((await o.hookWatchdog.runCheck()).repaired).toBe(1);
+      }
+      // An unrelated install signal must not reset the daily repair budget.
+      await fs.utimes(signal, new Date(), new Date(Date.now() + 1000));
+      await o.pollHookInstallSignal(signal);
+      needsRedeploy.mockResolvedValueOnce(true).mockResolvedValue(false);
+      expect((await o.hookWatchdog.runCheck()).repaired).toBe(0);
+      expect(repairHookSettings).toHaveBeenCalledTimes(3);
+
+      requestedScope = 'user';
+      await fs.writeFile(userPath, userConfig);
+      await fs.utimes(signal, new Date(), new Date(Date.now() + 2000));
+      await o.pollHookInstallSignal(signal);
+      await fs.unlink(userPath);
+      expect((await o.hookWatchdog.runCheck()).repaired).toBe(1);
+      expect(deploySingle).toHaveBeenCalledTimes(1);
+    } finally {
+      o.hookWatchdog?.stop();
+      defaults.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it('surfaces failed repair and removes only the Grok definition on cleanup', async () => {

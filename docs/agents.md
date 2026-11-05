@@ -81,6 +81,7 @@ shared installation; other detected Agents keep their home-local installation:
 | Agent | Shared registration | Tested CLI versions |
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+| Codex | `/etc/codex/config.toml` | 0.166.0 |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -88,6 +89,8 @@ identity homes under one Linux UID. Initialize before starting Agent processes;
 later identities require no Pilot installation of their own. System configuration,
 runtime files and collection directories must be accessible in that business
 container. This does not provide tenant authorization or cross-container injection.
+
+Codex must have its hooks feature enabled.
 
 Install, repair, upgrade, disable and uninstall follow the recorded target and
 preserve third-party configuration. Explicit migration retires only recorded
