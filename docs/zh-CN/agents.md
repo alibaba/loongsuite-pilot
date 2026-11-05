@@ -78,6 +78,7 @@ loongsuite-pilot hook status --json
 | --- | --- | --- |
 | Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
+| Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
@@ -85,6 +86,15 @@ loongsuite-pilot hook status --json
 此能力不提供租户授权隔离或跨容器自动注入。
 
 Codex 自身的 hooks 功能需保持启用。
+
+Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
+这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立
+`agentDir` 的身份不会继承。Pilot 不修改 `pi` 命令、业务启动参数或根目录环境变量。
+system 请求会报告实际共享配置路径；它表示当前配置根的覆盖范围，不是 Pi 原生机器级策略。
+不传 `--scope` 时保持现有 home 安装行为。
+
+运行资产和 Pi 配置采用原子替换，写入失败保留原文件；Pi 配置清理未完成时停止卸载，
+保留运行资产供重试。这些保护同样适用于默认 home 安装。
 
 安装、修复、升级、禁用和卸载沿用已记录目标，保留第三方配置。显式迁移仅清理已登记
 的旧 Pilot 注册，不扫描未登记的 home。配置无效、所有权冲突、只读或外部挂载且需要

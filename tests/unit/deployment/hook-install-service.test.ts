@@ -250,6 +250,53 @@ describe('hook install service', () => {
     expect(status.report.agents[0].reason).toBe('not-detected');
   });
 
+  it('reuses Pi root registration for system requests and reports the persisted target', async () => {
+    const piHome = path.join(tmp, 'shared-pi-root');
+    await fs.mkdir(piHome);
+    const settings = path.join(piHome, 'settings.json');
+    const definitionPath = path.join(pilotDir, 'agents.d', 'pi-coding-agent.json');
+    const definition = {
+      id: 'pi-coding-agent', displayName: 'Pi Coding Agent', deployMode: 'plugin-inject',
+      detection: { paths: [piHome], commands: [] },
+      pluginInject: {
+        createIfMissing: true, configPaths: [settings], configKey: 'extensions',
+        pluginSpec: path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs'),
+        pluginId: 'loongsuite-pilot-pi-coding-agent',
+      },
+    };
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    await fs.writeFile(settings, JSON.stringify({ theme: 'dark', extensions: ['third-party-extension'] }));
+
+    const normal = await run({ agentsFlag: 'pi-coding-agent' });
+    expect(normal.report.agents[0].hint).toBeNull();
+    const registered = await fs.readFile(settings, 'utf8');
+    const modified = (await fs.stat(settings)).mtimeMs;
+
+    // No --agents: normal automatic detection still selects Pi and other Agents.
+    const system = await run({ deploymentScope: 'system' });
+    const pi = system.report.agents.find(agent => agent.id === 'pi-coding-agent')!;
+    expect(pi.status).toBe('up-to-date');
+    expect(pi.hookScope).toBeUndefined();
+    expect(pi.settingsPath).toBe(settings);
+    expect(pi.hint).toContain('independent roots do not inherit');
+    expect(pi.collectionStatus).toBe('not-verified');
+    expect(await fs.readFile(settings, 'utf8')).toBe(registered);
+    expect((await fs.stat(settings)).mtimeMs).toBe(modified);
+    expect(JSON.parse(registered)).toMatchObject({ theme: 'dark', extensions: ['third-party-extension', definition.pluginInject.pluginSpec] });
+    expect(system.report.agents.find(agent => agent.id === 'sample-agent')!.hint).toBeNull();
+
+    const other = path.join(tmp, 'other-config-root');
+    await fs.mkdir(other);
+    definition.pluginInject.configPaths = [path.join(other, 'settings.json')];
+    definition.detection.paths = [other];
+    await fs.writeFile(definitionPath, JSON.stringify(definition));
+    const status = await run({ agentsFlag: 'pi-coding-agent', deploymentScope: 'system', mode: 'status' });
+    expect(status.report.agents[0].status).toBe('ok');
+    expect(status.report.agents[0].settingsPath).toBe(settings);
+    expect(status.report.agents[0].hint).toContain(settings);
+    await expect(fs.access(path.join(other, 'settings.json'))).rejects.toThrow();
+  });
+
   it('keeps an earlier named agent when a later install names a different one', async () => {
     const otherHome = path.join(tmp, 'other-home');
     await fs.mkdir(otherHome, { recursive: true });

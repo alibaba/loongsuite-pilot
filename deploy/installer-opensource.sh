@@ -2784,27 +2784,53 @@ try {
 remove_pi_coding_agent_extension() {
     local cfg="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
     local state_file="$DATA_DIR/deployed-agents.json"
-    if command -v node &>/dev/null && [ -f "$state_file" ]; then
+    local node_bin=""
+    local pin_file
+    for pin_file in "$DATA_DIR/node-bin" "$HOME/.loongsuite-pilot/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            local pinned
+            pinned=$(tr -d '\r\n' < "$pin_file")
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        # No parser remains. Do not mistake an unrelated settings file or an
+        # empty local-definition directory for an owned registration. A recorded
+        # Pi target is uncertain without Node, so retain its assets for retry.
+        local pending=0
+        if [ -f "$cfg" ] && grep -Eq 'loongsuite-pilot-pi-(coding-agent|sdk-)|plugins[\\/]+pi-coding-agent[\\/]+index[.]mjs' "$cfg"; then pending=1; fi
+        if [ -f "$state_file" ] && grep -Fq '"pi-coding-agent"' "$state_file"; then pending=1; fi
+        local definition
+        for definition in "$DATA_DIR/agents.d.local/"*.json; do
+            if [ -f "$definition" ] && grep -Fq 'loongsuite-pilot-pi-sdk-' "$definition"; then pending=1; break; fi
+        done
+        [ "$pending" -eq 1 ] || return 0
+        msg "    ❌ 无可用 Node.js，无法确认或清理 Pi 注册；卸载已停止，资产保留供重试" \
+            "    ❌ No usable Node.js; cannot verify or remove Pi registrations. Uninstall stopped; assets retained for retry."
+        return 1
+    fi
+    if [ -f "$state_file" ]; then
         local persisted
-        persisted=$(node -e '
+        if ! persisted=$("$node_bin" -e '
 const fs = require("fs");
 const path = require("path");
 try {
   const state = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const value = state?.["pi-coding-agent"]?.pluginInjectConfigPath;
   if (typeof value === "string" && path.isAbsolute(value)) process.stdout.write(value);
-} catch {}
-' "$state_file")
+} catch (error) { if (error.code !== "ENOENT") process.exit(1); }
+' "$state_file"); then
+            msg "    ❌ 无法读取 Pi 注册目标；卸载已停止，资产保留" \
+                "    ❌ Cannot read the recorded Pi target; uninstall stopped and assets retained."
+            return 1
+        fi
         if [ -n "$persisted" ]; then cfg="$persisted"; fi
     fi
     local short="${cfg/#$HOME/\~}"
-    if ! command -v node &>/dev/null; then
-        msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
-        return 0
-    fi
 
     local result
-    result=$(node -e "
+    result=$("$node_bin" -e "
 const fs = require('fs');
 const path = require('path');
 const defaultConfig = process.argv[1];
@@ -2889,7 +2915,14 @@ try {
           if (e?.code !== 'EEXIST') throw e;
         }
       }
-      fs.writeFileSync(target.configPath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+      const stat = fs.lstatSync(target.configPath);
+      if (stat.isSymbolicLink() || !(stat.mode & 0o222)) throw new Error('Pi settings are read-only or externally managed');
+      const staged = target.configPath + '.' + process.pid + '.tmp';
+      try {
+        fs.writeFileSync(staged, JSON.stringify(data, null, 2) + '\n', { mode: stat.mode & 0o777, flag: 'wx' });
+        if (fs.readFileSync(target.configPath, 'utf8') !== raw) throw new Error('Pi settings changed during cleanup');
+        fs.renameSync(staged, target.configPath);
+      } finally { try { fs.unlinkSync(staged); } catch {} }
       cleaned++;
     } catch {
       skipped++;
@@ -2912,6 +2945,7 @@ try {
         *)
             msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)" ;;
     esac
+    case "$result" in cleaned|nochange) return 0 ;; *) return 1 ;; esac
 }
 
 # ============================================================
@@ -3185,7 +3219,9 @@ cmd_uninstall() {
     echo ""
 
     msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    remove_pi_coding_agent_extension
+    if ! remove_pi_coding_agent_extension; then
+        return 1
+    fi
     echo ""
 
     # Remove plugin-inject specs (MiMo Code)

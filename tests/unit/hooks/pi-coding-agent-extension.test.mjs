@@ -42,7 +42,7 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-async function createRuntime(config = {}, identity) {
+async function createRuntime(config = {}, identity, extensionPath = EXTENSION_PATH) {
   fs.writeFileSync(path.join(tmpDir, 'config.json'), JSON.stringify(config));
   const handlers = new Map();
   const api = {
@@ -60,7 +60,7 @@ async function createRuntime(config = {}, identity) {
       ];
     },
   };
-  const mod = await import(`${pathToFileURL(EXTENSION_PATH).href}?t=${Date.now()}_${Math.random()}`);
+  const mod = await import(`${pathToFileURL(extensionPath).href}?t=${Date.now()}_${Math.random()}`);
   const extension = identity ? mod.createPiTelemetryExtension(identity) : mod.default;
   extension(api);
 
@@ -111,6 +111,24 @@ async function startTurn(runtime) {
 }
 
 describe('Pi Coding Agent extension', () => {
+  it('continues collecting if the optional resource-context helper is unavailable', async () => {
+    const installed = path.join(tmpDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    fs.mkdirSync(path.dirname(installed), { recursive: true });
+    fs.copyFileSync(EXTENSION_PATH, installed);
+    process.env.AGENTTEAMS_WORKER_NAME = 'worker-with-missing-helper';
+
+    const runtime = await createRuntime({}, undefined, installed);
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect the repository' }] }],
+    });
+
+    const request = readRecords().find(record => record['event.name'] === 'llm.request');
+    expect(request).toBeDefined();
+    expect(request['gen_ai.agent.name']).toBe('Pi Coding Agent');
+    expect(request.resourceAttributes).toBeUndefined();
+  });
+
   it('binds registered PI SDK Agent identity while keeping the shared log protocol', async () => {
     const runtime = await createRuntime({
       agents: {
