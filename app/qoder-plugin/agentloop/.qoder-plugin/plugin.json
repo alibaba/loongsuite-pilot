@@ -1,0 +1,11 @@
+{
+  "name": "agentloop",
+  "version": "0.1.0",
+  "displayName": "AgentLoop",
+  "description": "面向 Agent 的排查与管理。在对话里生成 loongsuite-pilot 安装包，并查询已经上报的使用记录。",
+  "author": { "name": "loongsuite" },
+  "license": "MIT",
+  "keywords": ["agentloop", "audit", "loongsuite-pilot", "oauth", "installer"],
+  "skills": "./skills/",
+  "commands": "./commands/"
+}
