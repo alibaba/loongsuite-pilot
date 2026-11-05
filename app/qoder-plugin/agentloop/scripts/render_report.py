@@ -6,6 +6,7 @@ chart's layout and SQL.
 """
 
 import json
+import subprocess
 import sys
 import time
 import argparse
@@ -301,12 +302,9 @@ def visible_cols(rows, query=""):
     all_cols = [c for c in rows[0].keys() if not c.startswith("__")]
     sql_cols = extract_sql_cols(query)
     if sql_cols:
-        ordered = []
-        for c in sql_cols:
-            if c in all_cols and c not in ordered:
-                ordered.append(c)
-        if ordered:
-            return ordered
+        ordered = [c for c in sql_cols if c in all_cols]
+        remaining = [c for c in all_cols if c not in ordered]
+        return ordered + remaining
     return all_cols
 
 
