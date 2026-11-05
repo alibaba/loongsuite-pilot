@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,8 @@ function extractPiCleanupNodeScript(source, style) {
   const functionStart = source.indexOf(functionMarker);
   const functionEnd = source.indexOf('# ====', functionStart);
   const body = source.slice(functionStart, functionEnd);
-  const scriptStartMarker = style === 'sh' ? 'result=$(node -e "\n' : "$result = & $script:NODE_BIN -e @'\n";
+  const shScriptStart = body.includes('result=$("$node_bin" -e "\n') ? 'result=$("$node_bin" -e "\n' : 'result=$(node -e "\n';
+  const scriptStartMarker = style === 'sh' ? shScriptStart : "$result = & $script:NODE_BIN -e @'\n";
   const scriptEndMarker = style === 'sh' ? '\n" "$cfg" "$DATA_DIR"' : "\n'@ $cfg $DATA_DIR";
   const scriptStart = body.indexOf(scriptStartMarker) + scriptStartMarker.length;
   const scriptEnd = body.indexOf(scriptEndMarker, scriptStart);
@@ -335,6 +337,69 @@ describe('installer-opensource.ps1 brace balance', () => {
 });
 
 describe('uninstall cleans the Pi Coding Agent extension injection', () => {
+  function cleanupWithoutPathNode(root, dataDir) {
+    const start = sh.indexOf('remove_pi_coding_agent_extension() {');
+    const helper = sh.slice(start, sh.indexOf('\n# ====', start));
+    const probeStart = sh.indexOf('_resolve_realpath() {');
+    const probes = sh.slice(probeStart, sh.indexOf('\nresolve_node() {', probeStart));
+    return spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${probes}\n${helper}\n
+resolve_node() { return 1; }
+command() { if [ "$1" = -v ] && [ "\${2:-}" = node ]; then return 1; fi; builtin command "$@"; }
+DATA_DIR="$1"
+msg() { :; }
+remove_pi_coding_agent_extension`, 'cleanup', dataDir], {
+      encoding: 'utf8', env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: '', NODE_OPTIONS: '' },
+    });
+  }
+
+  it.each(['data', 'cache'])('uses the %s pinned runtime for recorded settings when node is absent from PATH', pin => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-pinned-cleanup-'));
+    try {
+      const dataDir = join(root, 'shared pilot data');
+      const configPath = join(root, 'tenants/shared pi/settings.json');
+      const nodePath = join(root, 'managed runtime/node');
+      for (const dir of [dataDir, dirname(configPath), dirname(nodePath), join(root, '.loongsuite-pilot')]) mkdirSync(dir, { recursive: true });
+      symlinkSync(process.execPath, nodePath);
+      writeFileSync(join(pin === 'data' ? dataDir : join(root, '.loongsuite-pilot'), 'node-bin'), nodePath + '\r\n');
+      writeFileSync(configPath, JSON.stringify({ extensions: [join(dataDir, 'plugins/pi-coding-agent/index.mjs'), '/third-party.mjs'] }));
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, 'utf8')).extensions).toEqual(['/third-party.mjs']);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('does not block without Node when only unrelated settings and definitions exist', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-no-owned-cleanup-'));
+    try {
+      const dataDir = join(root, 'pilot');
+      mkdirSync(join(root, '.pi/agent'), { recursive: true });
+      mkdirSync(join(dataDir, 'agents.d.local'), { recursive: true });
+      const configPath = join(root, '.pi/agent/settings.json');
+      const original = '{"extensions":["/third-party.mjs","/opt/pi-coding-agent-extra.mjs"]}\n';
+      writeFileSync(configPath, original);
+      writeFileSync(join(dataDir, 'agents.d.local/other.json'), '{"id":"other"}');
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(0);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('retains an unverified recorded custom root when no usable runtime remains', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-no-runtime-custom-'));
+    try {
+      const dataDir = join(root, 'pilot');
+      const configPath = join(root, 'custom pi/settings.json');
+      mkdirSync(dataDir); mkdirSync(dirname(configPath));
+      const original = JSON.stringify({ extensions: [join(dataDir, 'plugins/pi-coding-agent/index.mjs')] });
+      writeFileSync(configPath, original);
+      writeFileSync(join(dataDir, 'deployed-agents.json'), JSON.stringify({ 'pi-coding-agent': { pluginInjectConfigPath: configPath } }));
+      const run = cleanupWithoutPathNode(root, dataDir);
+      expect(run.status, run.stderr).toBe(1);
+      expect(readFileSync(configPath, 'utf8')).toBe(original);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('sh defines and calls remove_pi_coding_agent_extension', () => {
     expect(sh).toMatch(/remove_pi_coding_agent_extension\(\)\s*\{/);
     const uninstall = sh.slice(sh.indexOf('cmd_uninstall()'));
@@ -401,7 +466,7 @@ fs.writeFileSync = function(file, ...args) {
 }; syncBuiltinESMExports();`);
       const start = sh.indexOf('remove_pi_coding_agent_extension() {');
       const helper = sh.slice(start, sh.indexOf('\n# ====', start));
-      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${helper}\nDATA_DIR="$1"\nmsg() { :; }\nremove_pi_coding_agent_extension`,
+      const run = spawnSync('bash', ['-c', `set -euo pipefail\n${helper}\nresolve_node() { command -v node; }\nDATA_DIR="$1"\nmsg() { :; }\nremove_pi_coding_agent_extension`,
         'cleanup', dataDir], { encoding: 'utf8', env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: dirname(configPath), NODE_OPTIONS: `--import=${preload}` } });
       expect(run.status, run.stderr).toBe(1);
       expect(readFileSync(configPath, 'utf8')).toBe(original);
