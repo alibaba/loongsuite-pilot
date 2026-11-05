@@ -55,6 +55,7 @@ Pilot 按以下顺序解析配置：
 | `AGENT_DATA_COLLECTION_CONFIG` | 自定义配置文件路径。 |
 | `LOONGSUITE_PILOT_ENABLED` | 设置为 `false` 或 `0` 可关闭 collector。 |
 | `LOONGSUITE_PILOT_DATA_DIR` | 覆盖数据目录。 |
+| `LOONGSUITE_PILOT_HOOK_SCOPE` | Hook CLI 与容器启动安装的 scope（`user` 或仅 Linux 支持的 `system`）。显式 `--scope` 优先；未设置时保留原行为与已记录目标。 |
 | `LOONGSUITE_PILOT_USER_ID` | 覆盖 `userId`。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |

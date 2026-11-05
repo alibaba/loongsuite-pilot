@@ -113,6 +113,12 @@ spec:
 
 ## 多个身份目录
 
+Linux 下可在业务容器中设置 `LOONGSUITE_PILOT_HOOK_SCOPE=system`，一次注册后覆盖后续身份，无需修改 webhook。现有 preload 和 `start.sh` 会把继承的环境交给公共安装入口；不指定 agents 时仍自动探测。Grok/Codex 使用原生系统配置；Pi/DSH 的后续身份须复用同一 `PI_CODING_AGENT_DIR` / `DSH_HOME`。系统配置需要业务容器具备写权限。
+
+`hook install --scope` 优先于该变量。未设置变量保持原行为和已记录目标；非法值使本次安装失败，由容器入口降级继续业务启动。修改 Pod 模板后滚动重建 Pod，使新镜像和配置生效。此变量选择安装方式，不表示已完成采集或 Trace 质量验收。
+
+未使用共享接入时，可按以下方式分别注册身份目录。
+
 同一个 Agent 的每个身份目录单独执行一次，并且放在该身份的进程启动之前。以 Grok 为例，`--home` 只写这一次指定的目录，不会改其他身份的注册文件：
 
 ```sh

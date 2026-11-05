@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { loadConfig } from '../core/config-loader.js';
 import { resolveHome } from '../utils/fs-utils.js';
 import { redirectRootLoggerToStderr } from '../utils/logger.js';
+import { resolveHookInstallScope } from './hook-scope.js';
 import { isAgentGatedEnabled, resolvePilotDir } from './deploy-command.js';
 import {
   runHookInstall,
@@ -67,6 +68,7 @@ export function parseHookArgs(argv: string[]): ParsedHookArgs {
       out.homes[value.slice(0, splitAt)] = value.slice(splitAt + 1);
     }
   }
+  out.deploymentScope = resolveHookInstallScope(out.deploymentScope);
   if (out.deploymentScope === 'system') {
     if (Object.keys(out.homes).length || out.configDir) throw new Error('--scope system cannot be combined with --home or --config-dir');
     if (process.platform !== 'linux') throw new Error('System hooks are supported only on Linux');
@@ -79,6 +81,7 @@ function printUsage(): void {
     'Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--scope user|system] [--config-dir PATH] [--json]',
     '       loongsuite-pilot hook status [--agents <ids>] [--scope user|system] [--json]',
     'System scope is opt-in and Linux-only. Supported agents use shared installation; other agents keep home installation.',
+    'LOONGSUITE_PILOT_HOOK_SCOPE supplies the scope when --scope is omitted.',
     '',
     'Detects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.',
     'The exact value none skips injection. The literal null is treated as unset.',
