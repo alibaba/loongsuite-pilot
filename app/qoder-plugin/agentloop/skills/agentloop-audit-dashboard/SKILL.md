@@ -7,27 +7,27 @@ description: |
 
 # 审计报表
 
-## 在本插件里
+## 查询知识与执行环境
 
-正文与 `solutions/loongsuite-pilot-sls-dashboard` 里的同一份技能一致。这里只改接法，不另写页面规则。
+业务数据模型、枚举与查询参考由 [agentloop-audit-query](../agentloop-audit-query/SKILL.md) 维护；本技能组织指标、图表与交互，调用 [sls-dashboard-builder](../sls-dashboard-builder/SKILL.md) 生成 SLS 配置。原事件与团队示例在 [examples/](examples/)，按目标需求改写 spec，不修改示例文件。
 
-- 查询目标取 `~/.loongsuite-pilot/audit/config-record.json` 的 `slsProject`、`regionId`。登录用插件已保存的，不要传 `--profile test`。
-- 原文里的 `cases/loongsuite-pilot-insight/input/` 和 `output/` 都改到 `~/.loongsuite-pilot/audit/reports/`。不要把产物写进 skill 目录，也不要改 [examples/](examples/) 里的文件。
-- [examples/](examples/) 是原方案 `agent-events`、`business-team` 的副本，给模型参考版式和口径。用户的 HTML 仍按下面的 Workflow 新写。不要直接渲染 examples 里的文件。AgentLoop 托管索引没有 `gen_ai.tool.call.arguments.file_path`，Skill 图用 `gen_ai.skill.name`。
-- 预览在插件根目录执行 `python3 scripts/run.py report --dashboard ~/.loongsuite-pilot/audit/reports/<scenario>-dashboard.json`。Windows 用 `scripts/run.ps1 report`，参数相同。不要调用 skill 目录或本插件以外的 `render_report.py`。
-- 发布先执行 `python3 scripts/run.py publish --dashboard <json> --remark "<修改原因>"`，把将创建还是覆盖告诉用户；用户同意后再加 `--confirm`。不要执行会卡在安装 `aliyun-cli-sls` 确认提示的 `aliyun sls create-dashboard` / `update-dashboard`。
-- 临时问一条数走 [agentloop-audit-query](../agentloop-audit-query/SKILL.md)。要报表时，从这次对话推测用户要放的，再用本技能 `schema.md` 和示例里已经有的能力写成 spec。
+- 沿用 Query Skill 已确认的时间、范围、筛选与查询；用户没有确认时间时先询问。超过一天的新查询先窄窗验证，再按目标范围取数。
+- Project、Region 与登录使用插件本地环境绑定；表与外表映射按客户目标确认，不在公开 schema 记录真实环境。
+- 产物写入 `~/.loongsuite-pilot/audit/reports/`，不写 Skill 目录。托管索引缺少工具参数动态子字段时读取已支持 JSON 字段；Skill 优先使用显式 gen_ai.skill.name。
+- 在插件根目录执行 `python3 scripts/run.py report --dashboard <json>`，Windows 使用 `scripts/run.ps1 report`。发布先运行 `python3 scripts/run.py publish --dashboard <json> --remark "<修改原因>"` 查看将创建还是覆盖；用户确认预览后加 `--confirm`。
+- 临时查询、验证 SQL 或 SDK 接入材料走 Query Skill，不为这些任务生成 dashboard JSON。内置面板参考中的调用口径不能默默覆盖原报表模型响应口径。
 
 ## Purpose
 
-将 LoongSuite Pilot 采集的 AI Agent 事件转化为可复用的报表语义。用户应直接使用本 skill；本 skill 负责业务数据语义、指标口径和场景需求解释，再调用 `sls-dashboard-builder` 的通用能力生成或修改 SLS dashboard JSON。
+将 LoongSuite Pilot 采集的 AI Agent 事件转化为可复用的报表语义。用户应直接使用本 skill；本 skill 负责场景需求解释、业务指标选择与视图组织，再调用 `sls-dashboard-builder` 的通用能力生成或修改 SLS dashboard JSON。
 
 ## References
 
 | 参考 | 读取范围 |
 |---|---|
-| [schema.md](schema.md) | 先读 Data Source Bindings 和 Source Composition，再按任务读取所需 Source 和查询构件；组织关联读 dept_roster，枚举展示读“枚举展示与交互” |
-| [value-labels.md](value-labels.md) | 生成枚举标签时查对应字段及父子分类表；普通 Token 报表无需读取 |
+| [共享 schema](../agentloop-audit-query/references/schema.md) | 先读 Data Source Bindings 和 Source Composition，再按任务读取所需 Source 和查询构件；组织关联读 dept_roster，枚举展示读“枚举展示与交互” |
+| [枚举字典](../agentloop-audit-query/references/value-labels.md) | 生成枚举标签时查对应字段及父子分类表；普通 Token 报表无需读取 |
+| [核心面板目录](../agentloop-audit-query/references/catalog.md) | 选择内置面板参考，按条目口径组合查询；先对齐目标来源与版本 |
 | `sls-dashboard-builder` | 构建图表 JSON、预览或发布时，读取其入口及必要参考 |
 | [筛选器与变量替换](../sls-dashboard-builder/references/filters-and-variables.md) | 配置筛选器或查询参数时先读；确定作用范围、模板、原值与标签、默认值和候选来源，再应用业务枚举 |
 | [交互事件与下钻报表](../sls-dashboard-builder/references/drill-down-events.md) | 制作总览与明细联动、日志下钻或业务页面链接时读取；先按查看环境选择纯 SLS 原生事件或 AgentLoop URL，场景 spec 写明点击入口、目标资源、变量映射和时间范围 |
@@ -47,7 +47,7 @@ description: |
 ## Workflow
 
 1. 确定 `<scenario>`，读取或创建场景 spec。
-2. 按 References 确定数据源、指标口径和查询构件。
+2. 按 References 与 Query Skill 的核心面板目录确定数据源、口径和查询构件，完成字段与代表性查询验证。
 3. 解析 spec，将自然语言需求转成视图清单：指标、SQL、图表类型、布局、筛选器和说明块。
 4. 使用 `sls-dashboard-builder` 生成或更新 dashboard JSON。
 5. 生成本地 HTML 预览，调用方式见 Preview。
@@ -95,7 +95,7 @@ size: <w>x<h>
 - `dashboard.name` 是生成 SLS dashboard JSON 的稳定名称，`dashboard.displayName` 是大盘展示名。
 - `dashboard.defaultTimeRange` 使用 SLS 相对时间，例如 `-604800s`、`-86400s`、`-2592000s`。
 - `dashboard.layout` 默认使用 `grid`。
-- 不在 spec 中重复维护真实 project、region、logstore；这些放在 `schema.md` 的 Data Source Bindings。
+- 真实 Project、Region、表名与组织映射取客户本地环境绑定；公开 schema 只定义语义与默认逻辑映射，不保存真实目标。
 - 不为构建归档、HTML 预览等后续产物维护独立 spec。
 - dashboard 模块统一使用 `## Section:`；筛选器、静态说明块和普通图表都放在 section 下。
 - 图表元信息优先写 `intent`、`type`、`size`，按需补 `format`、`unit`、`orientation`、`key`、`filterType`、`globalFilter`。

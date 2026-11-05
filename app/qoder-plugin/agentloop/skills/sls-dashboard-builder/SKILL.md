@@ -51,7 +51,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 - 用户提供了现有 JSON：保留未知字段与未改动的图表  
 - 未明确要求发布，或用户尚未确认预览效果前，只生成或修改本地 dashboard JSON，不 create/update 线上大盘  
 - create/update 线上大盘时，以用户确认后的 dashboard JSON 为准  
-- 发布到 SLS 时使用插件命令 `aliyun sls update-dashboard` / `create-dashboard`，显式传 `--display-name`、`--charts`、`--description`、`--attribute remark=<具体修改原因> type=grid update=<ms> version=<version>`；不要用 CamelCase OpenAPI 入口 `UpdateDashboard --body-file` 发布。
+- 插件外使用通用 SLS CLI 发布时，使用 `aliyun sls update-dashboard` / `create-dashboard`，显式传 `--display-name`、`--charts`、`--description`、`--attribute remark=<具体修改原因> type=grid update=<ms> version=<version>`；不要用 CamelCase OpenAPI 入口 `UpdateDashboard --body-file` 发布。
 - 公开 SLS Dashboard API 的 `UpdateDashboard` / `aliyun sls update-dashboard` 是覆盖式更新当前大盘；`attribute.version/update/remark` 只影响当前版本展示元数据，不会自动追加控制台「历史版本」归档。
 - 用户说「先给一版」：默认 `single-dashboard-mvp`  
 - 用户提供完整任务包或设计文档：默认 `single-dashboard-full`  
