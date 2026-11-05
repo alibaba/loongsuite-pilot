@@ -118,7 +118,11 @@ fn extract_l1665_destinations_and_cwd() {
     }
     assert_eq!(
         extract_markdown_image_paths("![x](images/a.png)", None),
-        vec!["images/a.png"]
+        vec![std::env::current_dir()
+            .unwrap()
+            .join("images/a.png")
+            .to_string_lossy()
+            .into_owned()]
     );
 }
 #[test]

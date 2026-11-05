@@ -72,6 +72,40 @@ pub fn match_all(
     out
 }
 
+/// Plain object, or a JSON string parsing to one. Arrays and plain text are ignored.
+pub fn as_record(
+    value: &serde_json::Value,
+) -> Option<std::borrow::Cow<'_, serde_json::Map<String, serde_json::Value>>> {
+    match value {
+        serde_json::Value::Object(record) => Some(std::borrow::Cow::Borrowed(record)),
+        serde_json::Value::String(text) => match serde_json::from_str(text).ok()? {
+            serde_json::Value::Object(record) => Some(std::borrow::Cow::Owned(record)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Nanoseconds as milliseconds; digit strings retain integer precision.
+pub fn time_unix_nano_to_millis(nano: &serde_json::Value, now: i64) -> i64 {
+    match nano {
+        serde_json::Value::String(text)
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u128>()
+                .ok()
+                .and_then(|number| i64::try_from(number / 1_000_000).ok())
+                .unwrap_or(now)
+        }
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .map(|number| (number / 1_000_000.0).floor() as i64)
+            .unwrap_or(now),
+        _ => now,
+    }
+}
+
 pub fn take_unique_extracted_paths(
     raw_paths: &[String],
     normalize: Option<&dyn Fn(&str) -> String>,
@@ -88,7 +122,7 @@ pub fn take_unique_extracted_paths(
         }
         let normalized = match normalize {
             Some(normalize) => normalize(raw),
-            None => raw.clone(),
+            None => resolve_image_path(raw, None),
         };
         let path = normalized.trim();
         if path.is_empty()

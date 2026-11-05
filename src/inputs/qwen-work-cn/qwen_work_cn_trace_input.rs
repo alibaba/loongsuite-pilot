@@ -4,8 +4,10 @@ use crate::inputs::base::{
     create_hook_history_startup_checkpoint, entry_from, filter_bootstrap_history_turns, InputBody,
     InputRuntime,
 };
+use crate::inputs::qoder_trace::multimodal::PathToUri;
+use crate::multimodal::{MultimodalProcessor, PathToUriOptions};
 use crate::normalization::enrich_canonical_entry_with_git;
-use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
+use crate::types::{AgentActivityEntry, ClientType, CollectionMethod, MultimodalUploadMode};
 use crate::utils::{
     directory_exists, ensure_dir, get_today_date_string, resolve_home, DEFAULT_POLL_INTERVAL_MS,
 };
@@ -14,6 +16,8 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -33,11 +37,40 @@ pub struct QwenWorkCnTraceOptions {
     pub log_dir: Option<String>,
     pub segments_root: Option<String>,
     pub poll_interval_ms: Option<u64>,
+    pub multimodal: Option<QwenWorkCnMultimodalOptions>,
+}
+
+pub struct QwenWorkCnMultimodalOptions {
+    pub enabled: bool,
+    pub upload_mode: MultimodalUploadMode,
+    pub processor: Option<Arc<MultimodalProcessor>>,
+    pub allowed_root_paths: Vec<String>,
+}
+
+pub fn qwen_work_cn_default_allowed_root_paths() -> Vec<String> {
+    vec![
+        resolve_home("~/.qwenworkcn/workspace"),
+        resolve_home("~/.qwenworkcn/tmp"),
+    ]
+}
+
+pub fn resolve_qwen_work_cn_allowed_root_paths(user_paths: &[String]) -> Vec<String> {
+    crate::multimodal::resolve::merge_allowed_root_paths(
+        &qwen_work_cn_default_allowed_root_paths(),
+        Some(user_paths),
+    )
+}
+
+struct QwenWorkCnMultimodalRuntime {
+    upload_mode: MultimodalUploadMode,
+    path_to_uri: PathToUri,
 }
 
 pub struct QwenWorkCnTraceBody {
     log_dir: String,
     segments_root: String,
+    multimodal: Option<QwenWorkCnMultimodalRuntime>,
+    multimodal_stopped: Arc<AtomicBool>,
     segment_pairs: Mutex<HashMap<String, Vec<SegmentLlmPair>>>,
     segment_tool_timings: Mutex<HashMap<String, HashMap<String, SegmentToolTiming>>>,
     subagent_turns: Mutex<HashMap<String, HashMap<String, i64>>>,
@@ -113,11 +146,46 @@ impl QwenWorkCnTraceInput {
         let segments_root = opts
             .segments_root
             .unwrap_or_else(|| resolve_home("~/.qwenworkcn/logs/sessions"));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let multimodal = opts.multimodal.and_then(|config| {
+            if !config.enabled || config.upload_mode == MultimodalUploadMode::None {
+                return None;
+            }
+            let processor = config.processor?;
+            let roots = resolve_qwen_work_cn_allowed_root_paths(&config.allowed_root_paths);
+            let stopped = Arc::clone(&stopped);
+            let callback: PathToUri = Arc::new(move |path, time| {
+                let processor = Arc::clone(&processor);
+                let roots = roots.clone();
+                let stopped = Arc::clone(&stopped);
+                Box::pin(async move {
+                    if stopped.load(Ordering::SeqCst) {
+                        return Ok(None);
+                    }
+                    Ok(processor
+                        .path_to_uri(
+                            &path,
+                            Some(time as f64),
+                            PathToUriOptions {
+                                allowed_root_paths: Some(roots),
+                                deadline_ms: None,
+                            },
+                        )
+                        .await)
+                })
+            });
+            Some(QwenWorkCnMultimodalRuntime {
+                upload_mode: config.upload_mode,
+                path_to_uri: callback,
+            })
+        });
         Self {
             inner: crate::inputs::base::HostedInput::new(
                 QwenWorkCnTraceBody {
                     log_dir,
                     segments_root,
+                    multimodal,
+                    multimodal_stopped: stopped,
                     segment_pairs: Mutex::new(HashMap::new()),
                     segment_tool_timings: Mutex::new(HashMap::new()),
                     subagent_turns: Mutex::new(HashMap::new()),
@@ -171,7 +239,12 @@ impl InputBody for QwenWorkCnTraceBody {
         CollectionMethod::HookJsonl
     }
 
+    fn before_stop(&self) {
+        self.multimodal_stopped.store(true, Ordering::SeqCst);
+    }
+
     async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        self.multimodal_stopped.store(false, Ordering::SeqCst);
         ensure_dir(&self.log_dir).await;
         let current = rt.state();
         let Some(checkpoint) =
@@ -219,6 +292,16 @@ impl QwenWorkCnTraceBody {
                 entry.agent_type = ClientType::QwenWorkCN.as_str().to_owned();
                 let record = crate::inputs::base::entry_map(entry);
                 let _ = enrich_canonical_entry_with_git(entry, &record, "qwen-work-cn").await;
+            }
+            if !self.multimodal_stopped.load(Ordering::SeqCst) {
+                if let Some(multimodal) = &self.multimodal {
+                    super::multimodal::enrich_qwen_work_cn_multimodal(
+                        &mut turn,
+                        multimodal.upload_mode,
+                        &multimodal.path_to_uri,
+                    )
+                    .await;
+                }
             }
             output.extend(turn);
         }

@@ -233,3 +233,111 @@ fn terminal_l934_mid_tool_not_terminal() {
         ]
     ));
 }
+
+// New main contracts from qoder-hook-processor-retry.test.mjs at 2caaaf9.
+#[test]
+fn main2caa_window_keeps_user_before_late_prompt_progress() {
+    let rows = vec![
+        progress("UserPromptSubmit"),
+        progress("UserPromptSubmit"),
+        user("first prompt"),
+        progress("UserPromptSubmit"),
+        assistant("first answer"),
+        progress("Stop"),
+        progress("SessionEnd"),
+        progress("UserPromptSubmit"),
+        user("second prompt"),
+        progress("UserPromptSubmit"),
+        assistant("second answer"),
+        progress("Stop"),
+        progress("SessionEnd"),
+    ];
+    let (_dir, snapshot) = physical_snapshot(&rows);
+    for (start, stop, end, prompt) in [(2, 5, 7, "first prompt"), (8, 11, 13, "second prompt")] {
+        let window = find_triggered_turn_window(&snapshot, stop as i64);
+        assert!(window.complete);
+        assert_eq!(
+            (window.start_line, window.stop_line, window.end_line),
+            (Some(start), Some(stop), Some(end))
+        );
+        assert!(snapshot.rows[start..end]
+            .iter()
+            .flatten()
+            .any(|row| row["message"]["content"] == prompt));
+    }
+}
+fn normal_prompt_ordering(boundary: &str) {
+    let mut rows = vec![user("previous prompt")];
+    if boundary != "none" {
+        rows.push(if boundary == "last-prompt" {
+            json!({"type":"last-prompt"})
+        } else {
+            progress(boundary)
+        });
+    }
+    let start = rows.len();
+    rows.extend([
+        progress("UserPromptSubmit"),
+        user("current prompt"),
+        assistant("current answer"),
+        progress("Stop"),
+        progress("SessionEnd"),
+    ]);
+    let (_dir, snapshot) = physical_snapshot(&rows);
+    let window = find_triggered_turn_window(&snapshot, (start + 3) as i64);
+    assert!(window.complete);
+    assert_eq!(window.start_line, Some(start));
+    let selected = &snapshot.rows[window.start_line.unwrap()..window.end_line.unwrap()];
+    assert!(selected
+        .iter()
+        .flatten()
+        .any(|row| row == &user("current prompt")));
+    assert!(!selected
+        .iter()
+        .flatten()
+        .any(|row| row == &user("previous prompt")));
+}
+#[test]
+fn main2caa_normal_order_after_no_boundary() {
+    normal_prompt_ordering("none");
+}
+#[test]
+fn main2caa_normal_order_after_session_end() {
+    normal_prompt_ordering("SessionEnd");
+}
+#[test]
+fn main2caa_normal_order_after_last_prompt() {
+    normal_prompt_ordering("last-prompt");
+}
+fn missing_current_user(boundary: &str) {
+    let rows = vec![
+        user("previous prompt"),
+        if boundary == "last-prompt" {
+            json!({"type":"last-prompt"})
+        } else {
+            progress(boundary)
+        },
+        progress("UserPromptSubmit"),
+        assistant("current answer"),
+        progress("Stop"),
+        progress("SessionEnd"),
+    ];
+    let (_dir, snapshot) = physical_snapshot(&rows);
+    let window = find_triggered_turn_window(&snapshot, 4);
+    assert!(window.complete);
+    assert_eq!(window.start_line, Some(2));
+    assert!(
+        !snapshot.rows[window.start_line.unwrap()..window.end_line.unwrap()]
+            .iter()
+            .flatten()
+            .any(|row| row == &user("previous prompt"))
+    );
+}
+#[test]
+fn main2caa_missing_user_never_crosses_session_end() {
+    missing_current_user("SessionEnd");
+}
+#[test]
+fn main2caa_missing_user_never_crosses_last_prompt() {
+    missing_current_user("last-prompt");
+}

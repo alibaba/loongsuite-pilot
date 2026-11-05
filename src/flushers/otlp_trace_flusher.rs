@@ -33,12 +33,20 @@ use crate::utils::{
     normalize_agent_type, read_installed_version, DEFAULT_JSONL_SEGMENT_BYTES,
 };
 
+#[derive(Clone, Copy)]
 struct ConvertScope<'a> {
     agent_type: &'a str,
     service_name: &'a str,
     system: &'a str,
     framework: &'a str,
     convert_key: &'a str,
+}
+
+#[derive(Default)]
+struct StreamEnrichment {
+    grok_instructions_applied: bool,
+    reasoning_seen: bool,
+    reasoning_total: f64,
 }
 
 const VALID_TRACE_ID: &str = "^[0-9a-f]{32}$";
@@ -1772,10 +1780,8 @@ impl OtlpInner {
     ) -> bool {
         let ConvertScope {
             agent_type,
-            service_name,
-            system,
-            framework,
             convert_key,
+            ..
         } = scope;
         {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
@@ -1794,6 +1800,32 @@ impl OtlpInner {
         } else {
             drop_orphan_pairs(&trace_records)
         };
+        if converter.supports_streaming()
+            && agent_type != "doubao-work"
+            && !(agent_type == "qwen-code-cli"
+                && sanitized.iter().any(|record| {
+                    record.get("gen_ai.agent.scope").and_then(Value::as_str) == Some("subagent")
+                }))
+        {
+            let capture = StreamPreparation::default();
+            let planned = route_convert(agent_type, &sanitized, &prepared.passthrough, &capture);
+            let captured = capture
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let (Ok(_), Some((local, options))) = (planned, captured) {
+                if super::turn_stream::can_stream(&local) {
+                    let exported = self
+                        .stream_and_export(
+                            &scope, &records, &prepared, &projected, sanitized, local, options,
+                        )
+                        .await;
+                    self.note_convert_done(convert_key);
+                    return exported;
+                }
+            }
+        }
         let started = self.conversion_instant();
         let result = route_convert(agent_type, &sanitized, &prepared.passthrough, converter);
         let succeeded = result.is_ok();
@@ -1811,7 +1843,7 @@ impl OtlpInner {
                 }
             }
         }
-        let Ok(mut result) = result else {
+        let Ok(result) = result else {
             self.note_convert_done(convert_key);
             return false;
         };
@@ -1828,25 +1860,106 @@ impl OtlpInner {
             self.note_convert_done(convert_key);
             return true;
         }
-        let resource = self.build_resource(agent_type, service_name, &projected, framework, system);
-        for span in &mut result.spans {
+        let exported = self
+            .export_converted_spans(&scope, &records, &prepared, &projected, result.spans, None)
+            .await;
+        self.note_convert_done(convert_key);
+        exported
+    }
+
+    async fn export_converted_spans(
+        self: &Arc<Self>,
+        scope: &ConvertScope<'_>,
+        records: &[AgentActivityEntry],
+        prepared: &PreparedRecords,
+        projected: &Map<String, Value>,
+        mut spans: Vec<ReadableSpan>,
+        mut stream: Option<&mut StreamEnrichment>,
+    ) -> bool {
+        if spans.is_empty() {
+            return true;
+        }
+        let ConvertScope {
+            agent_type,
+            service_name,
+            system,
+            framework,
+            ..
+        } = *scope;
+        let resource = self.build_resource(agent_type, service_name, projected, framework, system);
+        for span in &mut spans {
             span.resource_attributes = Some(resource.clone());
         }
-        apply_qoder_work_step_timing(&records, &mut result.spans);
-        enrich_tool_skills(&records, &mut result.spans);
+        apply_qoder_work_step_timing(records, &mut spans);
+        enrich_tool_skills(records, &mut spans);
         if agent_type == "openclaw" {
-            enrich_openclaw(&records, &prepared.identity, &mut result.spans);
+            enrich_openclaw(records, &prepared.identity, &mut spans);
+            if let Some(state) = stream.as_deref_mut() {
+                for span in &spans {
+                    if span
+                        .attributes
+                        .get("gen_ai.span.kind")
+                        .and_then(Value::as_str)
+                        == Some("LLM")
+                    {
+                        if let Some(value) = span
+                            .attributes
+                            .get("gen_ai.usage.reasoning_tokens")
+                            .and_then(Value::as_f64)
+                        {
+                            state.reasoning_seen = true;
+                            state.reasoning_total += value;
+                        }
+                    }
+                }
+                if state.reasoning_seen {
+                    let total = state.reasoning_total;
+                    let value = if total.fract() == 0.0
+                        && ((i64::MIN as f64)..-(i64::MIN as f64)).contains(&total)
+                    {
+                        Value::from(total as i64)
+                    } else {
+                        Value::from(total)
+                    };
+                    for span in &mut spans {
+                        if span
+                            .attributes
+                            .get("gen_ai.span.kind")
+                            .and_then(Value::as_str)
+                            == Some("AGENT")
+                        {
+                            span.attributes
+                                .insert("gen_ai.usage.reasoning_tokens".into(), value.clone());
+                        }
+                    }
+                }
+            }
         }
         if agent_type == "claude-code" {
-            enrich_claude(&records, &mut result.spans);
+            enrich_claude(records, &mut spans);
         }
         if agent_type == "grok-build" {
-            enrich_grok(&records, &prepared.grok, &mut result.spans);
+            let mut metadata = prepared.grok.clone();
+            if stream
+                .as_ref()
+                .is_some_and(|state| state.grok_instructions_applied)
+            {
+                metadata.system_instructions.clear();
+            }
+            enrich_grok(records, &metadata, &mut spans);
+            if let Some(state) = stream {
+                state.grok_instructions_applied |= spans.iter().any(|span| {
+                    span.attributes
+                        .get("gen_ai.span.kind")
+                        .and_then(Value::as_str)
+                        == Some("LLM")
+                });
+            }
         }
         let spans = self
             .enrichers
             .enrich(
-                result.spans,
+                spans,
                 SpanEnricherContext {
                     agent_type: agent_type.to_string(),
                     service_name: service_name.to_string(),
@@ -1856,11 +1969,132 @@ impl OtlpInner {
         if self.cfg.debug == Some(true) {
             self.write_debug_log(agent_type, &spans).await;
         }
-        let exported = self
-            .export_in_batches(agent_type, service_name, spans)
-            .await;
-        self.note_convert_done(convert_key);
-        exported
+        self.export_in_batches(agent_type, service_name, spans)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_and_export(
+        self: &Arc<Self>,
+        scope: &ConvertScope<'_>,
+        records: &[AgentActivityEntry],
+        prepared: &PreparedRecords,
+        projected: &Map<String, Value>,
+        original: Vec<AgentActivityEntry>,
+        local: Vec<AgentActivityEntry>,
+        options: ConvertOptions,
+    ) -> bool {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let agent_type = scope.agent_type.to_owned();
+        let passthrough = prepared.passthrough.clone();
+        let started = self.conversion_instant();
+        let converter = Arc::clone(&self.converter);
+        let worker = tokio::task::spawn_blocking(move || {
+            converter.convert_stream(&local, &options, &mut |spans, final_parents| {
+                let converter = StreamResult(Mutex::new(Some(ConvertResult {
+                    span_count: spans.len(),
+                    spans,
+                    ..ConvertResult::default()
+                })));
+                let mut result = route_convert(&agent_type, &original, &passthrough, &converter)?;
+                if !final_parents {
+                    result.spans.retain(|span| {
+                        matches!(
+                            span.attributes
+                                .get("gen_ai.span.kind")
+                                .and_then(Value::as_str),
+                            Some("LLM" | "TOOL")
+                        )
+                    });
+                }
+                sender
+                    .blocking_send(result.spans)
+                    .map_err(|_| "turn stream receiver closed".into())
+            })
+        });
+        let mut exported = true;
+        let mut export_duration = Duration::ZERO;
+        let limit = self
+            .cfg
+            .max_export_batch_bytes
+            .unwrap_or(DEFAULT_MAX_EXPORT_BATCH_BYTES) as usize;
+        let mut pending = Vec::new();
+        let mut pending_bytes = 0usize;
+        let mut enrichment = StreamEnrichment::default();
+        while let Some(spans) = receiver.recv().await {
+            for span in spans {
+                let size = estimate_span_size(&span);
+                if !pending.is_empty() && pending_bytes.saturating_add(size) > limit {
+                    let export_started = self.conversion_instant();
+                    exported &= self
+                        .export_converted_spans(
+                            scope,
+                            records,
+                            prepared,
+                            projected,
+                            std::mem::take(&mut pending),
+                            Some(&mut enrichment),
+                        )
+                        .await;
+                    export_duration += self
+                        .conversion_instant()
+                        .saturating_duration_since(export_started);
+                    pending_bytes = 0;
+                }
+                pending.push(span);
+                pending_bytes = pending_bytes.saturating_add(size);
+                if pending_bytes >= limit {
+                    let export_started = self.conversion_instant();
+                    exported &= self
+                        .export_converted_spans(
+                            scope,
+                            records,
+                            prepared,
+                            projected,
+                            std::mem::take(&mut pending),
+                            Some(&mut enrichment),
+                        )
+                        .await;
+                    export_duration += self
+                        .conversion_instant()
+                        .saturating_duration_since(export_started);
+                    pending_bytes = 0;
+                }
+            }
+        }
+        let succeeded = matches!(worker.await, Ok(Ok(())));
+        if !pending.is_empty() {
+            let export_started = self.conversion_instant();
+            exported &= self
+                .export_converted_spans(
+                    scope,
+                    records,
+                    prepared,
+                    projected,
+                    pending,
+                    Some(&mut enrichment),
+                )
+                .await;
+            export_duration += self
+                .conversion_instant()
+                .saturating_duration_since(export_started);
+        }
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(counters) = state.counters.get_mut(scope.agent_type) {
+                counters.converter_calls_total += 1;
+                counters.converter_duration_ms_total += self
+                    .conversion_instant()
+                    .saturating_duration_since(started)
+                    .saturating_sub(export_duration)
+                    .as_secs_f64()
+                    * 1000.0;
+                if !succeeded {
+                    counters.converter_failed_total += 1;
+                }
+            }
+        }
+        exported && succeeded
     }
 
     fn note_convert_done(&self, key: &str) {
@@ -2340,6 +2574,35 @@ fn prepare_records(
         passthrough,
         identity,
         grok,
+    }
+}
+
+#[derive(Default)]
+struct StreamPreparation(Mutex<Option<(Vec<AgentActivityEntry>, ConvertOptions)>>);
+impl EventLogConverter for StreamPreparation {
+    fn convert(
+        &self,
+        records: &[AgentActivityEntry],
+        options: &ConvertOptions,
+    ) -> Result<ConvertResult, String> {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some((records.to_vec(), options.clone()));
+        Ok(ConvertResult::default())
+    }
+}
+
+struct StreamResult(Mutex<Option<ConvertResult>>);
+impl EventLogConverter for StreamResult {
+    fn convert(
+        &self,
+        _: &[AgentActivityEntry],
+        _: &ConvertOptions,
+    ) -> Result<ConvertResult, String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or_else(|| "stream adapter consumed twice".into())
     }
 }
 

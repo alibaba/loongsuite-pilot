@@ -39,6 +39,7 @@ impl Fixture {
             state_store: self.store.clone(),
             log_dir: Some(self.history.to_string_lossy().into_owned()),
             segments_root: Some(self.segments.to_string_lossy().into_owned()),
+            multimodal: None,
             poll_interval_ms: Some(60000),
         })
     }

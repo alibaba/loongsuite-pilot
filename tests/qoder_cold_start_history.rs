@@ -584,3 +584,57 @@ async fn cold_l521_real_native_input_keeps_repeated_post_tool_use_in_distinct_to
         }
     }
 }
+
+// tests/unit/hooks/qoder-hook-processor-cold-start.test.mjs:211 at 2caaaf9.
+// The upstream driver runs the collector-owned native source, not the retained legacy inline processor.
+#[tokio::test]
+async fn main2caa_cold_retains_both_ide_inputs_with_post_user_progress() {
+    let f = Fixture::new();
+    f.input.start().await.unwrap();
+    let expected = ["first IDE prompt", "second IDE prompt"];
+    let mut records = Vec::new();
+    for (index, prompt) in expected.iter().enumerate() {
+        let mut rows = turn(index, prompt);
+        rows[0].as_object_mut().unwrap().remove("entrypoint");
+        f.write(
+            &[
+                progress("UserPromptSubmit"),
+                rows[0].clone(),
+                progress("UserPromptSubmit"),
+                rows[1].clone(),
+                progress("Stop"),
+                progress("SessionEnd"),
+            ],
+            true,
+        );
+        invoke(f.command("session-old", &[], None, None));
+        records.extend(f.collect_prompts(1).await);
+    }
+    f.input.stop().await.unwrap();
+    assert_eq!(prompts(&records), expected);
+    let requests = records
+        .iter()
+        .filter(|row| row["event.name"] == "llm.request")
+        .map(|row| {
+            row["gen_ai.input.messages_delta"][0]["parts"][0]["content"]
+                .as_str()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests, expected);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|row| row["event.name"] == "llm.response")
+            .count(),
+        2
+    );
+    assert_eq!(
+        records
+            .iter()
+            .map(|row| row["event.id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        records.len()
+    );
+}

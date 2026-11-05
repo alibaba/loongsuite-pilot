@@ -1,7 +1,9 @@
 //! Native Qoder image surfaces. File reads/uploads remain behind the shared
 //! MultimodalProcessor; this layer only projects evidenced image references.
 use super::{read_attached_image_paths_for_request_ids, AttachedImageLookup};
-use crate::multimodal::resolve::{match_all, resolve_image_path, take_unique_extracted_paths};
+use crate::multimodal::resolve::{
+    as_record, match_all, resolve_image_path, take_unique_extracted_paths, time_unix_nano_to_millis,
+};
 use crate::multimodal::types::{UriResult, MAX_MULTIMODAL_PARTS};
 use crate::multimodal::uploader::{LruMap, MULTIMODAL_LRU_LIMIT};
 use crate::normalization::{entry_from_map, entry_to_object, AGENT_INPUT_EVENT_NAMESPACE};
@@ -54,17 +56,13 @@ static ORIGINAL_SUFFIX: LazyLock<Regex> =
 fn captures(re: &Regex, text: &str) -> Vec<String> {
     match_all(re, text, |m| m.get(1).map(|s| s.as_str().to_owned()))
 }
-fn unique(paths: &[String], cwd: Option<&str>, always_resolve: bool) -> Vec<String> {
-    if cwd.is_some() || always_resolve {
-        take_unique_extracted_paths(paths, Some(&|p| resolve_image_path(p, cwd)))
-    } else {
-        take_unique_extracted_paths(paths, None)
-    }
+fn unique(paths: &[String], cwd: Option<&str>) -> Vec<String> {
+    take_unique_extracted_paths(paths, Some(&|p| resolve_image_path(p, cwd)))
 }
 pub fn extract_tool_image_paths(text: &str) -> Vec<String> {
     let mut paths = captures(&IMAGE_FILE, text);
     paths.extend(captures(&IMAGE_GEN, text));
-    unique(&paths, None, false)
+    unique(&paths, None)
 }
 pub fn extract_markdown_image_paths(text: &str, cwd: Option<&str>) -> Vec<String> {
     // A cached closing-bracket cursor keeps repeated "![" noise linear.
@@ -94,13 +92,12 @@ pub fn extract_markdown_image_paths(text: &str, cwd: Option<&str>) -> Vec<String
             }
         }
     }
-    unique(&paths, cwd, false)
+    unique(&paths, cwd)
 }
 pub fn extract_tool_call_image_paths(args: &Value, cwd: Option<&str>) -> Vec<String> {
-    let parsed = args
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok());
-    let object = parsed.as_ref().unwrap_or(args);
+    let Some(object) = as_record(args) else {
+        return vec![];
+    };
     let Some(path) = object
         .get("file_path")
         .and_then(Value::as_str)
@@ -109,7 +106,7 @@ pub fn extract_tool_call_image_paths(args: &Value, cwd: Option<&str>) -> Vec<Str
     else {
         return vec![];
     };
-    unique(&[path.to_owned()], cwd, false)
+    unique(&[path.to_owned()], cwd)
 }
 pub fn extract_cli_tool_image_paths(text: &str, cwd: Option<&str>) -> Vec<String> {
     let mut paths = captures(&READ_IMAGE, text);
@@ -118,7 +115,7 @@ pub fn extract_cli_tool_image_paths(text: &str, cwd: Option<&str>) -> Vec<String
         *path = SIZE_SUFFIX.replace(path, "").trim().to_owned();
     }
     paths.extend(captures(&IMAGE_GEN, text));
-    unique(&paths, cwd, true)
+    unique(&paths, cwd)
 }
 pub fn extract_cli_input_image_paths(entry: &AgentActivityEntry, cwd: Option<&str>) -> Vec<String> {
     let mut paths = entry
@@ -139,7 +136,7 @@ pub fn extract_cli_input_image_paths(entry: &AgentActivityEntry, cwd: Option<&st
     );
     paths.extend(captures(&AT_IMAGE, &text));
     paths.extend(captures(&FILE_CITATION, &text));
-    unique(&paths, cwd, true)
+    unique(&paths, cwd)
 }
 fn message_texts(value: Option<&Value>) -> Vec<String> {
     value
@@ -188,14 +185,12 @@ fn cwd(entry: &AgentActivityEntry) -> Option<String> {
         .map(str::to_owned)
 }
 fn entry_ms(entry: &AgentActivityEntry) -> i64 {
-    entry
-        .time_unix_nano
-        .parse::<i128>()
-        .ok()
-        .filter(|v| *v >= 0)
-        .map(|v| (v / 1_000_000) as i64)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
+    time_unix_nano_to_millis(
+        &json!(entry.time_unix_nano),
+        chrono::Utc::now().timestamp_millis(),
+    )
 }
+
 fn synthetic(
     response: &mut AgentActivityEntry,
     id: &str,
@@ -479,25 +474,6 @@ impl QoderMultimodal {
         if mode == MultimodalUploadMode::None {
             return;
         }
-        if multimodal_upload_includes_input(mode) {
-            for entry in entries.iter_mut() {
-                if !matches!(
-                    entry.event_name,
-                    Some(AgentEventName::LlmRequest | AgentEventName::Other)
-                ) || !entry
-                    .input_messages_delta
-                    .as_ref()
-                    .is_some_and(Value::is_array)
-                {
-                    continue;
-                }
-                let paths = extract_cli_input_image_paths(entry, cwd(entry).as_deref());
-                let parts = convert(&paths, callback, entry_ms(entry)).await;
-                if append_parts(entry, &parts) > 0 {
-                    crate::multimodal::attach_multimodal_metadata_for_entry(entry);
-                }
-            }
-        }
         enrich_surfaces(entries, mode, callback, true).await;
     }
 }
@@ -511,6 +487,21 @@ async fn enrich_surfaces(
         let time = entry_ms(entry);
         let directory = cwd(entry);
         let mut changed = false;
+        if cli
+            && multimodal_upload_includes_input(mode)
+            && matches!(
+                entry.event_name,
+                Some(AgentEventName::LlmRequest | AgentEventName::Other)
+            )
+            && entry
+                .input_messages_delta
+                .as_ref()
+                .is_some_and(Value::is_array)
+        {
+            let paths = extract_cli_input_image_paths(entry, directory.as_deref());
+            let parts = convert(&paths, callback, time).await;
+            changed |= append_parts(entry, &parts) > 0;
+        }
         if multimodal_upload_includes_input(mode)
             && entry.event_name == Some(AgentEventName::ToolResult)
         {

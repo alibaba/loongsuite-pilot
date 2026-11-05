@@ -150,6 +150,10 @@ fn collect_uri_parts_from_messages(messages: &[Value]) -> Vec<UriPart> {
                 if let Some(response) = part.get("response") {
                     parts.extend(collect_uri_parts_from_value(response));
                 }
+            } else if part.get("type").and_then(Value::as_str) == Some("tool_call") {
+                if let Some(arguments) = part.get("arguments") {
+                    parts.extend(collect_uri_parts_from_value(arguments));
+                }
             }
         }
     }
@@ -184,6 +188,23 @@ mod tests {
             }
         }
         serde_json::from_value(map).unwrap()
+    }
+
+    // tests/unit/multimodal/rewrite.test.ts: collects URI parts in tool_call arguments.
+    #[test]
+    fn main2caa_collects_nested_tool_call_arguments() {
+        let uri = "oss://bucket/mm/nested.png";
+        let mut entry = base_entry(
+            json!({"gen_ai.output.messages":[{"role":"assistant","parts":[{
+            "type":"tool_call","id":"call-1","name":"Read","arguments":[
+                {"type":"text","content":"{\"file_path\":\"/tmp/a.png\"}"},
+                {"type":"uri","uri":uri,"mime_type":"image/png","modality":"image"}]}]}]}),
+        );
+        attach_multimodal_metadata_for_entry(&mut entry);
+        assert_eq!(
+            entry.output_multimodal_metadata,
+            Some(json!([{"uri":uri,"mime_type":"image/png","modality":"image"}]))
+        );
     }
 
     #[test]

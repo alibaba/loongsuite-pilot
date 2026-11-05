@@ -1739,6 +1739,25 @@ fn find_triggered_turn_window(snapshot: &Snapshot, trigger_end_line: i64) -> Tur
             break;
         }
     }
+    if let Some(start) = start_line {
+        if !rows[start..stop_line]
+            .iter()
+            .any(|row| row.as_ref().is_some_and(is_real_user_prompt))
+        {
+            for index in (0..start).rev() {
+                let row = rows[index].as_ref();
+                if row.is_some_and(|row| matches!(typ(row), "assistant" | "last-prompt"))
+                    || matches!(hook_event(row), "Stop" | "SessionEnd")
+                {
+                    break;
+                }
+                if row.is_some_and(is_real_user_prompt) {
+                    start_line = Some(index);
+                    break;
+                }
+            }
+        }
+    }
     if start_line.is_none() {
         for index in (0..stop_line).rev() {
             if rows[index].as_ref().is_some_and(is_real_user_prompt) {

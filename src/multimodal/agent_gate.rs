@@ -39,8 +39,10 @@ mod tests {
     fn lists_only_agents_with_extraction_implemented() {
         assert!(MULTIMODAL_SUPPORTED_AGENT_IDS.contains(&"codex"));
         assert!(MULTIMODAL_SUPPORTED_AGENT_IDS.contains(&"qoder"));
+        assert!(MULTIMODAL_SUPPORTED_AGENT_IDS.contains(&"qwen-work-cn"));
         assert!(is_multimodal_supported_agent("codex"));
         assert!(is_multimodal_supported_agent("qoder"));
+        assert!(is_multimodal_supported_agent("qwen-work-cn"));
         assert!(!is_multimodal_supported_agent("cursor"));
     }
 
@@ -49,6 +51,7 @@ mod tests {
         let all = enabled(MultimodalUploadMode::All);
         assert!(is_agent_multimodal_enabled(Some("codex"), &all));
         assert!(is_agent_multimodal_enabled(Some("qoder"), &all));
+        assert!(is_agent_multimodal_enabled(Some("qwen-work-cn"), &all));
         assert!(!is_agent_multimodal_enabled(Some("cursor"), &all));
         let mut with_capture = all.clone();
         with_capture.capture_message_content = Some(false);

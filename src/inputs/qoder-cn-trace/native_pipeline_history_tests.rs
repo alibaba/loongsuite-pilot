@@ -251,6 +251,7 @@ fn rows(epoch: i64, turn: usize, cli: bool, secret: &str) -> Vec<Value> {
     let mut rows = vec![
         progress("UserPromptSubmit", 0),
         user,
+        progress("UserPromptSubmit", 20),
         json!({"type":"assistant","timestamp":at(100),"message":{"id":format!("response-{turn}-0"),"model":"synthetic-model","role":"assistant","usage":{"request_id":format!("req-{turn}-0")},"content":[{"type":"tool_use","id":format!("tool-{turn}"),"name":"Read","input":{"path":secret}}],"stop_reason":"tool_use"}}),
         progress("PreToolUse", 120),
         json!({"type":"user","timestamp":at(200),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":format!("tool-{turn}"),"content":format!("result {secret}")}]}}),
@@ -314,6 +315,26 @@ async fn scenario(agent: &str, cli: bool) {
     assert_eq!(sink.0.lock().unwrap().len(), before);
     initial.close().await;
     let first = sink.values();
+    for event in ["other", "llm.request"] {
+        let user_texts = first
+            .iter()
+            .filter(|row| row["event.name"] == event)
+            .flat_map(|row| {
+                row["gen_ai.input.messages_delta"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+            })
+            .filter(|message| message["role"] == "user")
+            .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["content"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_texts,
+            ["prompt 0 [APIKEY_MASKED]", "prompt 1 [APIKEY_MASKED]"]
+        );
+    }
     assert_eq!(
         first
             .iter()

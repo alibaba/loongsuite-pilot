@@ -24,6 +24,7 @@ mod sls_transport;
 mod span_enricher;
 mod span_id_reservation;
 mod trace_event_compat;
+mod turn_stream;
 
 pub use base_flusher::{
     BaseFlusher, FlushError, FlushErrorKind, TraceRuntimeCounters, TraceRuntimeSnapshot,

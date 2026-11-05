@@ -173,11 +173,28 @@ pub struct ConvertResult {
 }
 
 pub trait EventLogConverter: Send + Sync {
+    /// Custom converters keep the batch contract unless they explicitly opt in.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
     fn convert(
         &self,
         records: &[AgentActivityEntry],
         options: &ConvertOptions,
     ) -> Result<ConvertResult, String>;
+
+    /// A blocking bounded sink is the native drain barrier. Custom implementations
+    /// may opt in while retaining their own conversion/error accounting.
+    fn convert_stream(
+        &self,
+        records: &[AgentActivityEntry],
+        options: &ConvertOptions,
+        emit: &mut dyn FnMut(Vec<ReadableSpan>, bool) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let result = self.convert(records, options)?;
+        emit(result.spans, true)
+    }
 }
 
 #[cfg(test)]

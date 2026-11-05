@@ -19,6 +19,7 @@ async fn make_identity_input(
         state_store: Arc::clone(&store),
         log_dir: Some(root.join("hooks").to_string_lossy().into_owned()),
         segments_root: Some(root.join("segments").to_string_lossy().into_owned()),
+        multimodal: None,
         poll_interval_ms: Some(60_000),
     });
     (store, input)

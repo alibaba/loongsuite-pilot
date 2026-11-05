@@ -16,7 +16,9 @@ pub use agent_gate::{
     any_agent_multimodal_enabled, is_agent_multimodal_enabled, is_multimodal_supported_agent,
 };
 pub use processor::{with_deadline, MultimodalProcessor};
-pub use resolve::{match_all, resolve_image_path, take_unique_extracted_paths};
+pub use resolve::{
+    as_record, match_all, resolve_image_path, take_unique_extracted_paths, time_unix_nano_to_millis,
+};
 pub use rewrite::attach_multimodal_metadata_for_entry;
 pub use types::{
     PathToUriOptions, StorageBaseResult, UriPart, MAX_MULTIMODAL_PARTS, MAX_MULTIMODAL_PATH_CHARS,

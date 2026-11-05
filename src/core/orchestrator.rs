@@ -2269,6 +2269,28 @@ impl Orchestrator {
                 log_dir: Some(qwen_log.clone()),
                 segments_root: Some(qwen_segments.clone()),
                 poll_interval_ms: self.poll("qwen-work-cn-trace"),
+                multimodal: {
+                    let agent = self
+                        .config
+                        .agents
+                        .get("qwen-work-cn")
+                        .cloned()
+                        .unwrap_or_default();
+                    Some(crate::inputs::qwen_work_cn::QwenWorkCnMultimodalOptions {
+                        enabled: self.inputs_have_multimodal()
+                            && is_agent_multimodal_enabled(Some("qwen-work-cn"), &agent),
+                        upload_mode: agent
+                            .multimodal
+                            .as_ref()
+                            .map(|policy| policy.upload_mode)
+                            .unwrap_or(crate::types::MultimodalUploadMode::None),
+                        processor: self.inputs.multimodal_processor(),
+                        allowed_root_paths: agent
+                            .multimodal
+                            .and_then(|policy| policy.allowed_root_paths)
+                            .unwrap_or_default(),
+                    })
+                },
             }),
             QwenWorkCnTraceInput::get_watch_paths(Some(&qwen_log), Some(&qwen_segments)),
             QwenWorkCnTraceInput::check_availability,

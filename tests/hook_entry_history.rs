@@ -483,6 +483,7 @@ async fn qwen_custom_root_actual_installed_shell_and_trace_use_native_segments_w
         state_store: store,
         log_dir: Some(history.to_string_lossy().into_owned()),
         segments_root: Some(segments.to_string_lossy().into_owned()),
+        multimodal: None,
         poll_interval_ms: Some(60000),
     });
     let entries = Arc::new(Mutex::new(Vec::new()));

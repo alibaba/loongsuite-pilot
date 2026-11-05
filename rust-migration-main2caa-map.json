@@ -1,0 +1,216 @@
+{
+  "schema": 1,
+  "sourceCommit": "2caaaf928c00c60386785f3efdd78d33207a881e",
+  "previousSourceCommit": "f72c981089efb7400ee43e2d48f161b5670243bb",
+  "inputFileMapping": {
+    "assets/hooks/qoder-hook-processor.mjs": [
+      "src/hook_process/qoder.rs"
+    ],
+    "src/inputs/qoder-trace/qoder-cli-multimodal.ts": [
+      "src/inputs/qoder-trace/multimodal.rs"
+    ],
+    "src/inputs/qoder-trace/qoder-ide-multimodal.ts": [
+      "src/inputs/qoder-trace/multimodal.rs"
+    ],
+    "src/inputs/qwen-work-cn/qwen-work-cn-multimodal.ts": [
+      "src/inputs/qwen-work-cn/multimodal.rs"
+    ],
+    "src/inputs/qwen-work-cn/qwen-work-cn-trace-input.ts": [
+      "src/inputs/qwen-work-cn/qwen_work_cn_trace_input.rs"
+    ],
+    "src/multimodal/resolve.ts": [
+      "src/multimodal/resolve.rs"
+    ],
+    "src/multimodal/rewrite.ts": [
+      "src/multimodal/rewrite.rs"
+    ],
+    "src/multimodal/index.ts": [
+      "src/multimodal/mod.rs"
+    ],
+    "src/core/orchestrator.ts": [
+      "src/core/orchestrator.rs"
+    ],
+    "src/types/index.ts": [
+      "src/types/config.rs"
+    ]
+  },
+  "qwenOriginalDeclarations": [
+    {
+      "line": 55,
+      "title": "reads the pasted image tag, including later attributes and several images",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source55_reads_pasted_tag_later_attributes_and_several_images"
+    },
+    {
+      "line": 74,
+      "title": "reads a spaced path and ignores a long run of unclosed paste tags",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source74_spaced_path_long_unclosed_tags_remain_under_original_500ms"
+    },
+    {
+      "line": 94,
+      "title": "leaves a bare filename and a reminder reference unchanged",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source94_bare_filename_and_reminder_stay_unchanged"
+    },
+    {
+      "line": 106,
+      "title": "takes Read file_path only from the Read tool call",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source106_read_file_path_only_from_read_tool_call"
+    },
+    {
+      "line": 132,
+      "title": "does not rewrite Read arguments in input mode",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source132_input_mode_keeps_read_arguments"
+    },
+    {
+      "line": 147,
+      "title": "reads media_read call files and result sources once",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source147_media_read_call_files_and_result_sources_once"
+    },
+    {
+      "line": 180,
+      "title": "reads a completed media task and the present file once",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source180_completed_media_task_and_present_file_once"
+    },
+    {
+      "line": 234,
+      "title": "keeps the original field when pathToUri returns null or throws",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source234_null_or_error_preserves_original_field"
+    },
+    {
+      "line": 261,
+      "title": "reuses one pasted-image conversion for other and the first llm.request",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source261_one_pasted_conversion_shared_with_first_request"
+    },
+    {
+      "line": 286,
+      "title": "reuses a path uri inside one turn and converts it again for another turn",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source286_uri_cached_in_turn_converted_again_next_turn"
+    },
+    {
+      "line": 314,
+      "title": "copies a Read uri onto the model messages that repeat the call",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source314_read_uri_copied_to_repeated_model_tool_calls"
+    },
+    {
+      "line": 368,
+      "title": "copies a completed media task uri onto the next tool_call_response",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source368_completed_task_uri_copied_to_next_tool_response"
+    },
+    {
+      "line": 416,
+      "title": "rewrites a request tool call in input mode and leaves the response unchanged",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source416_input_rewrites_request_call_only_output_keeps_request"
+    },
+    {
+      "line": 468,
+      "title": "does nothing when uploadMode is none",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source468_none_mode_does_nothing"
+    },
+    {
+      "line": 479,
+      "title": "defaults the allowlist to the product directories",
+      "sourceFile": "tests/unit/inputs/qwen-work-cn-multimodal.test.ts",
+      "rustFile": "src/inputs/qwen-work-cn/qwen_work_cn_multimodal_tests.rs",
+      "rustTest": "inputs::qwen_work_cn::multimodal::tests::source479_default_allowlist_has_two_product_directories"
+    }
+  ],
+  "otherInputOriginalTests": {
+    "tests/unit/hooks/qoder-hook-processor-retry.test.mjs": {
+      "rustFile": "src/hook_process/qoder_retry_window_history_tests.rs",
+      "newCases": 6,
+      "selector": "main2caa_"
+    },
+    "tests/unit/hooks/qoder-hook-processor-cold-start.test.mjs": {
+      "rustFile": "tests/qoder_cold_start_history.rs",
+      "newCases": 1,
+      "selector": "main2caa_cold_retains_both_ide_inputs_with_post_user_progress"
+    },
+    "tests/unit/multimodal/rewrite.test.ts": {
+      "rustFile": "src/multimodal/rewrite.rs",
+      "newCases": 1,
+      "selector": "main2caa_collects_nested_tool_call_arguments"
+    },
+    "tests/unit/multimodal/agent-gate.test.ts": {
+      "rustFile": "src/multimodal/agent_gate.rs",
+      "existingCasesUpdated": 2
+    },
+    "tests/unit/inputs/qoder-trace-input.test.ts": {
+      "rustFile": "tests/qoder_trace_multimodal_surfaces.rs",
+      "existingCaseUpdated": "extract_l1643-like absolute relative Markdown path without cwd"
+    },
+    "tests/integration/qoder-native-transcript-pipeline.test.ts": {
+      "rustFile": "src/inputs/qoder-cn-trace/native_pipeline_history_tests.rs",
+      "existingMatrixUpdated": "qoder/qoder-cn x IDE/CLI; late prompt progress, original masked user text assertions"
+    },
+    "tests/integration/qoder-recovery-ownership.test.ts": {
+      "rustFile": "src/inputs/qoder-cn-trace/native_pipeline_history_tests.rs",
+      "note": "Native harness already awaits synchronous owning InputManager route; no JS async queue workaround required"
+    }
+  },
+  "outputFileMapping": {
+    "src/flushers/turn-stream.ts": [
+      "src/flushers/turn_stream.rs",
+      "src/flushers/event_log_converter.rs"
+    ],
+    "src/flushers/draining-in-memory-span-exporter.ts": [
+      "src/flushers/otlp_trace_flusher.rs bounded blocking sink/channel; native has no SDK timers"
+    ],
+    "src/flushers/otlp-trace-flusher.ts": [
+      "src/flushers/otlp_trace_flusher.rs"
+    ],
+    "src/flushers/codex-turn-converter.ts": [
+      "existing src/flushers/codex_turn_converter.rs reused via StreamPreparation/StreamResult"
+    ],
+    "src/flushers/delegated-turn-converter.ts": [
+      "existing src/flushers/delegated_turn_converter.rs reused via StreamPreparation/StreamResult"
+    ],
+    "src/flushers/qoder-turn-converter.ts": [
+      "existing src/flushers/qoder_turn_converter.rs reused via StreamPreparation/StreamResult"
+    ],
+    "tests/unit/flushers/otlp-trace-flusher/turn-streaming.test.ts": [
+      "tests/otlp_turn_stream_main540.rs"
+    ],
+    "tests/unit/flushers/otlp-trace-flusher/runtime-stage-outcome.test.ts": [
+      "tests/otlp_turn_stream_main540.rs new 2 stream cases; existing batch cases remain in source module"
+    ]
+  },
+  "validation": {
+    "inputLibPassed": 179,
+    "inputIntegrationPassed": 37,
+    "combinedWorkspaceStrictAllTargetsAllFeatures": true,
+    "combinedFlusherLibPassed": 292,
+    "combinedStreamingIntegrationPassed": 13,
+    "newAdditionalPlatformMatrix": false
+  },
+  "limits": [
+    "Historical source mapping is not a substitute for execution.",
+    "The three existing Qwen personal-data acceptances remain manual as requested."
+  ]
+}

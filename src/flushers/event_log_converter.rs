@@ -15,6 +15,8 @@ use crate::types::{AgentActivityEntry, AgentEventName};
 #[derive(Default)]
 pub struct GenAiEventLogConverter;
 
+type StreamEmitter<'a> = dyn FnMut(Vec<ReadableSpan>, bool) -> Result<(), String> + 'a;
+
 struct Pair<'a> {
     start: Option<&'a AgentActivityEntry>,
     end: Option<&'a AgentActivityEntry>,
@@ -73,6 +75,18 @@ fn correlation(record: &AgentActivityEntry, tool: bool) -> Option<&str> {
 }
 
 impl EventLogConverter for GenAiEventLogConverter {
+    fn convert_stream(
+        &self,
+        records: &[AgentActivityEntry],
+        options: &ConvertOptions,
+        emit: &mut dyn FnMut(Vec<ReadableSpan>, bool) -> Result<(), String>,
+    ) -> Result<(), String> {
+        convert_completed_stream(records, options, emit)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
     fn convert(
         &self,
         records: &[AgentActivityEntry],
@@ -118,8 +132,9 @@ impl EventLogConverter for GenAiEventLogConverter {
             groups.entry(key).or_default().push(record);
         }
         for (key, mut group) in groups {
+            let source = group.clone();
             group.sort_by_key(|record| timestamp(record).unwrap_or(0));
-            convert_group(&key, &group, options, &mut result)?;
+            convert_group(&key, &group, &source, options, &mut result, &mut None)?;
         }
         let mut ids = HashSet::new();
         for span in &result.spans {
@@ -134,11 +149,53 @@ impl EventLogConverter for GenAiEventLogConverter {
     }
 }
 
+/// Convert a completed turn while the bounded sink owns at most one leaf.
+pub(super) fn convert_completed_stream(
+    records: &[AgentActivityEntry],
+    options: &ConvertOptions,
+    emit: &mut dyn FnMut(Vec<ReadableSpan>, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    let mut group = Vec::new();
+    for record in records {
+        let encoded = serde_json::to_vec(record).map_err(|error| error.to_string())?;
+        if seen.insert(Sha256::digest(&encoded)) {
+            group.push(record);
+        }
+    }
+    let first = group.first().ok_or("empty turn stream")?;
+    let trace = first
+        .trace_id
+        .as_deref()
+        .filter(|id| valid_id(id, 32))
+        .unwrap_or("");
+    let key = serde_json::to_string(&(
+        &first.agent_type,
+        &first.session_id,
+        &first.turn_id,
+        &first.agent_id,
+        trace,
+    ))
+    .map_err(|error| error.to_string())?;
+    let source = group.clone();
+    group.sort_by_key(|record| timestamp(record).unwrap_or(0));
+    convert_group(
+        &key,
+        &group,
+        &source,
+        options,
+        &mut ConvertResult::default(),
+        &mut Some(emit),
+    )
+}
+
 fn convert_group(
     key: &str,
     records: &[&AgentActivityEntry],
+    source: &[&AgentActivityEntry],
     options: &ConvertOptions,
     result: &mut ConvertResult,
+    emit: &mut Option<&mut StreamEmitter<'_>>,
 ) -> Result<(), String> {
     let first = records[0];
     let is_dsh = first.agent_type == "dsh";
@@ -180,7 +237,7 @@ fn convert_group(
         "gen_ai.operation.name".into(),
         Value::String("enter".into()),
     );
-    let first_request = records
+    let first_request = source
         .iter()
         .position(|record| record.event_name == Some(AgentEventName::LlmRequest))
         .map(|index| index + 1)
@@ -235,7 +292,7 @@ fn convert_group(
             .copied()
             .filter(|r| r.event_name == Some(AgentEventName::Other))
             .collect();
-        materialize_input(&human_records).or_else(|| materialize_input(&records[..first_request]))
+        materialize_input(&human_records).or_else(|| materialize_input(&source[..first_request]))
     } else if is_dsh {
         let human_records: Vec<_> = records
             .iter()
@@ -244,7 +301,12 @@ fn convert_group(
             .collect();
         materialize_input(&human_records)
     } else {
-        materialize_input(&records[..first_request])
+        let human_records: Vec<_> = source
+            .iter()
+            .copied()
+            .filter(|record| record.event_name == Some(AgentEventName::Other))
+            .collect();
+        materialize_input(&human_records).or_else(|| materialize_input(&source[..first_request]))
     };
     if let Some(input) = top_input {
         root.attributes.insert(
@@ -252,7 +314,7 @@ fn convert_group(
             Value::String(input.to_string()),
         );
     }
-    if let Some(output) = records
+    if let Some(output) = source
         .iter()
         .rev()
         .find_map(|record| record.output_messages.as_ref())
@@ -459,11 +521,25 @@ fn convert_group(
                     Value::String(reason.clone()),
                 );
             }
-            let input_records: Vec<_> = records
+            let mut input_records: Vec<_> = records
                 .iter()
                 .copied()
-                .take_while(|record| timestamp(record).unwrap_or(0) <= start_time)
+                .take(
+                    records
+                        .iter()
+                        .position(|record| std::ptr::eq(*record, start))
+                        .map(|index| index + 1)
+                        .unwrap_or(records.len()),
+                )
                 .collect();
+            // Control prompts define the parent input. A model request's own
+            // rolling context is independent and must not prepend that prompt.
+            if input_records.iter().any(|record| {
+                record.event_name == Some(AgentEventName::LlmRequest)
+                    && (record.input_messages.is_some() || record.input_messages_delta.is_some())
+            }) {
+                input_records.retain(|record| record.event_name != Some(AgentEventName::Other));
+            }
             if let Some(input) = materialize_input(&input_records) {
                 leaf.attributes.insert(
                     "gen_ai.input.messages".into(),
@@ -471,7 +547,25 @@ fn convert_group(
                 );
             }
         }
-        leaves.push(leaf);
+        if let Some(emit) = emit {
+            aggregate_usage(&mut root, std::slice::from_ref(&leaf));
+            aggregate_usage(&mut agent, std::slice::from_ref(&leaf));
+            let default_name = root
+                .attributes
+                .get("gen_ai.agent.name")
+                .cloned()
+                .unwrap_or_else(|| Value::String(name.to_owned()));
+            if default_name.as_str().is_some_and(|name| !name.is_empty()) {
+                leaf.attributes
+                    .entry("gen_ai.agent.name")
+                    .or_insert(default_name);
+            }
+            // Parents are temporary context for deterministic adapter remapping;
+            // the sink exports only this leaf, and exports final parents last.
+            emit(vec![root.clone(), agent.clone(), step.clone(), leaf], false)?;
+        } else {
+            leaves.push(leaf);
+        }
     }
     aggregate_usage(&mut agent, &leaves);
     aggregate_usage(&mut root, &leaves);
@@ -494,6 +588,12 @@ fn convert_group(
         }
     }
     result.trace_ids.push(trace);
+    if let Some(emit) = emit {
+        let mut final_spans = vec![root, agent];
+        final_spans.extend(steps.into_values());
+        emit(final_spans, true)?;
+        return Ok(());
+    }
     result.spans.extend([root, agent]);
     result.spans.extend(steps.into_values());
     result.spans.extend(leaves);
