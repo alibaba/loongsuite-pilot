@@ -1,0 +1,186 @@
+{
+    "charts": [
+        {
+            "search": {
+                "transformers": [],
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690425207167",
+                "fieldOptions": [],
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "actionOptions": [],
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "basicOptions": {
+                    "displayName": "原始表格",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11,
+                "zIndex": 27
+            },
+            "action": {},
+            "title": "charts-demo1690425207167",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "transformers": [
+                    {
+                        "datasource": "A",
+                        "name": "TA",
+                        "type": "transposeRow"
+                    }
+                ],
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690425207167",
+                "fieldOptions": [],
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "actionOptions": [],
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "basicOptions": {
+                    "displayName": "行列变换",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 6,
+                "zIndex": 27
+            },
+            "action": {},
+            "title": "charts-demo1690425230255",
+            "type": "tablepro"
+        }
+    ],
+    "displayName": "表格-行列转换",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690425195526-131671"
+}

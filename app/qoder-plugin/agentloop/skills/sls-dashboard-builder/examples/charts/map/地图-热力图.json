@@ -1,0 +1,136 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "* | select  ip_to_geo(remote_addr) as address, count(1) as count group by address order by count desc limit 10",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "tokens": [],
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select  ip_to_geo(remote_addr) as address, count(1) as count group by address order by count desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select  ip_to_geo(remote_addr) as address, count(1) as count group by address order by count desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "nginx-access-log",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "xAxis": [
+                    "address"
+                ],
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "热力图",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xPos": 0,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "showBackground": true,
+                "saveZoomAndCenter": false,
+                "basicOptions": {
+                    "displayName": "热力图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 12,
+                "zIndex": 49,
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": "count",
+                        "longlat": "address"
+                    }
+                },
+                "yPos": 0,
+                "center": [
+                    120,
+                    30
+                ],
+                "zoom": 4,
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "fixedTime": false,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "showBorder": true,
+                "mapOption": {
+                    "enableScrollWheel": true,
+                    "enableDrag": true
+                },
+                "yAxis": [
+                    "count"
+                ],
+                "showTitle": true,
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "bottom"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "never",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {
+                "blank": true,
+                "logStoreName": "nginx-demo",
+                "logStoreFilter": "",
+                "filterInherit": false,
+                "type": "NewLogstore",
+                "timeRange": -2
+            },
+            "title": "charts-demo1690442538610",
+            "type": "heatmappro"
+        }
+    ],
+    "displayName": "地图-热力图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690442529269-885416"
+}

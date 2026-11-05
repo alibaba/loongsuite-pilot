@@ -1,0 +1,309 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": " * | select request_method, count(*) as c where request_method like '%%' group by request_method ",
+                        "name": "A",
+                        "tokenQuery": " * | select request_method, count(*) as c where request_method like '${{method|%%}}' group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 2,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [
+                    {
+                        "name": "request_method",
+                        "queryName": "A",
+                        "newAdd": true,
+                        "events": [
+                            {
+                                "values": {
+                                    "tokenInherit": false,
+                                    "blank": false,
+                                    "name": "打开仪表盘",
+                                    "project": "charts-demo",
+                                    "filterInherit": false,
+                                    "searchStaticToken": [],
+                                    "dashboardName": "dashboard-1734350490388-50040",
+                                    "searchToken": [
+                                        {
+                                            "value": "request_method",
+                                            "key": "method"
+                                        }
+                                    ]
+                                },
+                                "event": "dashboard"
+                            }
+                        ]
+                    }
+                ],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "新建图表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 6,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1.5,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1734347012744",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "isInheritFilter": false,
+                "query": "@",
+                "start": "-900s",
+                "timeSpanType": "",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "",
+                        "name": "A",
+                        "tokenQuery": "* | select DISTINCT request_method",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "mixed"
+            },
+            "display": {
+                "yPos": 0,
+                "displayName": "",
+                "bindQuery": true,
+                "width": 13,
+                "showDropListChart": true,
+                "basicOptions": {
+                    "displayName": "method",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": false,
+                    "showBorder": true
+                },
+                "dropListOption": {
+                    "tokenDefault": [],
+                    "alias": "",
+                    "multipleToken": false,
+                    "showType": "select",
+                    "list": [],
+                    "type": "token",
+                    "listAlias": [],
+                    "key": "method",
+                    "multipleTokenKey": ""
+                },
+                "xPos": 0,
+                "version": "2",
+                "height": 2
+            },
+            "action": {},
+            "title": "charts-demo1734347038424",
+            "type": "droplistpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": " * | select request_method, count(*) as c where request_method like '%%' group by request_method ",
+                        "name": "A",
+                        "tokenQuery": " * | select request_method, count(*) as c where request_method like '${{method|%%}}' group by request_method ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "yPos": 2,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 12,
+                "actionOptions": [],
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "barOptions": {
+                    "barWidth": 0.9,
+                    "orientation": "vertical",
+                    "showValues": "auto",
+                    "fillOpacity": 85,
+                    "stackingMode": "none",
+                    "valueSize": 12,
+                    "groupWidth": 0.7,
+                    "labelLocation": "xAxis",
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "basicOptions": {
+                    "displayName": "新建图表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1734350503206",
+            "type": "barpro"
+        }
+    ],
+    "displayName": "基础过滤器（场景四）",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1734350490388-50040"
+}

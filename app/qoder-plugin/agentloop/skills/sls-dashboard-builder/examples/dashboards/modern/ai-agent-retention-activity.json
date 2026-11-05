@@ -1,0 +1,374 @@
+{
+  "dashboardName": "ai-agent-retention-activity",
+  "displayName": "AI Agent 留存与活跃",
+  "description": "留存与活跃分析盘示例，覆盖活跃、留存、深度使用与流失。",
+  "attribute": { "type": "grid" },
+  "charts": [
+    {
+      "title": "row-retention-overview",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "核心概览" }, "xPos": 0, "yPos": 0, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "card-dau",
+      "type": "statpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 86400) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))",
+            "tokenQuery": "* | SELECT diff[1] as today, diff[2] as yesterday, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 86400) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-172800s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "basicOptions": { "displayName": "日活账号数", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "statStyleOptions": { "textAlignment": "center", "colorMode": "value", "graphMode": "none", "textMode": "value", "customValueColor": "#333333", "customBackgroundColor": "#FFFFFF" },
+        "statValueOption": { "calculationType": "first", "limitCount": 25, "showMode": "calculate", "layoutOrientation": "auto", "minItemHeight": 50, "minItemWidth": 50 },
+        "thresholdOption": { "thresholdMode": "absolute" },
+        "queryOptionMap": {
+          "A": {
+            "showField": ["today"],
+            "compareField": "growth",
+            "compareThreshold": 0,
+            "compareUnit": { "unit": "none" },
+            "compareValueDescription": "较昨日变化",
+            "descriptionDecimals": 2,
+            "descriptionFormat": "none"
+          }
+        },
+        "xPos": 0,
+        "yPos": 1,
+        "width": 4,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "card-wau",
+      "type": "statpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT diff[1] as current_7d, diff[2] as previous_7d, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 604800) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))",
+            "tokenQuery": "* | SELECT diff[1] as current_7d, diff[2] as previous_7d, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 604800) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-604800s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "basicOptions": { "displayName": "周活账号数", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "statStyleOptions": { "textAlignment": "center", "colorMode": "value", "graphMode": "none", "textMode": "value", "customValueColor": "#333333", "customBackgroundColor": "#FFFFFF" },
+        "statValueOption": { "calculationType": "first", "limitCount": 25, "showMode": "calculate", "layoutOrientation": "auto", "minItemHeight": 50, "minItemWidth": 50 },
+        "thresholdOption": { "thresholdMode": "absolute" },
+        "queryOptionMap": {
+          "A": {
+            "showField": ["current_7d"],
+            "compareField": "growth",
+            "compareThreshold": 0,
+            "compareUnit": { "unit": "none" },
+            "compareValueDescription": "较上一个 7 天窗口变化",
+            "descriptionDecimals": 2,
+            "descriptionFormat": "none"
+          }
+        },
+        "xPos": 4,
+        "yPos": 1,
+        "width": 4,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "card-mau",
+      "type": "statpro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT diff[1] as current_30d, diff[2] as previous_30d, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 2592000) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))",
+            "tokenQuery": "* | SELECT diff[1] as current_30d, diff[2] as previous_30d, round((diff[3]-1.0)*100, 2) as growth FROM (SELECT compare(active_accounts, 2592000) as diff FROM (SELECT count(distinct ownerId) as active_accounts FROM log))"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "basicOptions": { "displayName": "月活账号数", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "statStyleOptions": { "textAlignment": "center", "colorMode": "value", "graphMode": "none", "textMode": "value", "customValueColor": "#333333", "customBackgroundColor": "#FFFFFF" },
+        "statValueOption": { "calculationType": "first", "limitCount": 25, "showMode": "calculate", "layoutOrientation": "auto", "minItemHeight": 50, "minItemWidth": 50 },
+        "thresholdOption": { "thresholdMode": "absolute" },
+        "queryOptionMap": {
+          "A": {
+            "showField": ["current_30d"],
+            "compareField": "growth",
+            "compareThreshold": 0,
+            "compareUnit": { "unit": "none" },
+            "compareValueDescription": "较上一个 30 天窗口变化",
+            "descriptionDecimals": 2,
+            "descriptionFormat": "none"
+          }
+        },
+        "xPos": 8,
+        "yPos": 1,
+        "width": 4,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "note-retention-gaps",
+      "type": "markdownpro",
+      "search": { "query": "", "start": "-900s", "topic": "", "end": "now", "tokens": [], "logstore": "" },
+      "action": {},
+      "display": {
+        "isTimeSeries": false,
+        "markdownStr": "### 当前缺口\\n\\n- `AI 月度渗透率` 仍缺 CMS 全量月活母体。\\n- 当前示例盘只落已验证视图，不虚构缺失指标。",
+        "basicOptions": { "displayName": "指标缺口与假设", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": false },
+        "xPos": 12,
+        "yPos": 1,
+        "width": 12,
+        "height": 3,
+        "version": "2"
+      }
+    },
+    {
+      "title": "row-retention-trends",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "活跃趋势" }, "xPos": 0, "yPos": 4, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "line-dau",
+      "type": "linepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | SELECT date_trunc('day', __time__) as t, count(distinct ownerId) as active_accounts FROM log GROUP BY t ORDER BY t LIMIT 1000",
+            "tokenQuery": "* | SELECT date_trunc('day', __time__) as t, count(distinct ownerId) as active_accounts FROM log GROUP BY t ORDER BY t LIMIT 1000"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-2592000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "basicOptions": { "displayName": "日活趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "KMB", "unit": { "unit": "none" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "toggle", "maxContent": 30, "sortOrder": "none" },
+        "tooltipOption": { "mode": "all", "sortOrder": "none", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global" },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "t", "yAxisKeys": ["active_accounts"] } },
+        "xPos": 0,
+        "yPos": 5,
+        "width": 8,
+        "height": 6,
+        "version": "2"
+      }
+    },
+    {
+      "title": "row-retention-cohort",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "留存与流失" }, "xPos": 0, "yPos": 11, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "table-week-ret",
+      "type": "tablepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | WITH weekly_users AS (SELECT date_trunc('week', __time__) as wk, ownerId FROM log GROUP BY wk, ownerId), retention AS (SELECT curr.wk as cohort_week, count(*) as cohort_users, count_if(next.ownerId IS NOT NULL) as retained_users FROM weekly_users curr LEFT JOIN weekly_users next ON curr.ownerId = next.ownerId AND next.wk = date_add('day', 7, curr.wk) GROUP BY curr.wk) SELECT cohort_week, cohort_users, retained_users, round(retained_users * 100.0 / nullif(cohort_users, 0), 2) as retention_rate FROM retention ORDER BY cohort_week LIMIT 20",
+            "tokenQuery": "* | WITH weekly_users AS (SELECT date_trunc('week', __time__) as wk, ownerId FROM log GROUP BY wk, ownerId), retention AS (SELECT curr.wk as cohort_week, count(*) as cohort_users, count_if(next.ownerId IS NOT NULL) as retained_users FROM weekly_users curr LEFT JOIN weekly_users next ON curr.ownerId = next.ownerId AND next.wk = date_add('day', 7, curr.wk) GROUP BY curr.wk) SELECT cohort_week, cohort_users, retained_users, round(retained_users * 100.0 / nullif(cohort_users, 0), 2) as retention_rate FROM retention ORDER BY cohort_week LIMIT 20"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-10368000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "basicOptions": { "displayName": "周 Cohort 留存", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "none" } },
+        "xPos": 0,
+        "yPos": 12,
+        "width": 12,
+        "height": 7,
+        "version": "2"
+      }
+    },
+    {
+      "title": "table-month-ret",
+      "type": "tablepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | WITH monthly_users AS (SELECT date_trunc('month', __time__) as m, ownerId FROM log GROUP BY m, ownerId), retention AS (SELECT curr.m as cohort_month, count(*) as cohort_users, count_if(next.ownerId IS NOT NULL) as retained_users FROM monthly_users curr LEFT JOIN monthly_users next ON curr.ownerId = next.ownerId AND next.m = date_add('month', 1, curr.m) GROUP BY curr.m) SELECT cohort_month, cohort_users, retained_users, round(retained_users * 100.0 / nullif(cohort_users, 0), 2) as retention_rate FROM retention ORDER BY cohort_month LIMIT 12",
+            "tokenQuery": "* | WITH monthly_users AS (SELECT date_trunc('month', __time__) as m, ownerId FROM log GROUP BY m, ownerId), retention AS (SELECT curr.m as cohort_month, count(*) as cohort_users, count_if(next.ownerId IS NOT NULL) as retained_users FROM monthly_users curr LEFT JOIN monthly_users next ON curr.ownerId = next.ownerId AND next.m = date_add('month', 1, curr.m) GROUP BY curr.m) SELECT cohort_month, cohort_users, retained_users, round(retained_users * 100.0 / nullif(cohort_users, 0), 2) as retention_rate FROM retention ORDER BY cohort_month LIMIT 12"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-10368000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "basicOptions": { "displayName": "月 Cohort 留存", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "none" } },
+        "xPos": 12,
+        "yPos": 12,
+        "width": 12,
+        "height": 7,
+        "version": "2"
+      }
+    },
+    {
+      "title": "row-retention-ai",
+      "type": "dashboardrow",
+      "search": { "logstore": "", "topic": "", "query": "", "start": "-900s", "end": "now" },
+      "action": {},
+      "display": { "basicOptions": { "displayName": "深度使用与流失" }, "xPos": 0, "yPos": 19, "width": 24, "height": 1, "version": "2" }
+    },
+    {
+      "title": "line-ai-native",
+      "type": "linepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-session",
+            "query": "* | WITH user_business AS (SELECT date_trunc('month', __time__) as m, userId as owner_id, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type FROM log GROUP BY m, owner_id, business_type), user_monthly AS (SELECT m, owner_id, count(distinct business_type) as business_count FROM user_business GROUP BY m, owner_id), summary AS (SELECT m, count(*) as monthly_active_users, count_if(business_count >= 3) as ai_native_users FROM user_monthly GROUP BY m) SELECT m, monthly_active_users, ai_native_users, round(ai_native_users * 100.0 / nullif(monthly_active_users, 0), 2) as ai_native_share FROM summary ORDER BY m LIMIT 12",
+            "tokenQuery": "* | WITH user_business AS (SELECT date_trunc('month', __time__) as m, userId as owner_id, CASE WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('sql_diagnosis', 'sql_generation') THEN 'sql' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('main', 'agent_main', 'sop', 'sop_recommend') THEN 'ops' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('intelligent_recommend') THEN 'recommend' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('spl_generation', 'spl_simple_qa', 'spl_intent_recognition', 'spl_diagnosis', 'promql') THEN 'query_language' WHEN regexp_extract(agentId, '.*\\\\.([^.]+)@.*', 1) IN ('trace-analysis', 'apm-analysis', 'logstore_analysis', 'alert-rule-analysis', 'log_cluster_result_analysis', 'metricset_abnormal_analysis', 'probe_diagnosis') THEN 'analysis' ELSE 'other' END as business_type FROM log GROUP BY m, owner_id, business_type), user_monthly AS (SELECT m, owner_id, count(distinct business_type) as business_count FROM user_business GROUP BY m, owner_id), summary AS (SELECT m, count(*) as monthly_active_users, count_if(business_count >= 3) as ai_native_users FROM user_monthly GROUP BY m) SELECT m, monthly_active_users, ai_native_users, round(ai_native_users * 100.0 / nullif(monthly_active_users, 0), 2) as ai_native_share FROM summary ORDER BY m LIMIT 12"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-10368000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "basicOptions": { "displayName": "深度使用旅程占比趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "custom", "customUnit": "%" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "toggle", "maxContent": 30, "sortOrder": "none" },
+        "tooltipOption": { "mode": "all", "sortOrder": "none", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global" },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "m", "yAxisKeys": ["ai_native_share"] } },
+        "xPos": 0,
+        "yPos": 20,
+        "width": 12,
+        "height": 6,
+        "version": "2"
+      }
+    },
+    {
+      "title": "line-churn",
+      "type": "linepro",
+      "search": {
+        "chartQueries": [
+          {
+            "name": "A",
+            "datasource": "logstore",
+            "project": "example-sls-project",
+            "logstore": "ai-agent-thread",
+            "query": "* | WITH monthly_users AS (SELECT date_trunc('month', __time__) as m, ownerId FROM log GROUP BY m, ownerId), churn AS (SELECT prev.m as base_month, count(*) as prev_active, count_if(curr.ownerId IS NULL) as churned_users FROM monthly_users prev LEFT JOIN monthly_users curr ON prev.ownerId = curr.ownerId AND curr.m = date_add('month', 1, prev.m) GROUP BY prev.m) SELECT base_month, prev_active, churned_users, round(churned_users * 100.0 / nullif(prev_active, 0), 2) as churn_rate FROM churn ORDER BY base_month LIMIT 12",
+            "tokenQuery": "* | WITH monthly_users AS (SELECT date_trunc('month', __time__) as m, ownerId FROM log GROUP BY m, ownerId), churn AS (SELECT prev.m as base_month, count(*) as prev_active, count_if(curr.ownerId IS NULL) as churned_users FROM monthly_users prev LEFT JOIN monthly_users curr ON prev.ownerId = curr.ownerId AND curr.m = date_add('month', 1, prev.m) GROUP BY prev.m) SELECT base_month, prev_active, churned_users, round(churned_users * 100.0 / nullif(prev_active, 0), 2) as churn_rate FROM churn ORDER BY base_month LIMIT 12"
+          }
+        ],
+        "dataSourceType": "current",
+        "start": "-5184000s",
+        "end": "now",
+        "logstore": "@",
+        "query": "@",
+        "topic": ""
+      },
+      "action": {},
+      "display": {
+        "isTimeSeries": true,
+        "basicOptions": { "displayName": "AI 用户流失率趋势", "showTitle": true, "showBorder": true, "showBackground": true, "showTime": true },
+        "standardOption": { "format": "none", "unit": { "unit": "custom", "customUnit": "%" } },
+        "legendOption": { "show": true, "position": "right", "actionMode": "toggle", "maxContent": 30, "sortOrder": "none" },
+        "tooltipOption": { "mode": "all", "sortOrder": "none", "labelFormat": "" },
+        "xAxisOption": { "show": true, "timeRangeMode": "dataTime", "zoomTarget": "global" },
+        "yAxisOption": { "show": true, "position": 3, "stackingMode": "none" },
+        "graphOptions": { "seriesStyle": "lines", "lineInterpolation": "smooth", "barStyle": "middle", "lineWidth": 1.5, "fillOpacity": 40, "pointSize": 6, "gradientMode": "opacity", "showPoint": "none" },
+        "queryOptionMap": { "A": { "name": "A", "xAxisKey": "base_month", "yAxisKeys": ["churn_rate"] } },
+        "xPos": 12,
+        "yPos": 20,
+        "width": 12,
+        "height": 6,
+        "version": "2"
+      }
+    }
+  ]
+}

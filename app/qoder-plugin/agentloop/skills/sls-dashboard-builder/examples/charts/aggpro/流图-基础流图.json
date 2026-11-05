@@ -1,0 +1,465 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-14400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__% 60 as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__% 60 as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "xAxisKey": "minute",
+                        "name": "A",
+                        "aggField": "request_method"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1655176822071",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "timeRangeMode": "searchTime",
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "isTimeSeries": true,
+                "aggChartOption": {
+                    "chartType": "line"
+                },
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "流图-线图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 0,
+                    "showPoint": "never",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "none",
+                    "lineWidth": 1,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 50
+            },
+            "action": {},
+            "title": "charts-demo1690426313830",
+            "type": "aggpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c, request_method group by minute, request_method order by minute asc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c, request_method group by minute, request_method order by minute asc limit 100000",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "xAxisKey": "minute",
+                        "name": "A",
+                        "aggField": "request_method"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "charts-demo1690426318178",
+                "fieldOptions": [],
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "normal",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "actionOptions": [
+                    {
+                        "name": "c",
+                        "queryName": "A",
+                        "events": [
+                            {
+                                "values": {
+                                    "blank": false,
+                                    "logstoreName": "nginx-access-log",
+                                    "name": "打开日志库",
+                                    "project": "simulator-nginx-demo",
+                                    "filterInherit": false,
+                                    "searchFilter": " ${c} ${request_method} ",
+                                    "timeRange": ""
+                                },
+                                "event": "logstore"
+                            }
+                        ]
+                    }
+                ],
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "aggChartOption": {
+                    "chartType": "interval"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "流图-柱状图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 80,
+                    "showPoint": "never",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "none",
+                    "lineWidth": 0,
+                    "seriesStyle": "bars"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 52
+            },
+            "action": {},
+            "title": "charts-demo1690426318178",
+            "type": "aggpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "xAxisKey": "minute",
+                        "name": "A",
+                        "aggField": "request_method"
+                    }
+                },
+                "yPos": 9,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1656411612000",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "normal",
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "aggChartOption": {
+                    "chartType": "area"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "sortOrder": "none",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "流图-面积图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 72,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9,
+                "zIndex": 52
+            },
+            "action": {},
+            "title": "charts-demo1690426323612",
+            "type": "aggpro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "name": "A",
+                        "tokenQuery": "* | select date_format(from_unixtime(__time__ - __time__% 60), '%H:%i') as minute, count(1) as c,  request_method group by minute, request_method order by minute asc limit 100000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1656411612000",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 12,
+                "actionOptions": [],
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "aggChartOption": {
+                    "chartType": "crossover"
+                },
+                "basicOptions": {
+                    "displayName": "流图-交叉表",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 9,
+                "zIndex": 52,
+                "queryOptionMap": {
+                    "A": {
+                        "yAxisKey": "c",
+                        "xAxisKey": "minute",
+                        "name": "A",
+                        "aggField": "request_method"
+                    }
+                },
+                "yPos": 9,
+                "xAxisOption": {
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "dataOption": {
+                    "autoFill": false,
+                    "maxClassifyGroupNum": 50,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690426328472",
+            "type": "aggpro"
+        }
+    ],
+    "displayName": "流图-基础流图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690426301182-194897"
+}

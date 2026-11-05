@@ -1,0 +1,466 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": "* and request_method: GET | select __time__ - __time__ % 60 as time, COUNT(*) as getpv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "name": "B",
+                        "tokenQuery": "* and request_method: GET | select __time__ - __time__ % 60 as time, COUNT(*) as getpv, avg(request_time) as duration GROUP BY time order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "sizeKey": "duration",
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "pv"
+                        ]
+                    },
+                    "B": {
+                        "xAxisKey": "time",
+                        "name": "B",
+                        "yAxisKeys": [
+                            "getpv"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#f7a35b"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690438652323",
+                "fieldOptions": [
+                    {
+                        "name": "getpv",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "fillOpacity"
+                                ],
+                                "value": 23
+                            },
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "pointSize"
+                                ],
+                                "value": 12
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#f15c80"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "scatterGraphOptions": {
+                    "pointSize": 0,
+                    "fillOpacity": 12,
+                    "lineWidth": 1
+                },
+                "tooltipOption": {
+                    "labelFormat": ""
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "散点图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10,
+                "scatterOption": {
+                    "pointSize": 5,
+                    "fillOpacity": 20,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "pointType": "Triangle",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438652323",
+            "type": "scatterchart"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, avg(request_time) as duration, request_method GROUP BY time, request_method order by time limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as time, COUNT(*) as pv, avg(request_time) as duration, request_method GROUP BY time, request_method order by time limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "sizeKey": "pv",
+                        "xAxisKey": "time",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "yAxisKeys": "duration"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#f7a35b"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1661312010530",
+                "fieldOptions": [
+                    {
+                        "name": "duration",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "decimals"
+                                ],
+                                "value": 2
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "unit"
+                                ],
+                                "value": {
+                                    "unit": "time-seconds"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "scatterGraphOptions": {
+                    "pointSize": 0,
+                    "fillOpacity": 12,
+                    "lineWidth": 1
+                },
+                "tooltipOption": {
+                    "labelFormat": "方法：${{request_method}}\n数量: ${{pv}}"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true
+                },
+                "xPos": 12,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "分类散点图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10,
+                "scatterOption": {
+                    "pointSize": 5,
+                    "fillOpacity": 20,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "pointType": "Triangle",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438685684",
+            "type": "scatterchart"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select request_time, request_length, request_method, upstream_response_time",
+                        "name": "A",
+                        "tokenQuery": "* | select request_time, request_length, request_method, upstream_response_time",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "sizeKey": "upstream_response_time",
+                        "xAxisKey": "request_time",
+                        "name": "A",
+                        "aggField": "request_method",
+                        "yAxisKeys": "request_length"
+                    }
+                },
+                "yPos": 10,
+                "standardOption": {
+                    "colorSchame": {
+                        "schema": "builtin",
+                        "color": "#f7a35b"
+                    },
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1661491884252",
+                "fieldOptions": [
+                    {
+                        "name": "getpv",
+                        "queryName": "B",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "fillOpacity"
+                                ],
+                                "value": 23
+                            },
+                            {
+                                "optionKeys": [
+                                    "scatterGraphOptions",
+                                    "pointSize"
+                                ],
+                                "value": 12
+                            },
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#f15c80"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "show": true,
+                    "label": "请求长度",
+                    "position": 3
+                },
+                "scatterGraphOptions": {
+                    "pointSize": 13,
+                    "fillOpacity": 12,
+                    "lineWidth": 1
+                },
+                "tooltipOption": {
+                    "labelFormat": "upstream_response_time: ${{upstream_response_time}}"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "label": "请求时间"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": false,
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "nginx请求时间和请求长度关系（动态设置点大小）",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 10,
+                "scatterOption": {
+                    "pointSize": 5,
+                    "fillOpacity": 20,
+                    "showPoint": "always",
+                    "lineInterpolation": "linear",
+                    "pointType": "Triangle",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 1
+                }
+            },
+            "action": {},
+            "title": "charts-demo1690438859453",
+            "type": "scatterchart"
+        }
+    ],
+    "displayName": "散点图-基础散点图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690438641963-167286"
+}
