@@ -227,7 +227,7 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 
 以下示例展示“事实合并与清洗 → 响应用量”的组合接口。按报表需要裁剪字段和 CTE，或补充已披露的工具等字段；完整查询以 `* |` 起始，在 CTE 后接目标 SELECT。
 
-应用事实的可执行构件维护于 [application-base.sql](queries/application-base.sql)。读取该文件，绑定整数 `{{from}}` / `{{to}}`，在 `WITH ...` 后接目标 SELECT，再加 `* |` 前缀。字段按本轮查询裁剪；两张物理表使用同一时间范围。该文件只维护事实清洗与模型响应用量，内置调用归并的区别见 [Token 配方](queries/tokens.md)。
+应用事实的可执行构件维护于 [application-base.sql](queries/application-base.sql)。读取该文件，绑定整数 `{{from}}` / `{{to}}`，在 `WITH ...` 后接目标 SELECT，再加 `* |` 前缀。字段按本轮查询裁剪；两张物理表使用同一时间范围。该文件只维护事实清洗与模型响应用量，内置调用归并的区别见 [Token 参考 SQL](queries/tokens.md)。
 
 | 构件 | 粒度与用途 |
 |---|---|
@@ -236,6 +236,15 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 | `event_user_day` / `active_user` | 按北京时间日期 × 用户 × Agent × 供应商 × 模型预聚合；事件数来自全部事件，Token 仅累计响应事件 |
 | `user_activity` / `user_usage` | 在目标窗口内按用户预聚合，供人群及组织外表关联 |
 | Session 聚合 | 包含用户、来源及 Session 身份，按需要保留 Agent、模型等维度；先聚合再关联标签或风险 |
+
+## Token 查询口径
+
+| 口径 | 数据与计算 | 用途 |
+|---|---|---|
+| 模型响应 | usage_events；输入 + 输出；响应模型优先 | 原报表和已观测用量分析 |
+| 调用归并 | 带用量事件按完整身份、Turn、Step、调用与模型归并；总量取 max(total) 与 max(input)+max(output) 的较大值；请求模型优先 | 内置调用视角参考 |
+
+调用构件见 [call-usage.sql](queries/call-usage.sql)：先确认 unkeyed_events=0，缺失事件 ID 时使用响应口径或确认稳定调用键，不按秒级时间合成 ID。构件保留用户与应用身份；与只按来源和 Session 归并的视图可能存在结果差异。输入 Token 已含缓存，Token 不等于账单。
 
 ## Source: intent_events
 
@@ -264,6 +273,10 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 - 意图属于多标签维度。标签组中的 Session 数及用量可以在组内统计；同一个 Session 可进入多个标签组，跨标签组不能直接相加。只需判断有无标签时，先生成唯一 Session 键集合再关联，避免复制事实行。
 - `usage_total_tokens` 是意图分摊量，不含模型维度。没有明确的归属规则时，不将其直接分配给某个模型；Session 标签关联统计与按意图分摊统计应分别命名。
 - 两侧使用明确的查询窗口，展示匹配与未匹配的事实组数及覆盖率。窗口内用量不等于完整 Session 生命周期用量；意图记录与应用响应落入窗口的时间可能不同。
+
+## Source: entity_facts
+
+实体事实来自 audit-event 的安全发现（security 域，排除意图事件）和 Skill Read 上下文（agent_context 域的 skill.read）。历史 security-event 可按相同字段契约合并，保留原表与事实 ID；incident.entities 用于风险附着，不代表全部实体清单。实体字段沿用审计和风险事件的 entities 结构。
 
 ## Source: incident_events
 

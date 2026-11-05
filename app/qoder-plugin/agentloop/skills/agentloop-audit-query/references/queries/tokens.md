@@ -1,59 +1,121 @@
-# Token 分析配方
+# Token 分析参考 SQL
 
-## 两种用量口径
+响应口径使用 [application-base.sql](application-base.sql)；Session / Turn 查询再续接 [usage-aggregates.sql](usage-aggregates.sql)。完整形式为 `* |` + CTE + SELECT。响应与调用归并的区别见 [schema](../schema.md#token-查询口径)。
 
-`response-usage.v1` 沿用原报表：读取 [application-base.sql](application-base.sql) 的 usage_events，仅模型响应，observed_tokens = 输入 + 输出；输入已含缓存。用 `sum(observed_tokens)` 做用户/模型/Agent 排名与趋势，保留用量缺失覆盖，不将缺失当真实 0。
-
-`call-usage.v1` 用于内置调用视角：读取有任一用量字段的事件，按来源、用户、应用、Session、Turn、Step、Tool Call 和模型归并；每调用取最大输入/输出，total 取 `greatest(max(total_tokens), max(input_tokens)+max(output_tokens))`。请求/响应可能共同描述一次调用，这一归并不是针对特殊回流的事件去重。模型选择、缺失调用键回退及 application/runtime 来源范围必须与目标页面一致，否则不宣称严格对账。
-
-| 构件 | 响应口径 | 调用口径 |
-|---|---|---|
-| 基础行 | usage_events，一条模型响应 | token_calls，一次归并调用 |
-| 模型 | 响应优先、请求回退 | 内置视角请求优先、响应回退 |
-| total | 输入 + 输出 | total 与输入输出之和取最大值 |
-| 缓存 | 有效样本条件聚合 | 不能直接套归并 total 作缓存分母 |
-
-调用口径的应用侧 CTE 在 [call-usage.sql](call-usage.sql)，输出 `token_call_t`。绑定整数时间参数后追加目标 SELECT；本文将该调用结果简称 token_calls。该构件在调用维度之外保留用户与应用身份，Session 键用 JSON 数组编码以避免分隔符碰撞。部分内置视图只按来源 + Session 归并；存在跨用户/应用的同名 Session 时本构件会分开统计，必须说明对账差异，不能为一致而混合无关身份。
-
-执行调用聚合前先以同一范围运行该 CTE + `SELECT token_events, unkeyed_events FROM token_source_quality_t`。只有 unkeyed_events=0 才继续调用数/用量聚合。event.id 缺失时不能用秒级时间合成“稳定”ID；改用响应事件观测口径并披露限制，或请客户确认稳定调用键。缺失 Turn/Step/Call 使用原始 event_id 回退，表示未能跨事件配对，不伪造已配对调用。
-
-维护与裁剪时遵循：源字段依 schema 扩充 `gen_ai.usage.total_tokens`，两表保持列顺序；缺失 Turn/Step/Call 键分别使用 `event-turn:` / `event-step:` / `event-call:` + 稳定 event_id，不能把所有空键归并为一个调用。按完整用户/应用身份、上述调用身份和 model 分组，保留 first_time/latest_time、用户、应用、Agent 和来源。runtime 独立适配；默认不把它默默加进应用报表。缺少稳定 ID 时需先确认回退规则，不能凭时间秒数合并无关事件。
-
-## 总量、模型与用户排名
-
-响应口径示例，按索引确认后使用：
+## 总量、用户与模型排行
 
 ```sql
 SELECT user_id, sum(observed_tokens) AS total_tokens,
   sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
   count(*) AS model_responses,
-  count_if(input_tokens IS NOT NULL AND output_tokens IS NOT NULL) AS complete_usage_responses
+  count_if(input_tokens IS NOT NULL AND output_tokens IS NOT NULL) AS complete_responses
 FROM usage_events WHERE user_id IS NOT NULL
 GROUP BY user_id ORDER BY total_tokens DESC, user_id LIMIT 20
 ```
 
-换 model / agent_type 为模型/Agent 分布。调用口径从 token_calls 聚合 total_tokens，输出命名为 calls，不能把 count(*) 称为响应数。连续趋势按时间桶；内置调用视角按 latest_time 归桶。最近 24h 以当前范围结束时间为锚点独立取窗口，不自动以系统现在为结束时间。
+按 model 或 agent_type 分组得到模型或 Agent 排行；总量查询省略分组。
 
-## Turn / Session 统计与分布
+调用归并使用 [call-usage.sql](call-usage.sql)。先确认稳定 ID 覆盖，再聚合调用：
 
-先按来源、用户、应用和 Session 聚合；Turn 再加 turn_id，Step 再加 step_id 和 model。空 Turn 不算真实 Turn 数，可单列“缺失 Turn”的用量；内置回退键的数量须标为归并组数。
+```sql
+SELECT token_events, unkeyed_events FROM token_source_quality_t
+```
 
-在该预聚合结果上计算均值、分位数、固定桶、排行和长会话，不能对模型响应直接 avg 冒充平均 Session Token。分布阈值：
+unkeyed_events=0 时：
 
-| 视角 | 桶边界 |
-|---|---|
-| 单 Turn Token | <1k、<5k、<10k、<50k、<100k、其他 |
-| Session Token | <10k、<50k、<100k、<500k、<1M、其他 |
-| 长对话 Turn 数 | ≤1、≤5、≤10、≤20、≤50、其他 |
+```sql
+SELECT count(*) AS calls, sum(total_tokens) AS total_tokens FROM token_call_t
+```
 
-平均趋势将完整目标窗口的 Turn/Session 用量预聚合，再按 latest_time 分桶；“每小时内 Session 用量均值”是另一口径，必须另命名。Session 时长只覆盖窗口内观测。P95 全量应对未 LIMIT 的 Session 聚合使用 `approx_percentile(session_tokens, 0.95)`；UI Top Session 样本估算需要复现相同样本再算，不能把两者对账。
+## Token 趋势与平均消耗
 
-集中度：在全部 Session 聚合上 `row_number() OVER (ORDER BY session_tokens DESC, <稳定身份键>)`，计算总 Session 数及总 Token，再按累计人数百分比分桶并累计贡献。TopN 只限制最终展示，不能截断分母；并列和小样本人群的边界需说明。
+```sql
+SELECT cast(floor(ts / 3600) * 3600 AS bigint) AS hour_ts,
+  sum(observed_tokens) AS total_tokens
+FROM usage_events GROUP BY hour_ts ORDER BY hour_ts
+```
 
-## 缓存
+平均 Session 消耗先聚合会话，再按末次观测时间归桶。
 
-在 usage_events 上使用 schema 的 cache_valid：输入 >0、读取缓存 ≥0 且不超过输入。条件求和计算命中率，另给有效响应数、缺失/异常数和覆盖率；未声明支持缓存字段的模型不按零命中处理。
+```sql
+SELECT cast(floor(latest_time / 3600) * 3600 AS bigint) AS hour_ts,
+  avg(session_tokens) AS avg_session_tokens
+FROM session_usage GROUP BY hour_ts ORDER BY hour_ts
+```
 
-## 对账前检查
+平均 Turn 消耗将 session_usage/session_tokens 换为 turn_usage/turn_tokens。周期对比使用相同 SQL 分别查询当前与比较窗口；固定 24 小时视图以选定范围的结束时间为锚点。
 
-逐项核对时间/时区、来源、筛选、事件兼容名、模型优先级、调用归并键、TopN 与样本、完整性以及返回数值类型。内置调用算法与响应算法不一致时同时给出明确命名的结果；不能为凑数改写旧报表口径。
+## Session 排名、P95 与分桶
+
+```sql
+SELECT * FROM session_usage
+ORDER BY session_tokens DESC, source_scope, user_id, service_name, session_id LIMIT 20
+```
+
+全量 P95 在 LIMIT 前计算；内置面板的 Top Session 样本 P95 需要使用同样样本。
+
+```sql
+SELECT approx_percentile(session_tokens, 0.95) AS p95_session_tokens FROM session_usage
+```
+
+```sql
+SELECT CASE WHEN session_tokens < 10000 THEN '0-10k'
+    WHEN session_tokens < 50000 THEN '10k-50k'
+    WHEN session_tokens < 100000 THEN '50k-100k'
+    WHEN session_tokens < 500000 THEN '100k-500k'
+    WHEN session_tokens < 1000000 THEN '500k-1M' ELSE '1M+' END AS bucket,
+  count(*) AS sessions
+FROM session_usage GROUP BY bucket ORDER BY min(session_tokens)
+```
+
+Turn 分布使用 turn_usage/turn_tokens，桶边界为 1k、5k、10k、50k、100k。
+
+## 长对话与消耗集中度
+
+```sql
+SELECT turn_count, count(*) AS sessions,
+  avg(latest_time - first_time) AS avg_duration_seconds,
+  avg(session_tokens) AS avg_tokens,
+  approx_percentile(session_tokens, 0.95) AS p95_tokens
+FROM session_usage GROUP BY turn_count ORDER BY turn_count
+```
+
+按 Turn 数分桶即可生成长对话分布；缺失 Turn ID 不计真实轮数。
+
+```sql
+, ranked AS (
+  SELECT session_tokens,
+    row_number() OVER (ORDER BY session_tokens DESC,
+      source_scope, user_id, service_name, session_id) AS rank_no,
+    count(*) OVER () AS session_count,
+    sum(session_tokens) OVER () AS scope_tokens
+  FROM session_usage
+)
+SELECT 1.0 * sum(CASE WHEN rank_no <= greatest(1, ceil(session_count * 0.1))
+    THEN session_tokens ELSE 0 END) / nullif(max(scope_tokens), 0) AS top10_share
+FROM ranked
+```
+
+此例计算前 10% Session 的 Token 贡献，人数向上取整。
+
+## Turn / Step 明细
+
+```sql
+SELECT source_scope, user_id, service_name, session_id, turn_id, step_id, model,
+  sum(observed_tokens) AS total_tokens
+FROM usage_events
+GROUP BY source_scope, user_id, service_name, session_id, turn_id, step_id, model
+ORDER BY total_tokens DESC LIMIT 100
+```
+
+## 缓存命中率
+
+```sql
+SELECT model,
+  1.0 * sum(CASE WHEN cache_valid THEN cache_read_tokens END)
+    / nullif(sum(CASE WHEN cache_valid THEN input_tokens END), 0) AS cache_hit_ratio,
+  count_if(cache_valid) AS valid_responses, count(*) AS responses
+FROM usage_events GROUP BY model
+```
+
+有效样本定义见 schema；输入已包含缓存，计算总 Token 时不重复相加。

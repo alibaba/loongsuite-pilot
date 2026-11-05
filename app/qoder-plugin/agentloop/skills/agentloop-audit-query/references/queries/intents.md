@@ -1,40 +1,81 @@
-# 意图审计配方
+# 意图审计参考 SQL
 
-来源 audit-event，`intent-labels.v1`。只读 `event_name IN ('intent.user_intent','intent.custom_user_intent')`；普通域为 user_intent，风险意图域为 security。对账产品默认检测器时追加已公开且目标使用的 detector_name，不能悄悄排除客户自定义检测器。
-
-## 数量、趋势与分类
+## 意图数量与趋势
 
 ```sql
 * | SELECT count(*) AS intent_records,
   count_if(event_domain = 'security') AS risky_intent_records,
-  1.0 * count_if(event_domain = 'security') / nullif(count(*), 0) AS risky_ratio,
-  sum(try_cast(usage_total_tokens AS double)) AS allocated_tokens
+  1.0 * count_if(event_domain = 'security') / nullif(count(*), 0) AS risky_ratio
 FROM "audit-event"
 WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
 ```
 
-趋势按 __time__ 的 Unix 秒桶和 event_domain 分组。普通分类使用 intent_category + intent_subcategory；风险意图使用 risk_type + risk_subtype，不能将风险意图的空普通分类归到普通“其他”。枚举查 [value-labels](../value-labels.md)，自定义分类保持 taxonomy 上下文。
+```sql
+* | SELECT cast(floor(__time__ / 3600) * 3600 AS bigint) AS hour_ts,
+  event_domain, count(*) AS intents
+FROM "audit-event"
+WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
+GROUP BY hour_ts, event_domain ORDER BY hour_ts, event_domain
+```
 
-用户分布按清洗 user 统计去重用户，Session 分布先按来源、用户、应用、evidence_session_id 和标签聚合，保留多标签不可相加说明。用户概览、最近活动和会话概览复用同一限定条件，再按用户或会话身份聚合，不查询整张审计表。
-
-usage_total_tokens 是按意图分摊的 Session Token；只对该字段求和表示“意图分摊用量”，不能再次加完整 Session 用量。无此字段时使用关联方式并另命名。
-
-## 意图 × 模型 × 平均 Session 用量
-
-应用事实先按来源、用户、应用、Session、模型预聚合成一行，意图表先按来源、用户、应用、Session、分类/子类归一为标签集合，再关联。示意接口：
+## 意图分类与 Token 分布
 
 ```sql
+* | SELECT intent_category, intent_subcategory,
+  count(*) AS intents,
+  sum(try_cast(usage_total_tokens AS bigint)) AS allocated_tokens
+FROM "audit-event"
+WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
+  AND event_domain = 'user_intent'
+GROUP BY intent_category, intent_subcategory ORDER BY intents DESC
+```
+
+usage_total_tokens 是意图分摊量，不是完整 Session 用量。
+
+## 用户与会话概览
+
+```sql
+* | SELECT source_scope, "user" AS user_id, service_name, evidence_session_id,
+  count(*) AS intents, max(__time__) AS latest_time
+FROM "audit-event"
+WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
+GROUP BY source_scope, "user", service_name, evidence_session_id
+ORDER BY latest_time DESC LIMIT 100
+```
+
+## 风险意图明细
+
+```sql
+* | SELECT audit_event_id, "user" AS user_id, risk_type, risk_subtype,
+  severity, evidence_session_id, evidence_event_id
+FROM "audit-event"
+WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
+  AND event_domain = 'security'
+ORDER BY __time__ DESC, audit_event_id DESC LIMIT 0, 20
+```
+
+## 意图 × 模型 × 平均 Session Token
+
+续接 [application-base.sql](application-base.sql) 和 [usage-aggregates.sql](usage-aggregates.sql)。
+
+```sql
+, labels AS (
+  SELECT DISTINCT source_scope, "user" AS user_id, service_name,
+    evidence_session_id AS session_id, intent_category, intent_subcategory
+  FROM "audit-event"
+  WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
+    AND event_domain = 'user_intent'
+    AND __time__ >= {{from}} AND __time__ < {{to}}
+)
 SELECT i.intent_category, i.intent_subcategory, u.model,
   count(*) AS matched_session_model_groups,
-  avg(u.session_tokens) AS avg_labeled_session_model_tokens
-FROM session_model_usage u
-JOIN session_intent_labels i
+  avg(u.session_tokens) AS avg_session_model_tokens
+FROM session_model_usage u JOIN labels i
   ON u.source_scope = i.source_scope AND u.user_id = i.user_id
   AND u.session_id = i.session_id
-  AND (u.service_name = i.service_name OR (u.service_name IS NULL AND i.service_name IS NULL))
+  AND (u.service_name = i.service_name
+    OR (u.service_name IS NULL AND i.service_name IS NULL))
 GROUP BY i.intent_category, i.intent_subcategory, u.model
 ```
 
-这里只展示预聚合接口；交付时必须补齐两侧 CTE、时间条件和 `* |`，不能把示意尾部当可执行完整 SQL。应用名缺失时先核查 Session 归属的唯一性，不因缺失放宽为笛卡尔 JOIN。统计 unmatched 与 matched 的事实组数及覆盖，未匹配不算 0 Token。多标签 Session 进入多个意图组，跨意图不可相加；该均值不是 usage_total_tokens 的模型分摊。
-
-风险意图明细按 audit_event_id 引用、按 evidence_session_id / evidence_event_id 下钻；它仍是意图识别结果，不等同 incident 已成立风险。
+同一 Session 可有多个意图，跨意图不能相加；关联覆盖与身份规则见 schema。
