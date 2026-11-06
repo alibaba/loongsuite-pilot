@@ -141,6 +141,17 @@ await build({
   ],
 });
 
+// Shares the installation ownership rules for user JSON and system TOML.
+await build({
+  entryPoints: ['src/scope-cleanup-cli.ts'],
+  outfile: 'dist/scope-cleanup.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+  banner: { js: "process.env.LOG_LEVEL = 'silent';" },
+  define: commonDefine, plugins: commonPlugins,
+});
+
+
 await build({
   entryPoints: ['src/updater/index.ts'],
   outdir: 'dist/updater',

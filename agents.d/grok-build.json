@@ -8,6 +8,7 @@
   },
   "hook": {
     "settingsPath": "$GROK_HOME/hooks/loongsuite-pilot.json",
+    "systemSettingsPath": "/etc/grok/managed_config.toml",
     "events": ["stop", "stop_failure", "user_prompt_submit", "session_end"],
     "hookCommand": "$PILOT_DATA/hooks/grok-build-loongsuite-pilot-hook.sh",
     "format": "nested",

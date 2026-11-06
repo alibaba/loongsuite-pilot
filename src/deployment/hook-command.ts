@@ -17,6 +17,7 @@ export interface ParsedHookArgs {
   json: boolean;
   pilotDir?: string;
   help: boolean;
+  deploymentScope?: 'user' | 'system';
 }
 
 export function parseHookArgs(argv: string[]): ParsedHookArgs {
@@ -46,7 +47,7 @@ export function parseHookArgs(argv: string[]): ParsedHookArgs {
     const eq = arg.indexOf('=');
     const key = eq === -1 ? arg : arg.slice(0, eq);
     const inline = eq === -1 ? undefined : arg.slice(eq + 1);
-    if (key !== '--agents' && key !== '--home' && key !== '--config-dir' && key !== '--pilot-dir') {
+    if (key !== '--agents' && key !== '--home' && key !== '--config-dir' && key !== '--pilot-dir' && key !== '--scope') {
       throw new Error(`Unknown option: ${arg}`);
     }
     const value = inline !== undefined ? inline : rest[++i];
@@ -54,6 +55,10 @@ export function parseHookArgs(argv: string[]): ParsedHookArgs {
     if (key === '--agents') out.agents = value;
     else if (key === '--config-dir') out.configDir = value;
     else if (key === '--pilot-dir') out.pilotDir = value;
+    else if (key === '--scope') {
+      if (value !== 'user' && value !== 'system') throw new Error('--scope must be user or system');
+      out.deploymentScope = value;
+    }
     else {
       const splitAt = value.indexOf('=');
       if (splitAt <= 0 || splitAt === value.length - 1) {
@@ -62,13 +67,18 @@ export function parseHookArgs(argv: string[]): ParsedHookArgs {
       out.homes[value.slice(0, splitAt)] = value.slice(splitAt + 1);
     }
   }
+  if (out.deploymentScope === 'system') {
+    if (Object.keys(out.homes).length || out.configDir) throw new Error('--scope system cannot be combined with --home or --config-dir');
+    if (process.platform !== 'linux') throw new Error('System hooks are supported only on Linux');
+  }
   return out;
 }
 
 function printUsage(): void {
   console.log([
-    'Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--config-dir PATH] [--json]',
-    '       loongsuite-pilot hook status [--agents <ids>] [--json]',
+    'Usage: loongsuite-pilot hook install [--agents <ids>] [--home <id>=<dir>]... [--scope user|system] [--config-dir PATH] [--json]',
+    '       loongsuite-pilot hook status [--agents <ids>] [--scope user|system] [--json]',
+    'System scope is opt-in and Linux-only. Supported agents use shared installation; other agents keep home installation.',
     '',
     'Detects every agent when --agents and LOONGSUITE_PILOT_AGENTS are unset.',
     'The exact value none skips injection. The literal null is treated as unset.',
@@ -115,6 +125,7 @@ export async function runHookCommand(argv: string[]): Promise<number> {
       agentsFlag: parsed.agents,
       envAgents: parsed.agents === undefined ? process.env.LOONGSUITE_PILOT_AGENTS : undefined,
       homes,
+      deploymentScope: parsed.deploymentScope,
       writeResult: parsed.subcommand === 'install',
       enabled: id => isAgentGatedEnabled(config, id),
       mode: parsed.subcommand,

@@ -62,6 +62,36 @@ Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 根目录下最近活跃的 rollout 文件。`Stop` 仅作为尽力而为的唤醒信号，
 目录发现不依赖它。
 
+## Linux 系统接入
+
+在 POSIX 安装命令中加上 `--scope system`，也可对已安装的 Pilot 执行：
+
+```bash
+loongsuite-pilot hook install --scope system
+loongsuite-pilot hook status --json
+```
+
+不指定 `--agents` 时自动探测已安装的 Agent。下列框架使用公共安装方式，
+其他已探测到的 Agent 继续安装到原来的 home：
+
+| Agent | 公共注册方式 | 已验证 CLI 版本 |
+| --- | --- | --- |
+| Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+
+`--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
+首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
+重复安装 Pilot。系统配置、运行文件和采集目录必须对业务容器中的相应进程可见、可访问。
+此能力不提供租户授权隔离或跨容器自动注入。
+
+安装、修复、升级、禁用和卸载沿用已记录目标，保留第三方配置。显式迁移仅清理已登记
+的旧 Pilot 注册，不扫描未登记的 home。配置无效、所有权冲突、只读或外部挂载且需要
+修改时会保留原文件并报错。状态中的 `collectionStatus=not-verified` 只表示核对安装和
+运行文件，不代表真实对话已经上报。安装失败时保留运行文件并保持 collector 停止，
+便于恢复；升级保留已记录的安装范围。
+
+回退某个 Agent 时执行 `hook install --agents <id> --scope user`；原生 Hook Agent 还可
+指定 `--home <id>=<home>`。`--scope system` 不能与 `--home` 同时使用。
+
 ## Grok Build 采集与生命周期
 
 Pilot 通过 Grok 官方的 `GROK_HOME`（默认 `~/.grok`）检测 Grok Build，并在

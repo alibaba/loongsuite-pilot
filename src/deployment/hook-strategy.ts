@@ -125,10 +125,16 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
+    // System registration is explicitly provisioned before any identity home exists.
+    if (def.hook?.scope === 'system') return true;
     return detectAgent(def.detection);
   }
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
+    if (def.hook?.scope === 'system') {
+      const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
+      return !(await systemTomlHooksInstalled(def));
+    }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
     }
@@ -195,6 +201,11 @@ export class HookStrategy implements DeployStrategy {
     }
 
     try {
+      if (hookConfig.scope === 'system') {
+        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
+        await updateSystemTomlHooks(def, true);
+        return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
       else await ensureSettings();
@@ -356,6 +367,16 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
+    if (def.hook?.scope === 'system') {
+      try {
+        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
+        await updateSystemTomlHooks(def, false);
+        return true;
+      } catch (error) {
+        logger.error('System hook removal failed', { error: String(error) });
+        return false;
+      }
+    }
     // Mirror deploy(): also remove retiredEvents (e.g. codex's PreToolUse/
     // PostToolUse from an older version). Otherwise disabling a codex agent
     // that was first deployed by an old build leaves those retired hooks

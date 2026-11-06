@@ -66,6 +66,41 @@ Codex collection is transcript-backed. Pilot uses the lightweight
 recent rollout files from that session root. `Stop` is retained as a
 best-effort wakeup and is not required for directory discovery.
 
+## Shared installation on Linux
+
+Add `--scope system` to the POSIX install command or run:
+
+```bash
+loongsuite-pilot hook install --scope system
+loongsuite-pilot hook status --json
+```
+
+Without `--agents`, Pilot detects installed Agents. These integrations use a
+shared installation; other detected Agents keep their home-local installation:
+
+| Agent | Shared registration | Tested CLI versions |
+| --- | --- | --- |
+| Grok Build | `/etc/grok/managed_config.toml` | 1.0.30 |
+
+`--agents` remains an optional filter, including mixed lists such as
+`--agents grok-build,claude-code`. The first supported topology is multiple
+identity homes under one Linux UID. Initialize before starting Agent processes;
+later identities require no Pilot installation of their own. System configuration,
+runtime files and collection directories must be accessible in that business
+container. This does not provide tenant authorization or cross-container injection.
+
+Install, repair, upgrade, disable and uninstall follow the recorded target and
+preserve third-party configuration. Explicit migration retires only recorded
+Pilot home registrations; unrecorded homes are not scanned. Invalid, conflicting,
+read-only or externally mounted system configuration is preserved on failure.
+Status checks installation/runtime integrity (`collectionStatus=not-verified`),
+not successful collection. An installer failure retains runtime for recovery and
+keeps the collector stopped. Upgrades preserve the recorded scope.
+
+To return one Agent to home installation, use
+`hook install --agents <id> --scope user`; native Hook agents can also specify
+`--home <id>=<home>`. System scope cannot be combined with `--home`.
+
 ## Grok Build Collection And Lifecycle
 
 Pilot detects Grok Build from Grok's `GROK_HOME` (default `~/.grok`) and
