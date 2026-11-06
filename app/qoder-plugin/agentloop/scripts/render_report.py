@@ -24,14 +24,14 @@ if str(SCRIPT_DIR) not in sys.path:
 from util.aliyun import SLS_VERSION, aliyun
 from util.config_record import DEFAULT_LOGSTORE, load_target, require_profile
 
-REPORT_DIR = Path.home() / ".loongsuite-pilot" / "audit" / "reports"
+REPORT_DIR = Path("output") / "audit" / "reports"
 PLACEHOLDER_PROJECTS = {"", "@", "agentloop-xxx", "example-project"}
 PLACEHOLDER_LOGSTORES = {"", "@"}
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Render SLS dashboard JSON to local HTML")
-    p.add_argument("scenario", nargs="?", default=None, help="场景名；读取报表目录下的 <scenario>-dashboard.json")
+    p.add_argument("scenario", nargs="?", default=None, help="场景名；读取当前项目 output/audit/reports/ 下的 <scenario>-dashboard.json")
     p.add_argument("--dashboard", dest="dashboard_json", type=Path, help="dashboard JSON 路径")
     p.add_argument("--hours", type=int, default=None, help="查询最近 N 小时（未指定时从 dashboard 查询 start 推导，兜底 168）")
     p.add_argument("--from", dest="ts_from", type=int)
@@ -1341,7 +1341,7 @@ def resolve_paths(args):
             name = name[:-len(suffix)] + "-report.html"
         else:
             name = dashboard_json.stem + "-report.html"
-        output_html = REPORT_DIR / name
+        output_html = dashboard_json.parent / name
     return dashboard_json, output_html
 
 

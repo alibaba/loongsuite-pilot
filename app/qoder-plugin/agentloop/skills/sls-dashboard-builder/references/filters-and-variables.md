@@ -174,12 +174,12 @@ WHERE ('${{dept_id|__all__}}' = '__all__'
 4. 动态候选：切换时间及其他筛选后，选项仍符合数据源与继承规则。
 5. 下钻：目标收到点击行的原始标识，保留所需时间范围，查询与结果确实缩小到目标对象。
 
-预览入口是插件根目录的 `scripts/run.py report`。它使用插件已保存的登录，不要传 `--profile test`。例如：
+在当前项目中通过插件脚本生成预览，使用插件已保存的登录。例如：
 
 ```bash
-python3 scripts/run.py report \
-  --dashboard ~/.loongsuite-pilot/audit/reports/overview-dashboard.json \
-  --output ~/.loongsuite-pilot/audit/reports/overview-report.html \
+python3 "<插件目录>/scripts/run.py" report \
+  --dashboard output/audit/reports/overview-dashboard.json \
+  --output output/audit/reports/overview-report.html \
   --var bucket_seconds=60
 ```
 
