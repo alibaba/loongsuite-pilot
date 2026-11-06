@@ -1,14 +1,14 @@
-//! Actual native Codex process -> spool -> collector -> local mirror / private HTTP.
+//! Actual native Codex process -> spool -> collector -> local mirror, without private HTTP.
 //! All files, environment and network destinations belong to this test.
 use loongsuite_pilot::metrics::{
     DataflowSnapshot, HookMetricsSpool, MetricsWriter, MetricsWriterOptions,
 };
 use serde_json::{json, Value};
 use std::{fs, path::Path, process::Stdio, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
-async fn native_codex_timing_reaches_mirror_and_only_private_http() {
+async fn native_codex_timing_reaches_mirror_without_private_http() {
     const CHILD: &str = "PILOT_HOOK_TIMING_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let config = loongsuite_pilot::core::load_config().await.unwrap();
@@ -78,16 +78,6 @@ async fn native_codex_timing_reaches_mirror_and_only_private_http() {
                 .unwrap()
                 >= 0.0
         );
-        if cfg!(feature = "proprietary") {
-            let accepted = data.join("fixture-http-accepted");
-            tokio::time::timeout(Duration::from_secs(4), async {
-                while !accepted.exists() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-        }
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -105,64 +95,18 @@ async fn native_codex_timing_reaches_mirror_and_only_private_http() {
         serde_json::to_vec(&json!({"dataDir":data})).unwrap(),
     )
     .unwrap();
-    let server_data = data.clone();
     let server = tokio::spawn(async move {
         let accepted = tokio::time::timeout(Duration::from_secs(8), listener.accept()).await;
-        if !cfg!(feature = "proprietary") {
-            assert!(
-                accepted.is_err(),
-                "public builds must keep self-monitoring local"
-            );
-            return;
-        }
-        let (mut socket, _) = accepted.unwrap().unwrap();
-        let mut raw = Vec::new();
-        let (offset, length) = loop {
-            let mut chunk = [0u8; 4096];
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            raw.extend_from_slice(&chunk[..n]);
-            assert!(raw.len() < 128 * 1024);
-            if let Some(offset) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&raw[..offset]);
-                let length = head
-                    .lines()
-                    .find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                break (offset + 4, length);
-            }
-        };
-        while raw.len() < offset + length {
-            let mut chunk = [0u8; 4096];
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            raw.extend_from_slice(&chunk[..n]);
-            assert!(raw.len() < 128 * 1024);
-        }
-        let body: Value = serde_json::from_slice(&raw[offset..offset + length]).unwrap();
-        assert_eq!(body["__topic__"], "pilot_pipeline");
-        let row = &body["__logs__"][0];
-        assert_eq!(row["type"], "hook");
-        assert_eq!(row["agent"], "codex");
-        assert_eq!(row["hook_event"], "stop");
-        assert_eq!(row["calls"], "2");
-        assert_eq!(row["user_id"], "fixture-user");
-        assert!(row.get("prompt").is_none());
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        fs::write(server_data.join("fixture-http-accepted"), "accepted").unwrap();
+        assert!(
+            accepted.is_err(),
+            "public source must keep private self-monitoring local"
+        );
     });
     let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
     command
         .args([
             "--exact",
-            "native_codex_timing_reaches_mirror_and_only_private_http",
+            "native_codex_timing_reaches_mirror_without_private_http",
         ])
         .env_clear()
         .env(CHILD, "1")

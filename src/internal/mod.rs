@@ -2,8 +2,8 @@
 //!
 //! Open-source builds keep [`send_alarm`], [`send_status`], [`send_running_status`],
 //! and [`post_alarm`] as no-ops. The `proprietary` feature turns on the statistic
-//! web-tracking post and the configurable internal self-monitoring transport.
-//! Its private destinations are loaded from the installation data directory.
+//! web-tracking post protocol.
+//! Private alarm/status delivery stays outside this public source tree.
 
 mod alarm_sender;
 pub use alarm_sender::configure as configure_telemetry;

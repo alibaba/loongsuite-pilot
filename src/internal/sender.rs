@@ -2,8 +2,8 @@
 //!
 //! The default build records nothing on the network. `send_alarm`, `send_status`,
 //! `send_running_status`, and `post_alarm` return immediately. The `proprietary`
-//! feature enables running-status samples and configured internal alarm/status
-//! delivery. Missing private configuration keeps alarm/status delivery disabled.
+//! feature enables the existing public running-status protocol. Private alarm/status
+//! implementations are not included in this repository.
 
 use indexmap::IndexMap;
 #[cfg(test)]
