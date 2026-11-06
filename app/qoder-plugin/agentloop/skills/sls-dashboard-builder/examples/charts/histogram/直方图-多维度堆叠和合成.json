@@ -1,0 +1,228 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as t, count_if(request_method = 'GET') as GET, count_if(request_method = 'POST') as POST group by t  order by t asc limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as t, count_if(request_method = 'GET') as GET, count_if(request_method = 'POST') as POST group by t  order by t asc limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "t",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "GET",
+                            "POST"
+                        ]
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1661490717390",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "vertical",
+                    "combineMode": "yes",
+                    "fillOpacity": 85,
+                    "labelRotate": 0,
+                    "bucketCount": 20,
+                    "timeType": "relativeTime",
+                    "timeSelect": 60,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "多维度合成",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1690437107682",
+            "type": "histogram"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-3600s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select __time__ - __time__ % 60 as t, count_if(request_method = 'GET') as GET, count_if(request_method = 'POST') as POST group by t  order by t asc limit 1000",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__ - __time__ % 60 as t, count_if(request_method = 'GET') as GET, count_if(request_method = 'POST') as POST group by t  order by t asc limit 1000",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "xAxisKey": "t",
+                        "name": "A",
+                        "yAxisKeys": [
+                            "GET",
+                            "POST"
+                        ]
+                    }
+                },
+                "yPos": 9,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 8,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1661490717390",
+                "yAxisOption": {
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "isTimeSeries": true,
+                "thresholdOption": {
+                    "fillOpacity": 40
+                },
+                "histogramOptions": {
+                    "orientation": "vertical",
+                    "combineMode": "normal",
+                    "fillOpacity": 85,
+                    "labelRotate": 0,
+                    "bucketCount": 20,
+                    "timeType": "relativeTime",
+                    "timeSelect": 60,
+                    "gradientMode": "none",
+                    "lineWidth": 1
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "多维度堆叠",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 9
+            },
+            "action": {},
+            "title": "charts-demo1690437136191",
+            "type": "histogram"
+        }
+    ],
+    "displayName": "直方图-多维度堆叠和合成",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690437097936-798907"
+}

@@ -1,0 +1,418 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "name": "A",
+                        "tokenQuery": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-deps"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "name": "B",
+                        "tokenQuery": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-metrics"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "mixed"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "parent_node_type": "type",
+                        "child_node_id": "child_service",
+                        "child_node_type": "type",
+                        "parent_node_id": "parent_service"
+                    },
+                    "B": {
+                        "parent_node_type": "",
+                        "child_node_type": "",
+                        "parent_node_id": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "qs-demos1687829815288",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "topoGraphOptions": {
+                    "nodeColor": "#0070cc",
+                    "layoutType": "fdp",
+                    "showEdgeMetrics": false,
+                    "nodeType": "text_node",
+                    "showLabel": true
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "closeSearch": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 9,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "力导向布局",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "height": 18,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690440978861",
+            "type": "topologypro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "name": "A",
+                        "tokenQuery": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-deps"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "name": "B",
+                        "tokenQuery": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-metrics"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "mixed"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "parent_node_type": "type",
+                        "child_node_id": "child_service",
+                        "child_node_type": "type",
+                        "parent_node_id": "parent_service"
+                    },
+                    "B": {
+                        "parent_node_type": "",
+                        "child_node_type": "",
+                        "parent_node_id": ""
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "qs-demos1687829815288",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "topoGraphOptions": {
+                    "nodeColor": "#0070cc",
+                    "layoutType": "dot",
+                    "showEdgeMetrics": false,
+                    "nodeType": "text_node",
+                    "showLabel": true
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "closeSearch": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 9,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 15,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "层次布局",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "height": 9,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690441010877",
+            "type": "topologypro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "name": "A",
+                        "tokenQuery": "version: service | select child_service, parent_service, 'SERVER' as type from log",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-deps"
+                    },
+                    {
+                        "datasource": "logstore",
+                        "displayName": "B",
+                        "query": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "name": "B",
+                        "tokenQuery": " * | select max(max_latency) as maxLatency, min(min_latency) as minLatency, sum(n_status_fail) as nStatusFail, service, sum(sum_latency) as sumLatency, sum(total) as total from log group by service",
+                        "project": "sls-mall",
+                        "logstore": "sls-mall-traces-metrics"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "mixed"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "parent_node_type": "type",
+                        "child_node_id": "child_service",
+                        "child_node_type": "type",
+                        "parent_node_id": "parent_service"
+                    },
+                    "B": {
+                        "parent_node_type": "",
+                        "child_node_type": "",
+                        "parent_node_id": ""
+                    }
+                },
+                "yPos": 9,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "qs-demos1687829815288",
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "topoGraphOptions": {
+                    "nodeColor": "#0070cc",
+                    "layoutType": "circo",
+                    "showEdgeMetrics": false,
+                    "nodeType": "text_node",
+                    "showLabel": true
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "closeSearch": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 9,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": 2,
+                "showTitle": true,
+                "width": 15,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "环形布局",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "height": 9,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690441013266",
+            "type": "topologypro"
+        }
+    ],
+    "displayName": "拓扑图-不同布局方式",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690440967318-198936"
+}

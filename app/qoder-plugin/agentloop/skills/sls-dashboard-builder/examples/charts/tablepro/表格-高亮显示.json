@@ -1,0 +1,641 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "closedKeys": [
+                            "__time__"
+                        ]
+                    }
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "",
+                "fieldOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#0070cc"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "background"
+                            },
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(92 ,183 ,74)",
+                                        "rule": ">",
+                                        "value": 27
+                                    },
+                                    {
+                                        "color": "rgb(208 ,172 ,88)",
+                                        "rule": ">",
+                                        "value": 28
+                                    },
+                                    {
+                                        "color": "rgb(230 ,131 ,65)",
+                                        "rule": ">",
+                                        "value": 29
+                                    },
+                                    {
+                                        "color": "rgb(208 ,74 ,90)",
+                                        "rule": ">",
+                                        "value": 30
+                                    },
+                                    {
+                                        "color": "rgb(202 ,81 ,184)",
+                                        "rule": ">",
+                                        "value": 31
+                                    },
+                                    {
+                                        "color": "rgb(232 ,136 ,147)",
+                                        "rule": ">",
+                                        "value": 32
+                                    },
+                                    {
+                                        "color": "rgb(139 ,180 ,216)",
+                                        "rule": ">",
+                                        "value": 33
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 12,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "单元格高亮",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690423262727",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "closedKeys": [
+                            "__time__"
+                        ]
+                    }
+                },
+                "yPos": 11,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690423343630",
+                "fieldOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "single",
+                                    "color": "#d04a5a"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "text"
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "文本高亮",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690423343630",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "query": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select __time__, split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1), __time__ order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "closedKeys": [
+                            "__time__"
+                        ]
+                    }
+                },
+                "yPos": 22,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690423343630",
+                "fieldOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#5cb74a"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "fullbackground"
+                            },
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(92 ,183 ,74)",
+                                        "rule": ">",
+                                        "value": 27
+                                    },
+                                    {
+                                        "color": "rgb(208 ,172 ,88)",
+                                        "rule": ">",
+                                        "value": 29
+                                    },
+                                    {
+                                        "color": "rgb(230 ,131 ,65)",
+                                        "rule": ">",
+                                        "value": 30
+                                    },
+                                    {
+                                        "color": "rgb(208 ,74 ,90)",
+                                        "rule": ">",
+                                        "value": 32
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "yAxisOption": {
+                    "stackingMode": "none",
+                    "show": true,
+                    "position": 3
+                },
+                "tableOptions": {
+                    "sortMethod": "default",
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "showGaugeTitle": true,
+                    "sortField": "",
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "showAll": false,
+                    "closeSearch": false,
+                    "searchAccurate": false,
+                    "columnMinWidth": 100,
+                    "searchMode": "search",
+                    "searchMultiple": true,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "labelFormat": "",
+                    "sortOrder": "none"
+                },
+                "valueMappingOption": [],
+                "xAxisOption": {
+                    "format": {
+                        "value": "auto"
+                    },
+                    "show": true,
+                    "zoomTarget": "global"
+                },
+                "xPos": 0,
+                "actionOptions": [],
+                "dataOption": {
+                    "autoFill": false,
+                    "autoFillNumber": 0
+                },
+                "version": "2",
+                "thresholdOption": {
+                    "thresholdMode": "absolute"
+                },
+                "width": 24,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "整行高亮",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "auto",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 11
+            },
+            "action": {},
+            "title": "charts-demo1690423387434",
+            "type": "tablepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select split_part(request_uri,'?',1) as path, count(1) as pv group by split_part(request_uri,'?',1) order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {}
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "charts-demo1690423583358",
+                "fieldOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "newAdd": true,
+                        "overrides": [
+                            {
+                                "optionKeys": [
+                                    "standardOption",
+                                    "colorSchame"
+                                ],
+                                "value": {
+                                    "schema": "threshold",
+                                    "color": "#0070cc"
+                                }
+                            },
+                            {
+                                "optionKeys": [
+                                    "thresholdOption",
+                                    "thresholds"
+                                ],
+                                "value": [
+                                    {
+                                        "color": "rgb(115, 191, 105)",
+                                        "rule": ">",
+                                        "value": 0
+                                    },
+                                    {
+                                        "color": "rgb(245, 77, 97)",
+                                        "rule": ">",
+                                        "value": 11300
+                                    }
+                                ]
+                            },
+                            {
+                                "optionKeys": [
+                                    "columnOptions",
+                                    "cellMode"
+                                ],
+                                "value": "background"
+                            }
+                        ]
+                    }
+                ],
+                "tableOptions": {
+                    "showHeader": true,
+                    "showTotal": true,
+                    "transparentBackground": false,
+                    "pageSize": 20,
+                    "showMode": "pagination",
+                    "rowHeight": 36
+                },
+                "columnOptions": {
+                    "closeSearch": false,
+                    "columnMinWidth": 100,
+                    "fontSize": 12,
+                    "closeSort": false,
+                    "columnAlign": "left",
+                    "cellMode": "none"
+                },
+                "valueMappingOption": [],
+                "xPos": 0,
+                "actionOptions": [],
+                "version": 2,
+                "showTitle": true,
+                "width": 24,
+                "basicOptions": {
+                    "displayName": "单元格默认为绿色，大于11300显示红色",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "height": 11,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690423583358",
+            "type": "tablepro"
+        }
+    ],
+    "displayName": "表格-高亮显示",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690423226201-950041"
+}

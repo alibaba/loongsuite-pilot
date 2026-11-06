@@ -1,0 +1,198 @@
+{
+    "charts": [
+        {
+            "search": {
+                "query": "@",
+                "start": "-86400s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | select count(1) as pv, case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end as http_user_agent  group by case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end   order by pv desc limit 10",
+                        "name": "A",
+                        "tokenQuery": "* | select count(1) as pv, case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end as http_user_agent  group by case when http_user_agent like '%Chrome%' then 'Chrome' when http_user_agent like '%Firefox%' then 'Firefox' when http_user_agent like '%Safari%' then 'Safari' else 'unKnown' end   order by pv desc limit 10",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "numFieldKey": "pv",
+                        "xAxisConcatKeys": [],
+                        "showFieldKey": "http_user_agent"
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": {
+                        "unit": "none"
+                    },
+                    "decimals": 2,
+                    "format": "KMB"
+                },
+                "displayName": "simulator-nginx-demo1679471499745",
+                "xPos": 0,
+                "actionOptions": [
+                    {
+                        "name": "pv",
+                        "queryName": "A",
+                        "events": [
+                            {
+                                "values": {
+                                    "blank": true,
+                                    "logstoreName": "nginx-access-log",
+                                    "name": "打开日志库",
+                                    "project": "simulator-nginx-demo",
+                                    "filterInherit": false,
+                                    "searchFilter": "",
+                                    "timeRange": -1
+                                },
+                                "event": "logstore"
+                            }
+                        ]
+                    }
+                ],
+                "version": 2,
+                "isTimeSeries": false,
+                "pieOption": {
+                    "chartType": "DountChart",
+                    "labelType": "percent",
+                    "showLabel": true
+                },
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": true,
+                    "position": "bottom"
+                },
+                "basicOptions": {
+                    "displayName": "环形图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "fixedTime": false,
+                    "showBorder": true
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 13,
+                "zIndex": 10
+            },
+            "action": {},
+            "title": "charts-demo1690430867307",
+            "type": "piepro"
+        },
+        {
+            "search": {
+                "query": "@",
+                "start": "-900s",
+                "topic": "",
+                "end": "now",
+                "chartQueries": [
+                    {
+                        "datasource": "logstore",
+                        "displayName": "A",
+                        "query": "* | SELECT  COUNT(*) as c, request_time group by request_time ",
+                        "name": "A",
+                        "tokenQuery": "* | SELECT  COUNT(*) as c, request_time group by request_time ",
+                        "project": "charts-demo",
+                        "logstore": "charts-demo"
+                    }
+                ],
+                "logstore": "@",
+                "dataSourceType": "current"
+            },
+            "display": {
+                "queryOptionMap": {
+                    "A": {
+                        "name": "A",
+                        "xAxisConcatKeys": []
+                    }
+                },
+                "yPos": 0,
+                "standardOption": {
+                    "unit": "none",
+                    "decimals": 2,
+                    "format": "none"
+                },
+                "displayName": "simulator-nginx-demo1659060738062",
+                "yAxisOption": {
+                    "softMin": 0,
+                    "show": true,
+                    "position": 3
+                },
+                "tooltipOption": {
+                    "mode": "all",
+                    "sortOrder": "none"
+                },
+                "xAxisOption": {
+                    "show": true
+                },
+                "xPos": 12,
+                "version": 2,
+                "isTimeSeries": true,
+                "pieOption": {
+                    "chartType": "PolarAreaChart",
+                    "labelType": "percent",
+                    "showLabel": true
+                },
+                "showTitle": true,
+                "width": 12,
+                "legendOption": {
+                    "maxContent": 30,
+                    "actionMode": "toggle",
+                    "show": false,
+                    "position": "right"
+                },
+                "basicOptions": {
+                    "displayName": "南丁玫瑰图",
+                    "showTitle": true,
+                    "showBackground": true,
+                    "showTime": true,
+                    "showBorder": true
+                },
+                "graphOptions": {
+                    "pointSize": 5,
+                    "fillOpacity": 40,
+                    "showPoint": "none",
+                    "lineInterpolation": "smooth",
+                    "barStyle": "middle",
+                    "gradientMode": "opacity",
+                    "lineWidth": 2,
+                    "seriesStyle": "lines"
+                },
+                "innerTokenOption": [],
+                "documentLinkOption": {
+                    "showIcon": true,
+                    "documentLinks": []
+                },
+                "height": 13,
+                "pieTypeOption": {
+                    "chartType": "PieChart"
+                },
+                "zIndex": 15
+            },
+            "action": {},
+            "title": "charts-demo1690433177717",
+            "type": "piepro"
+        }
+    ],
+    "displayName": "饼图-环形图和南丁玫瑰图",
+    "description": "",
+    "attribute": {
+        "type": "grid"
+    },
+    "dashboardName": "dashboard-1690430459204-333118"
+}
