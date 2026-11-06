@@ -16,5 +16,5 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 
 [patch.crates-io]
-boa_engine = { path = "../../target/rust-deps/boa_engine-0.22.0" }
-boa_parser = { path = "../../target/rust-deps/boa_parser-0.22.0" }
+boa_engine = { path = "../../.build/rust-deps/boa_engine-0.22.0" }
+boa_parser = { path = "../../.build/rust-deps/boa_parser-0.22.0" }

@@ -13,7 +13,6 @@ image (including process.execPath child processes), synthetic HOME and no networ
 cargo build --offline --locked --example host_plugin_projection_bridge
 # Set to the actual absolute path in the current CARGO_TARGET_DIR.
 export PILOT_NATIVE_PROJECTION_BRIDGE=/absolute/path/to/debug/examples/host_plugin_projection_bridge
-export PILOT_MIGRATION_REPORT=target/openclaw-host-flow-report.json
 npm run test:host:openclaw-flow -- --reporter=default
 cargo test --offline --locked --manifest-path tests/host-plugin-contracts/Cargo.toml legacy_openclaw_real_input -- --nocapture
 ```

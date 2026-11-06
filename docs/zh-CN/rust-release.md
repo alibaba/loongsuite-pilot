@@ -15,7 +15,7 @@ cargo build --locked --release
 
 Windows 可用 `python` 替代 `python3`。Python 只准备开发依赖，不进入 Pilot 运行包。
 
-Boa 0.22.0 的两份源码从 crates.io 官方归档下载，校验固定 SHA-256，仅把原有 ICU 约束从 `~2.3.0` 改为 `~2.4.0`，不修改 Rust 源码、不降低依赖版本。配方位于 `scripts/build/rust-dependencies.json`，源码缓存到忽略的 `target/rust-deps/`。归档另缓存于 .build/rust-archives/，避免被 Cargo 构建缓存清理。许可证保留于 `licenses/`。
+Boa 0.22.0 的两份源码从 crates.io 官方归档下载，校验固定 SHA-256，仅把原有 ICU 约束从 `~2.3.0` 改为 `~2.4.0`，不修改 Rust 源码、不降低依赖版本。配方位于 `scripts/build/rust-dependencies.json`，源码缓存到忽略的 `.build/rust-deps/`。归档缓存于 `.build/rust-archives/`，源码与归档都独立于 Cargo 构建缓存清理。许可证保留于 `licenses/`。
 
 后续构建验证并复用缓存。离线构建须先准备缓存，然后执行：
 

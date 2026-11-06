@@ -33,7 +33,8 @@ def tree_hash(root):
 
 
 def prepare(root, spec, offline):
-    cache = root / 'target' / 'rust-deps'
+    # Keep sources outside target: rust-cache may clean it before and after builds.
+    cache = root / '.build' / 'rust-deps'
     cache.mkdir(parents=True, exist_ok=True)
     archives = root / '.build' / 'rust-archives'
     archives.mkdir(parents=True, exist_ok=True)

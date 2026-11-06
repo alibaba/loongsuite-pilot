@@ -1,6 +1,6 @@
 [workspace]
 members = [".", "xtask"]
-exclude = ["target/rust-deps/boa_engine-0.22.0", "target/rust-deps/boa_parser-0.22.0"]
+exclude = [".build/rust-deps/boa_engine-0.22.0", ".build/rust-deps/boa_parser-0.22.0"]
 default-members = ["."]
 resolver = "2"
 
@@ -83,8 +83,8 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # Boa 0.22: upstream source retained; only mandatory ICU bounds moved to 2.4.
 # Prepare pinned sources with scripts/build/prepare-rust-dependencies.py.
 [patch.crates-io]
-boa_engine = { path = "target/rust-deps/boa_engine-0.22.0" }
-boa_parser = { path = "target/rust-deps/boa_parser-0.22.0" }
+boa_engine = { path = ".build/rust-deps/boa_engine-0.22.0" }
+boa_parser = { path = ".build/rust-deps/boa_parser-0.22.0" }
 
 [[bench]]
 name = "pii_mask_history"

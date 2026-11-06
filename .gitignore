@@ -72,3 +72,4 @@ docs/trace-validation-rules.json
 /docs/migration/
 __pycache__/
 /.build/rust-archives/
+/.build/rust-deps/
