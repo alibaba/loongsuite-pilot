@@ -431,6 +431,98 @@ describe('OtlpTraceFlusher - conversion', () => {
     });
   });
 
+  it('matches a missing response id by turn id and start time', () => {
+    const imageA = [{ uri: 'oss://bucket/a.png', mime_type: 'image/png' }];
+    const imageB = [{ uri: 'oss://bucket/b.png', mime_type: 'image/png' }];
+    const startMs = 1_700_000_000_010;
+    const time = String(BigInt(startMs) * 1_000_000n);
+    const startTime = [Math.floor(startMs / 1000), (startMs % 1000) * 1_000_000];
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.turn.id': 'turn-a',
+        time_unix_nano: time,
+        'gen_ai.input.multimodal_metadata_delta': imageA,
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.turn.id': 'turn-b',
+        time_unix_nano: time,
+        'gen_ai.input.multimodal_metadata_delta': imageB,
+      },
+    ] as unknown as AgentActivityEntry[];
+    const turnA = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.turn.id': 'turn-a' },
+    };
+    const turnB = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM', 'gen_ai.turn.id': 'turn-b' },
+    };
+    const noTurn = {
+      startTime,
+      attributes: { 'gen_ai.span.kind': 'LLM' },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [turnA, turnB, noTurn]);
+
+    expect(turnA.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(imageA),
+    });
+    expect(turnB.attributes).toMatchObject({
+      'gen_ai.input.multimodal_metadata_delta': JSON.stringify(imageB),
+    });
+    expect(noTurn.attributes).not.toHaveProperty('gen_ai.input.multimodal_metadata_delta');
+  });
+
+  it('rebuilds cumulative input metadata from the span messages and keeps the request delta', () => {
+    const prior = { uri: 'oss://bucket/a.png', mime_type: 'image/png', modality: 'image' };
+    const current = { uri: 'oss://bucket/b.png', mime_type: 'image/png', modality: 'image' };
+    const records = [
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-3',
+        'gen_ai.response.id': 'resp-3',
+        'gen_ai.input.multimodal_metadata': [prior, current],
+        'gen_ai.input.multimodal_metadata_delta': [current],
+      },
+      {
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'step-4',
+        'gen_ai.response.id': 'resp-4',
+        'gen_ai.input.multimodal_metadata': [prior, current],
+        'gen_ai.input.multimodal_metadata_delta': [current],
+      },
+    ] as unknown as AgentActivityEntry[];
+    const accumulated = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'resp-3',
+        'gen_ai.input.messages': JSON.stringify([
+          { role: 'user', parts: [{ type: 'uri', ...prior }] },
+          { role: 'user', parts: [{ type: 'text', content: 'plain' }] },
+          { role: 'user', parts: [{ type: 'uri', ...current }] },
+        ]),
+      },
+    };
+    const snapshot = {
+      attributes: {
+        'gen_ai.span.kind': 'LLM',
+        'gen_ai.response.id': 'resp-4',
+        'gen_ai.input.messages': JSON.stringify([
+          { role: 'user', parts: [{ type: 'uri', ...current }] },
+        ]),
+      },
+    };
+
+    (flusher as any).enrichMultimodalAttributes(records, [accumulated, snapshot]);
+
+    expect(JSON.parse(String(accumulated.attributes['gen_ai.input.multimodal_metadata']))).toEqual([prior, current]);
+    expect(JSON.parse(String(accumulated.attributes['gen_ai.input.multimodal_metadata_delta']))).toEqual([current]);
+    expect(JSON.parse(String(snapshot.attributes['gen_ai.input.multimodal_metadata']))).toEqual([current]);
+    expect(JSON.parse(String(snapshot.attributes['gen_ai.input.multimodal_metadata_delta']))).toEqual([current]);
+  });
+
   it('enriches OpenClaw LLM and AGENT spans with per-call reasoning tokens and error status', () => {
     const records = [
       {

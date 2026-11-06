@@ -24,6 +24,7 @@ import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-
 import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
+import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -579,6 +580,34 @@ function mergeRecordFields(
     // cur is non-empty → keep first-write value, ignore incoming
   }
   return merged as AgentActivityEntry;
+}
+
+function messageListAttribute(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function eventTimeMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value / 1_000_000);
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
+  return Number(BigInt(value) / 1_000_000n);
+}
+
+function spanStartTimeMs(span: ReadableSpan): number | undefined {
+  const start = span.startTime;
+  if (!start || start.length < 2) return undefined;
+  return start[0] * 1000 + Math.floor(start[1] / 1_000_000);
+}
+
+function turnStartKey(turnId: unknown, startMs: number | undefined): string | undefined {
+  if (typeof turnId !== 'string' || turnId.length === 0 || startMs === undefined) return undefined;
+  return JSON.stringify([turnId, startMs]);
 }
 
 export class OtlpTraceFlusher extends BaseFlusher {
@@ -1918,6 +1947,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     const attributesByCallId = new Map<string, Record<string, string>>();
     const attributesByResponseId = new Map<string, Record<string, string>>();
+    const deltaByTurnStart = new Map<string, string>();
     for (const record of records) {
       const name = record['event.name'];
       let target: Map<string, Record<string, string>> | undefined;
@@ -1938,6 +1968,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
         if (resolved) {
           target = attributesByResponseId;
           id = resolved;
+        } else if (name === 'llm.request') {
+          const turnKey = turnStartKey(record['gen_ai.turn.id'], eventTimeMs(record.time_unix_nano));
+          const delta = record['gen_ai.input.multimodal_metadata_delta'];
+          if (turnKey && delta != null && typeof delta === 'object') {
+            deltaByTurnStart.set(turnKey, JSON.stringify(delta));
+          }
         }
       }
       if (!target || !id) continue;
@@ -1958,9 +1994,26 @@ export class OtlpTraceFlusher extends BaseFlusher {
         : kind === 'LLM'
           ? span.attributes['gen_ai.response.id']
           : undefined;
-      if (typeof id !== 'string') continue;
-      const attributes = (kind === 'TOOL' ? attributesByCallId : attributesByResponseId).get(id);
-      if (attributes) Object.assign(span.attributes, attributes);
+      if (typeof id === 'string' && id.length > 0) {
+        const attributes = (kind === 'TOOL' ? attributesByCallId : attributesByResponseId).get(id);
+        if (attributes) Object.assign(span.attributes, attributes);
+      } else if (kind === 'LLM') {
+        const turnKey = turnStartKey(span.attributes['gen_ai.turn.id'], spanStartTimeMs(span));
+        const delta = turnKey && deltaByTurnStart.get(turnKey);
+        if (delta) span.attributes['gen_ai.input.multimodal_metadata_delta'] = delta;
+      }
+      if (kind !== 'LLM') continue;
+      // Span input.messages is the accumulated turn; the copied field is only this record.
+      for (const [messagesKey, metadataKey] of [
+        ['gen_ai.input.messages', 'gen_ai.input.multimodal_metadata'],
+        ['gen_ai.output.messages', 'gen_ai.output.multimodal_metadata'],
+      ] as const) {
+        const messages = messageListAttribute(span.attributes[messagesKey]);
+        if (!messages) continue;
+        const items = multimodalMetadataItemsFromMessages(messages);
+        if (items.length === 0) delete span.attributes[metadataKey];
+        else span.attributes[metadataKey] = JSON.stringify(items);
+      }
     }
   }
 
