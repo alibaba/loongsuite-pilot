@@ -59,6 +59,11 @@ export function attachMultimodalMetadataForEntry(entry: AgentActivityEntry): voi
   writeMetadata(entry, OUTPUT_MULTIMODAL_METADATA_FIELD, metadataItems(outputParts));
 }
 
+/** URI summary for a trace span, taken from that span's message list. */
+export function multimodalMetadataItemsFromMessages(messages: readonly unknown[]): MultimodalMetadataItem[] {
+  return metadataItems(collectUriPartsFromMessages([...messages]));
+}
+
 function metadataItems(parts: UriPart[]): MultimodalMetadataItem[] {
   const items: MultimodalMetadataItem[] = [];
   const seen = new Set<string>();
