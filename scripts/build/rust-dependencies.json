@@ -1,0 +1,20 @@
+[
+  {
+    "crate": "boa_engine",
+    "version": "0.22.0",
+    "url": "https://static.crates.io/crates/boa_engine/boa_engine-0.22.0.crate",
+    "sha256": "5d6aaf7fdc4299df68adb67e1a5440a51d34630a1f5271b9698fd74bc97b60d9",
+    "dependency": "icu_normalizer",
+    "old_requirement": "~2.3.0",
+    "new_requirement": "~2.4.0"
+  },
+  {
+    "crate": "boa_parser",
+    "version": "0.22.0",
+    "url": "https://static.crates.io/crates/boa_parser/boa_parser-0.22.0.crate",
+    "sha256": "641e81b3c8cbb7a2140547fb3ea534e9edf210b4e8c920b5fa864a919e11fbcf",
+    "dependency": "icu_properties",
+    "old_requirement": "~2.3.0",
+    "new_requirement": "~2.4.0"
+  }
+]

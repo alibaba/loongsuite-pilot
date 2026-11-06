@@ -1,0 +1,1366 @@
+[
+  {
+    "id": "L96:C5",
+    "group": "priority",
+    "user": {
+      "dataDir": "/from/file"
+    },
+    "env": {
+      "LOONGSUITE_PILOT_DATA_DIR": "/from/env"
+    },
+    "expected": {
+      "dataDir": "/from/env"
+    }
+  },
+  {
+    "id": "L106:C5",
+    "group": "priority",
+    "user": {
+      "enabled": false
+    },
+    "env": {},
+    "expected": {
+      "enabled": false
+    }
+  },
+  {
+    "id": "L115:C5",
+    "group": "priority",
+    "user": null,
+    "env": {},
+    "expected": {
+      "enabled": true,
+      "autoStart": true
+    }
+  },
+  {
+    "id": "L123:C5",
+    "group": "priority",
+    "user": {
+      "userId": "from-file"
+    },
+    "env": {
+      "LOONGSUITE_PILOT_USER_ID": "from-env"
+    },
+    "expected": {
+      "userId": "from-env"
+    }
+  },
+  {
+    "id": "L133:C5",
+    "group": "priority",
+    "user": {
+      "userId": "from-file"
+    },
+    "env": {},
+    "expected": {
+      "userId": "from-file"
+    }
+  },
+  {
+    "id": "L142:C5",
+    "group": "priority",
+    "user": {
+      "user.id": "from-file"
+    },
+    "env": {},
+    "expected": {
+      "userId": "from-file"
+    }
+  },
+  {
+    "id": "L153:C5",
+    "group": "priority",
+    "user": null,
+    "env": {},
+    "expected": {
+      "enabled": true,
+      "flushers": {
+        "jsonl": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  {
+    "id": "L264:C5",
+    "group": "outputs",
+    "user": {
+      "sls": {
+        "enabled": false,
+        "batchMaxSize": 5,
+        "flushIntervalMs": 750,
+        "endpoint": "https://legacy.example",
+        "project": "project",
+        "logstore": "store"
+      }
+    },
+    "env": {},
+    "expected": {
+      "flushers": {
+        "sls": {
+          "enabled": false,
+          "batchMaxSize": 5,
+          "flushIntervalMs": 750,
+          "endpoint": "https://legacy.example"
+        }
+      }
+    }
+  },
+  {
+    "id": "L283:C5",
+    "group": "outputs",
+    "user": null,
+    "env": {
+      "HTTP_REPORT_URL": "https://api.example"
+    },
+    "expected": {
+      "flushers": {
+        "http": {
+          "enabled": true,
+          "url": "https://api.example"
+        }
+      }
+    }
+  },
+  {
+    "id": "L292:C5",
+    "group": "outputs",
+    "user": null,
+    "env": {
+      "JSONL_ENABLED": "false"
+    },
+    "expected": {
+      "flushers": {
+        "jsonl": {
+          "enabled": false
+        }
+      }
+    }
+  },
+  {
+    "id": "L300:C5",
+    "group": "outputs",
+    "user": null,
+    "env": {
+      "JSONL_OUTPUT_DIR": "/custom/output"
+    },
+    "expected": {
+      "flushers": {
+        "jsonl": {
+          "outputDir": "/custom/output"
+        }
+      }
+    }
+  },
+  {
+    "id": "L310:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {},
+    "expected": {
+      "listeners": {
+        "qoder": {
+          "enabled": true
+        },
+        "qoder-trace": {
+          "enabled": true
+        },
+        "qoder-work": {
+          "enabled": true
+        },
+        "cursor-hook": {
+          "enabled": true
+        },
+        "qoder-work-cn-trace": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qoder-work-cn-hook": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qoder-work-cn-log": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qoder-work-cn-sqlite": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qwen-work-cn-hook": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qwen-work-cn-trace": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "qwen-work-cn-sqlite": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "grok-build-log": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "codex-transcript": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "opencode-log": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "pi-coding-agent-log": {
+          "enabled": true,
+          "pollInterval": 10000
+        },
+        "workbuddy": {
+          "enabled": true,
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L333:C5",
+    "group": "listeners",
+    "user": {
+      "listeners": {
+        "qoder": {
+          "enabled": false,
+          "pollInterval": 120000
+        },
+        "opencode-log": {
+          "pollInterval": 1000
+        }
+      }
+    },
+    "env": {},
+    "expected": {
+      "listeners": {
+        "qoder": {
+          "enabled": false,
+          "pollInterval": 120000
+        },
+        "opencode-log": {
+          "enabled": true,
+          "pollInterval": 1000
+        }
+      }
+    }
+  },
+  {
+    "id": "L347:C5",
+    "group": "listeners",
+    "user": {
+      "listeners": {
+        "codex-log": {
+          "enabled": false,
+          "pollInterval": 45000
+        }
+      }
+    },
+    "env": {},
+    "expected": {
+      "listeners": {
+        "codex-transcript": {
+          "enabled": false,
+          "pollInterval": 45000
+        }
+      }
+    }
+  },
+  {
+    "id": "L357:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "QODER_ANALYTICS_POLL_INTERVAL": "45000"
+    },
+    "expected": {
+      "listeners": {
+        "qoder": {
+          "pollInterval": 45000
+        },
+        "qoder-trace": {
+          "pollInterval": 45000
+        }
+      }
+    }
+  },
+  {
+    "id": "L369:C5",
+    "group": "listeners",
+    "user": {
+      "listeners": {
+        "qoder": {
+          "enabled": false,
+          "pollInterval": 120000
+        },
+        "kiro-cli-session": {
+          "enabled": true,
+          "pollInterval": 60000
+        }
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "3000",
+      "QODER_ANALYTICS_POLL_INTERVAL": "45000"
+    },
+    "expected": {
+      "listeners": {
+        "qoder": {
+          "pollInterval": 3000,
+          "enabled": false
+        },
+        "qoder-trace": {
+          "pollInterval": 3000
+        },
+        "cursor-hook": {
+          "pollInterval": 3000
+        },
+        "codex-transcript": {
+          "pollInterval": 3000
+        },
+        "hermes-agent-log": {
+          "pollInterval": 3000
+        },
+        "kiro-cli-session": {
+          "pollInterval": 3000,
+          "enabled": true
+        },
+        "workbuddy": {
+          "pollInterval": 3000
+        }
+      }
+    },
+    "allPoll": 3000,
+    "globalPollMs": 3000
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "0"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "nope"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "0.4"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "3"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "1e5"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "0x10"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "2147483648"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 10000
+        }
+      }
+    }
+  },
+  {
+    "id": "L390:C5",
+    "group": "listeners",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_POLL_INTERVAL_MS": "1000"
+    },
+    "expected": {
+      "listeners": {
+        "cursor-hook": {
+          "pollInterval": 1000
+        }
+      }
+    },
+    "globalPollMs": 1000
+  },
+  {
+    "id": "L418:C5",
+    "group": "retention",
+    "user": null,
+    "env": {},
+    "expected": {
+      "retention": {
+        "hookHistoryDays": 7,
+        "hookErrorDays": 7,
+        "hookDebugDays": 7,
+        "outputDays": 7,
+        "slsFailedDays": 7,
+        "otlpFailedDays": 7,
+        "metricAlarmDays": 7,
+        "enabled": true,
+        "intervalMs": 21600000
+      }
+    }
+  },
+  {
+    "id": "L433:C5",
+    "group": "retention",
+    "user": {
+      "retention": {
+        "hookHistoryDays": 60,
+        "hookDebugDays": 14,
+        "otlpFailedDays": 3,
+        "metricAlarmDays": 14
+      }
+    },
+    "env": {},
+    "expected": {
+      "retention": {
+        "hookHistoryDays": 60,
+        "hookDebugDays": 14,
+        "hookErrorDays": 7,
+        "otlpFailedDays": 3,
+        "metricAlarmDays": 14
+      }
+    }
+  },
+  {
+    "id": "L451:C5",
+    "group": "retention",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_LOG_RETENTION_DAYS": "10"
+    },
+    "expected": {
+      "retention": {
+        "hookHistoryDays": 10,
+        "hookErrorDays": 10,
+        "hookDebugDays": 10,
+        "outputDays": 10,
+        "slsFailedDays": 10,
+        "otlpFailedDays": 10,
+        "metricAlarmDays": 10
+      }
+    }
+  },
+  {
+    "id": "L465:C5",
+    "group": "retention",
+    "user": {
+      "retention": {
+        "hookHistoryDays": 90
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_LOG_RETENTION_DAYS": "10"
+    },
+    "expected": {
+      "retention": {
+        "hookHistoryDays": 90,
+        "hookErrorDays": 10,
+        "otlpFailedDays": 10,
+        "metricAlarmDays": 10
+      }
+    }
+  },
+  {
+    "id": "L478:C5",
+    "group": "retention",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_LOG_RETENTION_ENABLED": "false"
+    },
+    "expected": {
+      "retention": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L486:C5",
+    "group": "retention",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_LOG_RETENTION_INTERVAL_MS": "3600000"
+    },
+    "expected": {
+      "retention": {
+        "intervalMs": 3600000
+      }
+    }
+  },
+  {
+    "id": "L496:C5",
+    "group": "watchdog",
+    "user": null,
+    "env": {},
+    "expected": {
+      "hookWatchdog": {
+        "enabled": true,
+        "intervalMs": 300000,
+        "repairCooldownMs": 600000
+      }
+    }
+  },
+  {
+    "id": "L505:C5",
+    "group": "watchdog",
+    "user": {
+      "hookWatchdog": {
+        "enabled": false,
+        "intervalMs": 120000,
+        "repairCooldownMs": 60000
+      }
+    },
+    "env": {},
+    "expected": {
+      "hookWatchdog": {
+        "enabled": false,
+        "intervalMs": 120000,
+        "repairCooldownMs": 60000
+      }
+    }
+  },
+  {
+    "id": "L520:C5",
+    "group": "watchdog",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED": "false"
+    },
+    "expected": {
+      "hookWatchdog": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L528:C5",
+    "group": "watchdog",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS": "90000"
+    },
+    "expected": {
+      "hookWatchdog": {
+        "intervalMs": 90000
+      }
+    }
+  },
+  {
+    "id": "L536:C5",
+    "group": "watchdog",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_HOOK_WATCHDOG_COOLDOWN_MS": "300000"
+    },
+    "expected": {
+      "hookWatchdog": {
+        "repairCooldownMs": 300000
+      }
+    }
+  },
+  {
+    "id": "L1441:C5",
+    "group": "mask",
+    "user": null,
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "none",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1452:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "none",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1465:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "all",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "all",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1481:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "custom",
+        "types": [
+          "apiKey",
+          "cloudAccessKey",
+          "pii",
+          "databaseUrl",
+          "idCard",
+          "phone",
+          "email",
+          "ipAddress",
+          "bankCard"
+        ]
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "custom",
+        "types": [
+          "apiKey",
+          "cloudAccessKey",
+          "databaseUrl",
+          "idCard",
+          "phone",
+          "email",
+          "ipAddress",
+          "bankCard"
+        ],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1516:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "audit",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "none",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1532:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "custom"
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "custom",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1532:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "custom",
+        "types": []
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "custom",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1545:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "none",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_MASK_MODE": "all"
+    },
+    "expected": {
+      "mask": {
+        "mode": "all",
+        "types": [],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1562:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "custom",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_MASK_TYPES": "cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard"
+    },
+    "expected": {
+      "mask": {
+        "mode": "custom",
+        "types": [
+          "cloudAccessKey",
+          "databaseUrl",
+          "idCard",
+          "phone",
+          "email",
+          "ipAddress",
+          "bankCard"
+        ],
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1590:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "all",
+        "replacementMode": "preview"
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "mode": "all",
+        "types": [],
+        "replacementMode": "preview"
+      }
+    }
+  },
+  {
+    "id": "L1606:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "all",
+        "replacementMode": "placeholder"
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE": "preview"
+    },
+    "expected": {
+      "mask": {
+        "replacementMode": "preview"
+      }
+    }
+  },
+  {
+    "id": "L1619:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "all",
+        "replacementMode": "preview"
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE": ""
+    },
+    "expected": {
+      "mask": {
+        "replacementMode": "preview"
+      }
+    }
+  },
+  {
+    "id": "L1632:C5",
+    "group": "mask",
+    "user": {
+      "mask": {
+        "mode": "all",
+        "replacementMode": "fingerprint"
+      }
+    },
+    "env": {},
+    "expected": {
+      "mask": {
+        "replacementMode": "placeholder"
+      }
+    }
+  },
+  {
+    "id": "L1646:C5",
+    "group": "pipeline",
+    "user": null,
+    "env": {},
+    "expected": {
+      "fileCollection": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L1653:C5",
+    "group": "pipeline",
+    "user": {
+      "fileCollection": {
+        "enabled": true
+      }
+    },
+    "env": {},
+    "expected": {
+      "fileCollection": {
+        "enabled": true
+      }
+    }
+  },
+  {
+    "id": "L1662:C5",
+    "group": "pipeline",
+    "user": {
+      "fileCollection": {
+        "enabled": false
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED": "true"
+    },
+    "expected": {
+      "fileCollection": {
+        "enabled": true
+      }
+    }
+  },
+  {
+    "id": "L1672:C5",
+    "group": "pipeline",
+    "user": {
+      "fileCollection": {
+        "enabled": true
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED": "false"
+    },
+    "expected": {
+      "fileCollection": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L1684:C5",
+    "group": "trace",
+    "user": null,
+    "env": {},
+    "expected": {
+      "collectLog": true,
+      "collectTrace": true,
+      "serviceName": null,
+      "serviceNamePrefix": "loongsuite-pilot",
+      "cms": {
+        "enabled": false,
+        "licenseKey": "",
+        "endpoint": "",
+        "workspace": "",
+        "debug": false
+      }
+    }
+  },
+  {
+    "id": "L1695:C5",
+    "group": "trace",
+    "user": {
+      "collectLog": false,
+      "collectTrace": false,
+      "serviceNamePrefix": "my-team",
+      "cms": {
+        "licenseKey": "fixture-key",
+        "endpoint": "https://cms.example",
+        "workspace": "ws1"
+      }
+    },
+    "env": {},
+    "expected": {
+      "collectLog": false,
+      "collectTrace": false,
+      "serviceNamePrefix": "my-team",
+      "cms": {
+        "enabled": true,
+        "licenseKey": "fixture-key",
+        "endpoint": "https://cms.example",
+        "workspace": "ws1",
+        "debug": false
+      }
+    }
+  },
+  {
+    "id": "L1716:C5",
+    "group": "trace",
+    "user": {
+      "collectLog": true,
+      "collectTrace": true
+    },
+    "env": {
+      "LOONGSUITE_PILOT_COLLECT_LOG": "false",
+      "LOONGSUITE_PILOT_COLLECT_TRACE": "0"
+    },
+    "expected": {
+      "collectLog": false,
+      "collectTrace": false
+    }
+  },
+  {
+    "id": "L1729:C5",
+    "group": "trace",
+    "user": {
+      "cms": {
+        "licenseKey": "from-file"
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_CMS_LICENSE_KEY": "from-env"
+    },
+    "expected": {
+      "cms": {
+        "licenseKey": "from-env",
+        "enabled": true
+      }
+    }
+  },
+  {
+    "id": "L1740:C5",
+    "group": "trace",
+    "user": {
+      "cms": {
+        "endpoint": "https://cms.example"
+      }
+    },
+    "env": {},
+    "expected": {
+      "cms": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L1749:C5",
+    "group": "trace",
+    "user": {
+      "serviceNamePrefix": "from-file"
+    },
+    "env": {
+      "LOONGSUITE_PILOT_SERVICE_NAME_PREFIX": "from-env"
+    },
+    "expected": {
+      "serviceNamePrefix": "from-env"
+    }
+  },
+  {
+    "id": "L1759:C5",
+    "group": "trace",
+    "user": {
+      "serviceName": "from-file",
+      "serviceNamePrefix": "legacy-prefix"
+    },
+    "env": {
+      "LOONGSUITE_PILOT_SERVICE_NAME": "shared-service"
+    },
+    "expected": {
+      "serviceName": "shared-service",
+      "serviceNamePrefix": "legacy-prefix",
+      "flushers": {
+        "sls": {
+          "serviceName": "shared-service"
+        }
+      }
+    }
+  },
+  {
+    "id": "L1772:C5",
+    "group": "trace",
+    "user": {
+      "serviceName": "from-file"
+    },
+    "env": {
+      "LOONGSUITE_PILOT_SERVICE_NAME": "   "
+    },
+    "expected": {
+      "serviceName": "from-file"
+    }
+  },
+  {
+    "id": "L2153:C5",
+    "group": "attributes",
+    "user": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "env": "prod"
+      }
+    },
+    "env": {},
+    "expected": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "env": "prod"
+      }
+    },
+    "exactGlobal": {
+      "team": "infra",
+      "env": "prod"
+    }
+  },
+  {
+    "id": "L2159:C5",
+    "group": "attributes",
+    "user": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "env": "prod"
+      }
+    },
+    "env": {
+      "OTEL_SPAN_ATTRIBUTES": "env=staging,extra=v"
+    },
+    "expected": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "env": "staging",
+        "extra": "v"
+      }
+    },
+    "exactGlobal": {
+      "team": "infra",
+      "env": "staging",
+      "extra": "v"
+    }
+  },
+  {
+    "id": "L2166:C5",
+    "group": "attributes",
+    "user": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "git.repo": "x",
+        "num": 5,
+        "obj": {
+          "a": 1
+        }
+      }
+    },
+    "env": {},
+    "expected": {
+      "globalSpanAttributes": {
+        "team": "infra",
+        "num": "5"
+      }
+    },
+    "exactGlobal": {
+      "team": "infra",
+      "num": "5"
+    }
+  },
+  {
+    "id": "L2174:C5",
+    "group": "attributes",
+    "user": null,
+    "env": {},
+    "expected": {
+      "globalSpanAttributes": {}
+    },
+    "exactGlobal": {}
+  },
+  {
+    "id": "L2181:C5",
+    "group": "upstream",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK": "",
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS": "",
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM": "",
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING": ""
+    },
+    "expected": {
+      "upstreamLink": {
+        "enabled": false,
+        "propagateToTools": false,
+        "propagateToLlm": false,
+        "generateTraceWhenMissing": false,
+        "ttlMs": 86400000
+      }
+    }
+  },
+  {
+    "id": "L2195:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "ttlMs": 3600000
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK": "true"
+    },
+    "expected": {
+      "upstreamLink": {
+        "enabled": true,
+        "ttlMs": 3600000
+      }
+    }
+  },
+  {
+    "id": "L2203:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true,
+        "propagateToTools": true
+      }
+    },
+    "env": {},
+    "expected": {
+      "upstreamLink": {
+        "propagateToTools": true
+      }
+    }
+  },
+  {
+    "id": "L2203:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS": "1"
+    },
+    "expected": {
+      "upstreamLink": {
+        "propagateToTools": true
+      }
+    }
+  },
+  {
+    "id": "L2216:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true,
+        "propagateToLlm": true
+      }
+    },
+    "env": {},
+    "expected": {
+      "upstreamLink": {
+        "propagateToLlm": true
+      }
+    }
+  },
+  {
+    "id": "L2216:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM": "1"
+    },
+    "expected": {
+      "upstreamLink": {
+        "propagateToLlm": true
+      }
+    }
+  },
+  {
+    "id": "L2229:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true,
+        "generateTraceWhenMissing": true
+      }
+    },
+    "env": {},
+    "expected": {
+      "upstreamLink": {
+        "generateTraceWhenMissing": true
+      }
+    }
+  },
+  {
+    "id": "L2229:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "enabled": true
+      }
+    },
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING": "1"
+    },
+    "expected": {
+      "upstreamLink": {
+        "generateTraceWhenMissing": true
+      }
+    }
+  },
+  {
+    "id": "L2242:C5",
+    "group": "upstream",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK": ""
+    },
+    "expected": {
+      "upstreamLink": {
+        "enabled": false
+      }
+    }
+  },
+  {
+    "id": "L2249:C5",
+    "group": "upstream",
+    "user": {
+      "upstreamLink": {
+        "ttlMs": 0
+      }
+    },
+    "env": {},
+    "expected": {
+      "upstreamLink": {
+        "ttlMs": 86400000
+      }
+    }
+  },
+  {
+    "id": "L2255:C5",
+    "group": "upstream",
+    "user": null,
+    "env": {
+      "LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS": "-1"
+    },
+    "expected": {
+      "upstreamLink": {
+        "ttlMs": 86400000
+      }
+    }
+  }
+]

@@ -6,10 +6,25 @@ Use this guide to install, verify, uninstall, or run LoongSuite Pilot from sourc
 
 ## Prerequisites
 
-- Node.js that can load `node:sqlite` (22.13+, 23.4+, or newer). On supported platforms the installer downloads a managed Node.js 22.22 runtime, so a preinstalled Node.js is not required. A system Node.js is accepted only when `require('node:sqlite')` succeeds. Node.js 18/20 and 22.0–22.12 / 23.0–23.3 are not enough. Linux musl (Alpine) and Windows ARM64 have no managed runtime and must supply a Node.js that meets this floor, plus `npm`.
-- `npm`
-- `curl` or `wget`
-- PowerShell 5.1 or later on Windows
+- Linux/macOS: a system shell, `curl` or `wget`, and `tar`. Windows: PowerShell 5.1 or later.
+- Pilot packages ship a Rust binary; installation configuration, collection, updating, CLI, and standalone hook processing need no Node.js, npm, Python, or Rust toolchain.
+- Source builds use Rust 1.99.1 pinned in `rust-toolchain.toml`, a C/C++ compiler for bundled SQLite, and Swift for the macOS UI.
+- In-process JS plugins, preload/runtime wrappers, and the Hermes Python plugin use the Agent's own runtime.
+
+## Rust Packages And Platforms
+
+The release set is Linux x86_64/aarch64 with GNU libc, macOS x86_64/aarch64, and Windows x86_64/aarch64 MSVC: six targets. Linux musl (including Alpine) is unsupported; the Unix installer rejects musl and unknown libc before downloading or changing an installation. Historical eight-target runs do not establish acceptance of the current six-target code.
+
+Download the installer (`installer.sh` or `installer.ps1`), `SHA256SUMS`, and `loongsuite-pilot-<version>-<target>.tar.gz` (Windows: `.zip`) from the same Rust Release. Verify the archive checksum before explicitly installing it. For Linux x64 GNU:
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+bash ./installer.sh install --package-url "file://$(pwd)/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+Use `Get-FileHash -Algorithm SHA256` on Windows and pass `-PackageUrl`; macOS can use `shasum -a 256`. Substitute the actual version and target. Packages include `runtime-manifest.json`; Rust updater accepts only the separate six-platform `latest-rust.json`, not legacy Node archives.
+
+The OSS examples below describe the historical channel and are not guaranteed to return Rust packages. Pass an explicit, verified `--package-url` / `-PackageUrl` for Rust installation. This CI does not publish to OSS or migrate existing installations automatically. `.mjs` Span enrichers require migration to compiled Rust extensions; see [Trace output](trace-output.md#custom-span-enrichment).
 
 ## Install From Public Package On Linux Or macOS
 
@@ -31,7 +46,7 @@ Invoke-WebRequest `
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 ```
 
-The Windows installer downloads `loongsuite-pilot.zip` by default. It stores data under `%USERPROFILE%\.loongsuite-pilot` and installs the `loongsuite-pilot` command under `%USERPROFILE%\.local\bin`. Open a new PowerShell window if the command is not found immediately after installation.
+The legacy default URL uses `loongsuite-pilot.zip`; Rust installation requires an explicitly selected versioned, target-specific zip. It stores data under `%USERPROFILE%\.loongsuite-pilot` and installs the `loongsuite-pilot` command under `%USERPROFILE%\.local\bin`. Open a new PowerShell window if the command is not found immediately after installation.
 
 ## Install With Common Options
 
@@ -168,7 +183,7 @@ Collection keeps running. This also works when the collector is stopped or the m
 
 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` keeps higher priority than the file. An environment value that enables the app can override the persisted `false` on future Pilot starts; the command prints a warning when it detects this conflict.
 
-After a source build, `node dist/index.js menubar start` and `node dist/index.js menubar stop` provide the same commands without installing a new launcher.
+After a source build, `./target/release/loongsuite-pilot menubar start` and `./target/release/loongsuite-pilot menubar stop` provide the same commands without installing a new launcher.
 
 ### macOS Dashboard shortcut
 
@@ -187,7 +202,7 @@ loongsuite-pilot dashboard shortcut uninstall
 and adds it to the Dock's files area (beside Downloads/Trash, not the applications
 area). Clicking it uses the default browser. No `.app` is compiled or signed;
 there is no additional software dependency, background process, or service restart.
-The command uses Pilot's existing Node runtime and macOS system tools.
+The Rust CLI calls the macOS system osascript/JXA host directly. The bridge is embedded in the binary and the icon ships in the macOS package; Node.js is not required.
 
 The URL is read from `dashboard.port` in the active configuration at **shortcut
 installation time**. The CLI honors `AGENT_DATA_COLLECTION_CONFIG` and the installed
@@ -260,10 +275,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Pu
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
-npm install
-npm run build
-node scripts/postinstall.js
-node dist/index.js
+cargo build --locked --release
+./target/release/loongsuite-pilot
 ```
 
 This starts the collector in the foreground. On startup, Pilot reads agent definitions from `agents.d/`, auto-detects installed agents, and deploys collection capabilities for detected agents.
@@ -271,9 +284,17 @@ This starts the collector in the foreground. On startup, Pilot reads agent defin
 ## Install A Local Build As A Service
 
 ```bash
-bash deploy/package-opensource.sh
-bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
+cargo build --locked --release --target x86_64-unknown-linux-gnu
+cargo run --locked -p xtask -- package \
+  --target x86_64-unknown-linux-gnu \
+  --binary target/x86_64-unknown-linux-gnu/release/loongsuite-pilot \
+  --commit "$(git rev-parse HEAD)" --output target/packages
+bash deploy/installer-opensource.sh install --package-url "file://$(pwd)/target/packages/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
 ```
+
+This example targets Linux x64 GNU. Package on the matching OS/architecture; macOS also requires a matching UI binary via `--status-bar-binary`. Cargo is the version source. Packaging rejects dirty trees unless `--allow-dirty` is explicitly supplied for local-only candidates; these cannot be released. Existing output directories are not overwritten.
+
+See [release gates and test priorities](zh-CN/rust-release.md) for the staged CI rollout. `--version`, `probe --build-edition`, and `check --json` do not start services; installation and rollback modify local state and should be performed with retained backups.
 
 ## Next Steps
 

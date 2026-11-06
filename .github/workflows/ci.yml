@@ -2,24 +2,64 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, dev/v2.0.0, loongsuite-pilot-rust]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, dev/v2.0.0, loongsuite-pilot-rust]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    runs-on: loongsuite-pilot
-    strategy:
-      matrix:
-        node-version: [22, 23, 24]
+  rust:
+    name: ci-gate
+    runs-on: ubuntu-22.04
+    # 完整功能与宿主回归优先，保留编译及缓存收尾余量。
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: node -e "const s=require('fs').readFileSync('dist/hook-cli.cjs','utf8'); if(/node:sqlite|native-deps-guard/.test(s)) process.exit(1)"
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - name: 安装固定工具链
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-ci-v1
+          key: all-features
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+      - name: 严格 clippy（不降级为非阻断）
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: 现有 Rust 测试（隔离 HOME）
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pilot-home"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          HOME="$RUNNER_TEMP/pilot-home" USERPROFILE="$RUNNER_TEMP/pilot-home" cargo test --workspace --locked --all-features
+      - name: 现有 JXA 宿主策略测试（开发依赖不进入运行包）
+        run: |
+          npm ci --ignore-scripts
+          npm run test:host:shortcut -- --reporter=default
+      - name: 可选 Node worker 实际入口回归
+        env:
+          PILOT_NATIVE_NODE_WORKER_BRIDGE: ${{ github.workspace }}/target/debug/examples/host_node_worker_bridge
+        run: |
+          set -euo pipefail
+          cargo build --locked --all-features --example host_node_worker_bridge
+          npm run test:host:node-worker
+      - name: Hermes 宿主插件回归（Python 仅用于宿主测试）
+        run: npm run test:host:hermes -- --reporter=default
+      - name: OpenCode V1/V2 宿主插件回归
+        run: npm run test:host:opencode -- --reporter=default

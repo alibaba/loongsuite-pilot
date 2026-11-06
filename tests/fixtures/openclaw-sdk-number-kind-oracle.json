@@ -1,0 +1,83 @@
+{
+  "producer": "Actual installed repository OpenTelemetry 0.57.2 toAnyValue",
+  "path": "node_modules/@opentelemetry/otlp-transformer/build/src/common/internal.js",
+  "cases": [
+    {
+      "input": [
+        59,
+        22
+      ],
+      "total": 81,
+      "json": "81",
+      "anyValue": {
+        "intValue": 81
+      }
+    },
+    {
+      "input": [
+        0,
+        0
+      ],
+      "total": 0,
+      "json": "0",
+      "anyValue": {
+        "intValue": 0
+      }
+    },
+    {
+      "input": [
+        59.5,
+        22
+      ],
+      "total": 81.5,
+      "json": "81.5",
+      "anyValue": {
+        "doubleValue": 81.5
+      }
+    },
+    {
+      "input": [
+        1.5,
+        1.5
+      ],
+      "total": 3,
+      "json": "3",
+      "anyValue": {
+        "intValue": 3
+      }
+    },
+    {
+      "input": [
+        0.1,
+        0.2
+      ],
+      "total": 0.30000000000000004,
+      "json": "0.30000000000000004",
+      "anyValue": {
+        "doubleValue": 0.30000000000000004
+      }
+    },
+    {
+      "input": [
+        -1,
+        1
+      ],
+      "total": 0,
+      "json": "0",
+      "anyValue": {
+        "intValue": 0
+      }
+    },
+    {
+      "input": [
+        9007199254740992,
+        0
+      ],
+      "total": 9007199254740992,
+      "json": "9007199254740992",
+      "anyValue": {
+        "intValue": 9007199254740992
+      }
+    }
+  ]
+}

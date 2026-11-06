@@ -1,0 +1,29 @@
+name: Windows Native Launch Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [loongsuite-pilot-rust]
+    paths:
+      - .github/workflows/windows-native-launch-diagnostics.yml
+      - scripts/testing/windows-native-launch-diagnostics.py
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Native launch (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          persist-credentials: false
+      - name: Diagnose raw native launches without building or packaging
+        shell: bash
+        run: python scripts/testing/windows-native-launch-diagnostics.py --timeout-seconds 20

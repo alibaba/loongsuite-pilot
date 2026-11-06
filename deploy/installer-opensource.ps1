@@ -71,6 +71,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Resolve signed built-in modules by their exact PSHOME manifests. Short-name
+# autoload can stall in isolated Windows PowerShell 5.1 environments.
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Archive\Microsoft.PowerShell.Archive.psd1') -ErrorAction Stop
 foreach ($excludedWorkspace in $ExcludeWorkspace) {
     if ($excludedWorkspace -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)') {
         throw "-ExcludeWorkspace requires absolute local directories"
@@ -191,9 +197,9 @@ if ($MultimodalMode -and $MultimodalMode -ne "none") {
 }
 
 # ============================================================
-# Resolve package URL
+# Resolve install/upgrade defaults; uninstall only uses explicit package URLs.
 # ============================================================
-if (-not $PackageUrl) {
+if ($Command -ne 'uninstall' -and -not $PackageUrl) {
     if ($Version) {
         $PackageUrl = "$_OSS_BASE_URL/$Version/$PACKAGE_NAME.zip"
     } else {
@@ -800,80 +806,49 @@ function Ensure-NodeModules {
 $script:NODE_BIN = ""
 $script:NPM_BIN = ""
 
-function Check-Deps {
-    Msg "==> 检查依赖..." "==> Checking dependencies..."
-
-    $script:NODE_BIN = ""
-    if ($PreferSystemNode) {
-        $script:NODE_BIN = Resolve-Node
-        if (-not $script:NODE_BIN) {
-            Msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" `
-                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
-            $script:NODE_BIN = Ensure-ManagedNode
-        }
-    } else {
-        $script:NODE_BIN = Ensure-ManagedNode
-        if (-not $script:NODE_BIN) {
-            Msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" `
-                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
-            $script:NODE_BIN = Resolve-Node
-        }
+function Invoke-InstallerHelper {
+    param([string]$Operation, [string]$Json, [string[]]$ExtraArgs = @())
+    $binary = Join-Path $script:INSTALL_SRC "bin\loongsuite-pilot.exe"
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw "候选包缺少原生安装辅助入口"
     }
-    if (-not $script:NODE_BIN) {
-        Msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" `
-            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
-        exit 1
-    }
-
-    if (-not (Test-NodeSupportsSqlite $script:NODE_BIN)) {
-        $nodeVer = "unknown"
-        $prevEAP = $ErrorActionPreference
+    # 环境块传递 Unicode JSON，不受 Windows 5.1 的 ASCII 管道影响，也不产生凭据临时文件。
+    $previousInput = $env:LOONGSUITE_PILOT_INSTALL_INPUT
+    $previousEAP = $ErrorActionPreference
+    try {
+        $env:LOONGSUITE_PILOT_INSTALL_INPUT = $Json
         $ErrorActionPreference = "Continue"
-        try {
-            $verOut = & $script:NODE_BIN --version 2>&1
-            $code = $LASTEXITCODE
-            if ($code -eq 0 -and $verOut) { $nodeVer = "$verOut".Trim() }
-        } catch {
-            $nodeVer = "unknown"
-        } finally {
-            $ErrorActionPreference = $prevEAP
+        $PSNativeCommandArgumentPassing = 'Legacy'
+        $nativeArgs = @()
+        $protocolArgs = @('installer-helper', $Operation)
+        if ($Operation -notin @('read-user-id', 'json-argv')) { $protocolArgs += '--input-env' }
+        foreach ($argument in ($protocolArgs + $ExtraArgs)) {
+            $escaped = ([string]$argument) -replace '(\\*)"', '$1$1\"'
+            $escaped = $escaped -replace '(\\+)$', '$1$1'
+            $nativeArgs += '"' + $escaped + '"'
         }
-        Msg "❌ 当前 Node.js 无法加载 node:sqlite（$nodeVer）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" `
-            "❌ This Node.js cannot load node:sqlite ($nodeVer). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
-        exit 1
+        # PowerShell 原生命令更新全局退出码，局部同名变量会遮蔽真实结果。
+        $global:LASTEXITCODE = 9009
+        $result = & $binary @nativeArgs
+        $code = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEAP
+        $env:LOONGSUITE_PILOT_INSTALL_INPUT = $previousInput
     }
+    if ($code -ne 0) { throw "原生安装辅助操作失败 (exit=$code)" }
+    return $result
+}
 
-    # Pin node binary path. -Encoding UTF8 is required, not cosmetic: the path can sit
-    # under a non-ASCII %USERPROFILE% and the 5.1 default (ANSI) would store "??" there,
-    # see the note on Resolve-Node.
-    if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
-    Set-Content -LiteralPath (Join-Path $CACHE_DIR "node-bin") -Value $script:NODE_BIN -Encoding UTF8
-    # Hook entrypoints can always derive DataDir from their deployed location,
-    # while GUI agents do not necessarily inherit the installer's CacheDir.
-    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-    Set-Content -LiteralPath (Join-Path $DataDir "node-bin") -Value $script:NODE_BIN -Encoding UTF8
-
-    # Derive npm
-    $npmPath = Join-Path (Split-Path $script:NODE_BIN) "npm.cmd"
-    if (Test-Path $npmPath) {
-        $script:NPM_BIN = $npmPath
-    } else {
-        $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
-        if ($npmCmd) {
-            $script:NPM_BIN = $npmCmd.Source
-        } else {
-            Msg "❌ 缺少依赖: npm，请先安装后重试" "❌ Missing dependency: npm — please install it first"
-            exit 1
+function Check-Deps {
+    Msg "==> 检查下载与解压工具..." "==> Checking download and archive tools..."
+    foreach ($name in @('Expand-Archive', 'Invoke-WebRequest')) {
+        if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+            throw "缺少系统安装工具：$name"
         }
     }
-
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $nodeVer = & $script:NODE_BIN --version
-    $npmVer = & $script:NPM_BIN --version
-    $ErrorActionPreference = $prevEAP
-    Msg "    ✅ node $nodeVer  npm $npmVer" "    ✅ node $nodeVer  npm $npmVer"
-    Msg "    node pinned: $($script:NODE_BIN)" "    node pinned: $($script:NODE_BIN)"
-    Write-Host ""
+    if ($PreferSystemNode) {
+        Write-Warning '-PreferSystemNode 已弃用；原生安装不使用 Node.js'
+    }
 }
 
 # ============================================================
@@ -903,7 +878,7 @@ function Download-AndExtract {
             # Best-effort TLS1.2 bump; setting this static property throws under Constrained
             # Language Mode (WDAC), so swallow it (modern Windows defaults to TLS1.2 anyway).
             try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-            Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing
+            Invoke-WebRequest -Uri $PackageUrl -OutFile $archivePath -UseBasicParsing -TimeoutSec 600
         }
     } catch {
         Msg "❌ 下载失败: $_" "❌ Download failed: $_"
@@ -921,22 +896,29 @@ function Download-AndExtract {
         exit 1
     }
 
-    $pkgDir = Join-Path $tmpDir $PACKAGE_NAME
-    if (Test-Path $pkgDir) {
-        $script:INSTALL_SRC = $pkgDir
-    } elseif (Test-Path (Join-Path $tmpDir "package.json")) {
-        $script:INSTALL_SRC = $tmpDir
-    } else {
-        $found = Get-ChildItem $tmpDir -Recurse -Depth 2 -Filter "package.json" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($found) {
-            $script:INSTALL_SRC = $found.DirectoryName
-        } else {
-            Msg "❌ 解压后未找到 package.json，安装包结构异常" "❌ package.json not found — unexpected package structure"
-            exit 1
-        }
-    }
+    Select-NativePackageRoot -Directory $tmpDir
     Msg "    ✅ 解压完成" "    ✅ Extracted"
     Write-Host ""
+}
+
+function Select-NativePackageRoot {
+    param([string]$Directory)
+    $candidates = @($Directory)
+    $candidates += @(Get-ChildItem -LiteralPath $Directory -Directory -ErrorAction Stop | ForEach-Object { $_.FullName })
+    $roots = @()
+    foreach ($candidate in $candidates) {
+        $manifest = Join-Path $candidate 'runtime-manifest.json'
+        $bin = Join-Path $candidate 'bin'
+        $binary = Join-Path $bin 'loongsuite-pilot.exe'
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf) -or -not (Test-Path -LiteralPath $binary -PathType Leaf)) { continue }
+        $linked = $false
+        foreach ($path in @($candidate, $manifest, $bin, $binary)) {
+            if (((Get-Item -LiteralPath $path -Force -ErrorAction Stop).Attributes -band 0x400) -ne 0) { $linked = $true }
+        }
+        if (-not $linked) { $roots += $candidate }
+    }
+    if ($roots.Count -ne 1) { throw '安装包必须且只能包含一个原生运行清单与二进制根目录' }
+    $script:INSTALL_SRC = $roots[0]
 }
 
 # ============================================================
@@ -946,22 +928,18 @@ $script:PROBE_RESULT = "[]"
 
 function Probe-Agents {
     Msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
-    $probeScript = Join-Path $script:INSTALL_SRC "dist\cli-probe.cjs"
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    if (Test-Path $probeScript) {
-        try {
-            $raw = & $script:NODE_BIN $probeScript --installer --config-path (Join-Path $DataDir 'config.json') 2>$null
-            if ($raw) {
-                $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { $raw }
-            }
-        } catch {
-            Msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
-            $script:PROBE_RESULT = "[]"
-        }
-    }
-    $count = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
-    $ErrorActionPreference = $prevEAP
-    if (-not $count) { $count = "0" }
+    $probeBin = Join-Path $script:INSTALL_SRC "bin\loongsuite-pilot.exe"
+    if (-not (Test-Path -LiteralPath $probeBin -PathType Leaf)) { throw "候选包缺少原生探测入口" }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $global:LASTEXITCODE = 9009
+        $raw = & $probeBin probe --installer
+        $code = $global:LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEAP }
+    if ($code -ne 0) { throw "Agent 探测失败 (exit=$code)" }
+    $script:PROBE_RESULT = if ($raw -is [array]) { $raw -join "" } else { "$raw" }
+    $count = Invoke-InstallerHelper -Operation "probe-count" -Json $script:PROBE_RESULT
     Msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     Write-Host ""
 }
@@ -994,71 +972,23 @@ function Select-Agents {
         return
     }
 
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $agentCount = $script:PROBE_RESULT | & $script:NODE_BIN -e "const r=JSON.parse(require('fs').readFileSync(0,'utf-8'));process.stdout.write(String(r.length))" 2>$null
-    $ErrorActionPreference = $prevEAP
-    if (-not $agentCount -or $agentCount -eq "0") { return }
+    $agentCount = Invoke-InstallerHelper -Operation "probe-count" -Json $script:PROBE_RESULT
+    if ($agentCount -eq "0") { return }
 
-    # Non-interactive detection
     $isInteractive = Test-CanPrompt
     if (-not $isInteractive) {
-        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
-const detected = r.filter(a => a.detected).map(a => a.id);
-process.stdout.write(detected.join(','));
-'@ 2>$null
-        $ErrorActionPreference = $prevEAP
+        $script:SELECTED_AGENTS = Invoke-InstallerHelper -Operation "probe-detected" -Json $script:PROBE_RESULT
         Msg "    (非交互模式) 自动选择已检测到的 Agent: $($script:SELECTED_AGENTS)" `
             "    (non-interactive) Auto-selected detected agents: $($script:SELECTED_AGENTS)"
         Write-Host ""
         return
     }
 
-    # Interactive menu
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
-const lang = process.argv[1];
-const defaults = [];
-for (let i = 0; i < r.length; i++) {
-  const a = r[i];
-  const status = lang === 'zh'
-    ? (a.detected ? '已检测到: ' + a.reason : '未检测到' + (a.reason ? ': ' + a.reason : ''))
-    : (a.detected ? 'detected: ' + a.reason : 'not detected' + (a.reason ? ': ' + a.reason : ''));
-  console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
-  if (a.detected) defaults.push(i+1);
-}
-console.log('');
-if (lang === 'zh') {
-  console.log('    默认选择已检测到的 Agent: ' + defaults.join(','));
-  console.log('    输入要启用的编号 (逗号分隔)，直接回车使用默认:');
-} else {
-  console.log('    Default selection (detected): ' + defaults.join(','));
-  console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
-}
-'@ $LANG_MODE
-    $ErrorActionPreference = $prevEAP
-
+    Invoke-InstallerHelper -Operation "probe-menu" -Json $script:PROBE_RESULT -ExtraArgs @('--lang', $LANG_MODE) | ForEach-Object { Write-Host $_ }
     $rawSelection = Read-Host "    >"
     $selectInput = if ($null -eq $rawSelection) { "" } else { $rawSelection.Trim() }
-    $selectInput = $selectInput -replace '[，、；]', ','
     if ($selectInput) { $script:AGENT_SELECTION_EXPLICIT = '1' }
-
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    $script:SELECTED_AGENTS = $script:PROBE_RESULT | & $script:NODE_BIN -e @'
-const r = JSON.parse(require('fs').readFileSync(0,'utf-8'));
-const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
-let indices;
-if (!input.trim()) {
-  indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
-} else {
-  indices = [...new Set(input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length))].map(n => n - 1);
-}
-const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
-process.stdout.write(ids.join(','));
-'@ $selectInput 2>$null
-    $ErrorActionPreference = $prevEAP
+    $script:SELECTED_AGENTS = Invoke-InstallerHelper -Operation "probe-select" -Json $script:PROBE_RESULT -ExtraArgs @('--selection', $selectInput)
 
     if ($script:SELECTED_AGENTS) {
         Msg "    已选择: $($script:SELECTED_AGENTS)" "    Selected: $($script:SELECTED_AGENTS)"
@@ -1074,16 +1004,8 @@ process.stdout.write(ids.join(','));
 function Prompt-UserId {
     if ($UserId) { return }
     $configFile = Join-Path $DataDir "config.json"
-    $existingUid = ""
-    if (Test-Path $configFile) {
-        try {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            $existingUid = & $script:NODE_BIN -e @'
-try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
-'@ $configFile 2>$null
-            $ErrorActionPreference = $prevEAP
-        } catch {}
-    }
+    $existingUidJson = Invoke-InstallerHelper -Operation 'read-user-id' -ExtraArgs @('--config', $configFile, '--ascii-json')
+    $existingUid = $existingUidJson | ConvertFrom-Json
 
     # Reinstall preserves the existing identity without prompting. To change it,
     # callers must pass -UserId explicitly; this keeps scripted installs fully
@@ -1122,87 +1044,7 @@ function Confirm-ConfigOverwrite {
     $configFile = Join-Path $DataDir "config.json"
     if (-not (Test-Path $configFile)) { return }
 
-    $slsModeForDiff = ""
-    if ($SlsApiKey) {
-        $slsModeForDiff = "apiKey"
-    } elseif ($SlsAkId -and $SlsAkSecret) {
-        $slsModeForDiff = "ak"
-    }
-    $jsonArg = @{
-        slsEndpoint = $SlsEndpoint
-        slsProject = $SlsProject
-        slsLogstore = $SlsLogstore
-        slsMode = $slsModeForDiff
-        cmsLicenseKey = $CmsLicenseKey
-        cmsEndpoint = $CmsEndpoint
-        cmsWorkspace = $CmsWorkspace
-        serviceNamePrefix = $ServiceNamePrefix
-        dashboardPort = $DashboardPort
-        maskMode = $MaskMode
-        maskTypes = $MaskTypes
-        maskReplacementMode = $MaskReplacementMode
-        interceptorMode = $InterceptorMode
-        interceptorTypes = $InterceptorTypes
-        multimodalMode = $script:MultimodalMode
-    } | ConvertTo-Json -Compress
-
-    $prevEAP = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $diffs = & $script:NODE_BIN -e @'
-const fs = require('fs');
-let old = {};
-try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
-const newVals = JSON.parse(process.argv[2]);
-const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
-const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
-const uniqueTypes = list => [...new Set(list)];
-const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
-const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
-const maskTypesFinal = maskModeFinal === 'custom'
-  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
-  : [];
-const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
-const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
-const slsModeOf = sls => {
-  if (!sls) return '';
-  if (sls.mode) return sls.mode;
-  if (sls.apiKey) return 'apiKey';
-  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
-  return '';
-};
-const checks = [
-  { label: 'sls.endpoint',      oldVal: (old.sls||{}).endpoint||'',      newVal: newVals.slsEndpoint },
-  { label: 'sls.project',       oldVal: (old.sls||{}).project||'',       newVal: newVals.slsProject },
-  { label: 'sls.logstore',      oldVal: (old.sls||{}).logstore||'',      newVal: newVals.slsLogstore },
-  { label: 'sls.mode',          oldVal: slsModeOf(old.sls),              newVal: newVals.slsMode },
-  { label: 'cms.licenseKey',    oldVal: (old.cms||{}).licenseKey||'',    newVal: newVals.cmsLicenseKey },
-  { label: 'cms.endpoint',      oldVal: (old.cms||{}).endpoint||'',      newVal: newVals.cmsEndpoint },
-  { label: 'cms.workspace',     oldVal: (old.cms||{}).workspace||'',     newVal: newVals.cmsWorkspace },
-  { label: 'serviceNamePrefix', oldVal: old.serviceNamePrefix||'',       newVal: newVals.serviceNamePrefix },
-  { label: 'dashboard.port',    oldVal: (old.dashboard||{}).port||'',   newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',         oldVal: (old.mask||{}).mode||'',         newVal: coveredMaskMode },
-  { label: 'mask.types',        oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
-  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
-  { label: 'interceptor.mode',  oldVal: (old.interceptor||{}).mode||'',  newVal: newVals.interceptorMode },
-  { label: 'interceptor.types', oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
-  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
-];
-const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
-if (!changed.length) process.exit(0);
-for (const c of changed) {
-  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
-}
-'@ $configFile $jsonArg 2>$null
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
+    $diffs = Invoke-InstallerHelper -Operation "config-diffs" -Json (Get-InstallConfigJson)
 
     if (-not $diffs) { return }
 
@@ -1227,176 +1069,42 @@ for (const c of changed) {
 # ============================================================
 # Deploy bootstrap scripts
 # ============================================================
+function Invoke-InstallerRuntime {
+    param([string]$SourceDir, [string]$Operation, [switch]$DeployHooks)
+    $inputJson = @{
+        sourceDir = $SourceDir
+        cacheDir = $CACHE_DIR
+        dataDir = $DataDir
+        configPath = (Join-Path $DataDir "config.json")
+        binDir = (Join-Path $env:USERPROFILE ".local\bin")
+        configOptions = $(if ($script:INSTALL_CONFIG -and $Operation -ne 'sync-service') { Get-InstallConfigJson } else { $null })
+        deployHooks = [bool]$DeployHooks
+    } | ConvertTo-Json -Compress
+    Invoke-InstallerHelper -Operation $Operation -Json $inputJson
+}
+
 function Deploy-BootstrapScripts {
-    $srcDir = Join-Path $script:PERMANENT_DIR "scripts"
-    $bootDir = Join-Path $CACHE_DIR "bin"
-    if (-not (Test-Path $bootDir)) { New-Item -ItemType Directory -Path $bootDir -Force | Out-Null }
-    Copy-Item (Join-Path $srcDir "collector-daemon.js") $bootDir -Force
+    Invoke-InstallerRuntime -SourceDir $script:PERMANENT_DIR -Operation "sync-service"
 }
 
 # ============================================================
 # Deploy package to versions/ directory
 # ============================================================
+function Prepare-Package {
+    param([string]$SourceDir)
+    $candidateName = Invoke-InstallerRuntime -SourceDir $SourceDir -Operation 'stage-package'
+    $script:STAGED_DIR = Join-Path (Join-Path $CACHE_DIR 'versions') $candidateName
+    Msg "    ✅ Rust 候选包及配置已校验: $($script:STAGED_DIR)" "    ✅ Rust candidate and config verified: $($script:STAGED_DIR)"
+}
+
 function Deploy-Package {
     param([string]$src)
-
-    $cacheDir = $CACHE_DIR
-    $versionsDir = Join-Path $cacheDir "versions"
-    $currentFile = Join-Path $cacheDir "current"
-    $previousFile = Join-Path $cacheDir "previous"
-
-    $ver = ""; $commit = ""
-    $versionFile = Join-Path $src "VERSION"
-    if (Test-Path $versionFile) {
-        $content = Get-Content $versionFile
-        foreach ($line in $content) {
-            if ($line -match "^version=(.+)") { $ver = $Matches[1] }
-            if ($line -match "^git_commit=(.+)") { $commit = $Matches[1] }
-        }
-    }
-
-    $deployedDirName = ""
-    $oldDir = ""
-    if ($ver -and $commit) {
-        if (Test-Path $currentFile) {
-            $oldDir = (Get-Content $currentFile -ErrorAction SilentlyContinue).Trim()
-        }
-
-        $baseDirName = "${ver}_${commit}"
-        $deployedDirName = $baseDirName
-        $target = Join-Path $versionsDir $deployedDirName
-        if (Test-Path -LiteralPath $target) {
-            # Never overwrite a version directory in place. A collector may still
-            # have native modules loaded from it, especially when replacing an old
-            # S4U task that the current shell cannot terminate.
-            $suffix = "$(Get-Date -Format 'yyyyMMddHHmmss')_$(Get-Random -Minimum 1000 -Maximum 9999)"
-            $deployedDirName = "${baseDirName}_${suffix}"
-            $target = Join-Path $versionsDir $deployedDirName
-        }
-
-        Msg "==> 部署到 $target ..." "==> Deploying to $target ..."
-        if (-not (Test-Path $versionsDir)) { New-Item -ItemType Directory -Path $versionsDir -Force | Out-Null }
-        Copy-Item $src $target -Recurse
-
-        $script:PERMANENT_DIR = $target
-    } else {
-        Msg "==> 部署到 $($script:PERMANENT_DIR) ..." "==> Deploying to $($script:PERMANENT_DIR) ..."
-        $parentDir = Split-Path $script:PERMANENT_DIR
-        if (-not (Test-Path $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
-        if (Test-Path $script:PERMANENT_DIR) { Remove-Item $script:PERMANENT_DIR -Recurse -Force }
-        Copy-Item $src $script:PERMANENT_DIR -Recurse
-    }
-    Msg "    ✅ 部署完成" "    ✅ Deployed"
-    Write-Host ""
-
-    Msg "==> 安装依赖..." "==> Installing dependencies..."
-    $modulesVer = $ver
-    if (-not $modulesVer) { if ($Version) { $modulesVer = $Version } else { $modulesVer = "latest" } }
-    $modulesFromOss = Ensure-NodeModules $modulesVer
-    if (-not $modulesFromOss) {
-        Msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        $nodeDir = Split-Path $script:NODE_BIN
-        $savedPath = $env:PATH
-        if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
-        Push-Location $script:PERMANENT_DIR
-        try {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
-            $npmExit = $LASTEXITCODE
-            $ErrorActionPreference = $prevEAP
-        } finally {
-            Pop-Location
-            $env:PATH = $savedPath
-        }
-        if ($npmExit -ne 0) {
-            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
-            exit 1
-        }
-    }
-
-    # Only publish current/previous after the candidate is complete. This keeps
-    # the old version recoverable when dependency installation fails.
-    if ($deployedDirName) {
-        if ($oldDir -and $oldDir -ne $deployedDirName) {
-            Set-Content -Path $previousFile -Value $oldDir
-        }
-        Set-Content -Path $currentFile -Value $deployedDirName
-    }
-
-    Deploy-BootstrapScripts
-    if ($modulesFromOss) {
-        Msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
-    } else {
-        Msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
-    }
-    Write-Host ""
-
-    # >>> pilot-postinstall-exit-check >>>
-    Msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
-    $postinstallScript = Join-Path $script:PERMANENT_DIR "scripts\postinstall.js"
-    $postinstallExit = 0
-    $postinstallPartial = $false
-    # Empty means "nothing went wrong". The caller aborts on a non-empty value -- the policy
-    # lives at the call sites so this block stays byte-identical across the installers, same
-    # split as $script:PILOT_LAST_RESTART_ERR.
-    $script:PILOT_POSTINSTALL_ERR = ""
-    if (Test-Path $postinstallScript) {
-        # postinstall.js resolves its target as LOONGSUITE_PILOT_DATA_DIR, falling back to
-        # $env:USERPROFILE\.loongsuite-pilot. Unset, an install started with -DataDir would
-        # put hooks/skills/plugins in the default tree while its config lives elsewhere, and
-        # the collector would then find no hooks at all. Set for this child only and
-        # restored afterwards: the rest of the installer must keep seeing what it had.
-        $hadPostinstallDataDir = Test-Path Env:LOONGSUITE_PILOT_DATA_DIR
-        $priorPostinstallDataDir = if ($hadPostinstallDataDir) {
-            (Get-Item Env:LOONGSUITE_PILOT_DATA_DIR).Value
-        } else { $null }
-        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        try {
-            $env:LOONGSUITE_PILOT_DATA_DIR = $DataDir
-            # Captured rather than streamed because the per-tree verdict is in the output and
-            # nowhere else (see below). 2>&1 because postinstall.js reports it on stderr.
-            $postinstallOut = & $script:NODE_BIN $postinstallScript 2>&1
-            $postinstallExit = $LASTEXITCODE
-            $postinstallOut | ForEach-Object { Write-Host $_ }
-            if (($postinstallOut | Out-String) -match "failed asset tree|Post-install failed") { $postinstallPartial = $true }
-        } finally {
-            $ErrorActionPreference = $prevEAP
-            if ($hadPostinstallDataDir) {
-                Set-Item Env:LOONGSUITE_PILOT_DATA_DIR -Value $priorPostinstallDataDir
-            } else {
-                Remove-Item Env:LOONGSUITE_PILOT_DATA_DIR -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    # Never print the check mark for a postinstall that did not finish. That is exactly how
-    # the hooks/skills/plugins trees went missing on every Windows install without a word:
-    # fs.cpSync fail-fasts with 0xC0000409 on the bundled Node, killing the script before it
-    # copied anything, and this line printed "Hook scripts deployed" regardless.
-    #
-    # Three distinct outcomes, and the exit code only covers the first. postinstall.js
-    # deliberately exits 0 after a per-tree failure -- a non-zero exit would abort the npm
-    # install fallback above -- and announces it as "N failed asset tree(s)" instead; its
-    # top-level catch is the same story, printing "Post-install failed: <reason>" and still
-    # exiting 0. So a non-zero code means the process died outright, while the other two are
-    # legible only in the output. Keying the check mark off the exit code alone printed it over
-    # an install that had just reported a tree it could not copy.
-    #
-    # An install with no hooks/plugins is not an install: the collector finds nothing to load
-    # and every collection cycle fails on a plugin that was never written. The caller aborts
-    # (install) or rolls back (upgrade) on $script:PILOT_POSTINSTALL_ERR.
-    if ($postinstallExit -ne 0) {
-        $script:PILOT_POSTINSTALL_ERR = "postinstall.js (exit $postinstallExit)"
-        Msg "    ❌ Hook 脚本部署失败 (exit=$postinstallExit)，hooks/plugins 缺失" `
-            "    ❌ Hook script deployment failed (exit=$postinstallExit); hooks/plugins are missing"
-    } elseif ($postinstallPartial) {
-        $script:PILOT_POSTINSTALL_ERR = "postinstall.js reported a failed asset tree"
-        Msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" `
-            "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
-    } else {
-        Msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-    }
-    # <<< pilot-postinstall-exit-check <<<
-    Write-Host ""
+    # 配置合并、Hook 调用与版本入口发布由同一个原生操作串行执行。
+    $script:PILOT_POSTINSTALL_ERR = ''
+    Invoke-InstallerRuntime -SourceDir $src -Operation 'publish-package' -DeployHooks
+    $script:PERMANENT_DIR = $src
+    $script:PILOT_BIN = Join-Path $src 'bin\loongsuite-pilot.exe'
+    Msg '    ✅ 原生包及 Hook 已部署' '    ✅ Native package and hooks deployed'
 }
 
 # ============================================================
@@ -1438,12 +1146,9 @@ function Migrate-LegacyLayout {
 # ============================================================
 # Write config.json
 # ============================================================
-function Write-Config {
+function Get-InstallConfigJson {
     $configFile = Join-Path $DataDir "config.json"
-    Msg "==> 写入配置文件 $configFile ..." "==> Writing config to $configFile ..."
-    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
-
-    # Bundle all params as JSON to avoid PowerShell dropping empty-string args to native commands
+    # 配置业务在 Rust 中执行；这里只封装参数，空串保持“未指定”语义。
     $cfgArgs = [ordered]@{
         configPath        = $configFile
         dataDir           = $DataDir
@@ -1456,7 +1161,7 @@ function Write-Config {
         slsApiKey         = "$SlsApiKey"
         logLevel          = "$LogLevel"
         userId            = "$($script:UserId)"
-        excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ })
+        excludeWorkspaces = $null
         collectLog        = "$CollectLog"
         collectTrace      = "$CollectTrace"
         enableStatusBarApp = "$EnableStatusBarApp"
@@ -1476,262 +1181,19 @@ function Write-Config {
         interceptorTypes  = "$InterceptorTypes"
         probeResult       = "$($script:PROBE_RESULT)"
     }
-    $cfgJson = $cfgArgs | ConvertTo-Json -Compress
-
-    # Stage the JSON through a temp file rather than piping it to node's stdin. Under Windows
-    # PowerShell 5.1 a string piped to a native command is encoded with $OutputEncoding (default
-    # ASCII), so any non-ASCII value (Chinese serviceNamePrefix/userId, a Chinese username in the
-    # path, custom mask types...) would be mangled to "?" before node ever sees it. Set-Content
-    # -Encoding UTF8 is CLM-safe (no forbidden .NET calls) and encodes UTF-8 correctly regardless
-    # of $OutputEncoding; it prepends a BOM in PS5.1, which node strips below before JSON.parse.
-    $cfgTmp = Join-Path $env:TEMP ("lp-config-" + (Get-Random) + ".json")
-    Set-Content -LiteralPath $cfgTmp -Value $cfgJson -Encoding UTF8 -NoNewline
-    # Native node does not throw; read $LASTEXITCODE on the next line so a JSON
-    # or write failure cannot print "Config written" and keep installing.
-    $cfgExit = 1
-    $prevEAP = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & $script:NODE_BIN -e @'
-const fs = require('fs');
-let raw = fs.readFileSync(process.argv[1], 'utf-8');
-if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-const opts = JSON.parse(raw);
-
-let existing = {};
-try { existing = JSON.parse(fs.readFileSync(opts.configPath, 'utf-8')); } catch {}
-
-const config = {
-  ...existing,
-  enabled: true,
-  dataDir: opts.dataDir,
-};
-if (Array.isArray(opts.excludeWorkspaces) && opts.excludeWorkspaces.length > 0) {
-  if (opts.excludeWorkspaces.some(value => typeof value !== 'string' || !require('path').win32.isAbsolute(value))) {
-    throw new Error('-ExcludeWorkspace requires absolute local directories');
-  }
-  config.privacy = { ...config.privacy, excludeWorkspaces: opts.excludeWorkspaces };
-}
-if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
-  config.dashboard = {};
-}
-if (opts.dashboardPort) config.dashboard.port = Number(opts.dashboardPort);
-if (config.dashboard.port === undefined) config.dashboard.port = 8765;
-delete config.internal;
-if (config.userId === undefined && config['user.id'] !== undefined) {
-  config.userId = config['user.id'];
-}
-delete config['user.id'];
-
-if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore || opts.slsApiKey) {
-  config.sls = config.sls || {};
-  delete config.sls.destinationOverride;
-  if (opts.slsEndpoint) config.sls.endpoint = opts.slsEndpoint;
-  if (opts.slsApiKey) {
-    config.sls.mode = 'apiKey';
-    config.sls.apiKey = opts.slsApiKey;
-    delete config.sls.accessKeyId;
-    delete config.sls.accessKeySecret;
-  } else if (opts.slsAkId && opts.slsAkSecret) {
-    config.sls.mode = 'ak';
-    config.sls.accessKeyId = opts.slsAkId;
-    config.sls.accessKeySecret = opts.slsAkSecret;
-    delete config.sls.apiKey;
-  } else if (opts.slsEndpoint || opts.slsProject || opts.slsLogstore) {
-    config.sls.mode = 'webtracking';
-    delete config.sls.apiKey;
-    delete config.sls.accessKeyId;
-    delete config.sls.accessKeySecret;
-  }
-  if (opts.slsProject && opts.slsLogstore) {
-    config.sls.project = opts.slsProject;
-    config.sls.logstore = opts.slsLogstore;
-    delete config.sls.endpoints;
-  }
-}
-if (opts.logLevel) config.logLevel = opts.logLevel;
-if (opts.userId) { config.userId = opts.userId; delete config.identity; }
-if (opts.collectLog) config.collectLog = opts.collectLog === 'true';
-if (opts.collectTrace) config.collectTrace = opts.collectTrace === 'true';
-if (opts.enableStatusBarApp) config.enableStatusBarApp = opts.enableStatusBarApp.toLowerCase() === 'true';
-if (opts.cmsLicenseKey || opts.cmsEndpoint || opts.cmsWorkspace) {
-  config.cms = config.cms || {};
-  if (opts.cmsLicenseKey) config.cms.licenseKey = opts.cmsLicenseKey;
-  if (opts.cmsEndpoint) config.cms.endpoint = opts.cmsEndpoint;
-  if (opts.cmsWorkspace) config.cms.workspace = opts.cmsWorkspace;
-}
-if (opts.serviceNamePrefix) config.serviceNamePrefix = opts.serviceNamePrefix;
-if (opts.maskMode) {
-  config.mask = config.mask || {};
-  config.mask.mode = opts.maskMode;
-  if (opts.maskMode === 'custom') {
-    config.mask.types = opts.maskTypes.split(',').map(t => t.trim()).filter(Boolean);
-  } else { delete config.mask.types; }
-}
-if (opts.maskReplacementMode) {
-  config.mask = config.mask || {};
-  config.mask.replacementMode = opts.maskReplacementMode;
-}
-if (opts.interceptorMode) {
-  config.interceptor = config.interceptor || {};
-  config.interceptor.mode = opts.interceptorMode;
-  if (opts.interceptorMode === 'custom') {
-    config.interceptor.types = opts.interceptorTypes.split(',').map(t => t.trim()).filter(Boolean);
-  } else { delete config.interceptor.types; }
-}
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
-(function ensureMaskCoversInterceptor(config) {
-  const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
-  if (extra.length === 0) return;
-  if ((config.mask || {}).mode === 'all') return;
-  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
-    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
-    : [];
-  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
-    ? config.mask
-    : {};
-  config.mask.mode = 'custom';
-  config.mask.types = [...new Set(current.concat(extra))];
-})(config);
-const allAgents = JSON.parse(opts.probeResult || '[]');
-if (opts.allAgentsMode === '1') {
-  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
-  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
-} else if (opts.selectedAgents) {
-  config.agents = config.agents || {};
-  const previousOpenclaw = config.agents.openclaw;
-  const selected = opts.selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  for (const agent of allAgents) {
-    config.agents[agent.id] = config.agents[agent.id] || {};
-    // A transient discovery miss is not consent to uninstall a live plugin.
-    if (agent.id === 'openclaw' && !agent.detected && opts.agentSelectionExplicit !== '1'
-        && previousOpenclaw !== undefined) {
-      console.log('OpenClaw: detection unavailable; preserving previous enabled state and entry');
-      continue;
-    }
-    config.agents[agent.id].enabled = selected.includes(agent.id);
-  }
-}
-const openclaw = allAgents.find(agent => agent.id === 'openclaw');
-if (openclaw && openclaw.detected && openclaw.openclawCliPath
-    && (opts.allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
-  config.agents = config.agents || {};
-  config.agents.openclaw = config.agents.openclaw || {};
-  const previousEntry = config.agents.openclaw.cliPath;
-  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
-    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
-  }
-  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
-}
-if (opts.multimodalMode) {
-  config.agents = config.agents || {};
-  const supported = String(opts.multimodalSupportedAgents || '').split(',').map(s => s.trim()).filter(Boolean);
-  const selected = new Set(String(opts.selectedAgents || '').split(',').map(s => s.trim()).filter(Boolean));
-  const allSupported = opts.allAgentsMode === '1' && opts.multimodalMode !== 'none';
-  for (const id of supported) {
-    if (allSupported) config.agents[id] = config.agents[id] || {};
-    else if (!config.agents[id]) continue;
-    if (opts.multimodalMode === 'none') {
-      delete config.agents[id].multimodal;
-      continue;
-    }
-    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
-      ? config.agents[id].multimodal
-      : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? opts.multimodalMode : 'none' };
-  }
+    if ($ExcludeWorkspace) { $cfgArgs.excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ }) }
+    return ($cfgArgs | ConvertTo-Json -Depth 8 -Compress)
 }
 
-if (opts.multimodalMode && opts.multimodalMode !== 'none' && opts.slsEndpoint && opts.slsProject && opts.slsLogstore && opts.slsApiKey) {
-  config.multimodal = {
-    storage: {
-      type: 'sls',
-      target: { endpoint: opts.slsEndpoint, project: opts.slsProject, logstore: opts.slsLogstore },
-    },
-  };
-}
-
-fs.writeFileSync(opts.configPath, JSON.stringify(config, null, 2) + '\n');
-'@ $cfgTmp
-        $cfgExit = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $prevEAP
-        Remove-PilotPathQuietly $cfgTmp
-    }
-    if ($cfgExit -ne 0) {
-        Msg "❌ 配置写入失败 (exit=$cfgExit)" "❌ Failed to write config (exit=$cfgExit)"
-        exit 1
-    }
-
+function Write-Config {
+    $configFile = Join-Path $DataDir "config.json"
+    Msg "==> 写入配置文件 $configFile ..." "==> Writing config to $configFile ..."
+    Invoke-InstallerHelper -Operation "write-config" -Json (Get-InstallConfigJson)
     Msg "    ✅ 配置已写入" "    ✅ Config written"
     Write-Host ""
 }
 
 # reg.exe removes overrides under CLM; the guarded .NET call notifies Explorer.
-function Get-PilotRuntimeOverride {
-    param([string]$Name)
-    $prevEAP = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        $regOut = reg.exe query "HKCU\Environment" /v $Name 2>$null
-        $regExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
-    if ($regExitCode -ne 0) { return "" }
-    foreach ($line in $regOut) {
-        if (($line -match '^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$') -and $Matches[1] -ieq $Name) {
-            return $Matches[2].Trim()
-        }
-    }
-    return ""
-}
-
-function Remove-PilotRuntimeOverride {
-    param([string]$Name)
-    reg.exe delete "HKCU\Environment" /v $Name /f 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to remove $Name" }
-    try {
-        [Environment]::SetEnvironmentVariable($Name, $null, 'User')
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Retire-PilotRuntimeOverride {
-    param([string]$Name, [string]$WrapperPath)
-    $current = Get-PilotRuntimeOverride -Name $Name
-    if (-not $current) { return }
-    # Pilot-owned only: a third-party override must survive untouched.
-    if (($current -ieq $WrapperPath) -or ($current -like '*loongsuite-pilot*')) {
-        $broadcasted = Remove-PilotRuntimeOverride -Name $Name
-        if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-        Msg "    ✅ 已退役 $Name" "    ✅ Retired $Name"
-    }
-}
-
-function Retire-QoderworkRuntimeOverrides {
-    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    Retire-PilotRuntimeOverride -Name 'QW_QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
-    Retire-PilotRuntimeOverride -Name 'QODER_WORKER_RUNTIME_PATH' -WrapperPath $wrapperPath
-
-    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    环境变量已清理，但无法通知 Explorer；请注销并重新登录 Windows" `
-            "    Environment overrides removed but Explorer could not be notified; sign out and back in"
-    } else {
-        Msg "    请完全退出并重新打开对应应用以生效" `
-            "    Fully quit and restart the corresponding apps for changes to take effect"
-    }
-    Write-Host ""
-}
-
 # ============================================================
 # Install loongsuite-pilot command (batch wrapper)
 # ============================================================
@@ -1745,30 +1207,11 @@ function Install-Command {
     # (ExternalScript) BEFORE the .cmd shim, and a directly-run .ps1 obeys the session
     # ExecutionPolicy (often Restricted) instead of the shim's -ExecutionPolicy Bypass. A
     # non-colliding name keeps the .cmd the only match for the bare command name.
-    $ps1File = Join-Path $binDir "loongsuite-pilot-service.ps1"
-    $ps1Src = Join-Path $script:PERMANENT_DIR "scripts\loongsuite-pilot.ps1"
-    if (Test-Path $ps1Src) {
-        Copy-Item $ps1Src $ps1File -Force
-    }
+    Deploy-BootstrapScripts
     # Remove any stale same-name script from older installs that would shadow the .cmd shim.
     $legacyPs1 = Join-Path $binDir "loongsuite-pilot.ps1"
     if (Test-Path $legacyPs1) { Remove-Item $legacyPs1 -Force -ErrorAction SilentlyContinue }
-    $layoutFile = Join-Path $binDir "loongsuite-pilot-layout.json"
-    $layout = [ordered]@{
-        dataDir = $DataDir
-        cacheDir = $CACHE_DIR
-    } | ConvertTo-Json
-    # loongsuite-pilot.ps1 reads this back with Get-Content -Encoding UTF8 | ConvertFrom-Json,
-    # which tolerates a BOM, so Set-Content is fine here (and CLM-safe, unlike WriteAllText).
-    Set-Content -LiteralPath $layoutFile -Value $layout -Encoding UTF8
-
-    # Create a .cmd shim that forwards to the PowerShell script
     $cmdFile = Join-Path $binDir "loongsuite-pilot.cmd"
-    $cmdContent = @'
-@echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0loongsuite-pilot-service.ps1" %*
-'@
-    Set-Content -Path $cmdFile -Value $cmdContent -Encoding ASCII
     Msg "    ✅ 已安装: $cmdFile" "    ✅ Installed: $cmdFile"
 
     # Add to user PATH if not already there. The persistent write uses reg.exe (a native command,
@@ -1967,7 +1410,7 @@ function Restart-StaleCollector {
     $script:PILOT_LAST_RESTART_ERR = ""
     if (-not $priorVersion) { return $true }
     if (-not $serviceEntry) { return $true }
-    if (-not (Test-Path $serviceEntry)) { return $true }
+    if (-not (Test-Path -LiteralPath $serviceEntry)) { return $true }
     if (($startOutput | Out-String) -notmatch "already running") { return $true }
     # Locally forced to Continue: with 2>&1 in effect a caller left on Stop turns the first
     # stderr line into a NativeCommandError, which would report a successful restart as a
@@ -2143,10 +1586,23 @@ function Remove-HookConfigs {
         # Same guard Remove-OpenClawPlugin and Remove-OtelPlugin already carry, and the
         # reason uninstall may now reach this function without a Node: without it the
         # call below runs as & "" against a hook config that then goes unreported.
-        if (-not $script:NODE_BIN) {
-            Msg "    ⚠️  跳过: $short (无 node,需手动清理)" "    ⚠️  Skipped: $short (node unavailable, manual cleanup needed)"
+        $helper = Join-Path $PSScriptRoot "installer_py.py"
+        $python = $null
+        foreach ($name in @("python3", "python", "py")) {
+            $cmd = Get-Command $name -ErrorAction SilentlyContinue
+            if ($cmd) { $python = $cmd.Source; break }
+        }
+        if (-not $python) {
+            Msg "    ⚠️  跳过: $short (无 python3,需手动清理)" "    ⚠️  Skipped: $short (python3 unavailable, manual cleanup needed)"
             continue
         }
+        $result = & $python $helper clean-hooks $cfg $HOOK_MARKER 2>$null
+        if ($result -eq "cleaned" -or $result -eq "skip") {
+            Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short"
+        } else {
+            Msg "    ⚠️  跳过: $short (需手动清理)" "    ⚠️  Skipped: $short (manual cleanup needed)"
+        }
+        continue
 
         # Saved and restored around the try, not inside it: a throw from the native call
         # (an install-dir node-bin pin that no longer exists, say) used to skip the
@@ -2307,32 +1763,8 @@ function Remove-OpenCodePlugin {
         $result = & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
-// Match legacy plugins/opencode/plugin.mjs only under this installation.
-const normalize = value => {
-  if (typeof value !== 'string') return '';
-  let plain = value;
-  if (plain.startsWith('file://')) {
-    try {
-      const url = new URL(plain);
-      plain = decodeURIComponent(url.pathname);
-      if (plain[0] === '/' && plain[2] === ':') plain = plain.slice(1);
-      if (url.hostname && url.hostname !== 'localhost') {
-        if (process.platform !== 'win32') return '';
-        plain = '//' + url.hostname + plain;
-      }
-    } catch { return ''; }
-  }
-  plain = plain.split(String.fromCharCode(92)).join('/');
-  while (plain.endsWith('/')) plain = plain.slice(0, -1);
-  return process.platform === 'win32' ? plain.toLowerCase() : plain;
-};
-const dataDir = normalize(process.argv[2]);
-const managed = dataDir ? dataDir + '/plugins/opencode' : null;
-const isOurs = s => typeof s === 'string' && (
-  s === 'loongsuite-pilot-opencode' || s.startsWith('loongsuite-pilot-opencode@') ||
-  (managed !== null && (normalize(s) === managed || normalize(s) === managed + '/plugin.mjs'))
-);
-const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : (e?.package ?? ''));
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
 const stripJsonc = src => src
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '')
@@ -2342,19 +1774,16 @@ try {
   let data, hadComments = false;
   try { data = JSON.parse(raw); }
   catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
-  let removed = 0;
-  for (const key of ['plugin', 'plugins']) {
-    if (!Array.isArray(data[key])) continue;
-    const before = data[key].length;
-    data[key] = data[key].filter(e => !isOurs(entryStr(e)));
-    removed += before - data[key].length;
-  }
-  if (!removed) { process.stdout.write('nochange'); process.exit(0); }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
   if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-'@ $cfg $DataDir 2>$null
+'@ $cfg 2>$null
 
         switch ($result) {
             "cleaned"     { Msg "    ✅ 已清理: $short" "    ✅ Cleaned: $short" }
@@ -2793,40 +2222,11 @@ function Start-PilotAndWait {
 # CMD: install
 # ============================================================
 function Assert-SingleSlsConfig {
-    $configFile = Join-Path $DataDir "config.json"
-    if (-not (Test-Path -LiteralPath $configFile)) { return }
-
-    $prevEAP = $ErrorActionPreference
-    $configExit = 1
-    $global:LASTEXITCODE = 1
-    $nodeOut = $null
-    try {
-        $ErrorActionPreference = "Continue"
-        $nodeOut = & $script:NODE_BIN -e @'
-const fs = require("fs");
-try {
-  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
-  process.exit(Array.isArray(config?.sls) ? 12 : 0);
-} catch { process.exit(13); }
-'@ $configFile 2>&1
-        $configExit = $global:LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $prevEAP
-    }
-    if ($configExit -eq 12) {
-        Msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" `
-            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually."
-        exit 1
-    }
-    if ($configExit -ne 0) {
-        $detail = (($nodeOut | Out-String).Trim())
-        Msg "❌ 无法检查现有 config.json，请检查文件后重试`n$detail" `
-            "❌ Cannot inspect existing config.json; check the file and retry.`n$detail"
-        exit 1
-    }
+    Invoke-InstallerHelper -Operation 'check-config' -Json (Get-InstallConfigJson) | Out-Null
 }
 
 function Cmd-Install {
+    $script:INSTALL_CONFIG = $true
     Msg "==> 开始安装 $PACKAGE_NAME ..." "==> Installing $PACKAGE_NAME ..."
     Write-Host ""
 
@@ -2834,8 +2234,6 @@ function Cmd-Install {
     Warn-ElevatedInstall
 
     Check-Deps
-    Assert-SingleSlsConfig
-    Migrate-LegacyLayout
 
     $curVer = Get-InstalledVersion
     if ($curVer) {
@@ -2844,15 +2242,18 @@ function Cmd-Install {
     }
 
     try {
-        Disable-PilotScheduledTasksDuringDeploy
-        Stop-PilotService
-
         Download-AndExtract
+        Assert-SingleSlsConfig
         Probe-Agents
         Select-Agents
         Prompt-UserId
+        Invoke-InstallerHelper -Operation 'validate-config' -Json (Get-InstallConfigJson) | Out-Null
         Confirm-ConfigOverwrite
-        Deploy-Package $script:INSTALL_SRC
+        Prepare-Package $script:INSTALL_SRC
+        Disable-PilotScheduledTasksDuringDeploy
+        Stop-PilotService
+        Migrate-LegacyLayout
+        Deploy-Package $script:STAGED_DIR
         # Nothing downstream can repair this: postinstall.js is the only thing that fills
         # $DataDir\{hooks,skills,plugins}, and a collector with no hooks collects nothing.
         # Better to stop with the reason on screen than to finish and report success.
@@ -2862,9 +2263,7 @@ function Cmd-Install {
             Msg "   请检查上方输出后重试安装" "   Check the output above and re-run the install"
             exit 1
         }
-        Write-Config
         Install-Command
-        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动服务..." "==> Starting service..."
@@ -2885,6 +2284,7 @@ function Cmd-Install {
         Write-Host ""
         Print-Summary "install"
     } finally {
+        $script:INSTALL_CONFIG = $false
         Enable-PilotScheduledTasksAfterDeploy
         Remove-PilotPathQuietly $script:TMP_DIR
     }
@@ -2927,14 +2327,14 @@ function Cmd-Upgrade {
         Msg "   新版本: ${newVer} (${newCommit})" "   New version: ${newVer} (${newCommit})"
         Write-Host ""
 
+        Prepare-Package $script:INSTALL_SRC
         Msg "==> 停止服务..." "==> Stopping service..."
         Disable-PilotScheduledTasksDuringDeploy
         Stop-PilotService
         Write-Host ""
 
-        Deploy-Package $script:INSTALL_SRC
+        Deploy-Package $script:STAGED_DIR
         Install-Command
-        Retire-QoderworkRuntimeOverrides
 
         Enable-PilotScheduledTasksAfterDeploy
         Msg "==> 启动新版本..." "==> Starting new version..."
@@ -3511,30 +2911,19 @@ function Remove-DshYamlPatch {
         }
     }
 
-    if (-not (Test-Path -LiteralPath $cleanupScript)) {
+    $helper = Join-Path $PSScriptRoot "installer_py.py"
+    $python = $null
+    foreach ($name in @("python3", "python", "py")) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { $python = $cmd.Source; break }
+    }
+    if (-not $python) {
         if (Test-DshPatchStillManaged -PatchPath $patchPath) {
-            throw "DSH cleanup helper is missing; refusing to remove plugin assets still referenced by $patchPath"
+            throw "python3 is required to remove the DSH YAML patch at $patchPath"
         }
         return
     }
-    if (-not $script:NODE_BIN) {
-        # Gated the same way as the branch above, which it was not. Resolve-Node returns
-        # $null when no candidate is suitable, so this throw has always been reachable,
-        # and uninstall now also arrives here after a failed Node probe instead of dying
-        # inside Resolve-Node itself. Refusing unconditionally aborted the entire
-        # uninstall -- Cmd-Uninstall calls this before every other cleanup step, and
-        # -Purge, the step that deletes config.json and the reporting credentials in it,
-        # is the last thing in the function -- on machines where DSH was never patched and
-        # there was nothing to protect. Refuse only when something would really dangle.
-        if (Test-DshPatchStillManaged -PatchPath $patchPath) {
-            throw "No usable Node.js; cannot safely remove the DSH YAML patch at $patchPath"
-        }
-        Msg "    ⚠️  跳过: 无可用 node,且 $patchPath 里没有 Pilot 托管块,无需 unpatch" `
-            "    ⚠️  Skipped: no usable node, and $patchPath carries no Pilot-managed block, so there is nothing to unpatch"
-        return
-    }
-
-    & $script:NODE_BIN $cleanupScript --patch $patchPath --plugin-dir $pluginDir
+    & $python $helper dsh-cleanup --patch $patchPath --plugin-dir $pluginDir
     if ($LASTEXITCODE -ne 0) {
         throw "DSH YAML patch cleanup failed; Pilot assets were preserved"
     }
@@ -3544,56 +2933,40 @@ function Remove-DshYamlPatch {
 # ============================================================
 # CMD: uninstall
 # ============================================================
-function Remove-CopilotPlugin {
-    $copilotHome = Join-Path $env:USERPROFILE '.copilot'
-    if (-not (Test-Path -LiteralPath $copilotHome)) { return }
-    $helper = $null
-    $candidates = @((Join-Path $script:PERMANENT_DIR 'dist/copilot-cleanup.cjs'))
-    $currentFile = Join-Path $CACHE_DIR 'current'
-    if (Test-Path -LiteralPath $currentFile) {
-        $version = (Get-Content -LiteralPath $currentFile -Raw -Encoding UTF8).Trim()
-        $candidates = @((Join-Path $CACHE_DIR "versions/$version/dist/copilot-cleanup.cjs")) + $candidates
+# Cleanup uses a verified native candidate, including explicit candidates for
+# legacy installs. Resolve it before stopping services or deleting any assets.
+function Resolve-NativeUninstallSource {
+    if ($PackageUrl) {
+        Download-AndExtract
+    } elseif (-not $script:INSTALL_SRC) {
+        $current = Join-Path $CACHE_DIR 'current'
+        $version = if (Test-Path -LiteralPath $current -PathType Leaf) {
+            (Get-Content -LiteralPath $current -Raw).Trim()
+        } else { '' }
+        if ($version -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
+            throw 'Native uninstall runtime not found; supply a Rust candidate with -PackageUrl. Installation files were preserved'
+        }
+        $script:INSTALL_SRC = Join-Path (Join-Path $CACHE_DIR 'versions') $version
     }
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) { $helper = $candidate; break }
-    }
-    if (-not $script:NODE_BIN -or -not $helper) {
-        Write-Warning 'Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved'
-        return
-    }
-    $savedPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        & $script:NODE_BIN $helper $copilotHome
-        $cleanupExit = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $savedPreference }
-    if ($cleanupExit -ne 0) { Write-Warning 'Copilot cleanup incomplete; config and plugin assets preserved for retry' }
 }
 
-function Remove-CopilotOtelEnvironment {
-    # Best-effort legacy cleanup: Copilot automatic deployment is Unix-only.
-    # A profile access/CLM failure must not interrupt other agents or -Purge.
-    foreach ($relative in @('Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1')) {
-        $tmp = $null
-        try {
-            $profilePath = Join-Path $env:USERPROFILE $relative
-            if (-not (Test-Path -LiteralPath $profilePath)) { continue }
-            $before = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8
-            $after = $before -replace '(?s)\r?\n?# >>> loongsuite-pilot copilot otel >>>.*?# <<< loongsuite-pilot copilot otel <<<\r?\n?', "`n"
-            if ($before -ne $after) {
-                $tmp = "$profilePath.pilot-$PID.tmp"
-                Set-Content -LiteralPath $tmp -Value $after -Encoding UTF8 -NoNewline
-                Move-Item -LiteralPath (Get-PilotLongPath $tmp) -Destination (Get-PilotLongPath $profilePath) -Force
-            }
-        } catch { Write-Warning "Copilot profile cleanup incomplete; continuing uninstall" }
-        finally { if ($tmp) { Remove-PilotPathQuietly $tmp } }
-    }
-    Remove-Item -LiteralPath (Join-Path $DATA_DIR 'state/copilot/otel-enabled') -Force -ErrorAction SilentlyContinue
+function Invoke-NativeUninstall {
+    param([switch]$CheckOnly)
+    $options = @{
+        dataDir = $DataDir
+        pilotDir = $script:INSTALL_SRC
+        checkOnly = [bool]$CheckOnly
+        purge = [bool]$Purge
+    } | ConvertTo-Json -Compress
+    Invoke-InstallerHelper -Operation 'cleanup-agents' -Json $options | Out-Null
 }
 
 function Cmd-Uninstall {
     Msg "🗑️  开始卸载 $PACKAGE_NAME ..." "🗑️  Uninstalling $PACKAGE_NAME ..."
     Write-Host ""
+
+    Resolve-NativeUninstallSource
+    Invoke-NativeUninstall -CheckOnly
 
     Msg "==> 停止服务..." "==> Stopping service..."
     Stop-PilotService
@@ -3603,105 +2976,11 @@ function Cmd-Uninstall {
     Remove-PilotScheduledTasks
     Msg "    ✅ 已移除计划任务" "    ✅ Removed scheduled tasks"
 
-    # Resolve the pinned runtime before installation files (including node-bin)
-    # are removed. JSON config cleanup must also work when Node is absent from PATH.
-    if (-not $script:NODE_BIN) {
-        try {
-            $script:NODE_BIN = Resolve-Node
-        } catch {
-            # Non-fatal on purpose. Resolve-Node probes third-party version-manager
-            # directories, and under the file header's $ErrorActionPreference = "Stop"
-            # any unexpected error record in there becomes terminating. Unguarded, that
-            # aborted Cmd-Uninstall right here -- before plugin cleanup, before the
-            # install directory was deleted, and before -Purge -- so config.json
-            # survived on disk with its credentials in it. Every step below that needs
-            # Node already checks $script:NODE_BIN and reports what it skipped.
-            $script:NODE_BIN = ""
-            Msg "    ⚠️  解析 Node 失败: $($_.Exception.Message)" `
-                "    ⚠️  Resolving Node failed: $($_.Exception.Message)"
-        }
-    }
-    if (-not $script:NODE_BIN) {
-        Msg "    ⚠️  未解析到可用的 Node;依赖 Node 的清理步骤会逐项跳过并提示,其余步骤继续" `
-            "    ⚠️  No usable Node resolved; each Node-dependent cleanup step will be skipped with a notice, the rest continues"
-    }
-
-    Msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
-    Remove-DshYamlPatch
+    Msg "==> 原生清理 Agent 与历史插件配置..." "==> Cleaning Agent and legacy plugin configuration..."
+    Invoke-NativeUninstall
     Write-Host ""
 
-    # Read the persisted target before the default data/install directory is removed.
-    Msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
-    Remove-HermesPlugin
-    Write-Host ""
-
-    Msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
-    Remove-OpenClawPlugin
-    Write-Host ""
-
-    # This cleanup executes Node.js. Run it before installation assets or a
-    # pinned runtime can disappear, matching the POSIX uninstall ordering.
-    Msg "==> 清理 Grok Build hook 配置..." "==> Cleaning up Grok Build hook config..."
-    Remove-GrokBuildHookConfig
-    try { Remove-CopilotOtelEnvironment } catch { Write-Warning "Copilot environment cleanup failed; continuing uninstall" }
-    try { Remove-CopilotPlugin } catch { Write-Warning "Copilot plugin cleanup failed; continuing uninstall" }
-    Write-Host ""
-
-    Msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    Remove-HookConfigs
-    try {
-        Remove-CodexHookConfig
-    } catch {
-        Msg "    ⚠️  Codex hook 清理失败，继续卸载: $($_.Exception.Message)" `
-            "    ⚠️  Codex hook cleanup failed; continuing uninstall: $($_.Exception.Message)"
-    }
-    Write-Host ""
-
-    Msg "==> 清理 QoderWork 系列环境变量..." "==> Cleaning up QoderWork-family env vars..."
-    $wrapperPath = Join-Path $DataDir "hooks\qoderwork-runtime-wrapper.mjs"
-    $script:RUNTIME_ENV_BROADCAST_FAILED = $false
-    $runtimeEnvCleanupFailed = $false
-    foreach ($envName in @('QW_QODER_WORKER_RUNTIME_PATH', 'QODER_WORKER_RUNTIME_PATH')) {
-        try {
-            $currentRuntime = Get-PilotRuntimeOverride -Name $envName
-            if ($currentRuntime -and $currentRuntime -ieq $wrapperPath) {
-                $broadcasted = Remove-PilotRuntimeOverride -Name $envName
-                if (-not $broadcasted) { $script:RUNTIME_ENV_BROADCAST_FAILED = $true }
-                Msg "    ✅ 已移除 $envName" "    ✅ Removed $envName"
-            }
-        } catch {
-            $runtimeEnvCleanupFailed = $true
-            Msg "    ⚠️  清理 $envName 失败，已保留安装文件以便重试: $($_.Exception.Message)" `
-                "    ⚠️  Failed to clean $envName; installation files will be preserved for retry: $($_.Exception.Message)"
-        }
-    }
-    if ($script:RUNTIME_ENV_BROADCAST_FAILED) {
-        Msg "    ⚠️  请注销并重新登录 Windows 以刷新 Explorer 环境" `
-            "    ⚠️  Sign out and back in to refresh the Explorer environment"
-    }
-    Write-Host ""
-
-    Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
-    Remove-OtelPlugin
-    Write-Host ""
-
-    Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
-    Remove-OpenCodePlugin
-    Write-Host ""
-
-    Msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    Remove-PiCodingAgentExtension
-    Write-Host ""
-
-    Msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
-    Remove-MimoCodePlugin
-    Write-Host ""
-
-    if ($runtimeEnvCleanupFailed) {
-        throw "Runtime environment cleanup failed; installation files were preserved for retry"
-    }
-
-    # Keep the pinned node runtime and deployed helper assets available until
+    # Keep the native runtime and deployed helper assets available until
     # every external config and runtime override has been cleaned. In
     # particular, never leave a User env var pointing at a deleted wrapper.
     Msg "==> 删除安装目录..." "==> Removing installation..."

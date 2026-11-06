@@ -441,12 +441,7 @@ export async function parseStdinPayload(agentId) {
   const extra = payload.extra && typeof payload.extra === 'object' && !Array.isArray(payload.extra)
     ? payload.extra
     : undefined;
-  const parentBusinessInfo = payload.parent_business_info
-    && typeof payload.parent_business_info === 'object'
-    && !Array.isArray(payload.parent_business_info)
-    ? payload.parent_business_info
-    : undefined;
-  return { transcriptPath, sessionId, cwd, extra, parentBusinessInfo };
+  return { transcriptPath, sessionId, cwd, extra };
 }
 
 // --- Re-export normalizer utilities -----------------------------------------

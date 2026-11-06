@@ -1,0 +1,2756 @@
+{
+  "schema": 1,
+  "producerSha256": "756c16ab60f6839fbc0296a30a02013654a2d82610dc91cd2cd776e93b2b094a",
+  "sourceSha256": "f13df277beb8292838b60c83a6b4aadea2d4f1fee1b3a10d4fad79ff5226b201",
+  "prompt": "Count the approved files with one terminal call.",
+  "cases": [
+    {
+      "name": "normal",
+      "records": [
+        {
+          "time_unix_nano": "1793270749461100792",
+          "observed_time_unix_nano": "1793270749461100792",
+          "event.id": "4c04bc64-1808-4d88-96a5-3d6141f04bb8",
+          "event.name": "other",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "3331edf0f076db67",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749461100792",
+          "observed_time_unix_nano": "1793270749461100792",
+          "event.id": "16e4d0b2-5524-4ce4-94d9-55e79d43b69b",
+          "event.name": "llm.request",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "be0a472347d4335a",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749461706995",
+          "observed_time_unix_nano": "1793270749461706995",
+          "event.id": "8d331ed5-08ba-4210-92f8-3b9900e466ae",
+          "event.name": "tool.call",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "313e37c98e44905f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749461946178",
+          "observed_time_unix_nano": "1793270749461946178",
+          "event.id": "da80c299-a3fb-448d-99e9-62cfd8a54b6c",
+          "event.name": "tool.result",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "313e37c98e44905f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749462217737",
+          "observed_time_unix_nano": "1793270749462217737",
+          "event.id": "eb80dddd-294f-4cf7-b68d-7cd213624e5a",
+          "event.name": "llm.request",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "2f3648d72177b71e",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749461575684",
+          "observed_time_unix_nano": "1793270749461575684",
+          "event.id": "cc6b9e1c-6b03-442f-ab97-816264fa29a4",
+          "event.name": "llm.response",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "be0a472347d4335a",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749462496670",
+          "observed_time_unix_nano": "1793270749462496670",
+          "event.id": "4cef9fd8-7f2b-4c6f-9a07-07b9e7c86a26",
+          "event.name": "llm.response",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "2f3648d72177b71e",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749463167345",
+          "observed_time_unix_nano": "1793270749463167345",
+          "event.id": "351feb86-1d53-4089-aeae-1ab4eb4ca75a",
+          "event.name": "other",
+          "trace_id": "e8e4b4e63680975b8ba66b9037099fdc",
+          "span_id": "2f3648d72177b71e",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        },
+        {
+          "time_unix_nano": "1793270749463443777",
+          "observed_time_unix_nano": "1793270749463443777",
+          "event.id": "1a703539-5945-4e29-ba00-4850883e58c7",
+          "event.name": "other",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "e75f2d7b836c7bd9",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749463443777",
+          "observed_time_unix_nano": "1793270749463443777",
+          "event.id": "58033667-7236-4e86-bcaf-aa76088b09e9",
+          "event.name": "llm.request",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "1c57ada2ad93faed",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749463844267",
+          "observed_time_unix_nano": "1793270749463844267",
+          "event.id": "c4f21644-c76a-4cfd-96bc-af28c4763e0f",
+          "event.name": "tool.call",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "1c504ba0bb89ae4f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749464056915",
+          "observed_time_unix_nano": "1793270749464056915",
+          "event.id": "c51bebe6-5f41-46b4-8668-dce69ca0c6dd",
+          "event.name": "tool.result",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "1c504ba0bb89ae4f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749464310338",
+          "observed_time_unix_nano": "1793270749464310338",
+          "event.id": "8aa55d10-29d5-4d2d-bbb4-14557eef6a5a",
+          "event.name": "llm.request",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "db7b742ecb6153ed",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749463741286",
+          "observed_time_unix_nano": "1793270749463741286",
+          "event.id": "586fc2ae-f415-437c-a830-bebba5e4c99e",
+          "event.name": "llm.response",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "1c57ada2ad93faed",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749464567628",
+          "observed_time_unix_nano": "1793270749464567628",
+          "event.id": "b6af0877-ef04-4507-8491-8e22b995e30f",
+          "event.name": "llm.response",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "db7b742ecb6153ed",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749465211894",
+          "observed_time_unix_nano": "1793270749465211894",
+          "event.id": "5ed2bc97-6a7e-4e51-abdb-86978519254b",
+          "event.name": "other",
+          "trace_id": "d916e6c7c346da68e58ad2cc0baa05ac",
+          "span_id": "db7b742ecb6153ed",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        }
+      ]
+    },
+    {
+      "name": "history-only",
+      "records": [
+        {
+          "time_unix_nano": "1793270749676678782",
+          "observed_time_unix_nano": "1793270749676678782",
+          "event.id": "878402d3-f3f3-4fac-ad73-f4a2abfd9202",
+          "event.name": "other",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "8e584dc94e663eea",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749676678782",
+          "observed_time_unix_nano": "1793270749676678782",
+          "event.id": "067750bb-3ecc-4f34-bc34-6d8431ca3911",
+          "event.name": "llm.request",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "0938d3ed4a65e697",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749677308950",
+          "observed_time_unix_nano": "1793270749677308950",
+          "event.id": "2113399d-2dd1-4df8-8da2-b7a8690b843f",
+          "event.name": "tool.call",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "9a3c5e656c0a877f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749677558512",
+          "observed_time_unix_nano": "1793270749677558512",
+          "event.id": "f429090c-d251-4574-97aa-82837111b167",
+          "event.name": "tool.result",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "9a3c5e656c0a877f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749677835516",
+          "observed_time_unix_nano": "1793270749677835516",
+          "event.id": "b30b5de1-61ac-458a-9b6a-6b7c24b1e7c7",
+          "event.name": "llm.request",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "bdbe8c1b81814977",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749677177698",
+          "observed_time_unix_nano": "1793270749677177698",
+          "event.id": "d0183925-c4fd-4da5-9673-d5db423005ec",
+          "event.name": "llm.response",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "0938d3ed4a65e697",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749678113225",
+          "observed_time_unix_nano": "1793270749678113225",
+          "event.id": "b37bffa0-314f-4dd5-a819-a7e38f68575a",
+          "event.name": "llm.response",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "bdbe8c1b81814977",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749678786295",
+          "observed_time_unix_nano": "1793270749678786295",
+          "event.id": "7dbc9591-cd3f-4839-a352-a9858ee2b0f8",
+          "event.name": "other",
+          "trace_id": "a7661eb67fea9ef52900fd3a70fc9103",
+          "span_id": "bdbe8c1b81814977",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        },
+        {
+          "time_unix_nano": "1793270749679067267",
+          "observed_time_unix_nano": "1793270749679067267",
+          "event.id": "85cd59ec-953a-4baa-b1be-a9940252d1a9",
+          "event.name": "other",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "135f036605f1d188",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749679067267",
+          "observed_time_unix_nano": "1793270749679067267",
+          "event.id": "bc062acd-fe07-414b-8307-66867d8a37a3",
+          "event.name": "llm.request",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "234dae6efef5e359",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749679466569",
+          "observed_time_unix_nano": "1793270749679466569",
+          "event.id": "c78162ea-5b81-4627-8e98-2f5714487be7",
+          "event.name": "tool.call",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "99f6dde1068a25eb",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749679688878",
+          "observed_time_unix_nano": "1793270749679688878",
+          "event.id": "70b7c5a7-d292-4dce-ac42-d8a81d55dd5c",
+          "event.name": "tool.result",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "99f6dde1068a25eb",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749679941277",
+          "observed_time_unix_nano": "1793270749679941277",
+          "event.id": "cf444267-80cf-416f-ae6d-fe174dacc14b",
+          "event.name": "llm.request",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "55c95b45462c4fb4",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749679360416",
+          "observed_time_unix_nano": "1793270749679360416",
+          "event.id": "0b6bc7e5-5108-48a6-8f36-07dd88982224",
+          "event.name": "llm.response",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "234dae6efef5e359",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749680196790",
+          "observed_time_unix_nano": "1793270749680196790",
+          "event.id": "e42aed84-9f7f-4116-9ef2-25853f686d41",
+          "event.name": "llm.response",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "55c95b45462c4fb4",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749680846208",
+          "observed_time_unix_nano": "1793270749680846208",
+          "event.id": "7705226e-dcda-42d3-83ae-016ca8bebe6b",
+          "event.name": "other",
+          "trace_id": "99b5dd770f2127d9b12dda602d485171",
+          "span_id": "55c95b45462c4fb4",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        }
+      ]
+    },
+    {
+      "name": "late-history",
+      "records": [
+        {
+          "time_unix_nano": "1793270749889056464",
+          "observed_time_unix_nano": "1793270749889056464",
+          "event.id": "df3316bb-3d4a-4952-8954-f4472638dc84",
+          "event.name": "other",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "668a68fe475d7c86",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749889056464",
+          "observed_time_unix_nano": "1793270749889056464",
+          "event.id": "1225b4e8-e3df-4137-9930-d3313356a297",
+          "event.name": "llm.request",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "638ffb6b711d9b61",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749889702222",
+          "observed_time_unix_nano": "1793270749889702222",
+          "event.id": "2c39f241-5a11-40cf-a773-1afaf79cab41",
+          "event.name": "tool.call",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "ea0f5609d6ed23bb",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749889946248",
+          "observed_time_unix_nano": "1793270749889946248",
+          "event.id": "e023133e-4e93-4c95-bd83-a0949910d120",
+          "event.name": "tool.result",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "ea0f5609d6ed23bb",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749890222839",
+          "observed_time_unix_nano": "1793270749890222839",
+          "event.id": "f2e883db-0f7e-425b-937b-ab07e83e2954",
+          "event.name": "llm.request",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "d6b5e8af02ae0437",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749889567510",
+          "observed_time_unix_nano": "1793270749889567510",
+          "event.id": "b89c2efb-1469-4204-9482-bd3d110dcab7",
+          "event.name": "llm.response",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "638ffb6b711d9b61",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749890511791",
+          "observed_time_unix_nano": "1793270749890511791",
+          "event.id": "0488d808-384c-4b41-9229-c74d50c1b194",
+          "event.name": "llm.response",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "d6b5e8af02ae0437",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749891186166",
+          "observed_time_unix_nano": "1793270749891186166",
+          "event.id": "9dcdf612-a045-4ffd-9440-1f5ae5a5c468",
+          "event.name": "other",
+          "trace_id": "8c01d8185f44b9675afc21f7df279694",
+          "span_id": "d6b5e8af02ae0437",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        },
+        {
+          "time_unix_nano": "1793270749891459805",
+          "observed_time_unix_nano": "1793270749891459805",
+          "event.id": "31c7f7ca-dfab-4b3d-821f-0b6b41ea2a81",
+          "event.name": "other",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "2e106b527f5af2e9",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270749891459805",
+          "observed_time_unix_nano": "1793270749891459805",
+          "event.id": "cfcde58d-b166-4735-8bac-579de06deab4",
+          "event.name": "llm.request",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "e9287a428dd51679",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749891885867",
+          "observed_time_unix_nano": "1793270749891885867",
+          "event.id": "095c7237-e502-473d-89cc-0b81b173f6e7",
+          "event.name": "tool.call",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "c2290fa91ec01da7",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270749892102836",
+          "observed_time_unix_nano": "1793270749892102836",
+          "event.id": "ce88bf30-57ea-4691-b8e8-91a91b68b79c",
+          "event.name": "tool.result",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "c2290fa91ec01da7",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270749892355849",
+          "observed_time_unix_nano": "1793270749892355849",
+          "event.id": "064c90c2-ce20-4e9c-8694-6e6bc207c5e8",
+          "event.name": "llm.request",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "cf22c01c31ba855f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270749891779936",
+          "observed_time_unix_nano": "1793270749891779936",
+          "event.id": "c1a3feca-b1c0-414a-b0ee-548458fc34d5",
+          "event.name": "llm.response",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "e9287a428dd51679",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270749892620634",
+          "observed_time_unix_nano": "1793270749892620634",
+          "event.id": "ab33d472-71ae-448b-9bca-773664b690f4",
+          "event.name": "llm.response",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "cf22c01c31ba855f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270749893268943",
+          "observed_time_unix_nano": "1793270749893268943",
+          "event.id": "3a780ec7-e3e9-411f-8215-c139ee51861f",
+          "event.name": "other",
+          "trace_id": "2580ea615da199a4f63020c5bdc820fc",
+          "span_id": "cf22c01c31ba855f",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        }
+      ]
+    },
+    {
+      "name": "full-late-history",
+      "records": [
+        {
+          "time_unix_nano": "1793270750109326425",
+          "observed_time_unix_nano": "1793270750109326425",
+          "event.id": "b0cac01c-6c12-47d6-bc7e-cd4e7c82672d",
+          "event.name": "other",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "1adeeec484819a98",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270750109326425",
+          "observed_time_unix_nano": "1793270750109326425",
+          "event.id": "a21aa6d4-751e-4dad-8b4a-55f8324a43d3",
+          "event.name": "llm.request",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "bd6e9465e51a7731",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270750109987793",
+          "observed_time_unix_nano": "1793270750109987793",
+          "event.id": "1f71641f-63bb-493a-8b21-0457440c69b0",
+          "event.name": "tool.call",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "aa73e4bdb6bef680",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270750110230585",
+          "observed_time_unix_nano": "1793270750110230585",
+          "event.id": "819058f5-7452-4afc-9b6a-db89ddd7e90c",
+          "event.name": "tool.result",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "aa73e4bdb6bef680",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270750110514595",
+          "observed_time_unix_nano": "1793270750110514595",
+          "event.id": "4c7c4ab3-06e8-4c65-bac9-13e2dc7d2f5f",
+          "event.name": "llm.request",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "806ad59304790a87",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270750109852798",
+          "observed_time_unix_nano": "1793270750109852798",
+          "event.id": "125d9809-208f-4009-8da6-034cc2340454",
+          "event.name": "llm.response",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "bd6e9465e51a7731",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a1",
+          "gen_ai.response.id": "turn-1:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270750110792427",
+          "observed_time_unix_nano": "1793270750110792427",
+          "event.id": "75ea6566-96b4-476f-8adb-a54287c6fcc3",
+          "event.name": "llm.response",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "806ad59304790a87",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-1:a2",
+          "gen_ai.response.id": "turn-1:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270750111470527",
+          "observed_time_unix_nano": "1793270750111470527",
+          "event.id": "6b709433-49b0-423e-87e2-f1155afb1203",
+          "event.name": "other",
+          "trace_id": "253827708383d7f5358b910ba253c175",
+          "span_id": "806ad59304790a87",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.step.id": "turn-1:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        },
+        {
+          "time_unix_nano": "1793270750111756357",
+          "observed_time_unix_nano": "1793270750111756357",
+          "event.id": "7849e973-1c31-40bc-a8f1-5ba4cb1270e4",
+          "event.name": "other",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "d0419617d139ce1e",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "agent.hermes.hook": "turn_start",
+          "gen_ai.provider.name": "qwen",
+          "agent.pilot.correlation.content_hash": "c69eaf1911aa7842",
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "time_unix_nano": "1793270750111756357",
+          "observed_time_unix_nano": "1793270750111756357",
+          "event.id": "8f8bb0ae-27b3-46eb-9b75-0de0605a15ed",
+          "event.name": "llm.request",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "d8ba02caf9d58630",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "e71ef97010acae11a0d72d1ba81cab1546827727b023aa25b03074c0784816d4",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270750112171347",
+          "observed_time_unix_nano": "1793270750112171347",
+          "event.id": "366fe5c0-2c7f-48a1-8e4e-048b14687b41",
+          "event.name": "tool.call",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "9a2d9739477df911",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.arguments": {
+            "command": "wc -l /etc/hosts /etc/shells"
+          }
+        },
+        {
+          "time_unix_nano": "1793270750112390295",
+          "observed_time_unix_nano": "1793270750112390295",
+          "event.id": "12b103a9-52e0-4a75-83f8-99d3f693b865",
+          "event.name": "tool.result",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "9a2d9739477df911",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.tool.name": "terminal",
+          "gen_ai.tool.call.id": "call_fixture_001",
+          "gen_ai.tool.call.exec.id": "call_fixture_001",
+          "gen_ai.tool.call.duration": 1,
+          "tool.result.status": "success",
+          "gen_ai.tool.call.result": {
+            "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+            "exit_code": 0,
+            "error": null
+          }
+        },
+        {
+          "time_unix_nano": "1793270750112656007",
+          "observed_time_unix_nano": "1793270750112656007",
+          "event.id": "6424fcac-d99c-43a2-a9f9-69158469c0f6",
+          "event.name": "llm.request",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "e93748022f141bf3",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "Count the approved files with one terminal call."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_delta": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "parts": [
+                {
+                  "type": "tool_call_response",
+                  "id": "call_fixture_001",
+                  "response": {
+                    "output": "17 /etc/hosts\n11 /etc/shells\n28 total",
+                    "exit_code": 0,
+                    "error": null
+                  }
+                }
+              ]
+            }
+          ],
+          "gen_ai.input.messages_hash": "392e3769906300e06002cd8be90549b6fb5a5e0e5ab1998742f842e5653edffa",
+          "agent.hermes.hook": "pre_api_request"
+        },
+        {
+          "time_unix_nano": "1793270750112066672",
+          "observed_time_unix_nano": "1793270750112066672",
+          "event.id": "19d603ed-971d-422b-8d29-ff31c03b876b",
+          "event.name": "llm.response",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "d8ba02caf9d58630",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s1",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a1",
+          "gen_ai.response.id": "turn-2:s1:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "tool_calls"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "tool_call",
+                  "id": "call_fixture_001",
+                  "name": "terminal",
+                  "arguments": {
+                    "command": "wc -l /etc/hosts /etc/shells"
+                  }
+                }
+              ],
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1711,
+          "gen_ai.usage.output_tokens": 31,
+          "gen_ai.usage.cache_read.input_tokens": 0,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1742
+        },
+        {
+          "time_unix_nano": "1793270750112913238",
+          "observed_time_unix_nano": "1793270750112913238",
+          "event.id": "cb253364-5bc5-4d99-a612-44ef8d2afbed",
+          "event.name": "llm.response",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "e93748022f141bf3",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "gen_ai.request.id": "turn-2:a2",
+          "gen_ai.response.id": "turn-2:s2:r",
+          "gen_ai.request.model": "qwen3-coder-plus",
+          "gen_ai.response.model": "qwen3-coder-plus",
+          "gen_ai.response.finish_reasons": [
+            "stop"
+          ],
+          "gen_ai.output.messages": [
+            {
+              "role": "assistant",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "The files have 17 and 11 lines, for a total of 28."
+                }
+              ],
+              "finish_reason": "stop"
+            }
+          ],
+          "gen_ai.usage.input_tokens": 1794,
+          "gen_ai.usage.output_tokens": 36,
+          "gen_ai.usage.cache_read.input_tokens": 1600,
+          "gen_ai.usage.cache_creation.input_tokens": 0,
+          "gen_ai.usage.total_tokens": 1830
+        },
+        {
+          "time_unix_nano": "1793270750113583033",
+          "observed_time_unix_nano": "1793270750113583033",
+          "event.id": "e919a180-454a-4174-aa03-c04d087f0e36",
+          "event.name": "other",
+          "trace_id": "009276ca94ed444fefee1879a1f48c31",
+          "span_id": "e93748022f141bf3",
+          "user.id": "fixture-user",
+          "host.name": "v43c03315.sqa.na131",
+          "service.name": "hermes-agent",
+          "agent.channel": "cli",
+          "gen_ai.session.id": "hermes-native-session",
+          "gen_ai.turn.id": "turn-2",
+          "gen_ai.step.id": "turn-2:s2",
+          "gen_ai.agent.type": "hermes",
+          "agent.hermes.collection": "realtime-v1",
+          "agent.pilot.invocation.user.id": "fixture-user",
+          "agent.hermes.sender.id": "fixture-user",
+          "gen_ai.provider.name": "qwen",
+          "agent.hermes.hook": "turn_end",
+          "gen_ai.turn.end": true
+        }
+      ]
+    }
+  ]
+}

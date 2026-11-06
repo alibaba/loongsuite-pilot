@@ -1,0 +1,11 @@
+name: Prepare pinned Rust dependencies
+description: Cache, verify and prepare build-only Boa sources before Cargo reads path patches
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: .build/rust-archives
+        key: pilot-rust-deps-${{ runner.os }}-${{ hashFiles('scripts/build/rust-dependencies.json', 'scripts/build/prepare-rust-dependencies.py') }}
+    - shell: bash
+      run: python scripts/build/prepare-rust-dependencies.py

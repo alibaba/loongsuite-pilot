@@ -1,35 +1,15 @@
 #!/usr/bin/env bash
-set +e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-PROCESSOR="$SCRIPT_DIR/workbuddy-hook-event-writer.mjs"
-SUBCOMMAND="${1:-unknown}"
-NODE_BIN=""
-
-for candidate in \
-  "$HOME/.loongsuite-pilot/node-bin" \
-  "$HOME/.volta/bin/node" \
-  "$HOME/.fnm/aliases/default/bin/node" \
-  /opt/homebrew/bin/node \
-  /usr/local/bin/node \
-  "$HOME/.local/bin/node"
-do
-  if [[ "$candidate" == *.loongsuite-pilot/node-bin && -f "$candidate" ]]; then
-    candidate="$(tr -d '[:space:]' < "$candidate" 2>/dev/null)"
-  fi
-  if [[ -n "$candidate" && -x "$candidate" ]]; then
-    NODE_BIN="$candidate"
-    break
-  fi
-done
-
-if [[ -z "$NODE_BIN" ]] && command -v node >/dev/null 2>&1; then
-  NODE_BIN="$(command -v node)"
-fi
-
-if [[ -n "$NODE_BIN" && -f "$PROCESSOR" ]]; then
-  "$NODE_BIN" "$PROCESSOR" "$SUBCOMMAND" 2>/dev/null || true
+set -u
+EMPTY_RESULT='{}'
+NATIVE_ARGS=('hook-process' 'workbuddy')
+EVENT="${1:-unknown}"
+NATIVE_ARGS+=("$EVENT")
+HOOK_DIR="${BASH_SOURCE[0]%/*}"
+[[ "$HOOK_DIR" != "${BASH_SOURCE[0]}" ]] || HOOK_DIR=.
+if HOOK_DIR="$(cd -- "$HOOK_DIR" && pwd -P)" && source "$HOOK_DIR/shared/native.sh"; then
+  pilot_invoke_native "$HOOK_DIR" "$EMPTY_RESULT" "${NATIVE_ARGS[@]}"
 else
-  printf '{}\n'
+  printf '%s\n' '[loongsuite-pilot] native hook bootstrap failed' >&2
+  [[ -z "$EMPTY_RESULT" ]] || printf '%s\n' "$EMPTY_RESULT"
 fi
 exit 0

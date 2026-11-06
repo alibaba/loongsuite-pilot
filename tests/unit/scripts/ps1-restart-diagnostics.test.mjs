@@ -11,13 +11,13 @@
 //   * several branches printed nothing at all.
 //
 // So every non-success exit now goes through Write-RestartFailure, which prints the
-// reason and drops a breadcrumb file that the caller reads (src/utils/restart-breadcrumb.ts)
+// reason and drops a breadcrumb file that the caller reads (src/utils/restart_breadcrumb.rs)
 // to enrich its alarm. These checks pin the shape of that contract, not any wording.
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 
 const SERVICE_PS1 = 'scripts/loongsuite-pilot.ps1';
-const BREADCRUMB_TS = 'src/utils/restart-breadcrumb.ts';
+const BREADCRUMB_RS = 'src/utils/restart_breadcrumb.rs';
 const text = readFileSync(SERVICE_PS1, 'utf-8');
 
 // Drop comment lines so prose about Write-RestartFailure cannot satisfy a structural check.
@@ -231,15 +231,13 @@ describe('the schtasks cross-check survives EAP=Stop', () => {
 });
 
 describe('stage labels agree with the reader', () => {
-  it('every stage the script writes is known to restart-breadcrumb.ts', () => {
+  it('every stage the script writes is known to restart_breadcrumb.rs', () => {
     // The stages are aggregation keys in the alarm stream. A label only one side knows
     // makes the alarm unqueryable, which is a silent failure of its own.
-    const tsText = readFileSync(BREADCRUMB_TS, 'utf-8');
-    const listed = tsText.slice(
-      tsText.indexOf('RESTART_STAGES = ['),
-      tsText.indexOf('] as const'),
-    );
-    const known = new Set([...listed.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]));
+    const rsText = readFileSync(BREADCRUMB_RS, 'utf-8');
+    const listed = rsText.match(/pub const RESTART_STAGES:[\s\S]*?=\s*&\[([\s\S]*?)\];/);
+    expect(listed, 'native stage registry must exist').not.toBeNull();
+    const known = new Set([...listed[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]));
     expect(known.size).toBeGreaterThan(5);
 
     const code = codeOf(text);
@@ -278,7 +276,12 @@ describe('query-fail still starts the task', () => {
 describe('wait loops do not delete pid files', () => {
   it('Test-PidAlive is read-only', () => {
     const body = bodyOf('Test-PidAlive');
-    expect(body).toContain('Get-Process -Id');
+    expect(body).toContain('Test-InstalledProcess');
+    const nativeProbe = bodyOf('Test-InstalledProcess');
+    expect(nativeProbe).toContain('"service-helper", "process-alive"');
+    for (const sideEffect of ['Remove-Item', 'Stop-Process', 'Test-PidRunning']) {
+      expect(nativeProbe).not.toContain(sideEffect);
+    }
     expect(body).not.toContain('Remove-Item');
     expect(body).not.toContain('Stop-Process');
   });

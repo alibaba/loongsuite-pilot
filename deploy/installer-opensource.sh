@@ -40,12 +40,6 @@ DEFAULT_DATA_DIR="$HOME/.loongsuite-pilot"
 
 # OSS download base URL
 _OSS_BASE_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot"
-# Managed Node.js runtime + prebuilt node_modules (downloaded from OSS at install time)
-NODE_VERSION="${LOONGSUITE_PILOT_NODE_VERSION:-22.22.2}"
-NODE_DEPS_BASE="${LOONGSUITE_PILOT_NODE_DEPS_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node}"
-NODE_MODULES_BASE="${LOONGSUITE_PILOT_NODE_MODULES_URL:-https://aliyun-observability-release-cn-shanghai.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/deps/node-modules}"
-
-
 # ============================================================
 # Parse sub-command
 # ============================================================
@@ -294,8 +288,8 @@ validate_install_user() {
     esac
 }
 
-# Resolve PACKAGE_URL from OSS if not explicitly set
-if [ -z "$PACKAGE_URL" ]; then
+# Resolve install/upgrade defaults; uninstall uses current unless a candidate is explicit.
+if [ "$COMMAND" != "uninstall" ] && [ -z "$PACKAGE_URL" ]; then
     if [ -n "$INSTALL_VERSION" ]; then
         PACKAGE_URL="${_OSS_BASE_URL}/${INSTALL_VERSION}/${PACKAGE_NAME}.tar.gz"
     else
@@ -384,298 +378,22 @@ resolve_node() {
     return 1
 }
 
-# >>> managed-node-runtime >>>
-# Managed Node.js runtime + prebuilt node_modules, downloaded from OSS.
-# Everything here logs to stderr only: ensure_managed_node is captured via
-# $(...) and must print the node path — and nothing else — on stdout.
-_mn_msg() {
-    if [ "${LANG_MODE:-en}" = "zh" ]; then echo "$1" >&2; else echo "$2" >&2; fi
-}
 
-managed_node_platform() {
-    local os arch
-    case "$(uname -s)" in
-        Darwin) os="darwin" ;;
-        Linux) os="linux" ;;
-        MINGW*|MSYS*|CYGWIN*) os="win" ;;
-        *)
-            echo "managed node: unsupported platform $(uname -s)" >&2
-            return 1 ;;
-    esac
-    case "$(uname -m)" in
-        arm64|aarch64) arch="arm64" ;;
-        x86_64|amd64) arch="x64" ;;
-        *)
-            echo "managed node: unsupported architecture $(uname -m)" >&2
-            return 1 ;;
-    esac
-    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
-        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
-                "managed node: no win-arm64 artifact, falling back to system node + npm install"
-        return 1
-    fi
-    if [ "$os" = "linux" ] && managed_node_is_musl; then
-        _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
-                "managed node: no linux-musl artifact, falling back to system node + npm install"
-        return 1
-    fi
-    echo "$os $arch"
-}
-
-managed_node_is_musl() {
-    ls /lib/ld-musl-* >/dev/null 2>&1 && return 0
-    ldd --version 2>&1 | grep -qi musl && return 0
-    return 1
-}
-
-managed_node_download() {
-    # managed_node_download <url> <dest>
-    # Bounded timeouts mirror the .ps1 installer (-TimeoutSec 600); without
-    # them a stalled TCP connection hangs the installer indefinitely.
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$1" -o "$2"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --tries=2 --timeout=20 "$1" -O "$2"
-    else
-        return 1
-    fi
-}
-
-managed_node_sha256() {
-    if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "managed node: neither shasum nor sha256sum available" >&2
-        return 1
-    fi
-}
-
-managed_node_verify() {
-    # managed_node_verify <archive> <shasums-file> <archive-basename>
-    local expected actual
-    # [*]? accepts sha256sum binary-mode lines ("<hash> *<name>"), matching
-    # the .ps1 installer's Test-ManagedNodeChecksum.
-    expected=$(grep -E "[[:space:]][*]?${3}\$" "$2" 2>/dev/null | awk '{print $1}' | head -1)
-    if [ -z "$expected" ]; then
-        echo "managed node: SHASUMS256.txt has no entry for $3" >&2
-        return 1
-    fi
-    actual=$(managed_node_sha256 "$1") || return 1
-    if [ "$expected" != "$actual" ]; then
-        echo "managed node: sha256 mismatch for $3 (expected $expected, got $actual)" >&2
-        return 1
-    fi
-    return 0
-}
-
-managed_node_bin() {
-    # managed_node_bin <node-dir> <os>
-    # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
-    local bin="$1/bin/node"
-    [ "$2" = "win" ] && bin="$1/bin/node.exe"
-    if [ -x "$bin" ]; then
-        echo "$bin"
-        return 0
-    fi
-    if [ "$2" = "win" ] && [ -x "$1/node.exe" ]; then
-        echo "$1/node.exe"
-        return 0
-    fi
-    return 1
-}
-
-ensure_managed_node() {
-    local runtime_dir="$DATA_DIR/runtime"
-    local tuple os arch
-    tuple=$(managed_node_platform) || return 1
-    os="${tuple% *}"; arch="${tuple#* }"
-
-    local ext="tar.gz"
-    [ "$os" = "win" ] && ext="zip"
-    local archive="node-v${NODE_VERSION}-${os}-${arch}.${ext}"
-    local node_dir="$runtime_dir/node-v${NODE_VERSION}-${os}-${arch}"
-    local node_bin=""
-    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
-
-    if [ -n "$node_bin" ] && [ "$("$node_bin" --version 2>/dev/null)" = "v${NODE_VERSION}" ]; then
-        echo "$node_bin"
-        return 0
-    fi
-
-    local base="${NODE_DEPS_BASE%/}/${NODE_VERSION}"
-    local tmp
-    tmp=$(mktemp -d) || return 1
-
-    _mn_msg "==> 下载托管 Node.js v${NODE_VERSION} (${os}-${arch})..." \
-            "==> Downloading managed Node.js v${NODE_VERSION} (${os}-${arch})..."
-    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
-        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
-        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-
-    mkdir -p "$runtime_dir"
-    rm -rf "$node_dir"
-    if [ "$ext" = "zip" ]; then
-        if ! command -v unzip >/dev/null 2>&1 || ! unzip -q "$tmp/$archive" -d "$runtime_dir"; then
-            rm -rf "$tmp" "$node_dir"
-            return 1
-        fi
-    else
-        if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$runtime_dir" 2>/dev/null \
-                || tar -xzf "$tmp/$archive" -C "$runtime_dir"; }; then
-            rm -rf "$tmp" "$node_dir"
-            return 1
-        fi
-    fi
-    rm -rf "$tmp"
-
-    node_bin=$(managed_node_bin "$node_dir" "$os") || node_bin=""
-    if [ -z "$node_bin" ]; then
-        echo "managed node: extracted archive has no usable node binary under $node_dir (bin/node or node.exe)" >&2
-        rm -rf "$node_dir"
-        return 1
-    fi
-    if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
-        xattr -dr com.apple.quarantine "$node_dir" 2>/dev/null || true
-    fi
-    echo "$node_bin"
-}
-
-ensure_node_modules() {
-    # ensure_node_modules <app-version>  (expects PERMANENT_DIR to point at the deployed version dir)
-    local app_version="${1:-latest}"
-    local tuple os arch
-    tuple=$(managed_node_platform) || return 1
-    os="${tuple% *}"; arch="${tuple#* }"
-
-    local modules_dir="$PERMANENT_DIR/node_modules"
-    local marker="$modules_dir/.pilot-modules-version"
-    local stamp="${app_version} ${os} ${arch}"
-    if [ -d "$modules_dir" ] && [ "$(cat "$marker" 2>/dev/null)" = "$stamp" ]; then
-        return 0
-    fi
-
-    local archive="node-modules-${os}-${arch}.tar.gz"
-    local base="${NODE_MODULES_BASE%/}/${app_version}"
-    local tmp
-    tmp=$(mktemp -d) || return 1
-
-    _mn_msg "==> 下载预编译 node_modules (${os}-${arch}, app v${app_version})..." \
-            "==> Downloading prebuilt node_modules (${os}-${arch}, app v${app_version})..."
-    if ! managed_node_download "$base/$archive" "$tmp/$archive" \
-        || ! managed_node_download "$base/SHASUMS256.txt" "$tmp/SHASUMS256.txt" \
-        || ! managed_node_verify "$tmp/$archive" "$tmp/SHASUMS256.txt" "$archive"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-
-    local stage="$tmp/stage"
-    mkdir -p "$stage"
-    if ! { tar --warning=no-unknown-keyword -xzf "$tmp/$archive" -C "$stage" 2>/dev/null \
-            || tar -xzf "$tmp/$archive" -C "$stage"; }; then
-        rm -rf "$tmp"
-        return 1
-    fi
-    if [ ! -d "$stage/node_modules" ]; then
-        rm -rf "$tmp"
-        echo "managed node_modules: archive does not contain node_modules/" >&2
-        return 1
-    fi
-    echo "$stamp" > "$stage/node_modules/.pilot-modules-version"
-    rm -rf "$modules_dir"
-    if ! mv "$stage/node_modules" "$modules_dir"; then
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-    return 0
-}
-
-run_npm() {
-    # npm shipped with the managed runtime is a symlink to npm-cli.js, whose
-    # `#!/usr/bin/env node` shebang resolves node through PATH. The runtime's bin dir
-    # is not on PATH, so calling "$NPM_BIN" directly dies with
-    # "env: node: No such file or directory" on hosts without a system node — exactly
-    # the hosts the managed runtime exists for. Mirrors the .ps1 npm fallback, which
-    # already prepends the node dir.
-    PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" "$@"
-}
-# <<< managed-node-runtime <<<
 
 check_deps() {
-    msg "==> 检查依赖..." "==> Checking dependencies..."
-
-    NODE_BIN=""
+    msg "==> 检查下载与解压工具..." "==> Checking download and archive tools..."
+    if ! command -v tar >/dev/null 2>&1; then
+        printf '%s\n' '缺少 tar，无法解压原生安装包' >&2
+        return 1
+    fi
+    if [ ! -f "$PACKAGE_URL" ] && [[ "$PACKAGE_URL" != file://* ]] \
+        && ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        printf '%s\n' '缺少 curl 或 wget，无法下载安装包' >&2
+        return 1
+    fi
     if [ "${PREFER_SYSTEM_NODE:-0}" -eq 1 ]; then
-        NODE_BIN=$(resolve_node) || NODE_BIN=""
-        if [ -z "$NODE_BIN" ]; then
-            msg "    ⚠️ 系统 Node.js 不可用或无法加载 node:sqlite（需要 22.13+ 或 23.4+），改用托管运行时" \
-                "    ⚠️ System Node.js is missing or cannot load node:sqlite (need 22.13+ or 23.4+); using the managed runtime"
-            NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
-        fi
-    else
-        NODE_BIN=$(ensure_managed_node) || NODE_BIN=""
-        if [ -z "$NODE_BIN" ]; then
-            msg "    ⚠️ 托管 Node.js 不可用（平台不支持或下载失败），回退系统 node" \
-                "    ⚠️ Managed Node.js unavailable (unsupported platform or download failed), falling back to system node"
-            NODE_BIN=$(resolve_node) || NODE_BIN=""
-        fi
+        printf '%s\n' '--prefer-system-node 已弃用；原生安装不使用 Node.js' >&2
     fi
-    if [ -z "$NODE_BIN" ]; then
-        msg "❌ 缺少可用的 Node.js：需要能加载 node:sqlite 的版本（22.13+ / 23.4+），或成功下载托管运行时" \
-            "❌ No usable Node.js: node:sqlite must load (22.13+ / 23.4+), or the managed runtime must download"
-        exit 1
-    fi
-
-    if ! _node_supports_sqlite "$NODE_BIN"; then
-        local node_ver
-        node_ver="$("$NODE_BIN" --version 2>/dev/null || echo unknown)"
-        msg "❌ 当前 Node.js 无法加载 node:sqlite（${node_ver}）。需要 22.13+ 或 23.4+（无需 --experimental-sqlite），或托管运行时。" \
-            "❌ This Node.js cannot load node:sqlite (${node_ver}). Need 22.13+ or 23.4+ (unflagged), or the managed runtime."
-        exit 1
-    fi
-
-    # Pin the node binary path
-    mkdir -p "$DATA_DIR" 2>/dev/null || true
-    echo "$NODE_BIN" > "$DATA_DIR/node-bin"
-
-    # Derive npm from the same installation
-    NPM_BIN="$(dirname "$NODE_BIN")/npm"
-    if [ ! -x "$NPM_BIN" ]; then
-        if command -v npm &>/dev/null; then
-            NPM_BIN=$(command -v npm)
-        else
-            msg "❌ 缺少依赖: npm，请先安装后重试" \
-                "❌ Missing dependency: npm — please install it first"
-            exit 1
-        fi
-    fi
-
-    if [ "$(uname)" = "Darwin" ]; then
-        local sys_arch; sys_arch=$(uname -m)
-        local node_arch; node_arch=$("$NODE_BIN" -e "process.stdout.write(process.arch)")
-        if [ "$sys_arch" = "arm64" ] && [ "$node_arch" = "x64" ]; then
-            msg "⚠️  架构不匹配: 系统为 arm64 (Apple Silicon)，但 Node.js 为 x64 (Intel)" \
-                "⚠️  Architecture mismatch: system is arm64 but Node.js is x64 (Intel)"
-            msg "   原生模块可能无法正常加载，建议安装 arm64 版本的 Node.js" \
-                "   Native modules may fail to load. Please install arm64 Node.js"
-        fi
-    fi
-
-    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
-        msg "❌ 需要 curl 或 wget，请先安装" \
-            "❌ curl or wget is required — please install one first"
-        exit 1
-    fi
-
-    msg "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)" \
-        "    ✅ node $("$NODE_BIN" --version)  npm $(run_npm --version)"
-    msg "    node pinned: $NODE_BIN" "    node pinned: $NODE_BIN"
-    echo ""
 }
 
 # ============================================================
@@ -688,10 +406,14 @@ download_and_extract() {
     msg "==> 下载安装包: $PACKAGE_URL" \
         "==> Downloading: $PACKAGE_URL"
 
-    if command -v curl &>/dev/null; then
-        curl -fsSL "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
+    if [ -f "$PACKAGE_URL" ]; then
+        cp "$PACKAGE_URL" "$TMP_DIR/package.tar.gz"
+    elif [[ "$PACKAGE_URL" == file://* ]]; then
+        cp "${PACKAGE_URL#file://}" "$TMP_DIR/package.tar.gz"
+    elif command -v curl &>/dev/null; then
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 "$PACKAGE_URL" -o "$TMP_DIR/package.tar.gz"
     else
-        wget -q "$PACKAGE_URL" -O "$TMP_DIR/package.tar.gz"
+        wget -q --tries=2 --timeout=20 "$PACKAGE_URL" -O "$TMP_DIR/package.tar.gz"
     fi
     msg "    ✅ 下载完成" "    ✅ Downloaded"
     echo ""
@@ -703,36 +425,46 @@ download_and_extract() {
         tar -xzf "$TMP_DIR/package.tar.gz" -C "$TMP_DIR"
     fi
 
-    if [ -d "$TMP_DIR/$PACKAGE_NAME" ]; then
-        INSTALL_SRC="$TMP_DIR/$PACKAGE_NAME"
-    elif [ -f "$TMP_DIR/package.json" ]; then
-        INSTALL_SRC="$TMP_DIR"
-    else
-        INSTALL_SRC=$(find "$TMP_DIR" -name "package.json" -maxdepth 2 -exec dirname {} \; | head -1 || true)
-        if [ -z "$INSTALL_SRC" ]; then
-            msg "❌ 解压后未找到 package.json，安装包结构异常" \
-                "❌ package.json not found — unexpected package structure"
-            exit 1
-        fi
-    fi
+    select_native_package_root "$TMP_DIR" || return 1
     msg "    ✅ 解压完成" "    ✅ Extracted"
     echo ""
 }
 
+select_native_package_root() {
+    local directory="$1" candidate
+    local roots=()
+    for candidate in "$directory" "$directory"/*; do
+        [ -d "$candidate" ] || continue
+        [ ! -L "$candidate" ] && [ ! -L "$candidate/bin" ] \
+            && [ ! -L "$candidate/runtime-manifest.json" ] \
+            && [ ! -L "$candidate/bin/loongsuite-pilot" ] || continue
+        if [ -f "$candidate/runtime-manifest.json" ] && [ -f "$candidate/bin/loongsuite-pilot" ] \
+            && [ -x "$candidate/bin/loongsuite-pilot" ]; then
+            roots+=("$candidate")
+        fi
+    done
+    if [ "${#roots[@]}" -ne 1 ]; then
+        printf '%s\n' '安装包必须且只能包含一个原生运行清单与二进制根目录' >&2
+        return 1
+    fi
+    INSTALL_SRC="${roots[0]}"
+}
+
 # ============================================================
-# Agent probe: detect available agents via Node.js CLI probe
+# Agent 探测由候选原生二进制执行。
 # ============================================================
 PROBE_RESULT="[]"
 
 probe_agents() {
     msg "==> 探测 AI Agent..." "==> Probing AI Agents..."
-    PROBE_RESULT=$("$NODE_BIN" "$INSTALL_SRC/dist/cli-probe.cjs" --installer --config-path "$DATA_DIR/config.json" 2>/dev/null) || {
-        msg "    ⚠️  Agent 探测失败，将跳过选择" "    ⚠️  Agent probe failed, skipping selection"
-        PROBE_RESULT="[]"
-        return 0
-    }
+    local probe_bin="$INSTALL_SRC/bin/loongsuite-pilot"
+    if [ ! -x "$probe_bin" ]; then
+        printf '%s\n' '候选包缺少原生探测入口' >&2
+        return 1
+    fi
+    PROBE_RESULT=$(AGENT_DATA_COLLECTION_CONFIG="$DATA_DIR/config.json" "$probe_bin" probe --installer) || return 1
     local count
-    count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
+    count=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-count) || return 1
     msg "    ✅ 探测到 ${count} 个 Agent 定义" "    ✅ Found ${count} agent definitions"
     echo ""
 }
@@ -763,78 +495,26 @@ select_agents() {
     fi
 
     local agent_count
-    agent_count=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "const r=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(String(r.length))" 2>/dev/null || echo "0")
+    agent_count=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-count) || return 1
     if [ "$agent_count" = "0" ]; then
         return 0
     fi
 
     # Non-interactive: auto-select all detected agents
     if [ ! -t 0 ]; then
-        SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
-const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const detected = r.filter(a => a.detected).map(a => a.id);
-process.stdout.write(detected.join(','));
-" 2>/dev/null || true)
+        SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-detected) || return 1
         msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
             "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
         echo ""
         return 0
     fi
 
-    # Interactive menu
-    printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
-const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const lang = process.argv[1];
-const defaults = [];
-for (let i = 0; i < r.length; i++) {
-  const a = r[i];
-  const status = lang === 'zh'
-    ? (a.detected ? '已检测到: ' + a.reason : '未检测到' + (a.reason ? ': ' + a.reason : ''))
-    : (a.detected ? 'detected: ' + a.reason : 'not detected' + (a.reason ? ': ' + a.reason : ''));
-  console.log('    [' + (i+1) + '] ' + a.displayName.padEnd(16) + '(' + status + ')');
-  if (a.detected) defaults.push(i+1);
-}
-console.log('');
-if (lang === 'zh') {
-  console.log('    默认选择已检测到的 Agent: ' + defaults.join(','));
-  console.log('    输入要启用的编号 (逗号分隔)，直接回车使用默认:');
-} else {
-  console.log('    Default selection (detected): ' + defaults.join(','));
-  console.log('    Enter numbers to enable (comma-separated), press Enter for default:');
-}
-" "$LANG_MODE"
-
-    # Read user input (Node readline handles UTF-8 editing; normalize Chinese punctuation).
-    # Prompt must go to stderr so it is visible and not captured by $().
+    printf '%s' "$PROBE_RESULT" | native_installer_helper probe-menu --lang "$LANG_MODE" || return 1
     local select_input
-    select_input=$("$NODE_BIN" -e "
-const readline = require('readline');
-const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-rl.question('    > ', (answer) => {
-  const normalized = answer.replace(/[，、；]/g, ',').trim();
-  process.stdout.write(normalized);
-  rl.close();
-});
-") || {
-        printf "    > " >&2
-        read -r select_input
-        select_input=$(printf '%s' "$select_input" | sed 's/，/,/g; s/、/,/g; s/；/,/g')
-    }
-
-    # Compute final selection: empty input = detected agents, otherwise use exact input
-    if [ -n "$select_input" ]; then AGENT_SELECTION_EXPLICIT=1; fi
-    SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | "$NODE_BIN" -e "
-const r = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const input = (process.argv[1] || '').replace(/[，、；]/g, ',');
-let indices;
-if (!input.trim()) {
-  indices = r.map((a, i) => a.detected ? i : -1).filter(i => i >= 0);
-} else {
-  indices = [...new Set(input.trim().split(/[\s,]+/).map(Number).filter(n => n >= 1 && n <= r.length))].map(n => n - 1);
-}
-const ids = indices.sort((a,b) => a-b).map(i => r[i].id);
-process.stdout.write(ids.join(','));
-" "$select_input" 2>/dev/null || true)
+    printf "    > " >&2
+    read -r select_input || return 1
+    if [ -n "${select_input//[[:space:]]/}" ]; then AGENT_SELECTION_EXPLICIT=1; fi
+    SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-select --selection "$select_input") || return 1
 
     if [ -n "$SELECTED_AGENTS" ]; then
         msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
@@ -854,9 +534,7 @@ prompt_user_id() {
     local existing_uid=""
     local config_file="$DATA_DIR/config.json"
     if [ -f "$config_file" ]; then
-        existing_uid=$("$NODE_BIN" -e "
-try { const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf-8')); process.stdout.write(c.userId||''); } catch {}
-" -- "$config_file" 2>/dev/null || true)
+        existing_uid=$(native_installer_helper read-user-id --config "$config_file") || return 1
     fi
 
     echo ""
@@ -888,61 +566,7 @@ confirm_config_overwrite() {
     if [ ! -f "$config_file" ]; then return 0; fi
 
     local diffs
-    diffs=$("$NODE_BIN" -e "
-const fs = require('fs');
-let old = {};
-try { old = JSON.parse(fs.readFileSync(process.argv[1], 'utf-8')); } catch { process.exit(0); }
-
-const newVals = JSON.parse(process.argv[2]);
-const normalizeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean).join(',');
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
-const parseTypeCsv = value => String(value || '').split(',').map(v => v.trim()).filter(Boolean);
-const uniqueTypes = list => [...new Set(list)];
-const interceptorModeFinal = newVals.interceptorMode || (old.interceptor||{}).mode || '';
-const interceptorTypesFinal = interceptorModeFinal === 'all'
-  ? INTERCEPTOR_TYPE_SET.slice()
-  : interceptorModeFinal === 'custom'
-    ? parseTypeCsv(newVals.interceptorMode ? newVals.interceptorTypes : ((old.interceptor||{}).types||[]).join(',')).filter(t => INTERCEPTOR_TYPE_SET.indexOf(t) !== -1)
-    : [];
-const maskModeFinal = newVals.maskMode || (old.mask||{}).mode || '';
-const maskTypesFinal = maskModeFinal === 'custom'
-  ? parseTypeCsv(newVals.maskMode ? newVals.maskTypes : ((old.mask||{}).types||[]).join(','))
-  : [];
-const coveredMaskMode = interceptorTypesFinal.length && maskModeFinal !== 'all' ? 'custom' : maskModeFinal;
-const coveredMaskTypes = coveredMaskMode === 'custom' ? uniqueTypes(maskTypesFinal.concat(interceptorTypesFinal)) : [];
-const slsModeOf = sls => {
-  if (!sls) return '';
-  if (sls.mode) return sls.mode;
-  if (sls.apiKey) return 'apiKey';
-  if (sls.accessKeyId || sls.accessKeySecret) return 'ak';
-  return '';
-};
-const checks = [
-  { label: 'sls.endpoint',       oldVal: (old.sls||{}).endpoint||'',       newVal: newVals.slsEndpoint },
-  { label: 'sls.project',        oldVal: (old.sls||{}).project||'',        newVal: newVals.slsProject },
-  { label: 'sls.logstore',       oldVal: (old.sls||{}).logstore||'',       newVal: newVals.slsLogstore },
-  { label: 'sls.mode',           oldVal: slsModeOf(old.sls),               newVal: newVals.slsMode },
-  { label: 'cms.licenseKey',     oldVal: (old.cms||{}).licenseKey||'',     newVal: newVals.cmsLicenseKey },
-  { label: 'cms.endpoint',       oldVal: (old.cms||{}).endpoint||'',       newVal: newVals.cmsEndpoint },
-  { label: 'cms.workspace',      oldVal: (old.cms||{}).workspace||'',      newVal: newVals.cmsWorkspace },
-  { label: 'serviceNamePrefix',  oldVal: old.serviceNamePrefix||'',        newVal: newVals.serviceNamePrefix },
-  { label: 'dashboard.port',     oldVal: (old.dashboard||{}).port||'',    newVal: newVals.dashboardPort ? Number(newVals.dashboardPort) : '' },
-  { label: 'mask.mode',          oldVal: (old.mask||{}).mode||'',          newVal: coveredMaskMode },
-  { label: 'mask.types',         oldVal: (old.mask||{}).mode === 'custom' && Array.isArray((old.mask||{}).types) ? normalizeCsv(old.mask.types.join(',')) : '', newVal: coveredMaskTypes.join(',') },
-  { label: 'mask.replacementMode', oldVal: (old.mask||{}).replacementMode||'', newVal: newVals.maskReplacementMode },
-  { label: 'interceptor.mode',   oldVal: (old.interceptor||{}).mode||'',   newVal: newVals.interceptorMode },
-  { label: 'interceptor.types',  oldVal: Array.isArray((old.interceptor||{}).types) ? normalizeCsv(old.interceptor.types.join(',')) : '', newVal: normalizeCsv(newVals.interceptorTypes) },
-  { label: 'multimodal.storage.type', oldVal: (old.multimodal && old.multimodal.storage && old.multimodal.storage.type) || '', newVal: (newVals.multimodalMode && newVals.multimodalMode !== 'none' && newVals.slsEndpoint && newVals.slsProject && newVals.slsLogstore && newVals.slsMode === 'apiKey') ? 'sls' : '' },
-];
-
-const changed = checks.filter(c => c.newVal && c.oldVal && c.newVal !== c.oldVal);
-if (!changed.length) process.exit(0);
-
-for (const c of changed) {
-  console.log(c.label + ': ' + c.oldVal + ' -> ' + c.newVal);
-}
-" -- "$config_file" "$(printf '{"slsEndpoint":"%s","slsProject":"%s","slsLogstore":"%s","slsMode":"%s","cmsLicenseKey":"%s","cmsEndpoint":"%s","cmsWorkspace":"%s","serviceNamePrefix":"%s","dashboardPort":"%s","maskMode":"%s","maskTypes":"%s","maskReplacementMode":"%s","interceptorMode":"%s","interceptorTypes":"%s","multimodalMode":"%s"}' \
-        "$SLS_ENDPOINT" "$SLS_PROJECT" "$SLS_LOGSTORE" "$([ -n "$SLS_API_KEY" ] && echo "apiKey" || { [ -n "$SLS_AK_ID" ] && [ -n "$SLS_AK_SECRET" ] && echo "ak" || true; })" "$CMS_LICENSE_KEY" "$CMS_ENDPOINT" "$CMS_WORKSPACE" "$SERVICE_NAME_PREFIX" "$DASHBOARD_PORT" "$MASK_MODE" "$MASK_TYPES" "$MASK_REPLACEMENT_MODE" "$INTERCEPTOR_MODE" "$INTERCEPTOR_TYPES" "$MULTIMODAL_MODE")" 2>/dev/null || true)
+    diffs=$(installer_config_operation config-diffs) || return 1
 
     if [ -z "$diffs" ]; then return 0; fi
 
@@ -974,122 +598,40 @@ for (const c of changed) {
 # ============================================================
 # Common: deploy bootstrap scripts from the current version
 # ============================================================
+installer_runtime_operation() {
+    local source="$1" operation="$2"
+    local flags=()
+    if [ "${3:-}" = "deploy-hooks" ]; then flags+=(--deploy-hooks); fi
+    if [ "${INSTALL_CONFIG:-0}" -eq 1 ] && [ "$operation" != "sync-service" ]; then
+        LP_SOURCE_DIR="$source" LP_CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}" \
+            LP_BIN_DIR="$HOME/.local/bin" installer_config_operation "$operation" --with-config ${flags[@]+"${flags[@]}"}
+    else
+        LP_SOURCE_DIR="$source" LP_CACHE_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}" \
+            LP_DATA_DIR="$DATA_DIR" LP_CONFIG_PATH="$DATA_DIR/config.json" \
+            LP_BIN_DIR="$HOME/.local/bin" native_installer_helper "$operation" --from-env ${flags[@]+"${flags[@]}"}
+    fi
+}
+
 deploy_bootstrap_scripts() {
-    local src_dir="$PERMANENT_DIR/scripts"
-    local boot_dir="$HOME/.loongsuite-pilot/bin"
-    mkdir -p "$boot_dir"
-    cp -f "$src_dir/collector-daemon.js" "$boot_dir/"
-    [ -f "$src_dir/updater-daemon.js" ] && cp -f "$src_dir/updater-daemon.js" "$boot_dir/" || true
+    installer_runtime_operation "$PERMANENT_DIR" sync-service
 }
 
 # ============================================================
 # Common: deploy package to versions/ directory
 # ============================================================
+prepare_package() {
+    local candidate_name
+    candidate_name=$(installer_runtime_operation "$1" stage-package) || return 1
+    STAGED_DIR="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}/versions/$candidate_name"
+    msg "    ✅ Rust 候选包及配置已校验: $STAGED_DIR" "    ✅ Rust candidate and config verified: $STAGED_DIR"
+}
+
 deploy_package() {
-    local src="$1"
-    local cache_dir="$HOME/.loongsuite-pilot"
-    local versions_dir="$cache_dir/versions"
-    local current_file="$cache_dir/current"
-    local previous_file="$cache_dir/previous"
-
-    local ver="" commit=""
-    if [ -f "$src/VERSION" ]; then
-        ver=$(grep '^version=' "$src/VERSION" | cut -d= -f2)
-        commit=$(grep '^git_commit=' "$src/VERSION" | cut -d= -f2)
-    fi
-
-    if [ -n "$ver" ] && [ -n "$commit" ]; then
-        local dir_name="${ver}_${commit}"
-        local target="$versions_dir/$dir_name"
-
-        if [ -f "$current_file" ]; then
-            local old_dir
-            old_dir=$(cat "$current_file" 2>/dev/null | tr -d '[:space:]')
-            if [ -n "$old_dir" ] && [ "$old_dir" != "$dir_name" ]; then
-                echo "$old_dir" > "$previous_file"
-            fi
-        fi
-
-        msg "==> 部署到 $target ..." "==> Deploying to $target ..."
-        mkdir -p "$versions_dir"
-        rm -rf "$target"
-        if ! cp -r "$src" "$target"; then
-            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
-            return 1
-        fi
-
-        PERMANENT_DIR="$target"
-    else
-        msg "==> 部署到 $PERMANENT_DIR ..." \
-            "==> Deploying to $PERMANENT_DIR ..."
-        mkdir -p "$(dirname "$PERMANENT_DIR")"
-        rm -rf "$PERMANENT_DIR"
-        if ! cp -r "$src" "$PERMANENT_DIR"; then
-            msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
-            return 1
-        fi
-    fi
-    msg "    ✅ 部署完成" "    ✅ Deployed"
-    echo ""
-
-    deploy_bootstrap_scripts
-
-    msg "==> 安装依赖..." "==> Installing dependencies..."
-    local modules_ver="${ver:-${INSTALL_VERSION:-latest}}"
-    if ensure_node_modules "$modules_ver"; then
-        msg "    ✅ 依赖安装完成（预编译 node_modules）" "    ✅ Dependencies installed (prebuilt node_modules)"
-    else
-        msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
-            "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
-            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
-            return 1
-        fi
-        msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
-    fi
-    echo ""
-
-    msg "==> 部署 hook 脚本..." "==> Deploying hook scripts..."
-    if [ -f "$PERMANENT_DIR/scripts/postinstall.js" ]; then
-        # postinstall.js falls back to $HOME/.loongsuite-pilot when this is unset, so
-        # --data-dir would otherwise put hooks/skills/plugins in the default tree while
-        # the config lives elsewhere.
-        # Captured because two of the three failure modes are only in the output: a per-tree
-        # failure and a thrown main() both exit 0 on purpose (a non-zero exit would abort the
-        # npm install fallback above), announcing themselves as "N failed asset tree(s)" and
-        # "Post-install failed: <reason>" instead. 2>&1 because both go to stderr.
-        postinstall_exit=0
-        postinstall_out="$(LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
-            "$NODE_BIN" "$PERMANENT_DIR/scripts/postinstall.js" 2>&1)" || postinstall_exit=$?
-        # `if`, not `[ -n ... ] && printf`: under set -e the latter aborts the function when
-        # the output is empty.
-        if [ -n "$postinstall_out" ]; then
-            printf '%s\n' "$postinstall_out"
-        fi
-        if [ "$postinstall_exit" -ne 0 ]; then
-            msg "    ❌ Hook 脚本部署失败 (exit=$postinstall_exit)，hooks/plugins 缺失" \
-                "    ❌ Hook script deployment failed (exit=$postinstall_exit); hooks/plugins are missing"
-            return 1
-        fi
-        if printf '%s' "$postinstall_out" | grep -qE "failed asset tree|Post-install failed"; then
-            msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" \
-                "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
-            return 1
-        fi
-        msg "    ✅ Hook 脚本已部署" "    ✅ Hook scripts deployed"
-        msg "    如使用 Codex 桌面版，首次启动需在桌面端手动信任 hooks" \
-            "    If using Codex desktop app, please manually trust hooks on first launch"
-    else
-        msg "    ⚠️ postinstall.js 未找到，跳过 Hook 部署" \
-            "    ⚠️ postinstall.js not found, skipping hook deployment"
-    fi
-    echo ""
-
-    # Write current pointer only after all deploy steps succeed
-    if [ -n "$ver" ] && [ -n "$commit" ]; then
-        echo "$dir_name" > "$current_file.tmp"
-        mv -f "$current_file.tmp" "$current_file"
-    fi
+    # 配置合并、Hook 调用与版本入口发布由同一个原生操作串行执行。
+    installer_runtime_operation "$1" publish-package deploy-hooks || return 1
+    PERMANENT_DIR="$1"
+    PILOT_BIN="$PERMANENT_DIR/bin/loongsuite-pilot"
+    msg "    ✅ 原生包及 Hook 已部署" "    ✅ Native package and hooks deployed"
 }
 
 # ============================================================
@@ -1133,239 +675,44 @@ migrate_legacy_layout() {
 # ============================================================
 # Common: write / merge config.json
 # ============================================================
-write_config() {
-    local config_file="$DATA_DIR/config.json"
-    msg "==> 写入配置文件 $config_file ..." \
-        "==> Writing config to $config_file ..."
-    mkdir -p "$DATA_DIR"
+native_installer_helper() {
+    local binary="${INSTALL_SRC:?}/bin/loongsuite-pilot"
+    if [ ! -x "$binary" ]; then
+        printf '%s\n' '候选包缺少原生安装辅助入口' >&2
+        return 1
+    fi
+    "$binary" installer-helper "$@"
+}
 
+installer_config_operation() {
+    local operation="$1"
+    shift
     local excluded_workspaces_json=""
     if [ "${#EXCLUDE_WORKSPACES[@]}" -gt 0 ]; then
-        excluded_workspaces_json=$("$NODE_BIN" -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- "${EXCLUDE_WORKSPACES[@]}")
+        excluded_workspaces_json=$(native_installer_helper json-argv -- "${EXCLUDE_WORKSPACES[@]}") || return 1
     fi
+    # 选项通过子进程环境传递，不插入脚本代码、argv 或诊断。
     printf '%s' "$PROBE_RESULT" | \
+        LP_CONFIG_PATH="$DATA_DIR/config.json" LP_DATA_DIR="$DATA_DIR" \
         LP_EXCLUDE_WORKSPACES="$excluded_workspaces_json" \
-        LP_SLS_API_KEY="$SLS_API_KEY" \
-        LP_SELECTED_AGENTS="$SELECTED_AGENTS" \
+        LP_SLS_ENDPOINT="$SLS_ENDPOINT" LP_SLS_PROJECT="$SLS_PROJECT" LP_SLS_LOGSTORE="$SLS_LOGSTORE" \
+        LP_SLS_AK_ID="$SLS_AK_ID" LP_SLS_AK_SECRET="$SLS_AK_SECRET" LP_SLS_API_KEY="$SLS_API_KEY" \
+        LP_LOG_LEVEL="$LOG_LEVEL" LP_USER_ID="$USER_ID" \
+        LP_COLLECT_LOG="$COLLECT_LOG" LP_COLLECT_TRACE="$COLLECT_TRACE" \
+        LP_CMS_LICENSE_KEY="$CMS_LICENSE_KEY" LP_CMS_ENDPOINT="$CMS_ENDPOINT" LP_CMS_WORKSPACE="$CMS_WORKSPACE" \
+        LP_SERVICE_NAME_PREFIX="$SERVICE_NAME_PREFIX" \
+        LP_SELECTED_AGENTS="$SELECTED_AGENTS" LP_ALL_AGENTS="$ALL_AGENTS" \
         LP_AGENT_SELECTION_EXPLICIT="$AGENT_SELECTION_EXPLICIT" \
-        LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" \
-        LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
-        LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
-        LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
-        "$NODE_BIN" -e "
-const fs = require('fs');
-const path = '$config_file';
-
-let existing = {};
-try { existing = JSON.parse(fs.readFileSync(path, 'utf-8')); } catch {}
-
-const config = {
-  ...existing,
-  enabled: true,
-  dataDir: '$DATA_DIR',
-};
-if (!config.dashboard || typeof config.dashboard !== 'object' || Array.isArray(config.dashboard)) {
-  config.dashboard = {};
-}
-if (process.env.LP_EXCLUDE_WORKSPACES) {
-  config.privacy = { ...config.privacy, excludeWorkspaces: JSON.parse(process.env.LP_EXCLUDE_WORKSPACES) };
-}
-const dashboardPort = process.env.LP_DASHBOARD_PORT || '';
-const enableStatusBarApp = process.env.LP_ENABLE_STATUS_BAR_APP || '';
-if (enableStatusBarApp) config.enableStatusBarApp = enableStatusBarApp === 'true';
-if (dashboardPort) config.dashboard.port = Number(dashboardPort);
-if (config.dashboard.port === undefined) config.dashboard.port = 8765;
-delete config.internal;
-if (config.userId === undefined && config['user.id'] !== undefined) {
-  config.userId = config['user.id'];
-}
-delete config['user.id'];
-
-const slsEndpoint = '${SLS_ENDPOINT}';
-const slsProject  = '${SLS_PROJECT}';
-const slsLogstore = '${SLS_LOGSTORE}';
-const slsAkId     = '${SLS_AK_ID}';
-const slsAkSecret = '${SLS_AK_SECRET}';
-const slsApiKey   = process.env.LP_SLS_API_KEY || '';
-const logLevel    = '${LOG_LEVEL}';
-const userId      = '${USER_ID}';
-
-if (slsEndpoint || slsProject || slsLogstore || slsApiKey) {
-  config.sls = config.sls || {};
-  delete config.sls.destinationOverride;
-  if (slsEndpoint) {
-    config.sls.endpoint = slsEndpoint;
-  }
-  if (slsApiKey) {
-    config.sls.mode = 'apiKey';
-    config.sls.apiKey = slsApiKey;
-    delete config.sls.accessKeyId;
-    delete config.sls.accessKeySecret;
-  } else if (slsAkId && slsAkSecret) {
-    config.sls.mode = 'ak';
-    config.sls.accessKeyId = slsAkId;
-    config.sls.accessKeySecret = slsAkSecret;
-    delete config.sls.apiKey;
-  } else if (slsEndpoint || slsProject || slsLogstore) {
-    config.sls.mode = 'webtracking';
-    delete config.sls.apiKey;
-    delete config.sls.accessKeyId;
-    delete config.sls.accessKeySecret;
-  }
-  if (slsProject && slsLogstore) {
-    config.sls.project = slsProject;
-    config.sls.logstore = slsLogstore;
-    delete config.sls.endpoints;
-  }
+        LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
+        LP_DASHBOARD_PORT="$DASHBOARD_PORT" LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
+        LP_MASK_MODE="$MASK_MODE" LP_MASK_TYPES="$MASK_TYPES" LP_MASK_REPLACEMENT_MODE="$MASK_REPLACEMENT_MODE" \
+        LP_INTERCEPTOR_MODE="$INTERCEPTOR_MODE" LP_INTERCEPTOR_TYPES="$INTERCEPTOR_TYPES" \
+        native_installer_helper "$operation" --from-env "$@"
 }
 
-if (logLevel) {
-  config.logLevel = logLevel;
-}
-
-if (userId) {
-  config.userId = userId;
-  delete config.identity;
-}
-
-const collectLog = '${COLLECT_LOG}';
-const collectTrace = '${COLLECT_TRACE}';
-const cmsLicenseKey = '${CMS_LICENSE_KEY}';
-const cmsEndpoint = '${CMS_ENDPOINT}';
-const cmsWorkspace = '${CMS_WORKSPACE}';
-const serviceNamePrefix = '${SERVICE_NAME_PREFIX}';
-const selectedAgents = process.env.LP_SELECTED_AGENTS || '';
-const allAgentsMode = '${ALL_AGENTS}';
-const multimodalMode = process.env.LP_MULTIMODAL_MODE || '';
-const maskMode = '${MASK_MODE}';
-const maskTypes = '${MASK_TYPES}';
-const maskReplacementMode = '${MASK_REPLACEMENT_MODE}';
-const interceptorMode = '${INTERCEPTOR_MODE}';
-const interceptorTypes = '${INTERCEPTOR_TYPES}';
-
-if (collectLog) config.collectLog = collectLog === 'true';
-if (collectTrace) config.collectTrace = collectTrace === 'true';
-
-if (cmsLicenseKey || cmsEndpoint || cmsWorkspace) {
-  config.cms = config.cms || {};
-  if (cmsLicenseKey) config.cms.licenseKey = cmsLicenseKey;
-  if (cmsEndpoint) config.cms.endpoint = cmsEndpoint;
-  if (cmsWorkspace) config.cms.workspace = cmsWorkspace;
-}
-
-if (serviceNamePrefix) config.serviceNamePrefix = serviceNamePrefix;
-
-if (maskMode) {
-  config.mask = config.mask || {};
-  config.mask.mode = maskMode;
-  if (maskMode === 'custom') {
-    config.mask.types = maskTypes
-      .split(',')
-      .map(type => type.trim())
-      .filter(Boolean);
-  } else {
-    delete config.mask.types;
-  }
-}
-if (maskReplacementMode) {
-  config.mask = config.mask || {};
-  config.mask.replacementMode = maskReplacementMode;
-}
-
-if (interceptorMode) {
-  config.interceptor = config.interceptor || {};
-  config.interceptor.mode = interceptorMode;
-  if (interceptorMode === 'custom') {
-    config.interceptor.types = interceptorTypes
-      .split(',')
-      .map(type => type.trim())
-      .filter(Boolean);
-  } else {
-    delete config.interceptor.types;
-  }
-}
-
-const INTERCEPTOR_TYPE_SET = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
-(function ensureMaskCoversInterceptor(config) {
-  const interceptor = config.interceptor || {};
-  const extra = interceptor.mode === 'all'
-    ? INTERCEPTOR_TYPE_SET.slice()
-    : interceptor.mode === 'custom' && Array.isArray(interceptor.types)
-      ? interceptor.types.filter(type => INTERCEPTOR_TYPE_SET.indexOf(type) !== -1)
-      : [];
-  if (extra.length === 0) return;
-  if ((config.mask || {}).mode === 'all') return;
-  const current = (config.mask || {}).mode === 'custom' && Array.isArray((config.mask || {}).types)
-    ? config.mask.types.filter(type => typeof type === 'string' && type.trim())
-    : [];
-  config.mask = config.mask && typeof config.mask === 'object' && !Array.isArray(config.mask)
-    ? config.mask
-    : {};
-  config.mask.mode = 'custom';
-  config.mask.types = [...new Set(current.concat(extra))];
-})(config);
-
-const allAgents = JSON.parse(fs.readFileSync(0, 'utf8') || '[]');
-if (allAgentsMode === '1') {
-  // Clear enable gates, not metadata such as a persisted OpenClaw entry.
-  for (const agent of Object.values(config.agents || {})) delete agent.enabled;
-} else if (selectedAgents) {
-  config.agents = config.agents || {};
-  const previousOpenclaw = config.agents.openclaw;
-  const selected = selectedAgents.split(',').map(s => s.trim()).filter(Boolean);
-  for (const agent of allAgents) {
-    config.agents[agent.id] = config.agents[agent.id] || {};
-    // A transient discovery miss is not consent to uninstall a live plugin.
-    if (agent.id === 'openclaw' && !agent.detected && process.env.LP_AGENT_SELECTION_EXPLICIT !== '1'
-        && previousOpenclaw !== undefined) {
-      console.log('OpenClaw: detection unavailable; preserving previous enabled state and entry');
-      continue;
-    }
-    config.agents[agent.id].enabled = selected.includes(agent.id);
-  }
-}
-const openclaw = allAgents.find(agent => agent.id === 'openclaw');
-if (openclaw && openclaw.detected && openclaw.openclawCliPath
-    && (allAgentsMode === '1' || (config.agents && config.agents.openclaw && config.agents.openclaw.enabled !== false))) {
-  config.agents = config.agents || {};
-  config.agents.openclaw = config.agents.openclaw || {};
-  const previousEntry = config.agents.openclaw.cliPath;
-  if (typeof previousEntry === 'string' && previousEntry !== openclaw.openclawCliPath) {
-    console.log('OpenClaw: updating launch entry ' + JSON.stringify(previousEntry) + ' -> ' + JSON.stringify(openclaw.openclawCliPath));
-  }
-  config.agents.openclaw.cliPath = openclaw.openclawCliPath;
-}
-
-if (multimodalMode) {
-  config.agents = config.agents || {};
-  const supported = (process.env.LP_MULTIMODAL_SUPPORTED_AGENTS || '').split(',').map(s => s.trim()).filter(Boolean);
-  const selected = new Set(selectedAgents.split(',').map(s => s.trim()).filter(Boolean));
-  const allSupported = allAgentsMode === '1' && multimodalMode !== 'none';
-  for (const id of supported) {
-    if (allSupported) config.agents[id] = config.agents[id] || {};
-    else if (!config.agents[id]) continue;
-    if (multimodalMode === 'none') {
-      delete config.agents[id].multimodal;
-      continue;
-    }
-    const prev = (config.agents[id].multimodal && typeof config.agents[id].multimodal === 'object')
-      ? config.agents[id].multimodal
-      : {};
-    config.agents[id].multimodal = { ...prev, uploadMode: (allSupported || selected.has(id)) ? multimodalMode : 'none' };
-  }
-}
-
-if (multimodalMode && multimodalMode !== 'none' && slsEndpoint && slsProject && slsLogstore && slsApiKey) {
-  config.multimodal = {
-    storage: {
-      type: 'sls',
-      target: { endpoint: slsEndpoint, project: slsProject, logstore: slsLogstore },
-    },
-  };
-}
-
-fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
-"
+write_config() {
+    msg "==> 写入配置文件 $DATA_DIR/config.json ..." "==> Writing config to $DATA_DIR/config.json ..."
+    installer_config_operation write-config || return 1
     msg "    ✅ 配置已写入" "    ✅ Config written"
     echo ""
 }
@@ -1376,11 +723,8 @@ fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 install_loongsuite_pilot_command() {
     msg "==> 安装服务管理脚本..." "==> Installing service management script..."
     local global_bin_dir="$HOME/.local/bin"
-    mkdir -p "$global_bin_dir"
-
     local loongsuite_pilot_cmd="$global_bin_dir/loongsuite-pilot"
-    cp -f "$PERMANENT_DIR/scripts/loongsuite-pilot.sh" "$loongsuite_pilot_cmd"
-    chmod +x "$loongsuite_pilot_cmd"
+    deploy_bootstrap_scripts || return 1
     msg "    ✅ 已安装: $loongsuite_pilot_cmd" "    ✅ Installed: $loongsuite_pilot_cmd"
 
     # If /usr/local/bin is writable (root), create a symlink for immediate PATH access
@@ -1614,30 +958,6 @@ remove_qoderclicn_token_intercept() {
 }
 
 
-# Restore app defaults without requiring the old wrapper, app, or agent selection to exist.
-retire_qoderwork_runtime_overrides() {
-    if [ "$(uname)" != "Darwin" ]; then return 0; fi
-
-    local plist_path
-    for plist_path in \
-        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qoderwork-env.plist" \
-        "$HOME/Library/LaunchAgents/com.loongsuite-pilot.qwenworkcn-env.plist"; do
-        if [ -f "$plist_path" ]; then
-            launchctl unload "$plist_path" 2>/dev/null || true
-            rm -f "$plist_path"
-        fi
-    done
-
-    local env_name current_runtime
-    for env_name in QW_QODER_WORKER_RUNTIME_PATH QODER_WORKER_RUNTIME_PATH; do
-        current_runtime=$(launchctl getenv "$env_name" 2>/dev/null || true)
-        if [ "$current_runtime" = "$DATA_DIR/hooks/qoderwork-runtime-wrapper.mjs" ] || printf '%s' "$current_runtime" | grep -q 'loongsuite-pilot'; then
-            launchctl unsetenv "$env_name"
-            msg "    已清理 $env_name" "    Cleaned up $env_name"
-        fi
-    done
-}
-
 # ============================================================
 # Claude Code fetch intercept: inject/remove shell function
 #
@@ -1737,42 +1057,6 @@ INTERCEPTBLOCK
             "        To enable collection, add to your claude definition: BUN_OPTIONS=\"--preload=$DATA_DIR/hooks/claude-code-fetch-intercept.mjs \${BUN_OPTIONS}\""
     fi
     echo ""
-}
-
-# Remove only the Pilot-owned Copilot startup block. Native telemetry files are data.
-remove_copilot_plugin() {
-    local copilot_home="$HOME/.copilot"
-    [ -d "$copilot_home" ] || return 0
-    local node_bin="${NODE_BIN:-}" helper="" version="" cache="$HOME/.loongsuite-pilot"
-    if [ ! -x "$node_bin" ] && [ -f "$cache/node-bin" ]; then
-        node_bin=$(tr -d '\r\n' < "$cache/node-bin")
-    fi
-    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
-    if [ -f "$cache/current" ]; then version=$(tr -d '\r\n' < "$cache/current"); fi
-    local candidate
-    for candidate in "$cache/versions/$version/dist/copilot-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/copilot-cleanup.cjs"; do
-        if [ -f "$candidate" ]; then helper="$candidate"; break; fi
-    done
-    if [ -z "$node_bin" ] || [ -z "$helper" ]; then
-        echo "Copilot cleanup skipped: safe Node JSONC helper unavailable; config and plugin assets preserved" >&2
-        return 0
-    fi
-    if ! "$node_bin" "$helper" "$copilot_home"; then
-        echo "Copilot cleanup incomplete; config and plugin assets preserved for retry" >&2
-    fi
-}
-
-remove_copilot_otel_environment() {
-    local file
-    for file in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        [ -f "$file" ] || continue
-        local tmp="${file}.pilot-copilot-$$.tmp"
-        if sed '/^# >>> loongsuite-pilot copilot otel >>>$/,/^# <<< loongsuite-pilot copilot otel <<<$/{d;}' "$file" > "$tmp"; then
-            cat "$tmp" > "$file"
-        fi
-        rm -f "$tmp"
-    done
-    rm -f "$DATA_DIR/state/copilot/otel-enabled"
 }
 
 remove_claude_code_fetch_intercept() {
@@ -1966,8 +1250,8 @@ print_summary() {
 # Overlay `install` used to SIGTERM only the collector pid file. The updater
 # stayed up, and gcOldVersions() deletes any versions/<dir> that is not
 # current/previous -- including the directory this deploy just copied, before
-# current is published. installer-opensource.sh writes current after
-# node_modules + postinstall, so that window is minutes. `loongsuite-pilot stop`
+# current is published. Native staging validates the complete package before
+# publish-package commits current and the installed hooks. `loongsuite-pilot stop`
 # unloads LaunchAgent / disables systemd (autostart_remove) so neither process
 # comes back mid-deploy. That is the Unix counterpart of Disable-ScheduledTask.
 #
@@ -2000,23 +1284,12 @@ run_pilot_cli() {
 
 stop_one_pilot_pid_file() {
     local pid_file="$1"
-    [ -f "$pid_file" ] || return 0
-    local old_pid
-    old_pid=$(cat "$pid_file")
-    if kill -0 "$old_pid" 2>/dev/null; then
-        kill "$old_pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$old_pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$old_pid" 2>/dev/null; then
-            kill -9 "$old_pid" 2>/dev/null || true
-        fi
-        rm -f "$pid_file"
-    else
-        rm -f "$pid_file"
-    fi
+    [ -e "$pid_file" ] || [ -L "$pid_file" ] || return 0
+    local cache_dir="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    # The already validated candidate supplies the native identity probe and
+    # targeted stop. A PID number alone never authorizes a signal or file removal.
+    LP_PID_FILE="$pid_file" LP_DATA_DIR="$DATA_DIR" LP_CACHE_DIR="$cache_dir" \
+        native_installer_helper stop-deploy-process --from-env
 }
 
 stop_pilot_for_deploy() {
@@ -2024,7 +1297,8 @@ stop_pilot_for_deploy() {
     local cli
     cli="$(resolve_pilot_cli)"
 
-    if [ -z "$cli" ] && [ ! -f "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -f "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
+    if [ -z "$cli" ] && [ ! -e "$DATA_DIR/loongsuite-pilot.pid" ] && [ ! -L "$DATA_DIR/loongsuite-pilot.pid" ] &&
+        [ ! -e "$DATA_DIR/loongsuite-pilot-updater.pid" ] && [ ! -L "$DATA_DIR/loongsuite-pilot-updater.pid" ]; then
         return 0
     fi
 
@@ -2037,8 +1311,14 @@ stop_pilot_for_deploy() {
         fi
     fi
     # Leftovers: no CLI on PATH, or an updater the CLI did not track.
-    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid"
-    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid"
+    local fallback_failed=0
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot.pid" || fallback_failed=1
+    stop_one_pilot_pid_file "$DATA_DIR/loongsuite-pilot-updater.pid" || fallback_failed=1
+    if [ "$fallback_failed" -ne 0 ]; then
+        msg "    ⚠️  无法确认剩余进程归属，已保留进程及 PID 文件，停止覆盖安装" \
+            "    ⚠️  Could not verify remaining process ownership; processes and PID files preserved, overlay stopped"
+        return 1
+    fi
     echo ""
 }
 
@@ -2057,42 +1337,17 @@ restore_pilot_after_deploy() {
 # CMD: install
 # ============================================================
 reject_multi_sls_config() {
-    local config_file="$DATA_DIR/config.json"
-    [ -f "$config_file" ] || return 0
-
-    local status
-    if "$NODE_BIN" -e '
-const fs = require("fs");
-try {
-  const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""));
-  process.exit(Array.isArray(config?.sls) ? 12 : 0);
-} catch { process.exit(13); }
-' "$config_file"; then
-        return 0
-    else
-        status=$?
-    fi
-    if [ "$status" -eq 12 ]; then
-        msg "❌ 配置包含多个 SLS flusher；安装器不支持修改，请手动编辑 config.json" \
-            "❌ Multiple SLS flushers found; the installer cannot modify them. Edit config.json manually." >&2
-    else
-        msg "❌ 无法检查现有 config.json，请检查文件后重试" \
-            "❌ Cannot inspect existing config.json; check the file and retry." >&2
-    fi
-    return 1
+    installer_config_operation check-config
 }
 
 cmd_install() {
+    local INSTALL_CONFIG=1
     msg "==> 开始安装 $PACKAGE_NAME ..." \
         "==> Installing $PACKAGE_NAME ..."
     echo ""
 
     validate_install_user
     check_deps
-    reject_multi_sls_config
-
-    # Migrate legacy layout if needed
-    migrate_legacy_layout
 
     # Check if already installed
     local cur_ver; cur_ver=$(get_installed_version)
@@ -2107,22 +1362,24 @@ cmd_install() {
     # Arm restore before stop: autostart_remove is not reversible if we die
     # between stop and trap.
     trap 'restore_pilot_after_deploy; rm -rf "${TMP_DIR:-}"' EXIT
-    stop_pilot_for_deploy
     download_and_extract
+    reject_multi_sls_config
     probe_agents
     select_agents
     prompt_user_id
+    installer_config_operation validate-config
     confirm_config_overwrite
+    prepare_package "$INSTALL_SRC"
+    stop_pilot_for_deploy
+    migrate_legacy_layout
     # set -e would end the install here anyway; saying why beats an exit code on its own.
-    if ! deploy_package "$INSTALL_SRC"; then
+    if ! deploy_package "$STAGED_DIR"; then
         echo ""
         msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
             "❌ Install aborted: hook script deployment failed; check the output above and retry"
         exit 1
     fi
-    write_config
     install_loongsuite_pilot_command
-    retire_qoderwork_runtime_overrides
     inject_qodercli_token_intercept
     inject_qoderclicn_token_intercept
     inject_claude_code_fetch_intercept
@@ -2191,16 +1448,17 @@ cmd_upgrade() {
         "   New version: ${new_ver:-unknown} (${new_commit:-unknown})"
     echo ""
 
+    prepare_package "$INSTALL_SRC"
     stop_pilot_for_deploy
 
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
-    if ! deploy_package "$INSTALL_SRC"; then
+    if ! deploy_package "$STAGED_DIR"; then
         echo ""
         msg "⚠️  部署失败，正在回滚到旧版本..." \
             "⚠️  Deployment failed, rolling back to old version..."
         local _rollback_ok=1
-        run_pilot_cli rollback 2>/dev/null || _rollback_ok=0
+        # 原生发布失败已恢复入口；不能再次交换 current/previous。
         if [ "$_rollback_ok" -eq 1 ]; then
             if run_pilot_cli start; then
                 PILOT_HELD_FOR_DEPLOY=0
@@ -2220,7 +1478,6 @@ cmd_upgrade() {
         exit 1
     fi
     install_loongsuite_pilot_command
-    retire_qoderwork_runtime_overrides
 
     # Start the new version
     msg "==> 启动新版本..." "==> Starting new version..."
@@ -2558,32 +1815,9 @@ remove_opencode_plugin() {
         result=$(node -e "
 const fs = require('fs');
 const f = process.argv[1];
-// Match legacy plugins/opencode/plugin.mjs only under this installation.
-const normalize = value => {
-  if (typeof value !== 'string') return '';
-  let plain = value;
-  if (plain.startsWith('file://')) {
-    try {
-      const url = new URL(plain);
-      plain = decodeURIComponent(url.pathname);
-      if (plain[0] === '/' && plain[2] === ':') plain = plain.slice(1);
-      if (url.hostname && url.hostname !== 'localhost') {
-        if (process.platform !== 'win32') return '';
-        plain = '//' + url.hostname + plain;
-      }
-    } catch { return ''; }
-  }
-  plain = plain.split(String.fromCharCode(92)).join('/');
-  while (plain.endsWith('/')) plain = plain.slice(0, -1);
-  return process.platform === 'win32' ? plain.toLowerCase() : plain;
-};
-const dataDir = normalize(process.argv[2]);
-const managed = dataDir ? dataDir + '/plugins/opencode' : null;
-const isOurs = s => typeof s === 'string' && (
-  s === 'loongsuite-pilot-opencode' || s.startsWith('loongsuite-pilot-opencode@') ||
-  (managed !== null && (normalize(s) === managed || normalize(s) === managed + '/plugin.mjs'))
-);
-const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : (e?.package ?? ''));
+// Our entries are identified by the pluginId or the plugin file path.
+const isOurs = s => typeof s === 'string' && (s.includes('loongsuite-pilot-opencode') || s.includes('plugins/opencode/plugin.mjs'));
+const entryStr = e => typeof e === 'string' ? e : (Array.isArray(e) ? String(e[0]) : '');
 // JSONC fallback: strip block comments, whole-line // comments, and trailing
 // // comments preceded by whitespace. URL values like file:/// are never
 // touched because their slashes are not preceded by whitespace.
@@ -2596,19 +1830,16 @@ try {
   let data, hadComments = false;
   try { data = JSON.parse(raw); }
   catch { data = JSON.parse(stripJsonc(raw)); hadComments = true; }
-  let removed = 0;
-  for (const key of ['plugin', 'plugins']) {
-    if (!Array.isArray(data[key])) continue;
-    const before = data[key].length;
-    data[key] = data[key].filter(e => !isOurs(entryStr(e)));
-    removed += before - data[key].length;
-  }
-  if (!removed) { process.stdout.write('nochange'); process.exit(0); }
+  const key = Array.isArray(data.plugins) ? 'plugins' : (Array.isArray(data.plugin) ? 'plugin' : null);
+  if (!key) { process.stdout.write('nochange'); process.exit(0); }
+  const before = data[key].length;
+  data[key] = data[key].filter(e => !isOurs(entryStr(e)));
+  if (data[key].length === before) { process.stdout.write('nochange'); process.exit(0); }
   if (hadComments) fs.writeFileSync(f + '.bak', raw, 'utf-8');
   fs.writeFileSync(f, JSON.stringify(data, null, 2) + '\n', 'utf-8');
   process.stdout.write(hadComments ? 'cleaned-bak' : 'cleaned');
 } catch (e) { process.stderr.write(e.message); process.exit(1); }
-" "$cfg" "$DATA_DIR" 2>/dev/null) || result="error"
+" "$cfg" 2>/dev/null) || result="error"
 
         case "$result" in
             cleaned)
@@ -2999,10 +2230,46 @@ NODE
 # ============================================================
 # CMD: uninstall
 # ============================================================
+# Resolve and validate the cleanup runtime before any service or asset removal.
+# Legacy installs can explicitly supply a Rust candidate with --package-url.
+prepare_native_uninstall() {
+    local cache_dir="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    local checked_cache="$cache_dir" checked_home="$HOME"
+    if [ -d "$cache_dir" ]; then checked_cache="$(cd "$cache_dir" && pwd -P)"; fi
+    if [ -d "$HOME" ]; then checked_home="$(cd "$HOME" && pwd -P)"; fi
+    if [ "$checked_cache" = / ] || [ "$checked_cache" = "$checked_home" ]; then
+        printf '%s\n' '拒绝不安全的卸载缓存目录；安装文件已保留' >&2
+        return 1
+    fi
+    if [ -n "${PACKAGE_URL:-}" ]; then
+        download_and_extract
+    elif [ -z "${INSTALL_SRC:-}" ]; then
+        local version=""
+        if [ -f "$cache_dir/current" ]; then version="$(< "$cache_dir/current")"; fi
+        case "$version" in
+            ""|.|..|*[!a-zA-Z0-9._-]*)
+                printf '%s\n' '找不到原生卸载入口；请通过 --package-url 指定 Rust 候选包，安装文件已保留' >&2
+                return 1
+                ;;
+        esac
+        INSTALL_SRC="$cache_dir/versions/$version"
+    fi
+    cleanup_native_agents --check-only
+}
+
+cleanup_native_agents() {
+    local flags=()
+    if [ "${PURGE:-0}" -eq 1 ]; then flags+=(--purge); fi
+    native_installer_helper cleanup-agents --data-dir "$DATA_DIR" --pilot-dir "$INSTALL_SRC" \
+        ${flags[@]+"${flags[@]}"} "$@" >/dev/null
+}
+
 cmd_uninstall() {
     msg "🗑️  开始卸载 $PACKAGE_NAME ..." \
         "🗑️  Uninstalling $PACKAGE_NAME ..."
     echo ""
+
+    prepare_native_uninstall
 
     # Stop service (also removes autostart)
     msg "==> 停止服务..." "==> Stopping service..."
@@ -3074,55 +2341,16 @@ cmd_uninstall() {
     msg "    ✅ 服务已停止" "    ✅ Service stopped"
     echo ""
 
-    msg "==> 清理 DSH YAML patch..." "==> Cleaning up DSH YAML patch..."
-    if ! remove_dsh_yaml_patch; then
-        return 1
-    fi
-    echo ""
-
-    # Read the persisted target before the data/install directory is removed.
-    msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
-    remove_hermes_plugin
-    echo ""
-
-    msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."
-    remove_openclaw_plugin
-    echo ""
-
-    # Remove hook entries from tool configs BEFORE removing install dir
-    msg "==> 清理 hook 配置..." "==> Cleaning up hook configs..."
-    remove_hook_configs
-    remove_grok_build_hook_config
+    msg "==> 原生清理 Agent 与历史插件配置..." "==> Cleaning Agent and legacy plugin configuration..."
+    cleanup_native_agents
     remove_qodercli_token_intercept
     remove_qoderclicn_token_intercept
-    retire_qoderwork_runtime_overrides
     remove_claude_code_fetch_intercept
-    remove_copilot_otel_environment
-    remove_copilot_plugin
-    echo ""
-
-    # Remove OTel Claude plugin
-    msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
-    remove_otel_plugin
-    echo ""
-
-    # Remove plugin-inject specs (OpenCode)
-    msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
-    remove_opencode_plugin
-    echo ""
-
-    msg "==> 清理 Pi Coding Agent Extension 配置..." "==> Cleaning up Pi Coding Agent extension config..."
-    remove_pi_coding_agent_extension
-    echo ""
-
-    # Remove plugin-inject specs (MiMo Code)
-    msg "==> 清理 MiMo Code 插件配置..." "==> Cleaning up MiMo Code plugin config..."
-    remove_mimocode_plugin
     echo ""
 
     # Remove installation artifacts
     msg "==> 删除安装目录..." "==> Removing installation..."
-    local _cache_dir="$HOME/.loongsuite-pilot"
+    local _cache_dir="${LOONGSUITE_PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
     rm -rf "${_cache_dir:?}/versions"
     rm -rf "${_cache_dir:?}/bin"
     rm -rf "${_cache_dir:?}/package"
@@ -3156,9 +2384,50 @@ cmd_uninstall() {
     echo "============================================================"
 }
 
+# >>> native-platform-support >>>
+# Establish libc before downloading a package or touching an existing installation.
+# GNU and musl use different executable loaders; unknown libc must not select GNU.
+native_installer_target() {
+    local os arch libc loader
+    os=$(uname -s) || return 1
+    arch=$(uname -m) || return 1
+    case "$arch" in
+        x86_64|amd64) arch=x86_64 ;;
+        aarch64|arm64) arch=aarch64 ;;
+        *) printf '%s\n' "Unsupported architecture: $arch" >&2; return 1 ;;
+    esac
+    case "$os" in
+        Darwin) printf '%s-apple-darwin\n' "$arch"; return 0 ;;
+        Linux)
+            for loader in /lib/ld-musl-*.so*; do
+                if [ -e "$loader" ]; then
+                    printf '%s\n' 'Unsupported platform: Linux musl (Alpine); GNU libc is required.' >&2
+                    return 1
+                fi
+            done
+            libc=$(ldd --version 2>&1 || true)
+            case "$libc" in
+                *musl*|*Musl*|*MUSL*)
+                    printf '%s\n' 'Unsupported platform: Linux musl (Alpine); GNU libc is required.' >&2
+                    return 1 ;;
+            esac
+            libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+            case "$libc" in
+                "glibc "[0-9]*) printf '%s-unknown-linux-gnu\n' "$arch"; return 0 ;;
+            esac
+            printf '%s\n' 'Unsupported platform: Linux libc could not be verified as GNU libc.' >&2
+            return 1 ;;
+        *) printf '%s\n' "Unsupported platform: $os" >&2; return 1 ;;
+    esac
+}
+# <<< native-platform-support <<<
+
 # ============================================================
 # Main dispatcher
 # ============================================================
+if [ "$COMMAND" = "install" ] || [ "$COMMAND" = "upgrade" ]; then
+    native_installer_target >/dev/null || exit 1
+fi
 case "$COMMAND" in
     install)   cmd_install ;;
     upgrade)   cmd_upgrade ;;

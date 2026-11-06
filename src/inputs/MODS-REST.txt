@@ -1,0 +1,48 @@
+// Paste into src/inputs/mod.rs. Hyphenated directories need #[path].
+// rest_support is the local hook/session reader used because crate::inputs::base
+// was not present. dsh is the event transform; dsh_log is the collector.
+
+#[path = "rest_support.rs"]
+pub mod rest_support;
+
+#[path = "claude-code-log/mod.rs"]
+pub mod claude_code_log;
+
+#[path = "codex-log/mod.rs"]
+pub mod codex_log;
+
+#[path = "cursor-hook/mod.rs"]
+pub mod cursor_hook;
+
+#[path = "dsh/mod.rs"]
+pub mod dsh;
+
+#[path = "dsh-log/mod.rs"]
+pub mod dsh_log;
+
+#[path = "grok-build-log/mod.rs"]
+pub mod grok_build_log;
+
+#[path = "hermes-log/mod.rs"]
+pub mod hermes_log;
+
+#[path = "kiro-cli-log/mod.rs"]
+pub mod kiro_cli_log;
+
+#[path = "kiro-cli-session/mod.rs"]
+pub mod kiro_cli_session;
+
+#[path = "mimo-code-log/mod.rs"]
+pub mod mimo_code_log;
+
+#[path = "openclaw-plugin/mod.rs"]
+pub mod openclaw_plugin;
+
+#[path = "opencode-log/mod.rs"]
+pub mod opencode_log;
+
+#[path = "pi-coding-agent-log/mod.rs"]
+pub mod pi_coding_agent_log;
+
+#[path = "qwen-code-cli-log/mod.rs"]
+pub mod qwen_code_cli_log;

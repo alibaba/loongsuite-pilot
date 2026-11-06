@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -261,4 +262,37 @@ print(json.dumps({'terminal': len(terminal)}))
       expect(unfinished.some(r => r['agent.hermes.hook'] === 'turn_start')).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
+});
+
+it('hashes the full UTF-8 input before truncating the displayed turn input', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-hermes-full-input-'));
+  const longDriver = [
+    'import importlib.util, json, pathlib, sys, types',
+    "spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])",
+    'p = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(p)',
+    'hooks = {}',
+    'p.register(types.SimpleNamespace(register_hook=lambda name, cb: hooks.update({name: cb})))',
+    "base = dict(session_id='s', task_id='t', turn_id='t', model='m', provider='openai')",
+    "hooks['pre_llm_call'](**base, user_message='界' * 33000)",
+    "hooks['pre_api_request'](**base, api_call_count=1)",
+    "rows = [json.loads(line) for f in pathlib.Path(sys.argv[2]).glob('logs/hermes-agent/*.jsonl') for line in f.read_text().splitlines()]",
+    'print(json.dumps(rows))',
+  ].join('\n');
+  try {
+    const result = spawnSync('python3', ['-c', longDriver, plugin, root], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: root, LOONGSUITE_PILOT_DATA_DIR: root, LOONGSUITE_PILOT_USER_ID: 'fixture-user', PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    expect(result.status, result.stderr || String(result.signal)).toBe(0);
+    const rows = JSON.parse(result.stdout);
+    const inputs = rows.filter(row => row['agent.hermes.hook'] === 'turn_start');
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]['agent.pilot.correlation.content_hash']).toBe(
+      createHash('sha256').update('界'.repeat(33000), 'utf8').digest('hex').slice(0, 16),
+    );
+    expect(inputs[0]['gen_ai.input.messages_delta'][0].parts[0].content).toBe(
+      '界'.repeat(32768) + '...[truncated]',
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

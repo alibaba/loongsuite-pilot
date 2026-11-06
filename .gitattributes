@@ -1,0 +1,13 @@
+# Hook 模板和发行脚本按字节校验，跨平台检出统一使用 LF。
+*.sh text eol=lf
+*.ps1 text eol=lf
+
+# Hermes replay fixtures pin exact producer/input bytes on every checkout.
+assets/plugins/hermes-agent/loongsuite-pilot/__init__.py text eol=lf
+tests/fixtures/hermes-agent/real-tool-turn-hooks.jsonl text eol=lf
+
+# Preserve the exact pinned upstream schema bytes on Windows checkouts.
+tests/schemas/gen-ai-input-messages.json text eol=lf
+
+# Native replay fixtures pin the real Agent-host plugin bytes.
+assets/plugins/**/*.mjs text eol=lf

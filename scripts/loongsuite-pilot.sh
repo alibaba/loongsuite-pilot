@@ -16,7 +16,7 @@ LEGACY_DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
-CONFIG_FILE="$DATA_DIR/config.json"
+CONFIG_FILE="${AGENT_DATA_COLLECTION_CONFIG:-$DATA_DIR/config.json}"
 SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
 OPEN_SOURCE_INSTALLER_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh"
 
@@ -186,13 +186,9 @@ collect_restart_diag() {
             ;;
     esac
 
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || node_bin=""
-    if [ -n "$node_bin" ]; then
-        echo "node_bin=$node_bin"
-    else
-        echo "node_bin=not found"
-    fi
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin 2>/dev/null) || pilot_bin=""
+    echo "binary=${pilot_bin:-not found}"
 
     if [ -f "$log_file" ]; then
         echo "log_tail=$(tail -n 3 "$log_file" 2>/dev/null | tr '\n\r\t' '   ' | cut -c1-300)"
@@ -307,34 +303,27 @@ wait_for_updater_process() {
     return 1
 }
 
-sync_bootstrap_scripts() {
-    local version_dir
-    version_dir=$(resolve_current_version 2>/dev/null) || true
-    if [ -z "$version_dir" ]; then return; fi
-    local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ]; then return; fi
-    mkdir -p "$BOOTSTRAP_DIR"
-    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/"
-    cp -f "$src_dir/updater-daemon.js"   "$BOOTSTRAP_DIR/" 2>/dev/null || true
-}
-
 sync_installed_scripts_from_version() {
     local version_dir="$1"
-    local src_dir="$version_dir/scripts"
-    if [ ! -f "$src_dir/collector-daemon.js" ] || [ ! -f "$src_dir/updater-daemon.js" ] || [ ! -f "$src_dir/loongsuite-pilot.sh" ]; then
-        return 1
-    fi
+    native_version_root "$version_dir" || return 1
+    LP_SOURCE_DIR="$version_dir" LP_CACHE_DIR="$CACHE_DIR" LP_DATA_DIR="$DATA_DIR" \
+        LP_CONFIG_PATH="$CONFIG_FILE" LP_BIN_DIR="${LOONGSUITE_PILOT_BIN%/*}" \
+        "$version_dir/bin/loongsuite-pilot" installer-helper sync-service --from-env
+}
 
-    mkdir -p "$BOOTSTRAP_DIR"
-    cp -f "$src_dir/collector-daemon.js" "$BOOTSTRAP_DIR/collector-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/collector-daemon.js.tmp" "$BOOTSTRAP_DIR/collector-daemon.js"
-    cp -f "$src_dir/updater-daemon.js" "$BOOTSTRAP_DIR/updater-daemon.js.tmp"
-    mv -f "$BOOTSTRAP_DIR/updater-daemon.js.tmp" "$BOOTSTRAP_DIR/updater-daemon.js"
-
-    mkdir -p "$(dirname "$LOONGSUITE_PILOT_BIN")"
-    cp -f "$src_dir/loongsuite-pilot.sh" "$LOONGSUITE_PILOT_BIN.tmp"
-    chmod 755 "$LOONGSUITE_PILOT_BIN.tmp"
-    mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
+installed_native_entry() {
+    local entry="$1" relative version
+    case "$entry" in
+        "$VERSIONS_DIR/"*/bin/loongsuite-pilot)
+            relative="${entry#"$VERSIONS_DIR/"}"
+            version="${relative%/bin/loongsuite-pilot}"
+            [[ "$version" =~ ^[A-Za-z0-9_+.-]+$ ]] || return 1
+            case "$version" in .|..|*.) return 1 ;; esac
+            [ ! -L "$VERSIONS_DIR" ] && native_version_root "$VERSIONS_DIR/$version"
+            ;;
+        "$PACKAGE_DIR/bin/loongsuite-pilot") native_version_root "$PACKAGE_DIR" ;;
+        *) return 1 ;;
+    esac
 }
 
 process_matches_installed_entry() {
@@ -345,13 +334,8 @@ process_matches_installed_entry() {
     local expected_arg=""
     local expected_process=""
     case "$kind" in
-        collector)
-            expected_entry="$BOOTSTRAP_DIR/collector-daemon.js"
-            expected_process=node
-            ;;
-        updater)
-            expected_entry="$BOOTSTRAP_DIR/updater-daemon.js"
-            expected_process=node
+        collector|updater)
+            expected_process=native
             ;;
         collector-wrapper)
             expected_entry="$LOONGSUITE_PILOT_BIN"
@@ -390,9 +374,8 @@ process_matches_installed_entry() {
         process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
     fi
     process_name="${process_name##*/}"
-    # Node 23+ sets /proc/pid/comm to MainThread, so ucomm is no longer "node".
     case "$expected_process:$process_name" in
-        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        native:loongsuite-pilot|native:loongsuite-pilo|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
         *) return 1 ;;
     esac
 
@@ -402,17 +385,39 @@ process_matches_installed_entry() {
     if [ -r "/proc/$pid/cmdline" ]; then
         local arg=""
         local arg_index=0
+        local argv0=""
         local argv_entry=""
         local argv_arg=""
         local argv_count=0
         while IFS= read -r -d '' arg; do
             case "$arg_index" in
+                0) argv0="$arg" ;;
                 1) argv_entry="$arg" ;;
                 2) argv_arg="$arg" ;;
             esac
             arg_index=$((arg_index + 1))
             argv_count=$arg_index
         done < "/proc/$pid/cmdline"
+        if [ "$expected_process" = native ]; then
+            installed_native_entry "$argv0" || return 1
+            # argv[0] 可伪造，必须同时匹配内核记录的可执行文件。
+            [ "/proc/$pid/exe" -ef "$argv0" ] || return 1
+            local process_data="" process_home=""
+            [ -r "/proc/$pid/environ" ] || return 1
+            while IFS= read -r -d '' arg; do
+                case "$arg" in
+                    LOONGSUITE_PILOT_DATA_DIR=*) process_data="${arg#*=}" ;;
+                    HOME=*) process_home="${arg#*=}" ;;
+                esac
+            done < "/proc/$pid/environ"
+            [ "${process_data:-$process_home/.loongsuite-pilot}" = "$DATA_DIR" ] || return 1
+            if [ "$kind" = updater ]; then
+                [ "$argv_entry" = "run-updater" ] && [ "$argv_count" -eq 2 ]
+            else
+                [ "$argv_count" -eq 1 ] || { [ "$argv_entry" = run ] && [ "$argv_count" -eq 2 ]; }
+            fi
+            return
+        fi
         [ "$argv_entry" = "$expected_entry" ] || return 1
         if [ -n "$expected_arg" ]; then
             [ "$argv_arg" = "$expected_arg" ] && [ "$argv_count" -eq 3 ]
@@ -426,6 +431,17 @@ process_matches_installed_entry() {
     # process-name and uid checks above; -ww prevents path truncation.
     local command_line
     command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    if [ "$expected_process" = native ]; then
+        local entry="$command_line"
+        case "$kind:$command_line" in
+            updater:*"/loongsuite-pilot run-updater") entry="${command_line% run-updater}" ;;
+            collector:*"/loongsuite-pilot run") entry="${command_line% run}" ;;
+            collector:*"/loongsuite-pilot") ;;
+            *) return 1 ;;
+        esac
+        installed_native_entry "$entry"
+        return
+    fi
     local expected_suffix="$expected_entry"
     [ -n "$expected_arg" ] && expected_suffix="$expected_suffix $expected_arg"
     if [ "$expected_process" = shell ] && [ "$command_line" = "$expected_suffix" ]; then
@@ -448,7 +464,7 @@ find_current_user_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$kind:$process_name" in
-            collector:node|collector:nodejs|collector:MainThread|updater:node|updater:nodejs|updater:MainThread|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            collector:loongsuite-pilot|collector:loongsuite-pilo|updater:loongsuite-pilot|updater:loongsuite-pilo|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && echo "$pid"
@@ -466,8 +482,15 @@ find_current_user_collector_processes() {
     while read -r pid process_name; do
         process_name="${process_name##*/}"
         case "$process_name" in
-            node|nodejs|MainThread) kind=collector ;;
-            bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
+            loongsuite-pilot|loongsuite-pilo)
+                if process_matches_installed_entry "$pid" collector; then
+                    printf '%s %s\n' "$pid" collector
+                elif process_matches_installed_entry "$pid" collector-wrapper; then
+                    printf '%s %s\n' "$pid" collector-wrapper
+                fi
+                continue
+                ;;
+            bash|sh|zsh) kind=collector-wrapper ;;
             *) continue ;;
         esac
         process_matches_installed_entry "$pid" "$kind" && printf '%s %s\n' "$pid" "$kind"
@@ -554,7 +577,9 @@ stop_installed_updater_processes() {
         count=$((count + 1))
     done
     for p in $pids; do
-        kill -9 "$p" 2>/dev/null || true
+        if process_matches_installed_entry "$p" updater || process_matches_installed_entry "$p" updater-wrapper; then
+            kill -9 "$p" 2>/dev/null || true
+        fi
     done
 }
 
@@ -662,21 +687,13 @@ cleanup_legacy_monitor_processes() {
 }
 
 updater_process_exists() {
+    local pid=""
     if [ -f "$UPDATER_PID_FILE" ]; then
-        local pid
         pid=$(cat "$UPDATER_PID_FILE" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            local command_line
-            command_line=$(ps -p "$pid" -o command= 2>/dev/null || true)
-            case "$command_line" in
-                *updater-daemon.js*|*"/bin/updater-daemon"*|*"loongsuite-pilot run-updater"*|*"dist/updater/index.js"*)
-                    return 0
-                    ;;
-            esac
-        fi
+        process_matches_installed_entry "$pid" updater && return 0
     fi
-
-    pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
+    pid=$(find_current_user_processes updater | head -n 1 || true)
+    [ -n "$pid" ]
 }
 
 # Same rule as the installer: the node that launches the collector must load
@@ -843,32 +860,41 @@ is_managed_by_initd() {
 
 
 
+native_version_root() {
+    local root="$1"
+    [ -d "$root" ] && [ ! -L "$root" ] && [ ! -L "$root/bin" ] || return 1
+    [ -f "$root/runtime-manifest.json" ] && [ ! -L "$root/runtime-manifest.json" ] || return 1
+    [ -f "$root/bin/loongsuite-pilot" ] && [ ! -L "$root/bin/loongsuite-pilot" ] && [ -x "$root/bin/loongsuite-pilot" ]
+}
+
+resolve_version_pointer() {
+    local pointer="$1" dir
+    [ -f "$pointer" ] && [ ! -L "$pointer" ] && [ ! -L "$VERSIONS_DIR" ] || return 1
+    [ "$(wc -c < "$pointer")" -le 1024 ] || return 1
+    dir=$(cat "$pointer") || return 1
+    dir="${dir#$'\xef\xbb\xbf'}"
+    # Trim encoding boundaries only; internal whitespace remains invalid.
+    dir="${dir#"${dir%%[!$' \t\r\n']*}"}"
+    dir="${dir%"${dir##*[!$' \t\r\n']}"}"
+    [[ "$dir" =~ ^[A-Za-z0-9_+.-]+$ ]] && [ "${#dir}" -le 240 ] || return 1
+    case "$dir" in .|..|*.) return 1 ;; esac
+    native_version_root "$VERSIONS_DIR/$dir" || return 1
+    printf '%s\n' "$VERSIONS_DIR/$dir"
+}
+
 resolve_current_version() {
-    if [ -f "$CURRENT_FILE" ]; then
-        local dir
-        dir=$(cat "$CURRENT_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$dir" ] && [ -d "$VERSIONS_DIR/$dir" ]; then
-            echo "$VERSIONS_DIR/$dir"
-            return 0
-        fi
+    if [ -e "$CURRENT_FILE" ] || [ -L "$CURRENT_FILE" ]; then
+        resolve_version_pointer "$CURRENT_FILE"
+        return
     fi
-    if [ -d "$PACKAGE_DIR" ] && [ -f "$PACKAGE_DIR/dist/index.js" ]; then
-        echo "$PACKAGE_DIR"
-        return 0
-    fi
-    return 1
+    native_version_root "$PACKAGE_DIR" || return 1
+    printf '%s\n' "$PACKAGE_DIR"
 }
 
 build_edition() {
-    local version_dir
-    version_dir=$(resolve_current_version 2>/dev/null) || return 1
-
-    local probe="$version_dir/dist/cli-probe.cjs"
-    [ -f "$probe" ] || return 1
-
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || return 1
-    "$node_bin" "$probe" --build-edition 2>/dev/null
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    "$pilot_bin" probe --build-edition
 }
 
 is_opensource_build() {
@@ -876,14 +902,29 @@ is_opensource_build() {
 }
 
 resolve_previous_version() {
-    if [ -f "$PREVIOUS_FILE" ]; then
-        local dir
-        dir=$(cat "$PREVIOUS_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$dir" ] && [ -d "$VERSIONS_DIR/$dir" ]; then
-            echo "$VERSIONS_DIR/$dir"
+    resolve_version_pointer "$PREVIOUS_FILE"
+}
+
+resolve_pilot_bin() {
+    local version_dir repo_dir candidate
+    if version_dir=$(resolve_current_version); then
+        printf '%s\n' "$version_dir/bin/loongsuite-pilot"
+        return 0
+    fi
+    # 已有但损坏的安装不能回退到工作区、bootstrap 或旧 Node 包。
+    [ ! -e "$CURRENT_FILE" ] && [ ! -L "$CURRENT_FILE" ] || return 1
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    if native_version_root "$repo_dir"; then
+        printf '%s\n' "$repo_dir/bin/loongsuite-pilot"
+        return 0
+    fi
+    [ -f "$repo_dir/Cargo.toml" ] && [ -f "$repo_dir/src/main.rs" ] || return 1
+    for candidate in "$repo_dir/target/release/loongsuite-pilot" "$repo_dir/target/debug/loongsuite-pilot"; do
+        if [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
             return 0
         fi
-    fi
+    done
     return 1
 }
 
@@ -904,41 +945,31 @@ resolve_script() {
 
 cmd_run() {
     ensure_dirs
-    sync_bootstrap_scripts
 
-    if [ ! -f "$BOOTSTRAP_DIR/collector-daemon.js" ]; then
-        echo "❌ Bootstrap script missing" >&2
-        exit 1
-    fi
-
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found" >&2
         exit 1
     }
 
     echo "$$" > "$PID_FILE"
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    exec "$node_bin" "$BOOTSTRAP_DIR/collector-daemon.js"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$pilot_bin"
 }
 
 cmd_run_updater() {
     ensure_dirs
-    sync_bootstrap_scripts
 
-    if [ ! -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-        exit 0
-    fi
-
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || { echo "原生 updater 二进制缺失" >&2; return 1; }
 
     echo "$$" > "$UPDATER_PID_FILE"
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$pilot_bin" run-updater
 }
 
 cmd_start() {
@@ -957,7 +988,6 @@ cmd_start() {
     fi
 
     ensure_dirs
-    sync_bootstrap_scripts
 
     if autostart_install "true"; then
         sleep 2
@@ -1051,7 +1081,6 @@ start_collector_after_stop() {
     local _err=""
 
     ensure_dirs
-    sync_bootstrap_scripts
 
     local _restarted=false
     case "$(uname -s)" in
@@ -1155,22 +1184,17 @@ start_collector_after_stop() {
     if [ "$_restarted" = false ]; then
         case "$init_type" in
             nohup|unknown|"")
-                local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-                if [ ! -f "$entry" ]; then
-                    write_restart_failure collector "bootstrap-missing" \
-                        "collector-daemon.js not found at $entry"
-                    echo "❌ Bootstrap script missing" >&2
-                    return 1
-                fi
-                local node_bin
-                node_bin=$(resolve_node) || {
-                    write_restart_failure collector "node-missing" \
-                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
-                    echo "❌ node runtime not found" >&2
+                local pilot_bin
+                pilot_bin=$(resolve_pilot_bin) || {
+                    write_restart_failure collector "binary-missing" \
+                        "loongsuite-pilot binary not found"
+                    echo "❌ loongsuite-pilot binary not found" >&2
                     return 1
                 }
                 export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-                nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
+                export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+                export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+                nohup "$pilot_bin" >> "$LOG_FILE" 2>&1 &
                 echo "$!" > "$PID_FILE"
                 echo "⚠️  collector started (nohup fallback after stage=$_stage: $_detail)" >&2
                 ;;
@@ -1311,7 +1335,6 @@ cmd_restart_updater() {
     sleep 1
 
     ensure_dirs
-    sync_bootstrap_scripts
 
     # Start updater via service manager
     local _restarted=false
@@ -1419,22 +1442,17 @@ cmd_restart_updater() {
     if [ "$_restarted" = false ]; then
         case "$init_type" in
             nohup|unknown|"")
-                local entry="$BOOTSTRAP_DIR/updater-daemon.js"
-                if [ ! -f "$entry" ]; then
-                    write_restart_failure updater "bootstrap-missing" \
-                        "updater-daemon.js not found at $entry"
-                    echo "❌ Updater bootstrap script missing" >&2
-                    return 1
-                fi
-                local node_bin
-                node_bin=$(resolve_node) || {
-                    write_restart_failure updater "node-missing" \
-                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
-                    echo "❌ node runtime not found" >&2
+                local pilot_bin
+                pilot_bin=$(resolve_pilot_bin) || {
+                    write_restart_failure updater "binary-missing" \
+                        "loongsuite-pilot binary not found"
+                    echo "❌ loongsuite-pilot binary not found" >&2
                     return 1
                 }
                 export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-                nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+                export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+                export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+                nohup "$pilot_bin" run-updater >> "$UPDATER_LOG_FILE" 2>&1 &
                 echo "$!" > "$UPDATER_PID_FILE"
                 echo "⚠️  updater restarted (nohup fallback after stage=$_stage: $_detail)" >&2
                 ;;
@@ -1482,80 +1500,22 @@ interceptor_embedded_status() {
     echo "stopped"
 }
 
+dashboard_probe() {
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE" "$pilot_bin" dashboard probe "$@"
+}
+
 dashboard_port() {
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || {
-        echo 8765
-        return
-    }
-    "$node_bin" -e '
-const fs = require("node:fs");
-const path = process.argv[1];
-let port;
-try { port = JSON.parse(fs.readFileSync(path, "utf8"))?.dashboard?.port; } catch {}
-process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
-' "$CONFIG_FILE" 2>/dev/null || echo 8765
+    dashboard_probe --port
 }
 
 dashboard_data_dir() {
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || {
-        echo "$DATA_DIR"
-        return
-    }
-    LOONGSUITE_PILOT_LAUNCHER_DATA_DIR="$DATA_DIR" "$node_bin" -e '
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const configPath = process.argv[1];
-let configured;
-try { configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir; } catch {}
-let dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || configured || process.env.LOONGSUITE_PILOT_LAUNCHER_DATA_DIR;
-if (dataDir === "~") dataDir = os.homedir();
-else if (dataDir.startsWith("~/")) dataDir = path.join(os.homedir(), dataDir.slice(2));
-process.stdout.write(dataDir);
-' "$CONFIG_FILE" 2>/dev/null || echo "$DATA_DIR"
+    dashboard_probe --data-dir
 }
 
 dashboard_is_available() {
-    local port="$1"
-    local effective_data_dir
-    effective_data_dir=$(dashboard_data_dir)
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || return 1
-    "$node_bin" -e '
-const http = require("node:http");
-const crypto = require("node:crypto");
-const path = require("node:path");
-let finished = false;
-let timer;
-const finish = (code) => {
-  if (finished) return;
-  finished = true;
-  clearTimeout(timer);
-  process.exit(code);
-};
-const request = http.request({
-  host: "127.0.0.1",
-  port: Number(process.argv[1]),
-  path: "/metrics-summary.json",
-  method: "HEAD",
-}, (response) => {
-  response.resume();
-  const expectedInstance = crypto.createHash("sha256")
-    .update(path.resolve(process.argv[2]))
-    .digest("hex");
-  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
-    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
-  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
-});
-request.on("error", () => finish(1));
-request.end();
-timer = setTimeout(() => {
-  request.destroy();
-  finish(1);
-}, 300);
-' "$port" "$effective_data_dir" >/dev/null 2>&1
+    dashboard_probe --available >/dev/null 2>&1
 }
 
 cmd_status() {
@@ -1611,27 +1571,11 @@ cmd_info() {
     echo "log=$LOG_FILE"
     echo "versions_dir=$VERSIONS_DIR"
 
-    if [ -f "$NODE_PIN_FILE" ]; then
-        local pinned_node
-        pinned_node=$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$pinned_node" ] && [ -x "$pinned_node" ]; then
-            echo "node_bin=$pinned_node"
-            echo "node_version=$("$pinned_node" --version 2>/dev/null || echo 'unknown')"
-        else
-            echo "node_bin=$pinned_node (stale)"
-            local resolved
-            resolved=$(resolve_node 2>/dev/null) || true
-            echo "node_version=$("${resolved:-node}" --version 2>/dev/null || echo 'unknown')"
-        fi
-    else
-        echo "node_bin=not pinned"
-        local resolved
-        resolved=$(resolve_node 2>/dev/null) || true
-        if [ -n "$resolved" ]; then
-            echo "node_resolved=$resolved"
-            echo "node_version=$("$resolved" --version 2>/dev/null || echo 'unknown')"
-        fi
-    fi
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    echo "runtime=rust"
+    echo "binary=$pilot_bin"
+    "$pilot_bin" --version
 
     echo ""
     if [ -f "$CONFIG_FILE" ]; then
@@ -1641,47 +1585,33 @@ cmd_info() {
 
 cmd_worker() {
     ensure_dirs
-    sync_bootstrap_scripts
 
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found" >&2
         exit 1
     }
-
-    local version_dir
-    version_dir=$(resolve_current_version) || {
-        echo "❌ No valid loongsuite-pilot version found" >&2
-        exit 1
-    }
-    local entry="$version_dir/dist/index.js"
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    exec "$node_bin" "$entry" worker "$@"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$pilot_bin" worker "$@"
 }
 
 cmd_agent() {
     ensure_dirs
-    sync_bootstrap_scripts
 
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found" >&2
         return 1
     }
-
-    local version_dir
-    version_dir=$(resolve_current_version) || {
-        echo "❌ No valid loongsuite-pilot version found" >&2
-        return 1
-    }
-    local entry="$version_dir/dist/index.js"
     local subcommand="${1:-}"
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-    "$node_bin" "$entry" agent "$@" || return $?
+    "$pilot_bin" agent "$@" || return $?
 
     # The command performs injection/removal synchronously. Restart only an
     # already-running collector so it reloads definitions and watchdog targets;
@@ -1711,63 +1641,34 @@ inject_failure() {
 }
 
 cmd_inject() {
-    local node_bin version_dir
-    node_bin=$(resolve_node) || { inject_failure "Node runtime not found" "$@"; return 1; }
-    version_dir=$(resolve_current_version) || { inject_failure "No valid loongsuite-pilot version found" "$@"; return 1; }
-    [ -r "$version_dir/dist/index.js" ] || { inject_failure "Pilot entrypoint is missing or unreadable" "$@"; return 1; }
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || { inject_failure "loongsuite-pilot binary not found" "$@"; return 1; }
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-    exec "$node_bin" "$version_dir/dist/index.js" inject "$@"
+    exec "$pilot_bin" inject "$@"
 }
 
 cmd_hook() {
-    local node_bin version_dir entry
-    node_bin=$(resolve_node) || {
-        echo "loongsuite-pilot hook: Node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "loongsuite-pilot hook: binary not found" >&2
         return 1
     }
-    version_dir=$(resolve_current_version) || {
-        echo "loongsuite-pilot hook: No valid loongsuite-pilot version found" >&2
-        return 1
-    }
-    # Prefer the sqlite-free bundle. Fall back to the daemon entry when an
-    # older install has not shipped hook-cli.cjs yet.
-    if [ -r "$version_dir/dist/hook-cli.cjs" ]; then
-        entry="$version_dir/dist/hook-cli.cjs"
-    else
-        entry="$version_dir/dist/index.js"
-        [ -r "$entry" ] || {
-            echo "loongsuite-pilot hook: Pilot entrypoint is missing or unreadable" >&2
-            return 1
-        }
-        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
-        export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-        exec "$node_bin" "$entry" hook "$@"
-    fi
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-    exec "$node_bin" "$entry" hook "$@"
+    exec "$pilot_bin" hook "$@"
 }
 
 cmd_deploy() {
     ensure_dirs
-    sync_bootstrap_scripts
 
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found" >&2
         return 1
     }
-
-    local version_dir
-    version_dir=$(resolve_current_version) || {
-        echo "❌ No valid loongsuite-pilot version found" >&2
-        return 1
-    }
-    local entry="$version_dir/dist/index.js"
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
@@ -1776,7 +1677,7 @@ cmd_deploy() {
     # builds, where nothing is running yet and starting a daemon inside a build
     # layer would leave a half-written state file baked into the image. A running
     # collector re-reads its deployment state on its own next cycle.
-    exec "$node_bin" "$entry" deploy "$@"
+    exec "$pilot_bin" deploy "$@"
 }
 
 cmd_menubar() {
@@ -1785,34 +1686,15 @@ cmd_menubar() {
         return 1
     fi
 
-    local repo_dir version_dir entry node_bin
-    repo_dir="$(dirname "$SCRIPT_DIR")"
-    # A source checkout must not send a new command to an older installed runtime.
-    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
-        version_dir="$repo_dir"
-    else
-        version_dir=$(resolve_current_version 2>/dev/null) || true
-    fi
-    if [ -z "$version_dir" ]; then
-        version_dir="$repo_dir"
-    fi
-    entry="$version_dir/dist/index.js"
-    if [ ! -f "$entry" ]; then
-        echo "❌ loongsuite-pilot runtime entry not found; build or install Pilot first" >&2
-        return 1
-    fi
-    if ! grep -Fq 'Usage: loongsuite-pilot menubar <start|stop>' "$entry"; then
-        echo "❌ loongsuite-pilot runtime does not support the menubar command; upgrade Pilot or run 'npm run build' first" >&2
-        return 1
-    fi
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found; build or install Pilot first" >&2
         return 1
     }
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
     export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
-    exec "$node_bin" "$entry" menubar "$@"
+    exec "$pilot_bin" menubar "$@"
 }
 
 cmd_dashboard() {
@@ -1822,82 +1704,37 @@ cmd_dashboard() {
         --help|-h) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}"; return 0 ;;
         *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
     esac
-    local node_bin="" version_dir repo_dir entry config_path pin pinned
-    repo_dir="$(dirname "$SCRIPT_DIR")"
-    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
-        entry="$repo_dir/scripts/dashboard-shortcut.mjs"
-    else
-        version_dir=$(resolve_current_version 2>/dev/null) || {
-            echo "Pilot is not installed. Install Pilot before managing Dashboard shortcuts." >&2
-            return 1
-        }
-        entry="$version_dir/scripts/dashboard-shortcut.mjs"
-    fi
-    if [ ! -f "$entry" ]; then
-        echo "Dashboard shortcut command is missing. Upgrade or repair Pilot." >&2
+    case "${1:-}" in
+        install|status|uninstall|--help|-h) ;;
+        *) echo "Usage: loongsuite-pilot dashboard shortcut {install|status|uninstall}" >&2; return 2 ;;
+    esac
+    local pilot_bin config_path
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "loongsuite-pilot binary not found. Upgrade or repair Pilot." >&2
         return 1
-    fi
+    }
     config_path="${AGENT_DATA_COLLECTION_CONFIG:-}"
     config_path="${config_path#"${config_path%%[![:space:]]*}"}"
     config_path="${config_path%"${config_path##*[![:space:]]}"}"
     config_path="${config_path:-$CONFIG_FILE}"
     case "$config_path" in '~') config_path="$HOME" ;; '~/'*) config_path="$HOME/${config_path#\~/}" ;; esac
-    # A custom --data-dir installer pins Node next to config.json, not the cache.
-    # Preserve spaces in the pinned path; never rewrite the pin on this path.
-    for pin in "$(dirname "$config_path")/node-bin" "$NODE_PIN_FILE"; do
-        if [ -r "$pin" ]; then
-            IFS= read -r pinned < "$pin" || true
-            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
-        fi
-    done
-    if [ -z "$node_bin" ]; then
-        node_bin=$(resolve_node false) || {
-            echo "Pilot Node.js runtime not found. Repair the Pilot installation." >&2
-            return 1
-        }
-    fi
     export AGENT_DATA_COLLECTION_CONFIG="$config_path"
-    exec "$node_bin" "$entry" "$@"
+    exec "$pilot_bin" dashboard shortcut "$@"
 }
 
 cmd_token_usage() {
     ensure_dirs
 
-    local repo_dir version_dir entry candidate node_bin
-    repo_dir="$(dirname "$SCRIPT_DIR")"
-    entry=""
-
-    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
-        if [ -f "$repo_dir/dist/index.js" ]; then
-            entry="$repo_dir/dist/index.js"
-        else
-            echo "❌ local dist/index.js not found; run 'npm run build' first"
-            exit 1
-        fi
-    else
-        version_dir=$(resolve_current_version 2>/dev/null) || true
-        for candidate in \
-            "${version_dir:-}/dist/index.js" \
-            "$PACKAGE_DIR/dist/index.js"; do
-            if [ -f "$candidate" ]; then
-                entry="$candidate"
-                break
-            fi
-        done
-    fi
-
-    if [ -z "$entry" ]; then
-        echo "❌ loongsuite-pilot runtime entry not found"
-        exit 1
-    fi
-
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || {
+        echo "❌ loongsuite-pilot binary not found" >&2
         exit 1
     }
 
     export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    exec "$node_bin" "$entry" token-usage "$@"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$pilot_bin" token-usage "$@"
 }
 
 print_upgrade_usage() {
@@ -1993,76 +1830,50 @@ cmd_upgrade() {
 
 cleanup_hermes_for_rollback() {
     local target_version_dir="$1"
-    [ -f "$target_version_dir/agents.d/hermes-agent.json" ] && return 0
+    local helper_bin="" helper_root removed
+    if [ "$#" -ge 2 ]; then helper_bin="$2"; fi
+    if [ -z "$helper_bin" ]; then
+        helper_bin=$(resolve_pilot_bin) || return 1
+    fi
+    helper_root=$(dirname "$(dirname "$helper_bin")") || return 1
+    if ! removed=$(LP_DATA_DIR="$DATA_DIR" LP_CACHE_DIR="$CACHE_DIR" \
+        LP_HERMES_TARGET_DIR="$target_version_dir" LP_PILOT_DIR="$helper_root" \
+        "$helper_bin" installer-helper cleanup-rollback-hermes --from-env); then
+        echo "Hermes rollback cleanup failed; plugin files and state preserved for retry" >&2
+        return 1
+    fi
+    [ -z "$removed" ] || printf '   Removed Hermes plugin not supported by rollback target: %s\n' "$removed"
+}
 
-    local node_bin
-    node_bin=$(resolve_node 2>/dev/null) || return 0
-    "$node_bin" -e '
-const fs = require("fs");
-const path = require("path");
-const stateFile = process.argv[1];
-const fallback = path.join(process.env.HERMES_HOME || path.join(process.env.HOME || "", ".hermes"), "plugins", "loongsuite-pilot");
-let state = {};
-try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
-const recorded = state?.["hermes-agent"]?.targetDir;
-const target = typeof recorded === "string" && path.isAbsolute(recorded) ? recorded : fallback;
-const marker = path.join(target, ".loongsuite-pilot-managed.json");
-try {
-  const meta = JSON.parse(fs.readFileSync(marker, "utf8"));
-  if (meta.owner !== "loongsuite-pilot" || meta.agentId !== "hermes-agent") process.exit(0);
-  fs.rmSync(target, { recursive: true, force: true });
-  if (state && typeof state === "object" && state["hermes-agent"]) {
-    delete state["hermes-agent"];
-    const tmp = stateFile + ".tmp";
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
-    fs.renameSync(tmp, stateFile);
-  }
-  process.stdout.write(target + "\n");
-} catch {}
-' "$DATA_DIR/deployed-agents.json" | while IFS= read -r removed; do
-        [ -n "$removed" ] && echo "   Removed Hermes plugin not supported by rollback target: $removed"
-    done
+publish_rollback_version() {
+    local version_dir="$1" pilot_bin
+    native_version_root "$version_dir" || return 1
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    LP_SOURCE_DIR="$version_dir" LP_CACHE_DIR="$CACHE_DIR" LP_DATA_DIR="$DATA_DIR" \
+        LP_CONFIG_PATH="$CONFIG_FILE" LP_BIN_DIR="${LOONGSUITE_PILOT_BIN%/*}" \
+        "$pilot_bin" installer-helper rollback-package --from-env
 }
 
 cmd_rollback() {
-    if [ ! -f "$PREVIOUS_FILE" ]; then
-        echo "❌ No previous version to roll back to"
-        exit 1
+    local prev_path prev_dir
+    prev_path=$(resolve_previous_version) || {
+        echo "❌ Previous version is not a supported native installation; pointers unchanged"
+        return 1
+    }
+    prev_dir="${prev_path##*/}"
+    local hermes_cleanup_helper
+    hermes_cleanup_helper=$(resolve_pilot_bin) || return 1
+    # The current native helper validates the previous package/config first,
+    # then publishes both pointers and service files in the durable transaction.
+    # Never expose a legacy or unchecked current between a manual swap and sync.
+    if ! publish_rollback_version "$prev_path"; then
+        echo "❌ Failed to publish rollback target: $prev_dir; installation preserved"
+        return 1
     fi
-
-    local prev_dir
-    prev_dir=$(cat "$PREVIOUS_FILE" 2>/dev/null | tr -d '[:space:]')
-    if [ -z "$prev_dir" ] || [ ! -d "$VERSIONS_DIR/$prev_dir" ]; then
-        echo "❌ Previous version directory not found: $prev_dir"
-        exit 1
+    if ! cleanup_hermes_for_rollback "$prev_path" "$hermes_cleanup_helper"; then
+        echo "❌ Rollback publication committed but Hermes cleanup failed; files preserved"
+        return 1
     fi
-
-    local curr_dir=""
-    if [ -f "$CURRENT_FILE" ]; then
-        curr_dir=$(cat "$CURRENT_FILE" 2>/dev/null | tr -d '[:space:]')
-    fi
-
-    echo "$prev_dir" > "$CURRENT_FILE.tmp"
-    mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-    if [ -n "$curr_dir" ]; then
-        echo "$curr_dir" > "$PREVIOUS_FILE.tmp"
-        mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-    fi
-
-    if ! sync_installed_scripts_from_version "$VERSIONS_DIR/$prev_dir"; then
-        if [ -n "$curr_dir" ]; then
-            echo "$curr_dir" > "$CURRENT_FILE.tmp"
-            mv -f "$CURRENT_FILE.tmp" "$CURRENT_FILE"
-            echo "$prev_dir" > "$PREVIOUS_FILE.tmp"
-            mv -f "$PREVIOUS_FILE.tmp" "$PREVIOUS_FILE"
-            sync_installed_scripts_from_version "$VERSIONS_DIR/$curr_dir" 2>/dev/null || true
-        fi
-        echo "❌ Failed to sync scripts for rollback target: $prev_dir"
-        exit 1
-    fi
-
-    cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
-
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
     cmd_restart
@@ -2319,10 +2130,12 @@ pid_matches_daemon() {
 
     local arg=""
     local arg_index=0
+    local argv0=""
     local argv_entry=""
     local argv_command=""
     local argv_count=0
     while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 0 ] && argv0="$arg"
         [ "$arg_index" -eq 1 ] && argv_entry="$arg"
         [ "$arg_index" -eq 2 ] && argv_command="$arg"
         arg_index=$((arg_index + 1))
@@ -2330,6 +2143,12 @@ pid_matches_daemon() {
     done < "/proc/$pid/cmdline"
     if [ "$argv_entry" = "$DAEMON_BIN" ]; then
         [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    elif [ "${argv0##*/}" = "loongsuite-pilot" ]; then
+        if [ "$DAEMON_COMMAND" = "run" ]; then
+            [ "$argv_count" -eq 1 ]
+        else
+            [ "$argv_entry" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 2 ]
+        fi
     else
         [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
     fi
@@ -2491,10 +2310,12 @@ pid_matches_daemon() {
 
     local arg=""
     local arg_index=0
+    local argv0=""
     local argv_entry=""
     local argv_command=""
     local argv_count=0
     while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 0 ] && argv0="$arg"
         [ "$arg_index" -eq 1 ] && argv_entry="$arg"
         [ "$arg_index" -eq 2 ] && argv_command="$arg"
         arg_index=$((arg_index + 1))
@@ -2502,6 +2323,12 @@ pid_matches_daemon() {
     done < "/proc/$pid/cmdline"
     if [ "$argv_entry" = "$DAEMON_BIN" ]; then
         [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    elif [ "${argv0##*/}" = "loongsuite-pilot" ]; then
+        if [ "$DAEMON_COMMAND" = "run" ]; then
+            [ "$argv_count" -eq 1 ]
+        else
+            [ "$argv_entry" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 2 ]
+        fi
     else
         [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
     fi
@@ -2720,7 +2547,7 @@ autostart_install() {
             launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
             _write_launchd_plist
             launchctl load -w "$LAUNCHD_PLIST"
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
                 _write_launchd_updater_plist
                 launchctl load -w "$UPDATER_PLIST"
@@ -2729,12 +2556,12 @@ autostart_install() {
             ;;
         systemd-user)
             _write_systemd_user_unit
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 _write_systemd_user_updater_unit
             fi
             systemctl --user daemon-reload &>/dev/null
             systemctl --user enable --now loongsuite-pilot.service &>/dev/null
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
             fi
             enable_linger || true
@@ -2742,12 +2569,12 @@ autostart_install() {
             ;;
         systemd-system)
             _write_systemd_system_unit "$target_user"
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 _write_systemd_system_updater_unit "$target_user"
             fi
             maybe_sudo systemctl daemon-reload &>/dev/null
             maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
             fi
             echo "systemd-system" > "$INIT_TYPE_FILE"
@@ -2756,7 +2583,7 @@ autostart_install() {
             _write_initd_script "$target_user"
             _register_initd_boot "loongsuite-pilot-${target_user}"
             maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
-            if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
+            if resolve_pilot_bin >/dev/null; then
                 _write_initd_updater_script "$target_user"
                 _register_initd_boot "loongsuite-pilot-updater-${target_user}"
                 maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
@@ -2862,56 +2689,13 @@ autostart_status() {
 # Manage ~/.loongsuite-pilot/span-attributes.json — user-defined attributes
 # injected into trace spans (not the event log). The collector re-reads the
 # file per turn, so changes take effect without a restart.
-_span_attr_run() {
-    local node_bin
-    node_bin=$(resolve_node) || { echo "[span-attr] node runtime not found" >&2; exit 1; }
-    "$node_bin" -e '
-const fs = require("fs");
-const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
-const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
-const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
-function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
-function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
-if (op === "set") {
-  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
-  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
-  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
-} else if (op === "unset") {
-  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
-  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
-} else if (op === "list") {
-  const o = read(); const ks = Object.keys(o);
-  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
-}
-' "$SPAN_ATTR_FILE" "$@"
-}
-
 cmd_span_attr() {
-    local sub="${1:-}"
-    case "$sub" in
-        set)   shift; _span_attr_run set "$@" ;;
-        unset) shift; _span_attr_run unset "$@" ;;
-        list)  _span_attr_run list ;;
-        clear)
-            rm -f "$SPAN_ATTR_FILE"
-            echo "cleared custom span attributes ($SPAN_ATTR_FILE)"
-            ;;
-        ""|help|-h|--help)
-            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
-            echo ""
-            echo "  set <key> <value>   Set a custom trace span attribute"
-            echo "  unset <key>         Remove a custom attribute"
-            echo "  list                Show current custom attributes"
-            echo "  clear               Remove all custom attributes"
-            echo ""
-            echo "Attributes are injected into trace spans only (not the event log)."
-            echo "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
-            echo "Changes take effect on the next turn — no restart needed." ;;
-        *)
-            echo "Unknown span-attr command: $sub" >&2
-            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>" >&2
-            exit 1 ;;
-    esac
+    local pilot_bin
+    pilot_bin=$(resolve_pilot_bin) || return 1
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$pilot_bin" span-attr "$@"
 }
 
 cmd_help() {
@@ -2946,6 +2730,7 @@ cmd_help() {
 
 # ---- Dispatch ----
 
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 case "${1:-status}" in
     start)       shift; cmd_start "$@" ;;
     stop)        cmd_stop ;;
@@ -2979,9 +2764,25 @@ case "${1:-status}" in
     restart-updater)     cmd_restart_updater ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;
+    hook-process)
+        shift
+        pilot_bin=$(resolve_pilot_bin) || { printf '%s\n' '{}'; exit 0; }
+        exec "$pilot_bin" hook-process "$@"
+        ;;
+    probe)
+        shift
+        pilot_bin=$(resolve_pilot_bin) || { printf '%s\n' '[]'; exit 0; }
+        exec "$pilot_bin" probe "$@"
+        ;;
+    interceptor)
+        shift
+        pilot_bin=$(resolve_pilot_bin) || exit 0
+        exec "$pilot_bin" interceptor "$@"
+        ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"
         cmd_help
         exit 1 ;;
 esac
+fi

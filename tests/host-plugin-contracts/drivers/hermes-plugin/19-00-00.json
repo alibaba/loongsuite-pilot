@@ -1,0 +1,297 @@
+{
+  "case": 19,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Make two separate terminal calls and report both counts.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Use terminal exactly once to count the two approved files."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_fixture_001",
+                "call_id": "call_fixture_001",
+                "type": "function",
+                "function": {
+                  "name": "terminal",
+                  "arguments": "{\"command\":\"wc -l /etc/hosts /etc/shells\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"output\":\"17 /etc/hosts\\n11 /etc/shells\\n28 total\",\"exit_code\":0,\"error\":null}",
+            "tool_call_id": "call_fixture_001"
+          },
+          {
+            "role": "assistant",
+            "content": "The files have 17 and 11 lines, for a total of 28.",
+            "finish_reason": "stop"
+          },
+          {
+            "role": "user",
+            "content": "Make two separate terminal calls and report both counts."
+          }
+        ],
+        "is_first_turn": false,
+        "model": "qwen3-coder-plus",
+        "platform": "cli",
+        "sender_id": ""
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "finish_reason": "tool_calls",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "prompt_tokens": 1960,
+          "output_tokens": 25,
+          "total_tokens": 1985
+        }
+      }
+    },
+    {
+      "hook": "pre_tool_call",
+      "payload": {
+        "tool_name": "terminal",
+        "args": {
+          "command": "wc -l /etc/hosts"
+        },
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_9619303d98aa474299c86f52"
+      }
+    },
+    {
+      "hook": "post_tool_call",
+      "payload": {
+        "tool_name": "terminal",
+        "args": {
+          "command": "wc -l /etc/hosts"
+        },
+        "result": "{\"output\":\"17 /etc/hosts\",\"exit_code\":0,\"error\":null}",
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_9619303d98aa474299c86f52"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "finish_reason": "tool_calls",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "prompt_tokens": 2040,
+          "output_tokens": 25,
+          "total_tokens": 2065
+        }
+      }
+    },
+    {
+      "hook": "pre_tool_call",
+      "payload": {
+        "tool_name": "terminal",
+        "args": {
+          "command": "wc -l /etc/shells"
+        },
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_7bffd0cfff4f4966a504ad5e"
+      }
+    },
+    {
+      "hook": "post_tool_call",
+      "payload": {
+        "tool_name": "terminal",
+        "args": {
+          "command": "wc -l /etc/shells"
+        },
+        "result": "{\"output\":\"11 /etc/shells\",\"exit_code\":0,\"error\":null}",
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "tool_call_id": "call_7bffd0cfff4f4966a504ad5e"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 3,
+        "response_model": "qwen3-coder-plus",
+        "usage": {}
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000002",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 3,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "prompt_tokens": 2110,
+          "output_tokens": 30,
+          "total_tokens": 2140
+        }
+      }
+    },
+    {
+      "hook": "post_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Make two separate terminal calls and report both counts.",
+        "assistant_response": "The counts are 17 and 11, total 28.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Use terminal exactly once to count the two approved files."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_fixture_001",
+                "call_id": "call_fixture_001",
+                "type": "function",
+                "function": {
+                  "name": "terminal",
+                  "arguments": "{\"command\":\"wc -l /etc/hosts /etc/shells\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"output\":\"17 /etc/hosts\\n11 /etc/shells\\n28 total\",\"exit_code\":0,\"error\":null}",
+            "tool_call_id": "call_fixture_001"
+          },
+          {
+            "role": "assistant",
+            "content": "The files have 17 and 11 lines, for a total of 28.",
+            "finish_reason": "stop"
+          },
+          {
+            "role": "user",
+            "content": "Make two separate terminal calls and report both counts."
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_9619303d98aa474299c86f52",
+                "call_id": "call_9619303d98aa474299c86f52",
+                "type": "function",
+                "function": {
+                  "name": "terminal",
+                  "arguments": "{\"command\":\"wc -l /etc/hosts\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"output\":\"17 /etc/hosts\",\"exit_code\":0,\"error\":null}",
+            "tool_call_id": "call_9619303d98aa474299c86f52"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_7bffd0cfff4f4966a504ad5e",
+                "call_id": "call_7bffd0cfff4f4966a504ad5e",
+                "type": "function",
+                "function": {
+                  "name": "terminal",
+                  "arguments": "{\"command\":\"wc -l /etc/shells\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "{\"output\":\"11 /etc/shells\",\"exit_code\":0,\"error\":null}",
+            "tool_call_id": "call_7bffd0cfff4f4966a504ad5e"
+          },
+          {
+            "role": "assistant",
+            "content": "The counts are 17 and 11, total 28.",
+            "finish_reason": "stop"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": true,
+    "configUser": "config-fallback-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

@@ -1,0 +1,426 @@
+{
+  "case": 10,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Report the available tool surface.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Report the available tool surface."
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a careful assistant."
+              },
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a careful assistant."
+              },
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "Follow the house rules."
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 2,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "Follow the house rules."
+          }
+        }
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 3,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": [
+              {
+                "text": "Bedrock block prompt."
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 3,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": [
+              {
+                "text": "Bedrock block prompt."
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 4,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "systemInstruction": {
+              "parts": [
+                {
+                  "text": "Gemini instruction."
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 4,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "systemInstruction": {
+              "parts": [
+                {
+                  "text": "Gemini instruction."
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 5,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "developer",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Developer rule."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 5,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "developer",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Developer rule."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 6,
+        "response_model": "qwen3-coder-plus",
+        "usage": {},
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "   "
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "00000000-0000-4000-8000-000000000001",
+        "session_id": "fixture-session-001",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 6,
+        "finish_reason": "stop",
+        "response_model": "qwen3-coder-plus",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "total_tokens": 15
+        },
+        "request": {
+          "method": "POST",
+          "body": {
+            "model": "qwen3-coder-plus",
+            "messages": [
+              {
+                "role": "user",
+                "content": "Report the available tool surface."
+              }
+            ],
+            "system": "   "
+          }
+        }
+      }
+    },
+    {
+      "hook": "post_llm_call",
+      "payload": {
+        "session_id": "fixture-session-001",
+        "user_message": "Report the available tool surface.",
+        "assistant_response": "The tool surface is available.",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "Report the available tool surface."
+          },
+          {
+            "role": "assistant",
+            "content": "The tool surface is available.",
+            "finish_reason": "stop"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": true,
+    "configUser": "pilot-config-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

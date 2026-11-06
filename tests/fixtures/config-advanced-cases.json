@@ -1,0 +1,3383 @@
+[
+  {
+    "id": "L163:C5",
+    "title": "SLS disabled with empty endpoints when no config",
+    "user": null,
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "enabled"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": false
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 0
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L171:C5",
+    "title": "uses user SLS fields from config file",
+    "user": {
+      "sls": {
+        "endpoint": "https://legacy.example.com",
+        "project": "legacy-project",
+        "logstore": "legacy-logstore"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 1
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          0
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "endpoint": "https://legacy.example.com",
+          "project": "legacy-project",
+          "logstore": "legacy-logstore"
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "enabled"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": true
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L190:C5",
+    "title": "tags inner SLS endpoints with inner serviceNamePrefix",
+    "user": {
+      "serviceNamePrefix": "user-svc",
+      "sls": {
+        "endpoint": "https://user.log.aliyuncs.com",
+        "project": "up",
+        "logstore": "ul"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "managed-svc",
+      "sls": [
+        {
+          "name": "inner",
+          "endpoint": "https://inner.log.aliyuncs.com",
+          "project": "ip",
+          "logstore": "il"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "project"
+            ],
+            "expected": "up",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "project"
+            ],
+            "expected": "ip",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "managed-svc"
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L210:C5",
+    "title": "leaves inner SLS serviceName unset when inner prefix equals the user prefix",
+    "user": {
+      "serviceNamePrefix": "same-svc",
+      "sls": {
+        "endpoint": "https://user.log.aliyuncs.com",
+        "project": "up",
+        "logstore": "ul"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "same-svc",
+      "sls": [
+        {
+          "name": "inner",
+          "endpoint": "https://inner.log.aliyuncs.com",
+          "project": "ip",
+          "logstore": "il"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "project"
+            ],
+            "expected": "ip",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L225:C5",
+    "title": "uses env SLS destination over file values",
+    "user": {
+      "sls": {
+        "endpoint": "https://legacy.example.com",
+        "project": "legacy-project",
+        "logstore": "legacy-logstore"
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_SLS_ENDPOINT": "https://sls.example.com",
+      "LOONGSUITE_SLS_PROJECT": "proj2",
+      "LOONGSUITE_SLS_LOGSTORE": "log2"
+    },
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 1
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          0
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "project": "proj2",
+          "logstore": "log2"
+        }
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L245:C5",
+    "title": "ignores legacy destinationOverride",
+    "user": {
+      "sls": {
+        "destinationOverride": true,
+        "endpoint": "sls.example.com",
+        "project": "operator-project",
+        "logstore": "operator-logstore"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoint"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "https://sls.example.com"
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 1
+      },
+      {
+        "base": "config",
+        "path": [
+          "flushers",
+          "sls",
+          "endpoints",
+          0
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "project": "operator-project",
+          "logstore": "operator-logstore"
+        }
+      }
+    ],
+    "group": "outputs"
+  },
+  {
+    "id": "L546:C5",
+    "title": "defaults to no per-agent policies when config is missing",
+    "user": null,
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L553:C5",
+    "title": "ignores legacy per-agent captureMessageContent values",
+    "user": {
+      "agents": {
+        "cursor": {
+          "captureMessageContent": false
+        },
+        "qoder": {
+          "captureMessageContent": true
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "qoder"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      },
+      {
+        "base": "config",
+        "path": [
+          "listeners",
+          "codex-transcript"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "enabled": true,
+          "pollInterval": 10000
+        }
+      },
+      {
+        "base": "logs",
+        "path": [],
+        "op": "toHaveBeenCalledWith",
+        "negate": false,
+        "expected": [
+          {
+            "$stringContaining": "deprecated and ignored"
+          },
+          {
+            "locations": [
+              "agents.cursor.captureMessageContent",
+              "agents.qoder.captureMessageContent"
+            ]
+          }
+        ]
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L574:C5",
+    "title": "ignores legacy string captureMessageContent values",
+    "user": {
+      "agents": {
+        "cursor": {
+          "captureMessageContent": "false"
+        },
+        "qoder": {
+          "captureMessageContent": "true"
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "qoder"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L587:C5",
+    "title": "does not expose legacy captureMessageContent in resolved agent config",
+    "user": {
+      "agents": {
+        "cursor": {
+          "captureMessageContent": "sometimes"
+        },
+        "qoder": {}
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toHaveProperty",
+        "negate": true,
+        "property": "captureMessageContent",
+        "hasExpected": false,
+        "expected": null
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "qoder"
+        ],
+        "op": "toHaveProperty",
+        "negate": true,
+        "property": "captureMessageContent",
+        "hasExpected": false,
+        "expected": null
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L600:C5",
+    "title": "ignores unsupported agent fields for this stage",
+    "user": {
+      "agents": {
+        "cursor": {
+          "captureMessageContent": "true",
+          "unknownFutureOption": "ignored"
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L614:C5",
+    "title": "parses agents with enabled field",
+    "user": {
+      "agents": {
+        "claude-code": {
+          "enabled": true
+        },
+        "cursor": {
+          "enabled": false
+        },
+        "codex": {
+          "enabled": true,
+          "captureMessageContent": false
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "claude-code"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "enabled": true
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "enabled": false
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "enabled": true
+        }
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L629:C5",
+    "title": "backward compat: empty agents config means no gate",
+    "user": {},
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L636:C5",
+    "title": "parses per-agent multimodal nested config",
+    "user": {
+      "agents": {
+        "codex": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "all"
+          }
+        },
+        "cursor": {
+          "captureMessageContent": true
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "multimodal": {
+            "uploadMode": "all"
+          }
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {}
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L654:C5",
+    "title": "parses agent multimodal allowedRootPaths and expands ~",
+    "user": {
+      "agents": {
+        "qoder": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "all",
+            "allowedRootPaths": [
+              "~/workspace/loongsuite-pilot",
+              "/tmp/extra"
+            ]
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "qoder",
+          "multimodal",
+          "uploadMode"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "all"
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "qoder",
+          "multimodal",
+          "allowedRootPaths"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "$TEST_HOME/workspace/loongsuite-pilot",
+          "/tmp/extra"
+        ]
+      }
+    ],
+    "homeProjection": true,
+    "group": "agents"
+  },
+  {
+    "id": "L675:C5",
+    "title": "defaults agent multimodal uploadMode to none",
+    "user": {
+      "agents": {
+        "codex": {
+          "captureMessageContent": true,
+          "multimodal": {}
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "none"
+        }
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L691:C5",
+    "title": "keeps multimodal config for any agent id (runtime capability gate applies later)",
+    "user": {
+      "agents": {
+        "cursor": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "all"
+          }
+        },
+        "codex": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "all"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "all"
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "all"
+        }
+      }
+    ],
+    "group": "agents"
+  },
+  {
+    "id": "L716:C5",
+    "title": "is undefined when multimodal block is absent",
+    "user": {},
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L722:C5",
+    "title": "loads oss storage without uploadMode",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+            "storageBasePath": "oss://bucket/mm"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "oss",
+            "target": {
+              "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+              "storageBasePath": "oss://bucket/mm"
+            },
+            "auth": {
+              "mode": "ak",
+              "accessKeyId": "ak",
+              "accessKeySecret": "sk"
+            }
+          },
+          "storageBasePath": "oss://bucket/mm"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L758:C5",
+    "title": "disables sls storage when logstore is omitted",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L780:C5",
+    "title": "loads sls apiKey auth without access keys",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "sls",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "my-project",
+              "logstore": "mm-store"
+            },
+            "auth": {
+              "mode": "apiKey",
+              "apiKey": "sls-api-key"
+            }
+          },
+          "storageBasePath": "sls://my-project/mm-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L816:C5",
+    "title": "loads explicit anonymous auth for sls without credentials",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "anonymous"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "sls",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "my-project",
+              "logstore": "mm-store"
+            },
+            "auth": {
+              "mode": "anonymous"
+            }
+          },
+          "storageBasePath": "sls://my-project/mm-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L846:C5",
+    "title": "disables anonymous sls auth when credentials are also present",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "anonymous",
+            "apiKey": "must-not-be-used"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L864:C5",
+    "title": "loads delegatedOss with apiKey auth",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "delegatedOss",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "delegatedOss",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "my-project",
+              "logstore": "mm-store"
+            },
+            "auth": {
+              "mode": "apiKey",
+              "apiKey": "sls-api-key"
+            }
+          },
+          "storageBasePath": "sls://my-project/mm-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L893:C5",
+    "title": "disables anonymous auth for delegatedOss",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "delegatedOss",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "anonymous"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L911:C5",
+    "title": "infers auth.mode=ak when mode is omitted and both access keys exist",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal",
+          "storage",
+          "auth"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "mode": "ak",
+          "accessKeyId": "ak",
+          "accessKeySecret": "sk"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L936:C5",
+    "title": "infers auth.mode=apiKey when mode is omitted and only apiKey exists",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal",
+          "storage",
+          "auth"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "mode": "apiKey",
+          "apiKey": "sls-api-key"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L959:C5",
+    "title": "disables multimodal when apiKey and access keys coexist",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk",
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L981:C5",
+    "title": "disables multimodal when auth.mode cannot be inferred",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project"
+          },
+          "auth": {
+            "accessKeyId": "ak"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1000:C5",
+    "title": "disables multimodal when auth.mode is unsupported",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project"
+          },
+          "auth": {
+            "mode": "webtracking",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1021:C5",
+    "title": "disables multimodal when storage.type is invalid",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "s3"
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1029:C5",
+    "title": "disables multimodal when oss storageBasePath is missing",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1049:C5",
+    "title": "disables multimodal when oss storageBasePath is not oss://",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+            "storageBasePath": "s3://bucket/mm"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1070:C5",
+    "title": "disables multimodal when oss credentials are incomplete",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+            "storageBasePath": "oss://bucket/mm"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1090:C5",
+    "title": "disables multimodal when type=oss uses apiKey auth",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+            "storageBasePath": "oss://bucket/mm"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "edge-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1110:C5",
+    "title": "disables multimodal when type=oss uses anonymous auth",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "oss",
+          "target": {
+            "endpoint": "https://oss-cn-hangzhou.aliyuncs.com",
+            "storageBasePath": "oss://bucket/mm"
+          },
+          "auth": {
+            "mode": "anonymous"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1127:C5",
+    "title": "disables multimodal when sls credentials are incomplete",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "my-project"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1147:C5",
+    "title": "disables multimodal when sls project is missing",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com"
+          },
+          "auth": {
+            "mode": "ak",
+            "accessKeyId": "ak",
+            "accessKeySecret": "sk"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1167:C5",
+    "title": "falls back unknown agent uploadMode to none",
+    "user": {
+      "agents": {
+        "codex": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "unknown"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "none"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1180:C5",
+    "title": "accepts input, output, and all uploadMode values",
+    "user": {
+      "agents": {
+        "codex": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "input"
+          }
+        },
+        "cursor": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "all"
+          }
+        },
+        "claude-code": {
+          "captureMessageContent": true,
+          "multimodal": {
+            "uploadMode": "output"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "codex",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "input"
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "cursor",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "all"
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "agents",
+          "claude-code",
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "uploadMode": "output"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1220:C5",
+    "title": "does not reuse an incomplete storage target",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "logstore": "multimodal"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1229:C5",
+    "title": "does not fill a missing project from sls",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1244:C5",
+    "title": "disables upload when project is blank",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "  ",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1258:C5",
+    "title": "disables upload when project conflicts with a qualified host",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://mm-proj.cn-hangzhou.log.aliyuncs.com",
+            "project": "other-proj",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1275:C5",
+    "title": "regionalizes an explicit project-qualified multimodal endpoint",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://mm-proj.cn-hangzhou.log.aliyuncs.com",
+            "project": "mm-proj",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "sls",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "mm-proj",
+              "logstore": "mm-store"
+            },
+            "auth": {
+              "mode": "apiKey",
+              "apiKey": "mm-key"
+            }
+          },
+          "storageBasePath": "sls://mm-proj/mm-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1304:C5",
+    "title": "extracts project from a project-qualified multimodal endpoint",
+    "user": {
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://mm-proj.cn-hangzhou.log.aliyuncs.com",
+            "logstore": "mm-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "sls",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "mm-proj",
+              "logstore": "mm-store"
+            },
+            "auth": {
+              "mode": "apiKey",
+              "apiKey": "mm-key"
+            }
+          },
+          "storageBasePath": "sls://mm-proj/mm-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1331:C5",
+    "title": "reuses the apiKey of the explicit target when auth is omitted",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "storage": {
+            "type": "sls",
+            "target": {
+              "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+              "project": "user-proj",
+              "logstore": "user-store"
+            },
+            "auth": {
+              "mode": "apiKey",
+              "apiKey": "sls-api-key"
+            }
+          },
+          "storageBasePath": "sls://user-proj/user-store"
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1347:C5",
+    "title": "reuses the matching apiKey when another destination also has an apiKey",
+    "user": {
+      "sls": [
+        {
+          "name": "one",
+          "enabled": true,
+          "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+          "project": "user-proj",
+          "logstore": "user-store",
+          "mode": "apiKey",
+          "apiKey": "sls-api-key"
+        },
+        {
+          "name": "two",
+          "endpoint": "https://cn-shanghai.log.aliyuncs.com",
+          "project": "p2",
+          "logstore": "l2",
+          "mode": "apiKey",
+          "apiKey": "key-2"
+        }
+      ],
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal",
+          "storage"
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1368:C5",
+    "title": "reuses the apiKey when the flusher host is project-qualified",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://user-proj.cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal",
+          "storage"
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "sls-api-key"
+          }
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1383:C5",
+    "title": "does not reuse an apiKey for a different logstore",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "multimodal"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1397:C5",
+    "title": "does not reuse auth when the matching destination is not apiKey",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "ak",
+        "accessKeyId": "sls-ak",
+        "accessKeySecret": "sls-sk"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1412:C5",
+    "title": "does not reuse when the same destination has conflicting apiKeys",
+    "user": {
+      "sls": [
+        {
+          "name": "one",
+          "enabled": true,
+          "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+          "project": "user-proj",
+          "logstore": "user-store",
+          "mode": "apiKey",
+          "apiKey": "key-1"
+        },
+        {
+          "name": "two",
+          "enabled": true,
+          "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+          "project": "user-proj",
+          "logstore": "user-store",
+          "mode": "apiKey",
+          "apiKey": "key-2"
+        }
+      ],
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1424:C5",
+    "title": "keeps explicit auth instead of the matching flusher apiKey",
+    "user": {
+      "sls": {
+        "enabled": true,
+        "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+        "project": "user-proj",
+        "logstore": "user-store",
+        "mode": "apiKey",
+        "apiKey": "sls-api-key"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://cn-hangzhou.log.aliyuncs.com",
+            "project": "user-proj",
+            "logstore": "user-store"
+          },
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "multimodal",
+          "storage"
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "auth": {
+            "mode": "apiKey",
+            "apiKey": "mm-key"
+          }
+        }
+      }
+    ],
+    "group": "multimodal"
+  },
+  {
+    "id": "L1782:C5",
+    "title": "loadConfig populates otlpTrace from file",
+    "user": {
+      "otlpTrace": {
+        "endpoint": "http://localhost:4318",
+        "headers": {
+          "Authorization": "Bearer token"
+        },
+        "resourceAttributes": {
+          "deployment.env": "prod"
+        },
+        "resourceAttributeKeys": [
+          "agentteams.worker.name"
+        ]
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "otlpTrace"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "endpoint": "http://localhost:4318",
+          "headers": {
+            "Authorization": "Bearer token"
+          },
+          "resourceAttributes": {
+            "deployment.env": "prod"
+          },
+          "resourceAttributeKeys": [
+            "agentteams.worker.name"
+          ]
+        }
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1801:C5",
+    "title": "otlpTrace is undefined when not in config file",
+    "user": null,
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "otlpTrace"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1808:C5",
+    "title": "buildOtlpTraceConfig builds a single endpoint from otlpTrace",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://jaeger:4318",
+        "captureMessageContent": false,
+        "headers": {
+          "X-Custom": "val"
+        },
+        "resourceAttributes": {
+          "team": "infra"
+        },
+        "serviceName": "my-svc",
+        "debug": true,
+        "turnIdleTimeoutMs": 5000
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 1
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "name": "user-otlp",
+          "endpoint": "http://jaeger:4318",
+          "headers": {
+            "X-Custom": "val"
+          }
+        }
+      },
+      {
+        "base": "built",
+        "path": [
+          "resourceAttributes"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "team": "infra"
+        }
+      },
+      {
+        "base": "built",
+        "path": [
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "my-svc"
+      },
+      {
+        "base": "built",
+        "path": [
+          "debug"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": true
+      },
+      {
+        "base": "built",
+        "path": [
+          "turnIdleTimeoutMs"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": 5000
+      },
+      {
+        "base": "built",
+        "path": [
+          "resourceAttributeKeys"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": []
+      },
+      {
+        "base": "config",
+        "path": [
+          "otlpTrace"
+        ],
+        "op": "toHaveProperty",
+        "negate": true,
+        "property": "captureMessageContent",
+        "hasExpected": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [],
+        "op": "toHaveProperty",
+        "negate": true,
+        "property": "captureMessageContent",
+        "hasExpected": false,
+        "expected": null
+      },
+      {
+        "base": "logs",
+        "path": [],
+        "op": "toHaveBeenCalledWith",
+        "negate": false,
+        "expected": [
+          {
+            "$stringContaining": "deprecated and ignored"
+          },
+          {
+            "locations": [
+              "otlpTrace.captureMessageContent"
+            ]
+          }
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1846:C5",
+    "title": "buildOtlpTraceConfig allows custom resource attribute keys",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://jaeger:4318",
+        "resourceAttributeKeys": [
+          "agentteams.worker.name",
+          "agentteams.worker.name",
+          "custom.attr",
+          " "
+        ]
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "resourceAttributeKeys"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "agentteams.worker.name",
+          "custom.attr"
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1862:C5",
+    "title": "buildOtlpTraceConfig defaults spanAttributePassthroughPrefixes to []",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://jaeger:4318"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "spanAttributePassthroughPrefixes"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": []
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1874:C5",
+    "title": "buildOtlpTraceConfig trims and de-dups spanAttributePassthroughPrefixes",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://jaeger:4318",
+        "spanAttributePassthroughPrefixes": [
+          "multica.",
+          "multica.",
+          " custom. ",
+          " "
+        ]
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "spanAttributePassthroughPrefixes"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "multica.",
+          "custom."
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1889:C5",
+    "title": "buildOtlpTraceConfig expands cms into an arms endpoint",
+    "user": {
+      "collectTrace": true,
+      "cms": {
+        "licenseKey": "key123",
+        "endpoint": "https://arms.cn-hangzhou.arms.aliyuncs.com",
+        "workspace": "ws1"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 1
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "name"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "user-cms"
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "endpoint"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "https://arms.cn-hangzhou.arms.aliyuncs.com"
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "headers"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "x-arms-license-key": "key123",
+          "x-arms-project": "arms",
+          "x-cms-workspace": "ws1"
+        }
+      },
+      {
+        "base": "built",
+        "path": [
+          "resourceAttributes"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "acs.arms.service.feature": "genai_app"
+        }
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1910:C5",
+    "title": "buildOtlpTraceConfig unions otlpTrace AND cms (both sent)",
+    "user": {
+      "collectTrace": true,
+      "cms": {
+        "licenseKey": "key",
+        "endpoint": "https://arms.example.com",
+        "workspace": "ws"
+      },
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints"
+        ],
+        "op": "toHaveLength",
+        "negate": false,
+        "expected": 2
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-otlp",
+          "user-cms"
+        ]
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "endpoint"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "http://tempo:4318"
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          1,
+          "endpoint"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "https://arms.example.com"
+      },
+      {
+        "base": "built",
+        "path": [
+          "resourceAttributes"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "acs.arms.service.feature": "genai_app"
+        }
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1929:C5",
+    "title": "buildOtlpTraceConfig adds inner otlp[] and cms[] backends (union)",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318"
+      }
+    },
+    "inner": {
+      "otlp": [
+        {
+          "name": "managed-otlp",
+          "endpoint": "http://collector.internal:4318",
+          "headers": {
+            "x-token": "t"
+          }
+        }
+      ],
+      "cms": [
+        {
+          "name": "managed-arms",
+          "endpoint": "https://managed.arms.aliyuncs.com",
+          "licenseKey": "lk",
+          "project": "proj",
+          "workspace": "wksp"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-otlp",
+          "managed-otlp",
+          "managed-arms"
+        ]
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "managed-arms",
+            "unset": false
+          },
+          "headers"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "x-arms-license-key": "lk",
+          "x-arms-project": "proj",
+          "x-cms-workspace": "wksp"
+        }
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1953:C5",
+    "title": "buildOtlpTraceConfig tags inner backends with inner serviceNamePrefix",
+    "user": {
+      "collectTrace": true,
+      "serviceNamePrefix": "user-svc",
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "managed-svc",
+      "otlp": [
+        {
+          "name": "managed-otlp",
+          "endpoint": "http://collector.internal:4318"
+        }
+      ],
+      "cms": [
+        {
+          "name": "managed-arms",
+          "endpoint": "https://managed.arms.aliyuncs.com",
+          "licenseKey": "lk"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "user-svc"
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "user-otlp",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "managed-otlp",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "managed-svc"
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "managed-arms",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "managed-svc"
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1977:C5",
+    "title": "buildOtlpTraceConfig uses one exact serviceName for user and managed backends",
+    "user": {
+      "collectTrace": true,
+      "serviceName": "shared-service",
+      "serviceNamePrefix": "user-svc",
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318",
+        "serviceName": "legacy-otlp-svc"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "managed-svc",
+      "otlp": [
+        {
+          "name": "managed-otlp",
+          "endpoint": "http://collector.internal:4318"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "shared-service"
+      },
+      {
+        "base": "built",
+        "path": [
+          "appendAgentTypeToServiceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": false
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "every",
+            "path": [
+              "serviceName"
+            ],
+            "expected": null,
+            "unset": true
+          }
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": true
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L1996:C5",
+    "title": "buildOtlpTraceConfig leaves inner serviceName unset when it equals the user prefix",
+    "user": {
+      "collectTrace": true,
+      "serviceNamePrefix": "same-svc",
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "same-svc",
+      "otlp": [
+        {
+          "name": "managed-otlp",
+          "endpoint": "http://collector.internal:4318"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "managed-otlp",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2014:C5",
+    "title": "buildOtlpTraceConfig keeps same-url backends split by inner serviceName",
+    "user": {
+      "collectTrace": true,
+      "serviceNamePrefix": "user-svc",
+      "cms": {
+        "licenseKey": "lk",
+        "endpoint": "https://a.arms.aliyuncs.com",
+        "workspace": "w"
+      }
+    },
+    "inner": {
+      "serviceNamePrefix": "managed-svc",
+      "cms": [
+        {
+          "name": "managed-dup",
+          "endpoint": "https://a.arms.aliyuncs.com",
+          "licenseKey": "lk",
+          "workspace": "w"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-cms",
+          "managed-dup"
+        ]
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "find",
+            "path": [
+              "name"
+            ],
+            "expected": "managed-dup",
+            "unset": false
+          },
+          "serviceName"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "managed-svc"
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2034:C5",
+    "title": "buildOtlpTraceConfig dedups by url + license-key + project",
+    "user": {
+      "collectTrace": true,
+      "cms": {
+        "licenseKey": "lk",
+        "endpoint": "https://a.arms.aliyuncs.com",
+        "workspace": "w"
+      }
+    },
+    "inner": {
+      "cms": [
+        {
+          "name": "dup",
+          "endpoint": "https://a.arms.aliyuncs.com",
+          "licenseKey": "lk",
+          "workspace": "w"
+        },
+        {
+          "name": "other-tenant",
+          "endpoint": "https://a.arms.aliyuncs.com",
+          "licenseKey": "lk2",
+          "workspace": "w2"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-cms",
+          "other-tenant"
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2055:C5",
+    "title": "buildOtlpTraceConfig keeps same-url/license/project backends that differ only by workspace",
+    "user": {
+      "collectTrace": true,
+      "cms": {
+        "licenseKey": "lk",
+        "endpoint": "https://a.arms.aliyuncs.com",
+        "workspace": "w1"
+      }
+    },
+    "inner": {
+      "cms": [
+        {
+          "name": "other-workspace",
+          "endpoint": "https://a.arms.aliyuncs.com",
+          "licenseKey": "lk",
+          "workspace": "w2"
+        }
+      ]
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-cms",
+          "other-workspace"
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2073:C5",
+    "title": "buildOtlpTraceConfig ignores malformed (non-array) inner otlp/cms without throwing",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://tempo:4318"
+      }
+    },
+    "inner": {
+      "otlp": {
+        "endpoint": "http://oops:4318"
+      },
+      "cms": "not-an-array"
+    },
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          {
+            "op": "map",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": [
+          "user-otlp"
+        ]
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2092:C5",
+    "title": "buildOtlpTraceConfig returns undefined when collectTrace is false",
+    "user": {
+      "collectTrace": false,
+      "otlpTrace": {
+        "endpoint": "http://localhost:4318"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2103:C5",
+    "title": "env var LOONGSUITE_PILOT_OTLP_ENDPOINT overrides file",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://from-file:4318"
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_PILOT_OTLP_ENDPOINT": "http://from-env:4318"
+    },
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "endpoint"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "http://from-env:4318"
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2117:C5",
+    "title": "env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://localhost:4318",
+        "headers": {
+          "from": "file"
+        }
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_PILOT_OTLP_HEADERS": "{\"from\":\"env\"}"
+    },
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "headers"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "from": "env"
+        }
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2134:C5",
+    "title": "new path with empty headers produces undefined headers",
+    "user": {
+      "collectTrace": true,
+      "otlpTrace": {
+        "endpoint": "http://localhost:4318"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "built",
+        "path": [],
+        "op": "toBeDefined",
+        "negate": false,
+        "expected": null
+      },
+      {
+        "base": "built",
+        "path": [
+          "endpoints",
+          0,
+          "headers"
+        ],
+        "op": "toBeUndefined",
+        "negate": false,
+        "expected": null
+      }
+    ],
+    "group": "otlp"
+  },
+  {
+    "id": "L2264:C5",
+    "title": "defaults to none when interceptor config is missing",
+    "user": null,
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "interceptor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "mode": "none",
+          "types": []
+        }
+      }
+    ],
+    "group": "interceptor"
+  },
+  {
+    "id": "L2270:C5",
+    "title": "loads all mode and custom types as a mask-type subset",
+    "user": {
+      "interceptor": {
+        "mode": "custom",
+        "types": [
+          "apiKey",
+          "idCard",
+          "cloudAccessKey"
+        ]
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "interceptor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "mode": "custom",
+          "types": [
+            "apiKey",
+            "cloudAccessKey"
+          ]
+        }
+      }
+    ],
+    "group": "interceptor"
+  },
+  {
+    "id": "L2284:C5",
+    "title": "uses interceptor env over config file",
+    "user": {
+      "interceptor": {
+        "mode": "none",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_PILOT_INTERCEPTOR_MODE": "all"
+    },
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "interceptor"
+        ],
+        "op": "toEqual",
+        "negate": false,
+        "expected": {
+          "mode": "all",
+          "types": []
+        }
+      },
+      {
+        "base": "config",
+        "path": [
+          "mask"
+        ],
+        "op": "toMatchObject",
+        "negate": false,
+        "expected": {
+          "mode": "custom",
+          "types": [
+            "cloudAccessKey",
+            "apiKey",
+            "privateKey",
+            "databaseUrl"
+          ]
+        }
+      }
+    ],
+    "group": "interceptor"
+  },
+  {
+    "id": "L2297:C5",
+    "title": "leaves mask mode all unchanged when interceptor is enabled",
+    "user": {
+      "mask": {
+        "mode": "all"
+      },
+      "interceptor": {
+        "mode": "custom",
+        "types": [
+          "apiKey"
+        ]
+      }
+    },
+    "inner": null,
+    "env": {},
+    "assertions": [
+      {
+        "base": "config",
+        "path": [
+          "mask",
+          "mode"
+        ],
+        "op": "toBe",
+        "negate": false,
+        "expected": "all"
+      }
+    ],
+    "group": "interceptor"
+  }
+]

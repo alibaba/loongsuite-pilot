@@ -73,9 +73,7 @@ Environment variables:
 
 ## Custom Span Enrichment
 
-Use `otlpTrace.spanEnrichers` to load trusted local `.mjs` modules that derive attributes
-such as `gen_ai.skill.*` from the completed `gen_ai.tool.*` fields. This also works
-with CMS/ARMS and managed trace backends, without adding a generic OTLP endpoint.
+`otlpTrace.spanEnrichers` retains explicitly configured trusted local `.mjs` modules. The Rust binary runs standard ESM with its embedded JavaScript engine; no external Node, npm or Python installation is needed. Existing paths do not need to be removed or replaced with a compile-time registration.
 
 ```json
 {
@@ -85,53 +83,32 @@ with CMS/ARMS and managed trace backends, without adding a generic OTLP endpoint
 }
 ```
 
-Each module must default-export an object with a synchronous `enrich(span, context)` method:
+The default export is an object with a synchronous `enrich(span, context)` method:
 
 ```js
 export default {
   enrich(span, context) {
     const attrs = span.attributes;
     if (attrs['gen_ai.span.kind'] !== 'TOOL') return;
-    if (attrs['gen_ai.tool.name'] !== 'exec') return;
     const raw = attrs['gen_ai.tool.call.arguments'];
     if (typeof raw !== 'string') return;
     const args = JSON.parse(raw);
     if (typeof args.command !== 'string' || !args.command.startsWith('npm test')) return;
-    return {
-      'gen_ai.skill.name': 'run-tests',
-      'gen_ai.skill.id': 'run-tests',
-      'gen_ai.skill.version': '1.0',
-    };
+    return { 'gen_ai.skill.name': 'run-tests', 'gen_ai.skill.id': 'run-tests' };
   },
 };
 ```
 
-Execution order: `event conversion → built-in enrichment → custom enrichers → debug/failure logs and OTLP export`.
-This is a Pilot pre-export transform, not OpenTelemetry `SpanProcessor.onEnd`.
-Pilot creates a new export view instead of letting plugins mutate ended SDK spans.
+Execution order is `conversion → built-in enrichment → custom enrichers → debug/failure files and OTLP export`. For separate conversions by service name, `context.serviceName` contains the final service name for that conversion and `context.agentType` identifies the agent.
 
-- `span` exposes readonly `name`, `traceId`, `spanId`, and `attributes`, including frozen
-  attribute arrays. `context` exposes readonly `agentType` and the final `serviceName`.
-  Raw events, SDK spans, and resource mutation are not exposed.
-- Return an attribute object or `undefined`. Values may be strings, finite numbers,
-  booleans, or homogeneous arrays (including null/undefined array entries).
-  Nested objects, deletion, and asynchronous callbacks are unsupported. Invalid patches
-  are discarded atomically. Plugins run in configuration order; later plugins see earlier
-  patches and override matching keys, including built-in attributes.
-- Paths may be absolute, start with `~/` or `$PILOT_DATA/` (the configured data directory),
-  or be relative to the directory containing `config.json`. At most 16 modules are loaded,
-  deduplicated by real path. No directory scanning takes place.
-- Modules load once on first conversion; restart Pilot after editing them. Loading waits
-  at most 5 seconds per module. Load failures, invalid exports, and callback exceptions do
-  not block trace export. Callback errors are logged once per plugin without exception
-  text that might disclose tool content. SDK `forceFlush`/`shutdown` methods are not called.
-- Plugins only see attributes retained by collection/privacy settings and cannot recover
-  missing or redacted content. Different backend service names may convert the same turn
-  separately; keep mappings fast and free of side effects.
-- Plugins execute inside the Pilot process. Only load trusted code. A load timeout does
-  not cancel module execution and cannot interrupt synchronous infinite loops. Frozen
-  views and exception handling are not a sandbox. New attributes do not pass through
-  input masking again; do not reintroduce sensitive information.
+- `span` exposes readonly `name`, `traceId`, `spanId` and `attributes`. Attribute arrays and `context` are readonly too. Raw events, the SDK Span and resource mutation are not exposed.
+- Return an attribute object or `undefined`. Supported values are strings, finite numbers, booleans and homogeneous arrays; array entries may include `null`/`undefined`. Nested objects, attribute deletion and asynchronous `enrich` callbacks are unsupported. Promise/thenable returns and other invalid patches are discarded atomically. Plugins execute in configured order; later plugins can read and replace earlier patches.
+- Paths may be absolute, `~/` or `$PILOT_DATA/`; relative paths use the directory containing `config.json`. The first 16 paths are deduplicated by real path; directories are not scanned. Standard ESM, local relative/absolute imports, `file:` URLs and `import.meta.url` are supported. Module state persists across calls; restart Pilot after editing a module.
+- Loading is lazy and concurrent on first conversion. Each plugin load and invocation has a five-second limit. Load failures, exceptions, readonly-view errors and timeouts leave normal trace export running. Callback errors warn once per plugin without exception text. A stuck worker is terminated while other plugin states remain intact.
+- The embedded environment currently supplies standard ESM and local module imports. `node:` APIs, Node globals, CommonJS and npm package resolution are not yet compatible. These import failures are isolated; this does not establish equivalent migration for scripts requiring those APIs.
+- Plugins see only attributes retained by collection/privacy settings; they cannot restore omitted or masked data. Added attributes do not pass through input masking again. Configure trusted, fast mappings. This is a Pilot pre-export transform, not an SDK `SpanProcessor.onEnd`; plugin SDK lifecycle methods are not invoked.
+
+Native Rust `SpanEnricher` implementations remain available as compile-time extensions. Agent-hosted plugins such as OpenClaw execute in their own hosts and are independent of this interface.
 
 ## ARMS/CMS-Compatible Trace Output
 

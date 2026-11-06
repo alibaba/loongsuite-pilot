@@ -88,38 +88,15 @@ Qoder Trace 使用同一字段契约，但一期只统计产生事件的主 Hook
 
 ## Codex Hook 调用耗时（`type=hook`）
 
-Codex 的 `session-start`、`user-prompt-submit`、`subagent-start`、`subagent-stop` 和 `stop` Hook 在写出 `{}` 后，用单调时钟固定本次 Node 处理部分的耗时，再受保护地加载可选计时模块。模块缺失、解析或初始化失败不影响已有上下文和唤醒处理。计时从 Node 的 `performance.timeOrigin` 开始，包含业务模块加载、stdin 读取、上下文和唤醒标记处理；不包含 Bash/PowerShell 包装脚本的启动、Node 查找及版本探测，也不包含可选计时模块加载、计时样本落盘和进程退出。因此它是 Hook 的 Node 部分耗时，不是宿主观察到的完整 Hook 延迟，更不是异步 transcript 采集耗时。
+Rust 的 Codex Hook 在写出并刷新 `{}` 响应后，用单调时钟固定本次原生处理耗时，再将无正文的样本追加到 `<dataDir>/state/hook-metrics/codex.jsonl`。时间从进入原生 Hook 处理函数开始，包括 stdin 读取、上下文和唤醒标记处理；不包含进程启动、包装脚本、指标落盘及退出时间，也不是异步 transcript 采集耗时。与 main 的 Node 指标协议兼容，但耗时度量的是 Rust 处理阶段。
 
-Hook 只在 `<dataDir>/state/hook-metrics/codex.jsonl` 追加无正文的耗时样本，不发起网络请求。collector 在现有 L2 周期（启动、每 10 分钟、正常退出）消费样本，按固定的 `agent + hook_event` 聚合：
+collector 在启动、每 10 分钟和正常退出的 L2 周期消费样本，按 `agent + hook_event` 汇总，发送到既有 `pilot_pipeline`，并镜像到 `logs/metric_alarm/pilot-hook-metrics-YYYY-MM-DD.jsonl`。行使用 `type=hook`，沿用 `hostname`、`ip`、`instance_id`、`run_id`、`user_id`、`window_ms` 和 `__time__`。开源版只保留本地镜像；集团版沿用已配置的内部自监控 sender。
 
-- 远端复用 `pilot_pipeline`，行的 `type` 为 `hook`，沿用每行的 `hostname`、`ip`、`instance_id`、`run_id`、`user_id`、`window_ms` 和 `__time__`；
-- 本地镜像写入 `logs/metric_alarm/pilot-hook-metrics-YYYY-MM-DD.jsonl`，沿用 `metricAlarmDays` 保留和指标日志容量清理；
-- 当前只有 Codex Hook 生产耗时样本；没有样本的事件不生成零调用、零耗时行；忽略事件和处理失败的调用只要运行到采样点也会计入，不代表采集成功；
-- 开源版保留本地镜像，远端发送沿用现有空实现；集团版通过既有自监控 sender 上报，不新增服务端地址或配置。
+- `calls`：本次消费的有效调用样本数；忽略事件和处理失败的调用运行到采样点时也计入，不表示采集成功。
+- `total_duration_ms`：有效调用耗时总和，毫秒；平均耗时用总耗时除以总调用数。
+- `max_duration_ms`：最慢一次调用的毫秒数。
+- 没有样本的事件不产生空行；有效的零毫秒调用仍计数。
 
-| 字段 | 聚合方式 | 含义 |
-|------|----------|------|
-| `agent` | 维度 | 固定为 `codex`。 |
-| `hook_event` | 维度 | Hook 子命令，例如 `stop`、`user-prompt-submit`。 |
-| `calls` | 求和 | 本次消费到的有效调用样本数，不是会话数、标准事件数或成功采集次数。 |
-| `total_duration_ms` | 求和 | 有效调用的 Node 部分耗时总和，单位毫秒。 |
-| `max_duration_ms` | 最大值 | 有效调用中最慢一次的 Node 部分耗时，单位毫秒。 |
+生产者最多等待文件锁 50 毫秒，活动文件最多 1 MiB；写入失败、锁竞争或文件满只丢弃指标样本。这个等待预算不是文件系统调用或整个 Hook 的硬超时。消费使用同一空文件锁，将活动文件移到 `.draining`；先恢复已有待处理文件，读取或删除失败时保留重试，禁止覆盖未消费样本。每轮最多 64 个 Agent/事件组合，非法样本和超过一天的耗时被丢弃；样本协议没有时间戳，一天不是样本年龄限制。
 
-例如两次 `stop` 调用分别耗时 40 ms 和 120 ms，明细字段为：
-
-```json
-{
-  "type": "hook",
-  "agent": "codex",
-  "hook_event": "stop",
-  "calls": "2",
-  "total_duration_ms": "160",
-  "max_duration_ms": "120"
-}
-```
-
-查询平均耗时使用 `SUM(total_duration_ms) / SUM(calls)`；最慢调用使用 `MAX(max_duration_ms)`，不要对窗口平均值再做简单平均。
-
-耗时统计是 fail-open 自监控：每次调用都尝试记录，没有配置采样率；锁竞争等待预算为 50 ms，每个 Agent 的活动样本文件最多 1 MiB，一次消费最多输出 64 个 Agent/事件组合。写出 `{}` 不代表进程已退出，可选模块加载、同步等锁和落盘仍会延迟 Hook 退出；50 ms 不是整个记录函数或文件系统操作的硬超时。写入失败、锁竞争、文件满、非法样本或未运行到采样点的进程会缺少样本，不能以 `calls` 推断全部真实调用数。collector 用同一文件锁将样本文件移到 `.draining` 后消费，异常退出留下的 `.draining` 可在下次恢复；远端发送失败不保证重放。
-
-collector 停机或锁竞争期间积压的样本归入下一次消费窗口。`window_ms` 表示 collector 的本次上报间隔，不保证所有 Hook 都发生在该时间段内，尤其不能用启动短窗口计算积压调用的每秒调用率。
+该指标是 best-effort 自监控，进程崩溃或远端发送失败不保证重放。积压样本归入下一次消费窗口，`window_ms` 是 collector 上报间隔，不能用启动短窗口推算积压调用发生速率。本地文件沿用 `metricAlarmDays` 和指标日志容量清理策略。

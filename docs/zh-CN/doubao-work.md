@@ -120,3 +120,16 @@ node scripts/diagnostics/doubao-work-network-probe.mjs \
 `network.jsonl` 是诊断事实，不是标准 GenAI 事件或可直接上报的 Span。重复物理传输保留，使用消息身份对照；不按请求数、工具块数或 `SSE_REPLY_END` 数量统计 LLM。观察到 `FETCH_STREAM.fetch_key` 时跟随对应 async task。也可提供第六个参数作为绝对路径的 task scope JSON 文件，内容为本次已有原生证据的 task ID 数组；最多 8 KiB / 128 项，每 250ms 刷新。已有 async 请求会在精确匹配后才开始读取流，其余正文不保留，绑定晚到或缓冲超限时可能缺失数据。
 
 对 scope 文件的关联必须先证明本次回复 thread ID 与 SDK 线程 session ID 的关系；人工 scope 的来源单独标为 `explicit_task_scope`，不充当 Agent 父边或模型调用身份。不猜测尚未证明的线程/任务映射。未知协议仅记录事件名，异步 snapshot 正文尚未适配。该脚本不接入常驻 collector、不自动开启调试端口、不上报 CMS；正式采集仍使用上文的被动文件 Input。测试结束后恢复普通启动并确认临时调试端口关闭。
+
+## Rust 采集输出与故障恢复
+
+Rust collector 对 Doubao Work 使用以下输出确认边界：
+
+- SLS 等待全部已配置端点接受当前批次后才释放输入 checkpoint。失败或取消会保留旧 checkpoint，重新启动后可从仍然存在的原始日志重读；已经接受该批次的端点可能再次收到相同 event.id。这不是持久化的离线 SLS 队列，原始文件被其他程序删除或轮转丢弃后不能凭 checkpoint 重建内容。
+- OTLP 在 logs/doubao-pending-turns/ 保存进入正常脱敏管道后的待完成事实。请求 trace 与 native execution 分开记录，独立于 Codex journal。写入结果确认后即可推进采集 checkpoint，未完成轮次的内存淘汰、空闲检查和正常停止不会凭空补出结束事件。
+- OTLP 只有在全部端点导出成功后才留下不含事件内容的 ACK，并移除相应 pending 内容。接收失败、导出中取消或进程重建时，未 ACK 的事实会重新进入转换和导出；重建时按当前工作区排除策略及脱敏规则重新处理。
+- Unix 下 pending 目录为 0700、文件为 0600；内容并未加密。普通日志保留清理不删除这个 pending 目录。持续故障时应关注磁盘空间；写入失败会阻止 checkpoint 前进，而不是丢弃待交付事实。
+
+这里的 OTLP「已接受」包含已安全写入本地 journal，不能据此认定远端已经完成索引。导出重试可能产生重复，ACK 缓存也有容量上限，不提供跨端点事务或无限期的 exactly-once 保证。未使用 collector 的 journal 接线、仅自行构造基础 OtlpTraceFlusher 时，调用者需要处理未完成轮次的持久化；完成轮次导出失败会明确返回保护 checkpoint 的错误。
+
+单个 Doubao pending 分组有独立的 64 MiB 上限，ACK 元数据最多读取 4 KiB。上限不来自单次轮询预算；跨轮次积累或重复追加同样受约束。超过上限时保留此前已接受的事实并返回保护 checkpoint 的错误，不删记录、不当作已导出。相同 event.id 的补充事实在实时处理与重建时使用同一规则：仅补齐缺失、null 或空字符串字段；已有非空字段、数组或对象不会被后来记录覆盖。

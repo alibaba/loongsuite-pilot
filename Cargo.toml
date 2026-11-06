@@ -1,0 +1,92 @@
+[workspace]
+members = [".", "xtask"]
+exclude = [".build/rust-deps/boa_engine-0.22.0", ".build/rust-deps/boa_parser-0.22.0"]
+default-members = ["."]
+resolver = "2"
+
+[package]
+name = "loongsuite-pilot"
+version = "2.0.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Multi-agent AI coding data collection platform"
+rust-version = "1.99.1"
+
+[[bin]]
+name = "loongsuite-pilot"
+path = "src/main.rs"
+
+[features]
+default = []
+proprietary = []
+
+[dependencies]
+boa_engine = { version = "0.22.0", default-features = false }
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8.44"
+clap = { version = "4", features = ["derive"] }
+fancy-regex = "0.14"
+flate2 = "1"
+fs2 = "0.4"
+glob = "0.3"
+hex = "0.4"
+hmac = "0.12"
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
+indexmap = { version = "2", features = ["serde"] }
+hostname = "0.4"
+notify = "=8.2.1"
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "raw_value"] }
+sha2 = "0.10"
+sysinfo = "0.33"
+tar = "0.4"
+tempfile = "3"
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+walkdir = "2"
+which = "7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console", "Win32_System_IO", "Win32_System_SystemServices", "Win32_Storage_FileSystem"] }
+
+# 安装态预检需计算含调试信息的完整二进制摘要；保持与 release 相同的摘要算法。
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Performance smoke cases keep their original CPU budgets against compiled code.
+# Optimize this package only; unrelated test dependencies keep their profiles.
+[profile.test.package.loongsuite-pilot]
+opt-level = 1
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+# Boa 0.22: upstream source retained; only mandatory ICU bounds moved to 2.4.
+# Prepare pinned sources with scripts/build/prepare-rust-dependencies.py.
+[patch.crates-io]
+boa_engine = { path = ".build/rust-deps/boa_engine-0.22.0" }
+boa_parser = { path = ".build/rust-deps/boa_parser-0.22.0" }
+
+[[bench]]
+name = "pii_mask_history"
+path = "tests/performance_native/pii_mask_history.rs"
+harness = true

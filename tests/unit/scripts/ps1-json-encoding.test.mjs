@@ -1,19 +1,9 @@
-// Every JSON file exchanged between a .ps1 and the node side must be read and
-// written with an explicit -Encoding UTF8.
-//
-// On Windows PowerShell 5.1, Set-Content / Add-Content / Get-Content default to the
-// *ANSI codepage* (GBK/936 on Chinese Windows), while node reads and writes these
-// files as UTF-8 (src/utils/fs-utils.ts). Without -Encoding UTF8 a non-ASCII value
-// — a targetDir under `C:\Users\张三\` is the realistic case — round-trips as
-// mojibake, and the plugin at that path silently goes uncleaned on rollback.
-//
-// The paired half of this rule lives on the node side: 5.1 has no `utf8NoBOM`, so
-// `-Encoding UTF8` always emits a BOM, and `JSON.parse` rejects a leading BOM.
-// readJsonFile() swallows parse errors and returns null, which callers read as
-// "file absent" — so a BOM alone would reset deployment state to empty instead of
-// failing loudly. readJsonFile() therefore strips it; see
-// tests/unit/utils/fs-utils.test.ts. Fixing only one side is worse than fixing
-// neither.
+// PowerShell 5.1 文件 cmdlet 默认使用 ANSI，交换 JSON 时必须显式指定 UTF8。
+// 5.1 的 UTF8 会附带 BOM；原生读取端必须接受前导 BOM 并保留字符串内部 BOM。
+// 文件读写回归在 src/utils/fs_utils.rs，真实 span-attr 回归在 tests/cli_native.rs。
+// 原生安装器通过 Unicode 环境块传递配置，不经过 ASCII 管道或凭据临时文件；
+// tests/installer_native.rs 在 Windows 5.1/pwsh 的 FullLanguage/CLM 下验证实际桥接。
+// 下游尚保留的内嵌 Node 读取和 UTF8 暂存路径仍分别检查。
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -32,6 +22,14 @@ const INNER = 'deploy/installer-inner.ps1';
 const tracked = execFileSync('git', ['ls-files', '*.ps1'], { encoding: 'utf-8' })
   .split('\n')
   .filter(Boolean);
+
+const psFunction = (text, name) => {
+  const start = text.indexOf(`function ${name} {`);
+  expect(start, `缺少 PowerShell 函数 ${name}`).toBeGreaterThanOrEqual(0);
+  const end = text.indexOf('\n}\n', start);
+  expect(end, `缺少 PowerShell 函数结束 ${name}`).toBeGreaterThan(start);
+  return text.slice(start, end + 2);
+};
 
 const codeLines = (text) => text
   .split('\n')
@@ -108,22 +106,17 @@ const pipedJsonToNode = (text) => {
   ));
 };
 
-// Every installer variant stages its config payload instead of piping it, so all three are
-// checked -- the open-source one included, and it is the only one of them present in the
-// open-source tree, where the two internal entries skip and the rule would otherwise go
-// unchecked entirely. The floor differs because the internal variants run this shape twice
-// (install and reconfigure), the open-source one once.
+// 下游旧安装器仍检查 UTF8 暂存、消费和清理；开源原生安装器在下方检查环境块协议。
 const STAGED_VARIANTS = [
   ['deploy/installer.ps1', 2],
   ['deploy/installer-inner.ps1', 2],
-  ['deploy/installer-opensource.ps1', 1],
 ];
 
 // $OutputEncoding is bumped only by the internal variants. The open-source one deliberately
 // does NOT: its ad-hoc PROBE_RESULT pipes do not strip a BOM and would break if one appeared.
 const OUTPUT_ENCODING_VARIANTS = ['deploy/installer.ps1', 'deploy/installer-inner.ps1'];
 
-describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
+describe('PowerShell JSON 交换保留 UTF8、BOM 与原生环境块合同', () => {
   it('finds interchange sites to check', () => {
     // Guards against the regex silently matching nothing (renamed cmdlet, reflow).
     const total = tracked.reduce(
@@ -167,11 +160,26 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
         if (!/\.replace\(\/\^\\uFEFF\//.test(line)) bare.push(`${file}:${n}: ${line.trim()}`);
       }
     }
-    // Guards against the matcher silently matching nothing. The floor here is the
-    // span-attr payload in scripts/loongsuite-pilot.ps1; the internal installer
-    // variants carry ~15 more sites wherever they are part of the tree.
-    expect(total).toBeGreaterThanOrEqual(existsSync(INNER) ? 15 : 1);
+    // 原生 span-attr 已无 Node 读取点；匹配器的非空约束由真实语法样本单独验证。
+    if (existsSync(INNER)) expect(total).toBeGreaterThanOrEqual(15);
     expect(bare).toEqual([]);
+  });
+
+  it('BOM 匹配器识别 JSON 文件读取但不改写 TOML 读取', () => {
+    const json = "const value = JSON.parse(fs.readFileSync(file, 'utf8'));";
+    const safe = String.raw`const value = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));`;
+    const toml = "const lines = fs.readFileSync(file, 'utf8').split('\\n');";
+    expect(jsonParseReads([json, safe, toml, `# ${json}`].join('\n')))
+      .toEqual([[1, json], [2, safe]]);
+    expect(safe).toMatch(/\.replace\(\/\^\\uFEFF\//);
+    expect(json).not.toMatch(/\.replace\(\/\^\\uFEFF\//);
+  });
+
+  it('span-attr 直接转发原生 CLI 参数与退出码，不再内嵌 Node JSON 读取', () => {
+    const body = psFunction(readFileSync('scripts/loongsuite-pilot.ps1', 'utf-8'), 'Cmd-SpanAttr');
+    expect(body).toContain('Invoke-Pilot -Arguments (@("span-attr") + $SubArgs)');
+    expect(body).toContain('exit $script:PilotExitCode');
+    expect(body).not.toMatch(/NODE_BIN|JSON\.parse|readFileSync|Get-Content/);
   });
 
   it.skipIf(!existsSync(INNER))('leaves the codex config.toml read unstripped', () => {
@@ -206,6 +214,26 @@ describe('ps1 <-> node JSON interchange is explicitly UTF-8', () => {
     expect(pipedJsonToNode(sample)).toHaveLength(1);
     // A pipe of something that never came from ConvertTo-Json is out of scope.
     expect(pipedJsonToNode("    $other | & $script:NODE_BIN -e @'")).toEqual([]);
+  });
+
+  it('开源安装器使用 Unicode 环境块并在所有出口恢复输入，不落盘或打印配置载荷', () => {
+    const text = readFileSync('deploy/installer-opensource.ps1', 'utf-8');
+    const helper = psFunction(text, 'Invoke-InstallerHelper');
+    expect(helper).toContain('Join-Path $script:INSTALL_SRC "bin\\loongsuite-pilot.exe"');
+    expect(helper).toMatch(/\$previousInput = \$env:LOONGSUITE_PILOT_INSTALL_INPUT/);
+    expect(helper).toMatch(/try\s*\{\s*\$env:LOONGSUITE_PILOT_INSTALL_INPUT = \$Json/);
+    expect(helper).toContain("$protocolArgs = @('installer-helper', $Operation)");
+    expect(helper).toContain("if ($Operation -notin @('read-user-id', 'json-argv')) { $protocolArgs += '--input-env' }");
+    expect(helper).toMatch(/\$result = & \$binary @nativeArgs[\s\S]*finally\s*\{[^}]*\$env:LOONGSUITE_PILOT_INSTALL_INPUT = \$previousInput/);
+    for (const body of [helper, psFunction(text, 'Probe-Agents')]) {
+      expect(body).toContain('$global:LASTEXITCODE = 9009');
+      expect(body).toContain('$code = $global:LASTEXITCODE');
+      expect(body).not.toMatch(/\$LASTEXITCODE\s*=/);
+    }
+    expect(helper).not.toMatch(/Set-Content|Out-File|Write-Host|Write-Output|\$Json\s*\||NODE_BIN/);
+    expect(helper.match(/\$Json\b/g)).toHaveLength(2);
+    expect(psFunction(text, 'Write-Config')).toContain('Invoke-InstallerHelper -Operation "write-config" -Json (Get-InstallConfigJson)');
+    expect(text).not.toMatch(/\$cfgTmp\b|\$cfgJson\b/);
   });
 
   for (const [file, floor] of STAGED_VARIANTS) {

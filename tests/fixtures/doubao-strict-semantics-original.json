@@ -1,0 +1,463 @@
+{
+  "schema": 1,
+  "source": "tests/unit/doubao-strict-semantics.test.mjs",
+  "sourceHash": "d4d8c783586f25bf1c9ee0a0e67c3d9b3215fb4103d4986854540f3f4092c5bc",
+  "note": "Only exact original pure span builders/fixture arguments executed; validators/expect replaced with passive fixture recorders. This extraction is NOT runtime proof. Actual Rust CLI executes these exact rows and original structure/time assertions.",
+  "cases": [
+    {
+      "title": "local receipt metadata cannot exempt a TOOL from STEP ownership",
+      "checks": [
+        {
+          "kind": "structure",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "TOOL synthetic",
+              "startTimeUnixNano": "1793000000010000000",
+              "endTimeUnixNano": "1793000000020000000",
+              "attributes": {
+                "gen_ai.span.kind": "TOOL",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.tool.call.id": "synthetic-call",
+                "loongsuite.doubao_work.tool_boundary": "client_received_to_execution_settled"
+              }
+            }
+          ],
+          "expectContains": {
+            "id": "structure.tool_under_step",
+            "status": "error",
+            "spanId": "0000000000000003"
+          }
+        }
+      ]
+    },
+    {
+      "title": "native_local_tool_fragment is not a delegation or an Agent invocation boundary",
+      "checks": [
+        {
+          "kind": "structure",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "m_native",
+                "loongsuite.doubao_work.observation_scope": "client_message"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000010000000",
+              "endTimeUnixNano": "1793000000030000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "o_native",
+                "gen_ai.agent.parent.id": "m_native",
+                "loongsuite.doubao_work.root_agent_id": "m_native",
+                "loongsuite.doubao_work.root_turn_id": "synthetic-invocation",
+                "loongsuite.doubao_work.observation_scope": "native_local_tool_fragment",
+                "loongsuite.doubao_work.agent_boundary": "native_local_tool_interval",
+                "loongsuite.doubao_work.relation_basis": "native_create_agent_ancestry",
+                "loongsuite.doubao_work.timing_basis": "own_local_tool",
+                "loongsuite.doubao_work.native_creation_call_id": "synthetic-create",
+                "loongsuite.doubao_work.fragment_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              }
+            }
+          ],
+          "expectContains": {
+            "id": "structure.agent_under_entry",
+            "status": "error",
+            "spanId": "0000000000000003"
+          }
+        }
+      ]
+    },
+    {
+      "title": "native_sandbox_execution is not a delegation or an Agent invocation boundary",
+      "checks": [
+        {
+          "kind": "structure",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "m_native",
+                "loongsuite.doubao_work.observation_scope": "client_message"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000010000000",
+              "endTimeUnixNano": "1793000000030000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "o_native",
+                "gen_ai.agent.parent.id": "m_native",
+                "loongsuite.doubao_work.root_agent_id": "m_native",
+                "loongsuite.doubao_work.root_turn_id": "synthetic-invocation",
+                "loongsuite.doubao_work.observation_scope": "native_sandbox_execution",
+                "loongsuite.doubao_work.agent_boundary": "native_sandbox_get_or_create_to_release",
+                "loongsuite.doubao_work.relation_basis": "native_create_agent_ancestry",
+                "loongsuite.doubao_work.timing_basis": "native_execution_startedAtMs_endedAtMs",
+                "loongsuite.doubao_work.native_creation_call_id": "synthetic-create",
+                "loongsuite.doubao_work.fragment_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "loongsuite.doubao_work.native_execution_id": "00000000-0000-4000-8000-000000000001",
+                "loongsuite.doubao_work.native_query_message_id": "00000000-0000-4000-8000-000000000002",
+                "loongsuite.doubao_work.native_sandbox_id": "synthetic-sandbox",
+                "loongsuite.doubao_work.native_thread_id": "102",
+                "loongsuite.doubao_work.native_ancestor_ids": [
+                  "m_native"
+                ],
+                "loongsuite.doubao_work.parent_resolution": "root_request_ancestor"
+              }
+            }
+          ],
+          "expectContains": {
+            "id": "structure.agent_under_entry",
+            "status": "error",
+            "spanId": "0000000000000003"
+          }
+        }
+      ]
+    },
+    {
+      "title": "a tool fragment cannot relax asynchronous lifetime checks",
+      "checks": [
+        {
+          "kind": "time",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "m_native",
+                "loongsuite.doubao_work.observation_scope": "client_message"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000110000000",
+              "endTimeUnixNano": "1793000000130000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.id": "o_native",
+                "gen_ai.agent.parent.id": "m_native",
+                "loongsuite.doubao_work.root_agent_id": "m_native",
+                "loongsuite.doubao_work.root_turn_id": "synthetic-invocation",
+                "loongsuite.doubao_work.observation_scope": "native_local_tool_fragment",
+                "loongsuite.doubao_work.agent_boundary": "native_local_tool_interval",
+                "loongsuite.doubao_work.relation_basis": "native_create_agent_ancestry",
+                "loongsuite.doubao_work.timing_basis": "own_local_tool",
+                "loongsuite.doubao_work.native_creation_call_id": "synthetic-create",
+                "loongsuite.doubao_work.fragment_id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              }
+            }
+          ],
+          "expectContains": {
+            "id": "time.parent_contains_children",
+            "status": "error",
+            "spanId": "0000000000000003"
+          }
+        }
+      ]
+    },
+    {
+      "title": "a real ReAct round and a delegated background Agent remain supported",
+      "checks": [
+        {
+          "kind": "structure",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "STEP synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000090000000",
+              "attributes": {
+                "gen_ai.span.kind": "STEP",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000004",
+              "parentSpanId": "0000000000000003",
+              "name": "LLM synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000010000000",
+              "attributes": {
+                "gen_ai.span.kind": "LLM",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000005",
+              "parentSpanId": "0000000000000003",
+              "name": "TOOL synthetic",
+              "startTimeUnixNano": "1793000000010000000",
+              "endTimeUnixNano": "1793000000020000000",
+              "attributes": {
+                "gen_ai.span.kind": "TOOL",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000006",
+              "parentSpanId": "0000000000000005",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000015000000",
+              "endTimeUnixNano": "1793000000130000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.scope": "subagent"
+              }
+            }
+          ],
+          "expectNoErrors": true
+        },
+        {
+          "kind": "time",
+          "rows": [
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000001",
+              "name": "ENTRY synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "ENTRY",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000002",
+              "parentSpanId": "0000000000000001",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000100000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000003",
+              "parentSpanId": "0000000000000002",
+              "name": "STEP synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000090000000",
+              "attributes": {
+                "gen_ai.span.kind": "STEP",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000004",
+              "parentSpanId": "0000000000000003",
+              "name": "LLM synthetic",
+              "startTimeUnixNano": "1793000000000000000",
+              "endTimeUnixNano": "1793000000010000000",
+              "attributes": {
+                "gen_ai.span.kind": "LLM",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000005",
+              "parentSpanId": "0000000000000003",
+              "name": "TOOL synthetic",
+              "startTimeUnixNano": "1793000000010000000",
+              "endTimeUnixNano": "1793000000020000000",
+              "attributes": {
+                "gen_ai.span.kind": "TOOL",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation"
+              }
+            },
+            {
+              "traceId": "dddddddddddddddddddddddddddddddd",
+              "spanId": "0000000000000006",
+              "parentSpanId": "0000000000000005",
+              "name": "AGENT synthetic",
+              "startTimeUnixNano": "1793000000015000000",
+              "endTimeUnixNano": "1793000000130000000",
+              "attributes": {
+                "gen_ai.span.kind": "AGENT",
+                "gen_ai.framework": "doubao-work",
+                "gen_ai.session.id": "synthetic-session",
+                "gen_ai.turn.id": "synthetic-invocation",
+                "gen_ai.agent.scope": "subagent"
+              }
+            }
+          ],
+          "expectNoErrors": true
+        }
+      ]
+    }
+  ]
+}

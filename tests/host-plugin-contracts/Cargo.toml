@@ -1,0 +1,20 @@
+[package]
+name = "pilot-host-plugin-contracts"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Explicit developer-only workspace: host runtimes are never product dependencies.
+[workspace]
+
+[dependencies]
+loongsuite-pilot = { path = "../.." }
+async-trait = "0.1"
+chrono = "0.4"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+
+[patch.crates-io]
+boa_engine = { path = "../../.build/rust-deps/boa_engine-0.22.0" }
+boa_parser = { path = "../../.build/rust-deps/boa_parser-0.22.0" }

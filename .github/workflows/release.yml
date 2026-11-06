@@ -4,33 +4,210 @@ on:
   push:
     tags:
       - 'v*'
+  # 手动运行只生成候选资产，不能发布。
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
-  release:
-    runs-on: loongsuite-pilot
+  build:
+    name: Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - {os: ubuntu-22.04, host: x86_64-unknown-linux-gnu, target: x86_64-unknown-linux-gnu}
+          - {os: ubuntu-22.04-arm, host: aarch64-unknown-linux-gnu, target: aarch64-unknown-linux-gnu}
+          - {os: macos-15-intel, host: x86_64-apple-darwin, target: x86_64-apple-darwin, ui: x64}
+          - {os: macos-15, host: aarch64-apple-darwin, target: aarch64-apple-darwin, ui: arm64}
+          - {os: windows-2022, host: x86_64-pc-windows-msvc, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, host: aarch64-pc-windows-msvc, target: aarch64-pc-windows-msvc}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      HOST: ${{ matrix.host }}
+      RUSTUP_TOOLCHAIN: 1.99.1-${{ matrix.host }}
+      PACKAGE_OUTPUT: pilot-packages-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          node-version: 20
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - name: Package
-        run: bash deploy/package-opensource.sh --skip-build
-      - name: Create GitHub Release
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - name: 核对受信任来源与版本
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          trusted=false
+          for ref in refs/remotes/origin/main refs/remotes/origin/master refs/remotes/origin/dev/v2.0.0 refs/remotes/origin/loongsuite-pilot-rust; do
+            if git show-ref --verify --quiet "$ref" && git merge-base --is-ancestor "$sha" "$ref"; then trusted=true; fi
+          done
+          test "$trusted" = true
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$EVENT" = push ]; then test "$REF_NAME" = "v$version"; fi
+          echo "RELEASE_SHA=$sha" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+      - name: 安装固定工具链
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target "$TARGET"
+      - name: 对齐 Rust、C 依赖和 Swift 的 macOS 最低版本
+        if: runner.os == 'macOS'
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=13.0' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-release-v1
+          key: ${{ matrix.target }}-opensource
+          cache-on-failure: true
+      - name: Linux 主质量门禁（默认测试与严格 lint）
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          mkdir -p "$RUNNER_TEMP/pilot-home"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          HOME="$RUNNER_TEMP/pilot-home" USERPROFILE="$RUNNER_TEMP/pilot-home" cargo test --workspace --locked
+      - name: 构建主机工具
+        run: cargo build --locked -p xtask --bin xtask
+      - name: 非 Linux 包预检进程、配置路径与 Hook 模板回归
+        if: runner.os != 'Linux'
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          mkdir -p "$RUNNER_TEMP/pilot-regression-home"
+          export HOME="$RUNNER_TEMP/pilot-regression-home" USERPROFILE="$RUNNER_TEMP/pilot-regression-home"
+          cargo test --locked -p xtask --bin xtask package::tests
+          cargo test --locked -p xtask --bin xtask hooks::tests
+          cargo test --locked -p loongsuite-pilot --lib utils::candidate_process::tests
+          cargo test --locked -p loongsuite-pilot --lib core::config_loader::tests::reads_inner_config_from_canonical_data_dir
+          cargo test --locked -p loongsuite-pilot --lib utils::pid_utils::tests
+          cargo test --locked -p loongsuite-pilot --lib cli::dashboard_shortcut::tests
+          cargo test --locked -p loongsuite-pilot --lib utils::process_discovery::tests
+          cargo test --locked -p loongsuite-pilot --lib interceptor::cli::qoder_surface::tests
+          cargo test --locked -p loongsuite-pilot --lib hook_process::qoder::
+          cargo test --locked -p loongsuite-pilot --test hooks_native
+          cargo test --locked -p loongsuite-pilot --test interceptor_native
+          cargo test --locked -p loongsuite-pilot --test upstream_context
+          cargo test --locked -p loongsuite-pilot --test hook_timing
+          cargo test --locked -p loongsuite-pilot --lib utils::single_instance_lock::tests
+          pilot_platform_failures=0
+          if [[ "$TARGET" == *apple* ]]; then cargo test --locked -p loongsuite-pilot --lib core::hook_watchdog::shell_history_tests || pilot_platform_failures=1; fi
+          cargo test --locked -p loongsuite-pilot --lib multimodal::resolve:: || pilot_platform_failures=1
+          cargo test --locked -p loongsuite-pilot --lib deployment::hook_strategy::tests || pilot_platform_failures=1
+          cargo test --locked -p loongsuite-pilot --lib deployment::dsh_yaml_patch_strategy::tests || pilot_platform_failures=1
+          cargo test --locked -p loongsuite-pilot --lib updater::package_archive::tests
+          cargo test --locked -p loongsuite-pilot --lib updater::runtime::tests::same_version_activation_preserves_live_tree_and_retries_failed_preflight
+          cargo test --locked -p loongsuite-pilot --test cli_native native_span_attributes_preserve_types_strings_and_never_launch_a_runtime -- --exact
+          if [[ "$TARGET" == *windows* ]]; then
+            cargo test --locked -p loongsuite-pilot --test cli_native dashboard_shortcut_rejects_other_platforms_without_loading_config_or_runtimes -- --exact
+            cargo test --locked -p loongsuite-pilot --test installer_native || pilot_platform_failures=1
+            cargo test --locked -p loongsuite-pilot --lib deployment::legacy_uninstall::tests || pilot_platform_failures=1
+          fi
+          test "$pilot_platform_failures" -eq 0
+      - name: 构建开源二进制
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p loongsuite-pilot --bin loongsuite-pilot --target "$TARGET"
+      - name: macOS 原生 UI 与现有 Swift 测试
+        if: runner.os == 'macOS'
+        env:
+          UI_ARCH: ${{ matrix.ui }}
+        run: ./target/debug/xtask build-status-bar --arch "$UI_ARCH" --output target/status-bar/LoongSuitePilotMenuBarApp
+      - name: 打包并执行隔离包内预检
+        run: |
+          set -euo pipefail
+          suffix=""
+          args=()
+          if [[ "$TARGET" == *windows* ]]; then suffix=.exe; fi
+          if [[ "$TARGET" == *apple* ]]; then args+=(--status-bar-binary target/status-bar/LoongSuitePilotMenuBarApp); fi
+          "./target/debug/xtask$suffix" package --target "$TARGET" \
+            --binary "target/$TARGET/release/loongsuite-pilot$suffix" \
+            --commit "$RELEASE_SHA" --output "$RUNNER_TEMP/$PACKAGE_OUTPUT" "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ matrix.target }}
+          path: ${{ runner.temp }}/${{ env.PACKAGE_OUTPUT }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  release:
+    name: release-gate
+    needs: build
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    environment: ${{ github.event_name == 'push' && 'release' || 'release-dry-run' }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1
+      RELEASE_INPUT: pilot-release-input-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_OUTPUT: pilot-release-assets-${{ github.run_id }}-${{ github.run_attempt }}
+    permissions:
+      contents: write
+    steps:
+      - name: 拒绝失败或取消的构建
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/${{ env.RELEASE_INPUT }}
+      - name: 安装固定工具链
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-release-v1
+          key: release-gate-opensource
+      - name: 从同一提交构建发布校验器
+        run: cargo build --locked -p xtask --bin xtask
+      - name: 手动 dry-run（无发布令牌）
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./target/debug/xtask release --packages "$RUNNER_TEMP/$RELEASE_INPUT" \
+            --output "$RUNNER_TEMP/$RELEASE_OUTPUT" --commit "$(git rev-parse HEAD)" --repository "$REPOSITORY"
+      - name: 核对六平台资产并自动发布已有 tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            loongsuite-pilot.tar.gz \
-            loongsuite-pilot.zip \
-            deploy/installer-opensource.sh#installer.sh \
-            deploy/installer-opensource.ps1#installer.ps1
+          ./target/debug/xtask release --packages "$RUNNER_TEMP/$RELEASE_INPUT" \
+            --output "$RUNNER_TEMP/$RELEASE_OUTPUT" --commit "$(git rev-parse HEAD)" \
+            --repository "$REPOSITORY" --tag "$RELEASE_TAG" --publish
+      - name: 保存轻门禁资产（不是完整注入验收）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/${{ env.RELEASE_OUTPUT }}/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

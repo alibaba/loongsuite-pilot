@@ -1,0 +1,767 @@
+[
+  {
+    "id": "L45:C5",
+    "group": "empty",
+    "user": null,
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L53:C5",
+    "group": "empty",
+    "user": {
+      "sls": {
+        "project": "orphan"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L65:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "endpoint": "https://one.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "user-sls",
+          "mode": "webtracking"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L86:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "accessKeyId": "fixture-id",
+        "accessKeySecret": "fixture-secret"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "ak",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L106:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "apiKey": "fixture-api"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "apiKey",
+          "apiKey": "fixture-api"
+        }
+      ],
+      "enabled": true,
+      "apiKey": "fixture-api"
+    }
+  },
+  {
+    "id": "L125:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "apiKey": "file-api"
+      },
+      "multimodal": {
+        "storage": {
+          "type": "sls",
+          "target": {
+            "endpoint": "https://one.example",
+            "project": "project-one",
+            "logstore": "store-one"
+          }
+        }
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_SLS_API_KEY": "env-api"
+    },
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "apiKey",
+          "apiKey": "file-api"
+        }
+      ]
+    },
+    "multimodal": {
+      "storage": {
+        "auth": {
+          "mode": "apiKey",
+          "apiKey": "file-api"
+        }
+      }
+    }
+  },
+  {
+    "id": "L154:C5",
+    "group": "env",
+    "user": {
+      "sls": {
+        "project": "file-project",
+        "logstore": "file-store"
+      }
+    },
+    "inner": null,
+    "env": {
+      "LOONGSUITE_SLS_PROJECT": "env-project",
+      "LOONGSUITE_SLS_LOGSTORE": "env-store"
+    },
+    "expected": {
+      "endpoints": [
+        {
+          "project": "env-project",
+          "logstore": "env-store"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L169:C5",
+    "group": "env",
+    "user": {
+      "sls": {
+        "project": "project-one",
+        "logstore": "store-one"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "endpoint": ""
+        }
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L183:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "destinationOverride": true
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "user-sls"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L200:C5",
+    "group": "user",
+    "user": {
+      "sls": {
+        "endpoint": "one.example/",
+        "project": "project-one",
+        "logstore": "store-one"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "endpoint": "https://one.example/"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L216:C5",
+    "group": "enabled",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "mode": "ak"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "ak"
+        }
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L230:C5",
+    "group": "enabled",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "mode": "apiKey"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "apiKey"
+        }
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L244:C5",
+    "group": "enabled",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "accessKeyId": "fixture-id",
+        "accessKeySecret": "fixture-secret",
+        "apiKey": "fixture-api"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "ak",
+          "accessKeyId": "fixture-id",
+          "apiKey": "fixture-api"
+        }
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L265:C5",
+    "group": "enabled",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one",
+        "enabled": false
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {}
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L279:C5",
+    "group": "enabled",
+    "user": {
+      "sls": {
+        "enabled": true
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L292:C5",
+    "group": "array",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "first"
+        },
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "first",
+          "project": "project-one",
+          "mode": "webtracking"
+        },
+        {
+          "name": "second",
+          "project": "project-two"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L324:C5",
+    "group": "array",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "mode": "ak",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L346:C5",
+    "group": "array",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "api",
+          "apiKey": "fixture-api"
+        },
+        {
+          "endpoint": "https://two.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "ak",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        },
+        {
+          "endpoint": "https://three.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "wt",
+          "mode": "webtracking"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "api",
+          "mode": "apiKey",
+          "apiKey": "fixture-api"
+        },
+        {
+          "name": "ak",
+          "mode": "ak"
+        },
+        {
+          "name": "wt",
+          "mode": "webtracking"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L392:C5",
+    "group": "empty",
+    "user": {
+      "sls": []
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L400:C5",
+    "group": "array",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "project-one",
+          "logstore": "store-one"
+        },
+        {
+          "endpoint": "https://two.example",
+          "project": "p2",
+          "logstore": "l2"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "sls-0"
+        },
+        {
+          "name": "sls-1"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L423:C5",
+    "group": "managed",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one"
+      }
+    },
+    "inner": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "user-sls",
+          "project": "project-one"
+        },
+        {
+          "name": "second",
+          "project": "project-two"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L457:C5",
+    "group": "managed",
+    "user": {},
+    "inner": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "second",
+          "project": "project-two"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L481:C5",
+    "group": "managed",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "inner": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "project": "project-two"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L512:C5",
+    "group": "managed",
+    "user": {
+      "sls": {
+        "endpoint": "https://one.example",
+        "project": "project-one",
+        "logstore": "store-one"
+      }
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "user-sls",
+          "project": "project-one"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L531:C5",
+    "group": "managed",
+    "user": {},
+    "inner": {
+      "sls": [
+        {
+          "name": "incomplete",
+          "endpoint": "https://one.example",
+          "project": "p"
+        },
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "second",
+          "project": "project-two"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L554:C5",
+    "group": "empty",
+    "user": {},
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L564:C5",
+    "group": "managed",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "user-override",
+          "mode": "ak",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ]
+    },
+    "inner": {
+      "sls": [
+        {
+          "endpoint": "https://two.example",
+          "project": "project-two",
+          "logstore": "store-two",
+          "name": "second"
+        }
+      ]
+    },
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "user-override",
+          "mode": "ak"
+        }
+      ]
+    }
+  },
+  {
+    "id": "L601:C5",
+    "group": "enabled",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "",
+          "logstore": "store-one",
+          "name": "wt-no-project",
+          "mode": "webtracking"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "wt-no-project",
+          "project": "",
+          "logstore": "store-one",
+          "mode": "webtracking"
+        }
+      ],
+      "enabled": true
+    }
+  },
+  {
+    "id": "L625:C5",
+    "group": "enabled",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "",
+          "logstore": "store-one",
+          "mode": "ak",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {}
+      ],
+      "enabled": false
+    }
+  },
+  {
+    "id": "L644:C5",
+    "group": "enabled",
+    "user": {
+      "sls": [
+        {
+          "endpoint": "https://one.example",
+          "project": "",
+          "logstore": "store-one",
+          "name": "wt-empty",
+          "mode": "webtracking"
+        },
+        {
+          "endpoint": "https://two.example",
+          "project": "project-one",
+          "logstore": "store-one",
+          "name": "ak-valid",
+          "accessKeyId": "fixture-id",
+          "accessKeySecret": "fixture-secret"
+        }
+      ]
+    },
+    "inner": null,
+    "env": {},
+    "expected": {
+      "endpoints": [
+        {
+          "name": "wt-empty",
+          "project": ""
+        },
+        {
+          "name": "ak-valid",
+          "mode": "ak"
+        }
+      ],
+      "enabled": true
+    }
+  }
+]

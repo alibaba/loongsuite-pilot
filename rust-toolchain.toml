@@ -1,0 +1,4 @@
+# CI 和本地使用固定版本；镜像缺失该版本时应显式配置可用下载来源。
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,2562 @@
+[
+  {
+    "id": "L17:C3",
+    "title": "propagates Cursor CLI workspace roots to every parent record",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-cli-workspace",
+        "generation_id": "turn-cli-workspace",
+        "model": "composer-cli",
+        "prompt": "inspect the workspace",
+        "workspace_roots": [
+          "C:\\Users\\alice\\project"
+        ]
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-cli-workspace",
+        "generation_id": "turn-cli-workspace",
+        "model": "composer-cli",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-cli-workspace",
+        "generation_id": "turn-cli-workspace"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-cli-workspace",
+      "variant": "cursor-cli"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(records.length)",
+        "matcher": "toBeGreaterThan",
+        "args": [
+          0
+        ]
+      },
+      {
+        "target": "expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli'))",
+        "matcher": "toBe",
+        "args": [
+          true
+        ]
+      },
+      {
+        "target": "expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\\\Users\\\\alice\\\\project'))",
+        "matcher": "toBe",
+        "args": [
+          true
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L49:C3",
+    "title": "derives LLM and tool span timing from hook captured time and duration",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "model": "gpt-5.4",
+        "prompt": "inspect the workspace"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "model": "gpt-5.4",
+        "text": "I need to inspect a couple of files.",
+        "duration_ms": 300
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "tool_name": "Read",
+        "tool_use_id": "call-read",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.700Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "tool_name": "Grep",
+        "tool_use_id": "call-grep",
+        "tool_input": {
+          "pattern": "foo"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "tool_name": "Read",
+        "tool_use_id": "call-read",
+        "tool_output": "read result",
+        "duration_ms": 250
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "tool_name": "Grep",
+        "tool_use_id": "call-grep",
+        "tool_output": "grep result",
+        "duration_ms": 200
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.300Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "model": "gpt-5.4",
+        "text": "Now I have enough context.",
+        "duration_ms": 150
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.500Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "model": "gpt-5.4",
+        "text": "done",
+        "input_tokens": 10,
+        "output_tokens": 2
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.600Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-1",
+        "generation_id": "turn-1",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-1"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(firstStepRequest)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800200000000",
+            "observed_time_unix_nano": "1780912800200000000",
+            "agent.cursor.llm_request_time_source": "thought_duration"
+          }
+        ]
+      },
+      {
+        "target": "expect(firstStepResponse)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800600000000",
+            "observed_time_unix_nano": "1780912800500000000",
+            "agent.cursor.llm_response_time_source": "after_agent_thought",
+            "agent.cursor.reasoning_observed_at": "2026-06-08T10:00:00.500Z",
+            "agent.cursor.first_tool_call_observed_at": "2026-06-08T10:00:00.600Z",
+            "agent.cursor.last_tool_call_observed_at": "2026-06-08T10:00:00.700Z",
+            "agent.cursor.thought_to_first_tool_ms": 100,
+            "agent.cursor.tool_call_emission_ms": 200,
+            "agent.cursor.tool_call_count": 2
+          }
+        ]
+      },
+      {
+        "target": "expect(readCall)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800600000000",
+            "observed_time_unix_nano": "1780912800600000000",
+            "gen_ai.tool.call.duration": 250
+          }
+        ]
+      },
+      {
+        "target": "expect(readResult)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800900000000",
+            "observed_time_unix_nano": "1780912800900000000"
+          }
+        ]
+      },
+      {
+        "target": "expect(grepCall)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800700000000",
+            "observed_time_unix_nano": "1780912800700000000",
+            "gen_ai.tool.call.duration": 200
+          }
+        ]
+      },
+      {
+        "target": "expect(grepResult)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912801000000000",
+            "observed_time_unix_nano": "1780912801000000000"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L195:C3",
+    "title": "deduplicates exact base/suffixed afterAgentThought pairs without a timing window",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "model": "gpt-5.4",
+        "prompt": "inspect the file"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "model": "gpt-5.4",
+        "text": "I will read the file.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "tool_name": "Read",
+        "tool_use_id": "call-thought-dedupe",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "tool_name": "Read",
+        "tool_use_id": "call-thought-dedupe",
+        "tool_output": "file contents",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:05.000Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe-0-rgr9",
+        "model": "gpt-5.4",
+        "text": "I will read the file.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:05.200Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "model": "gpt-5.4",
+        "text": "Now I can answer.",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:05.300Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "model": "gpt-5.4",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:05.400Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-thought-dedupe",
+        "generation_id": "turn-thought-dedupe",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-thought-dedupe"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(requests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(reasoningParts)",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "type": "reasoning",
+              "content": "Now I can answer."
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L283:C3",
+    "title": "does not deduplicate identical base afterAgentThought events without a suffixed pair",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-base-thoughts",
+        "generation_id": "turn-base-thoughts",
+        "model": "gpt-5.4",
+        "prompt": "continue"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-base-thoughts",
+        "generation_id": "turn-base-thoughts",
+        "model": "gpt-5.4",
+        "text": "Same text can be emitted by two real callbacks.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-base-thoughts",
+        "generation_id": "turn-base-thoughts",
+        "model": "gpt-5.4",
+        "text": "Same text can be emitted by two real callbacks.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-base-thoughts",
+        "generation_id": "turn-base-thoughts",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-base-thoughts"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(reasoningParts)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L327:C3",
+    "title": "does not open a new step while a synchronous tool is still active",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "model": "gpt-5.4",
+        "prompt": "inspect the file"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "model": "gpt-5.4",
+        "text": "I will inspect it.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "tool_name": "Read",
+        "tool_use_id": "call-active-read",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "model": "gpt-5.4",
+        "text": "This callback arrived before the read result.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "tool_name": "Read",
+        "tool_use_id": "call-active-read",
+        "tool_output": "file contents",
+        "duration_ms": 300
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.700Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "model": "gpt-5.4",
+        "text": "Now the result is available.",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "model": "gpt-5.4",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-active-tool",
+        "generation_id": "turn-active-tool",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-active-tool"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(requests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(firstReasoning)",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "I will inspect it.",
+            "This callback arrived before the read result."
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondRequest?.['gen_ai.input.messages_delta']?.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L423:C3",
+    "title": "recovers the next step when a synchronous tool completion hook is missing",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "model": "gpt-5.4",
+        "prompt": "inspect and continue"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "model": "gpt-5.4",
+        "text": "I will inspect the file.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "tool_name": "Read",
+        "tool_use_id": "call-result-never-arrives",
+        "tool_input": {
+          "path": "missing.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "model": "gpt-5.4",
+        "text": "I can continue despite the missing completion hook.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "tool_name": "Shell",
+        "tool_use_id": "call-normal-shell",
+        "tool_input": {
+          "command": "echo ok"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "tool_name": "Shell",
+        "tool_use_id": "call-normal-shell",
+        "tool_output": "ok"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "model": "gpt-5.4",
+        "text": "The normal tool completed.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "model": "gpt-5.4",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-missing-tool-result",
+        "generation_id": "turn-missing-tool-result",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-missing-tool-result"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(requests)",
+        "matcher": "toHaveLength",
+        "args": [
+          3
+        ]
+      },
+      {
+        "target": "expect(responses)",
+        "matcher": "toHaveLength",
+        "args": [
+          3
+        ]
+      },
+      {
+        "target": "expect(secondRequest?.['gen_ai.input.messages_delta'])",
+        "matcher": "toBeUndefined",
+        "args": []
+      },
+      {
+        "target": "expect(thirdDelta.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(thirdDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-normal-shell",
+            "name": "Shell"
+          }
+        ]
+      },
+      {
+        "target": "expect(thirdDelta[1]?.parts)",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "type": "tool_call_response",
+              "id": "call-normal-shell",
+              "response": "ok"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L533:C3",
+    "title": "drains active synchronous tools on postToolUseFailure",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "model": "gpt-5.4",
+        "prompt": "read a missing file"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "model": "gpt-5.4",
+        "text": "I will read it.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "tool_name": "Read",
+        "tool_use_id": "call-failing-read",
+        "tool_input": {
+          "path": "missing.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "postToolUseFailure",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "tool_name": "Read",
+        "tool_use_id": "call-failing-read",
+        "error_message": "File not found"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "model": "gpt-5.4",
+        "text": "The read failed, so I will recover.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "model": "gpt-5.4",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.700Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-tool-failure",
+        "generation_id": "turn-tool-failure",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-tool-failure"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(requests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(secondDelta.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-failing-read"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondDelta[1]?.parts)",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "type": "tool_call_response",
+              "id": "call-failing-read",
+              "response": "File not found"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L614:C3",
+    "title": "falls back to tool name when a completion hook omits tool_use_id",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "model": "gpt-5.4",
+        "prompt": "read a file"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "model": "gpt-5.4",
+        "text": "I will read it.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "tool_name": "Read",
+        "tool_use_id": "call-read-with-id",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "postToolUseFailure",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "tool_name": "Read",
+        "error_message": "File not found"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "model": "gpt-5.4",
+        "text": "The completion omitted its id, but the next step must recover.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-result-without-id",
+        "generation_id": "turn-result-without-id",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-result-without-id"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(requests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L672:C3",
+    "title": "only pairs tool calls and results when both have non-empty ids",
+    "originalSkipped": false,
+    "events": [
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "prompt": "inspect files"
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "text": "Inspecting.",
+        "duration_ms": 50
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "tool_name": "Read",
+        "tool_use_id": "call-read",
+        "tool_input": {}
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.210Z",
+        "hook_event": "preToolUse",
+        "tool_name": "Shell",
+        "tool_input": {}
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.220Z",
+        "hook_event": "preToolUse",
+        "tool_name": "Grep",
+        "tool_use_id": "call-grep",
+        "tool_input": {}
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "postToolUse",
+        "tool_name": "Read",
+        "tool_output": "read without id"
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.310Z",
+        "hook_event": "postToolUse",
+        "tool_name": "Grep",
+        "tool_use_id": "call-grep",
+        "tool_output": "grep with id"
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.320Z",
+        "hook_event": "postToolUse",
+        "tool_name": "Shell",
+        "tool_output": "shell without id"
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentThought",
+        "text": "Done inspecting.",
+        "duration_ms": 50
+      },
+      {
+        "conversation_id": "conv-null-id-pairing",
+        "generation_id": "turn-null-id-pairing",
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "stop",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-null-id-pairing"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(toolParts.map((part: Record<string, unknown>) => part.id))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "call-grep",
+            null,
+            null
+          ]
+        ]
+      },
+      {
+        "target": "expect(toolParts.map((part: Record<string, unknown>) => part.response))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "grep with id",
+            "read without id",
+            "shell without id"
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L704:C3",
+    "title": "guards LLM spans by moving start before the earliest buffered tool call",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-buffered",
+        "generation_id": "turn-buffered",
+        "model": "gpt-5.4",
+        "prompt": "inspect with a delayed thought"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-buffered",
+        "generation_id": "turn-buffered",
+        "tool_name": "Read",
+        "tool_use_id": "call-buffered-read",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-buffered",
+        "generation_id": "turn-buffered",
+        "tool_name": "Read",
+        "tool_use_id": "call-buffered-read",
+        "tool_output": "read result",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-buffered",
+        "generation_id": "turn-buffered",
+        "model": "gpt-5.4",
+        "text": "The tool call was decided before the reasoning text arrived.",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-buffered",
+        "generation_id": "turn-buffered",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-buffered"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(firstStepRequest)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800099000000",
+            "observed_time_unix_nano": "1780912800099000000",
+            "agent.cursor.llm_request_time_source": "thought_duration",
+            "agent.cursor.llm_request_time_guard": "earliest_tool_call_start_minus_1ms"
+          }
+        ]
+      },
+      {
+        "target": "expect(firstStepResponse)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800500000000",
+            "observed_time_unix_nano": "1780912800500000000"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L772:C3",
+    "title": "marks the final tool step response as stop when the turn ends without another LLM step",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-final-tool",
+        "generation_id": "turn-final-tool",
+        "model": "gpt-5.4",
+        "prompt": "inspect and finish"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-final-tool",
+        "generation_id": "turn-final-tool",
+        "model": "gpt-5.4",
+        "text": "I need one tool call.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-final-tool",
+        "generation_id": "turn-final-tool",
+        "tool_name": "Read",
+        "tool_use_id": "call-final-read",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-final-tool",
+        "generation_id": "turn-final-tool",
+        "tool_name": "Read",
+        "tool_use_id": "call-final-read",
+        "tool_output": "read result",
+        "duration_ms": 200
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-final-tool",
+        "generation_id": "turn-final-tool",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-final-tool"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(finalResponse?.['gen_ai.response.finish_reasons'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "stop"
+          ]
+        ]
+      },
+      {
+        "target": "expect(finalResponse?.['gen_ai.output.messages']?.[0]?.finish_reason)",
+        "matcher": "toBe",
+        "args": [
+          "stop"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L828:C3",
+    "title": "prefers synthesized Subagent result over duplicate Cursor postToolUse result",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "model": "gpt-5.4",
+        "prompt": "delegate this"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "model": "gpt-5.4",
+        "text": "I will delegate this to a subagent.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "tool_name": "Subagent",
+        "tool_use_id": "call-subagent",
+        "tool_input": {
+          "prompt": "inspect details"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "child-conv",
+        "generation_id": "child-turn",
+        "model": "gpt-5.4",
+        "text": "Child is inspecting.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "child-conv",
+        "generation_id": "child-turn",
+        "model": "gpt-5.4",
+        "text": "child final result"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.650Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "tool_name": "Subagent",
+        "tool_use_id": "call-subagent",
+        "tool_output": "cursor postToolUse result",
+        "duration_ms": 450
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "model": "gpt-5.4",
+        "text": "Now I can summarize.",
+        "duration_ms": 120
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "stop",
+        "conversation_id": "parent-conv",
+        "generation_id": "turn-subagent",
+        "transcript_path": "__TRANSCRIPT_ROOT__/parent.jsonl",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "parent-conv",
+      "transcriptPath": "__TRANSCRIPT_ROOT__/parent.jsonl"
+    },
+    "files": [
+      {
+        "path": "__TRANSCRIPT_ROOT__/subagents/child-conv.jsonl",
+        "content": ""
+      }
+    ],
+    "expected": [
+      {
+        "target": "expect(parentSubagentResults)",
+        "matcher": "toHaveLength",
+        "args": [
+          1
+        ]
+      },
+      {
+        "target": "expect(parentSubagentResults[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "agent.cursor.hook_event_name": "subagent_result_synthesized",
+            "gen_ai.tool.call.result": {
+              "summary": "child final result"
+            }
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[0]?.parts?.find(part => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-subagent",
+            "name": "Subagent"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[1]?.parts)",
+        "matcher": "toHaveLength",
+        "args": [
+          1
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[1]?.parts?.[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-subagent",
+            "response": "child final result"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull)",
+        "matcher": "toHaveLength",
+        "args": [
+          3
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate this"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[1])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "assistant"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[2])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "tool"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L954:C3",
+    "title": "does not consume a pre-collected Subagent result before its endTs",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "model": "gpt-5.4",
+        "prompt": "delegate this"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "model": "gpt-5.4",
+        "text": "I will delegate this.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "tool_name": "Task",
+        "tool_use_id": "call-subagent-causality",
+        "tool_input": {
+          "prompt": "inspect details"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "child-causality",
+        "generation_id": "child-turn-causality",
+        "model": "gpt-5.4",
+        "text": "Child is working.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "model": "gpt-5.4",
+        "text": "The child has not finished yet.",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "child-causality",
+        "generation_id": "child-turn-causality",
+        "model": "gpt-5.4",
+        "text": "child final result"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "model": "gpt-5.4",
+        "text": "Now I can use the child result.",
+        "duration_ms": 400
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.950Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "model": "gpt-5.4",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "stop",
+        "conversation_id": "parent-causality",
+        "generation_id": "turn-subagent-causality",
+        "transcript_path": "__TRANSCRIPT_ROOT__/parent.jsonl",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "parent-causality",
+      "transcriptPath": "__TRANSCRIPT_ROOT__/parent.jsonl"
+    },
+    "files": [
+      {
+        "path": "__TRANSCRIPT_ROOT__/subagents/child-causality.jsonl",
+        "content": ""
+      }
+    ],
+    "expected": [
+      {
+        "target": "expect(parentRequests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(firstReasoning)",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "I will delegate this.",
+            "The child has not finished yet."
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondRequest)",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "time_unix_nano": "1780912800800000000",
+            "observed_time_unix_nano": "1780912800800000000",
+            "agent.cursor.llm_request_time_source": "previous_tool_result_end"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondDelta.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondDelta[1]?.parts?.[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-subagent-causality",
+            "response": "child final result"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1085:C3",
+    "title": "keeps parallel Task calls from a duplicated thought in the same parent step",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "model": "composer-2.5-fast",
+        "prompt": "run two subagents in parallel"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "model": "composer-2.5-fast",
+        "text": "I will launch both tasks in parallel.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Task",
+        "tool_use_id": "call-task-1",
+        "tool_input": {
+          "prompt": "solve task 1"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.210Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel-0-rgr9",
+        "model": "composer-2.5-fast",
+        "text": "I will launch both tasks in parallel.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.220Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Task",
+        "tool_use_id": "call-task-2",
+        "tool_input": {
+          "prompt": "solve task 2"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "child-task-1",
+        "generation_id": "child-turn-1",
+        "model": "composer-2.5-fast",
+        "text": "working on task 1",
+        "duration_ms": 40
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.320Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "child-task-2",
+        "generation_id": "child-turn-2",
+        "model": "composer-2.5-fast",
+        "text": "working on task 2",
+        "duration_ms": 40
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "child-task-1",
+        "generation_id": "child-turn-1",
+        "model": "composer-2.5-fast",
+        "text": "task 1 result"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "child-task-2",
+        "generation_id": "child-turn-2",
+        "model": "composer-2.5-fast",
+        "text": "task 2 result"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.700Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "model": "composer-2.5-fast",
+        "text": "Both tasks finished; I will verify them.",
+        "duration_ms": 60
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.710Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Shell",
+        "tool_use_id": "call-verify-1",
+        "tool_input": {
+          "command": "verify task 1"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.720Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Shell",
+        "tool_use_id": "call-verify-2",
+        "tool_input": {
+          "command": "verify task 2"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Shell",
+        "tool_use_id": "call-verify-1",
+        "tool_output": "ok 1",
+        "duration_ms": 90
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.810Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "tool_name": "Shell",
+        "tool_use_id": "call-verify-2",
+        "tool_output": "ok 2",
+        "duration_ms": 90
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "model": "composer-2.5-fast",
+        "text": "Everything passed.",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.950Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "model": "composer-2.5-fast",
+        "text": "done"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "stop",
+        "conversation_id": "parent-parallel",
+        "generation_id": "turn-parallel",
+        "transcript_path": "__TRANSCRIPT_ROOT__/parent.jsonl",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "parent-parallel",
+      "transcriptPath": "__TRANSCRIPT_ROOT__/parent.jsonl"
+    },
+    "files": [
+      {
+        "path": "__TRANSCRIPT_ROOT__/subagents/child-task-1.jsonl",
+        "content": ""
+      },
+      {
+        "path": "__TRANSCRIPT_ROOT__/subagents/child-task-2.jsonl",
+        "content": ""
+      }
+    ],
+    "expected": [
+      {
+        "target": "expect(parentRequests)",
+        "matcher": "toHaveLength",
+        "args": [
+          3
+        ]
+      },
+      {
+        "target": "expect(firstStepTaskCalls)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[0]?.parts\n        ?.filter((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta.slice(1).every((message: Record<string, unknown>) =>\n        Array.isArray(message.parts) && message.parts.length === 1\n      ))",
+        "matcher": "toBe",
+        "args": [
+          true
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1275:C3",
+    "title": "uses Cursor postToolUse as Subagent result fallback when no child result exists",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "model": "gpt-5.4",
+        "prompt": "delegate without child transcript"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "model": "gpt-5.4",
+        "text": "I will delegate this.",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "tool_name": "Subagent",
+        "tool_use_id": "call-subagent-fallback",
+        "tool_input": {
+          "prompt": "inspect details"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "tool_name": "Subagent",
+        "tool_use_id": "call-subagent-fallback",
+        "tool_output": "cursor fallback result",
+        "duration_ms": 300
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "model": "gpt-5.4",
+        "text": "Now summarize.",
+        "duration_ms": 120
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:01.000Z",
+        "hook_event": "stop",
+        "conversation_id": "parent-fallback",
+        "generation_id": "turn-subagent-fallback",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "parent-fallback"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(parentSubagentResults)",
+        "matcher": "toHaveLength",
+        "args": [
+          1
+        ]
+      },
+      {
+        "target": "expect(parentSubagentResults[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "agent.cursor.hook_event_name": "postToolUse",
+            "gen_ai.tool.call.result": "cursor fallback result"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-subagent-fallback",
+            "name": "Subagent"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[1]?.parts)",
+        "matcher": "toHaveLength",
+        "args": [
+          1
+        ]
+      },
+      {
+        "target": "expect(secondStepDelta[1]?.parts?.[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-subagent-fallback",
+            "response": "cursor fallback result"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull)",
+        "matcher": "toHaveLength",
+        "args": [
+          3
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "delegate without child transcript"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[1])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "assistant"
+          }
+        ]
+      },
+      {
+        "target": "expect(secondStepFull[2])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "tool"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1372:C3",
+    "title": "isolates assembly to the stopping generation when two generations share a conversation",
+    "originalSkipped": true,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-a",
+        "model": "gpt-5.4",
+        "prompt": "do the task (gpt)"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.050Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "model": "composer-2.5-fast",
+        "prompt": "do the task (composer)"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.060Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-a",
+        "status": "aborted"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "model": "composer-2.5-fast",
+        "text": "composer thinking",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "tool_name": "Write",
+        "tool_use_id": "call-b-write",
+        "tool_input": {
+          "path": "a.md"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.600Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "tool_name": "Write",
+        "tool_use_id": "call-b-write",
+        "tool_output": "ok",
+        "duration_ms": 150
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.700Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "model": "composer-2.5-fast",
+        "text": "composer done",
+        "input_tokens": 5,
+        "output_tokens": 1
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-shared",
+        "generation_id": "gen-b",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-shared",
+      "stopGenerationId": "gen-b"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(entryRecord?.['gen_ai.input.messages_delta']?.[0]?.parts?.[0]?.content)",
+        "matcher": "toBe",
+        "args": [
+          "do the task (composer)"
+        ]
+      },
+      {
+        "target": "expect(entryRecord?.['gen_ai.turn.id'])",
+        "matcher": "toBe",
+        "args": [
+          "gen-b"
+        ]
+      },
+      {
+        "target": "expect(r['gen_ai.turn.id'])",
+        "matcher": "toBe",
+        "args": [
+          "gen-b"
+        ]
+      },
+      {
+        "target": "expect(toolCalls)",
+        "matcher": "toHaveLength",
+        "args": [
+          1
+        ]
+      },
+      {
+        "target": "expect(toolCalls[0]?.['gen_ai.tool.call.id'])",
+        "matcher": "toBe",
+        "args": [
+          "call-b-write"
+        ]
+      },
+      {
+        "target": "expect(consumedGenerationIds.has('gen-b'))",
+        "matcher": "toBe",
+        "args": [
+          true
+        ]
+      },
+      {
+        "target": "expect(consumedGenerationIds.has('gen-a'))",
+        "matcher": "toBe",
+        "args": [
+          false
+        ]
+      },
+      {
+        "target": "expect(consumedConversationIds.has('conv-shared'))",
+        "matcher": "toBe",
+        "args": [
+          false
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1483:C3",
+    "title": "starts s2 LLM request at the last buffered tool result (composer ReAct split)",
+    "originalSkipped": true,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "model": "composer-2.5-fast",
+        "prompt": "do many things"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "tool_name": "Read",
+        "tool_use_id": "call-c-1",
+        "tool_input": {
+          "path": "a.ts"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "tool_name": "Read",
+        "tool_use_id": "call-c-1",
+        "tool_output": "r1",
+        "duration_ms": 100
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "tool_name": "Grep",
+        "tool_use_id": "call-c-2",
+        "tool_input": {
+          "pattern": "foo"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.450Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "tool_name": "Grep",
+        "tool_use_id": "call-c-2",
+        "tool_output": "r2",
+        "duration_ms": 150
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.800Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "model": "composer-2.5-fast",
+        "text": "final answer",
+        "input_tokens": 10,
+        "output_tokens": 3
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.900Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-composer-split",
+        "generation_id": "turn-composer-split",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-composer-split",
+      "stopGenerationId": "turn-composer-split"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(s2Request)",
+        "matcher": "toBeDefined",
+        "args": []
+      },
+      {
+        "target": "expect(s2Response?.time_unix_nano)",
+        "matcher": "toBe",
+        "args": [
+          "1780912800800000000"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1582:C3",
+    "title": "emits assistant tool-call history before the matching result in raw events and the final LLM span",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "model": "gpt-5.4",
+        "prompt": "list files"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.100Z",
+        "hook_event": "afterAgentThought",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "model": "gpt-5.4",
+        "text": "will use ls",
+        "duration_ms": 50
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "tool_name": "ls",
+        "tool_use_id": "call-1",
+        "tool_input": {
+          "path": "."
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.300Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "tool_name": "ls",
+        "tool_use_id": "call-1",
+        "tool_output": "a.txt b.txt",
+        "duration_ms": 80
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "model": "gpt-5.4",
+        "text": "done",
+        "duration_ms": 60
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.500Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-msg",
+        "generation_id": "turn-msg",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-msg"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(llmRequests)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(llmRequests[0]!['gen_ai.input.messages_delta'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "list files"
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      {
+        "target": "expect(llmRequests[0]!['gen_ai.input.messages'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "list files"
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Delta.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Delta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-1",
+            "name": "ls",
+            "arguments": {
+              "path": "."
+            }
+          }
+        ]
+      },
+      {
+        "target": "expect(s2Delta[1]?.parts?.[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-1",
+            "response": "a.txt b.txt"
+          }
+        ]
+      },
+      {
+        "target": "expect(s2Full.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "user",
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Full[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "list files"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "target": "expect(s2Full[1])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "assistant"
+          }
+        ]
+      },
+      {
+        "target": "expect(s2Full[2])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "role": "tool"
+          }
+        ]
+      },
+      {
+        "target": "expect(s2Full[2]?.parts?.[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-1",
+            "response": "a.txt b.txt"
+          }
+        ]
+      },
+      {
+        "target": "expect(conversion.warnings)",
+        "matcher": "toEqual",
+        "args": [
+          []
+        ]
+      },
+      {
+        "target": "expect(convertedInput.map((message: Record<string, unknown>) => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "user",
+            "assistant",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(convertedInput[1].parts.find((part: Record<string, unknown>) => part.type === 'tool_call'))",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "call-1"
+          }
+        ]
+      },
+      {
+        "target": "expect(convertedInput[2].parts[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call_response",
+            "id": "call-1"
+          }
+        ]
+      },
+      {
+        "target": "expect(llmRequests[0]!['gen_ai.input.messages'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "list files"
+                }
+              ]
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "L1714:C3",
+    "title": "opens a final s2 for afterAgentResponse when no afterAgentThought is emitted (composer-2.5-fast)",
+    "originalSkipped": false,
+    "events": [
+      {
+        "_journal_ts": "2026-06-08T10:00:00.000Z",
+        "hook_event": "beforeSubmitPrompt",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "prompt": "solve leetcode 1"
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.050Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "tool_name": "Read",
+        "tool_use_id": "tool-aaa",
+        "tool_input": {
+          "file_path": "/tmp/foo.py"
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.120Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "tool_name": "Read",
+        "tool_use_id": "tool-aaa",
+        "tool_output": "class Solution: ...",
+        "duration_ms": 70
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.200Z",
+        "hook_event": "preToolUse",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "tool_name": "Write",
+        "tool_use_id": "tool-bbb",
+        "tool_input": {
+          "file_path": "/tmp/foo.py",
+          "content": "..."
+        }
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.260Z",
+        "hook_event": "postToolUse",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "tool_name": "Write",
+        "tool_use_id": "tool-bbb",
+        "tool_output": "{\"success\":true}",
+        "duration_ms": 60
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.320Z",
+        "hook_event": "afterAgentResponse",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "model": "composer-2.5-fast",
+        "text": "Done, both files updated.",
+        "duration_ms": 40,
+        "input_tokens": 50000,
+        "output_tokens": 120
+      },
+      {
+        "_journal_ts": "2026-06-08T10:00:00.400Z",
+        "hook_event": "stop",
+        "conversation_id": "conv-fast",
+        "generation_id": "turn-fast",
+        "status": "completed"
+      }
+    ],
+    "options": {
+      "stopConversationId": "conv-fast"
+    },
+    "files": [],
+    "expected": [
+      {
+        "target": "expect(s1Request)",
+        "matcher": "toBeDefined",
+        "args": []
+      },
+      {
+        "target": "expect(s2Request)",
+        "matcher": "toBeDefined",
+        "args": []
+      },
+      {
+        "target": "expect(s1Response)",
+        "matcher": "toBeDefined",
+        "args": []
+      },
+      {
+        "target": "expect(s2Response)",
+        "matcher": "toBeDefined",
+        "args": []
+      },
+      {
+        "target": "expect(s1Request!['gen_ai.input.messages_delta'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "solve leetcode 1"
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      {
+        "target": "expect(s1Request!['gen_ai.input.messages'])",
+        "matcher": "toEqual",
+        "args": [
+          [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "solve leetcode 1"
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      {
+        "target": "expect(s1ToolParts)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(s1ToolParts[0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "tool-aaa",
+            "name": "Read"
+          }
+        ]
+      },
+      {
+        "target": "expect(s1ToolParts[1])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "tool_call",
+            "id": "tool-bbb",
+            "name": "Write"
+          }
+        ]
+      },
+      {
+        "target": "expect(s1ToolCalls)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(s1ToolResults)",
+        "matcher": "toHaveLength",
+        "args": [
+          2
+        ]
+      },
+      {
+        "target": "expect(s2Delta.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "assistant",
+            "tool",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Delta[0].parts.filter(part => part.type === 'tool_call').map(part => part.id))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "tool-aaa",
+            "tool-bbb"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Delta.slice(1).map(message => message.parts[0]?.id))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "tool-aaa",
+            "tool-bbb"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Full.map(message => message.role))",
+        "matcher": "toEqual",
+        "args": [
+          [
+            "user",
+            "assistant",
+            "tool",
+            "tool"
+          ]
+        ]
+      },
+      {
+        "target": "expect(s2Output[0]!.parts![0])",
+        "matcher": "toMatchObject",
+        "args": [
+          {
+            "type": "text",
+            "content": "Done, both files updated."
+          }
+        ]
+      },
+      {
+        "target": "expect(s2ToolParts)",
+        "matcher": "toHaveLength",
+        "args": [
+          0
+        ]
+      }
+    ]
+  }
+]

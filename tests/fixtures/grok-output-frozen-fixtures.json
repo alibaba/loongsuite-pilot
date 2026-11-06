@@ -1,0 +1,1009 @@
+{
+  "schema": 1,
+  "baselineCommit": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+  "source": "tests/unit/flushers/otlp-trace-flusher/grok-build.test.ts",
+  "sourceHash": "1dca7cf622f1e1c9301524adbb62153daa31587135452273e2afbe410e859ff3",
+  "producer": "Actual frozen TypeScript helpers AST-extracted and executed offline with Node v22.22.3",
+  "full": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "request-1",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-1",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "SYSTEM-CONTENT"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ],
+      "gen_ai.system_instructions": [
+        {
+          "type": "text",
+          "content": "SYSTEM-CONTENT"
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883100000000",
+      "event.id": "response-event-1",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "tool_call"
+      ],
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 20,
+      "gen_ai.usage.cache_read.input_tokens": 10,
+      "gen_ai.usage.cache_creation.input_tokens": 0,
+      "gen_ai.usage.total_tokens": 120,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "tool-1",
+              "name": "read_file",
+              "arguments": {}
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883200000000",
+      "event.id": "tool-call",
+      "event.name": "tool.call",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "gen_ai.tool.call.arguments": {
+        "target_file": "README.md"
+      },
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883325000000",
+      "event.id": "tool-result",
+      "event.name": "tool.result",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "tool.result.status": "failure",
+      "gen_ai.tool.call.duration": 125,
+      "error.type": "ToolError",
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883400000000",
+      "event.id": "request-2",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-2",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "tool",
+          "parts": []
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296887900000000",
+      "event.id": "response-event-2",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ],
+      "gen_ai.usage.input_tokens": 130,
+      "gen_ai.usage.output_tokens": 25,
+      "gen_ai.usage.total_tokens": 155,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "done"
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296888000000000",
+      "event.id": "terminal",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ]
+    }
+  ],
+  "zero": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "request-1",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-1",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "SYSTEM-CONTENT"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ],
+      "gen_ai.system_instructions": [
+        {
+          "type": "text",
+          "content": "SYSTEM-CONTENT"
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883100000000",
+      "event.id": "response-event-1",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "tool_call"
+      ],
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 20,
+      "gen_ai.usage.cache_read.input_tokens": 10,
+      "gen_ai.usage.cache_creation.input_tokens": 0,
+      "gen_ai.usage.total_tokens": 120,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "tool-1",
+              "name": "read_file",
+              "arguments": {}
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883200000000",
+      "event.id": "tool-call",
+      "event.name": "tool.call",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "gen_ai.tool.call.arguments": {
+        "target_file": "README.md"
+      },
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883325000000",
+      "event.id": "tool-result",
+      "event.name": "tool.result",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "tool.result.status": "success",
+      "gen_ai.tool.call.duration": 0,
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883400000000",
+      "event.id": "request-2",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-2",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "tool",
+          "parts": []
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296887900000000",
+      "event.id": "response-event-2",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ],
+      "gen_ai.usage.input_tokens": 130,
+      "gen_ai.usage.output_tokens": 25,
+      "gen_ai.usage.total_tokens": 155,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "done"
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296888000000000",
+      "event.id": "terminal",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ]
+    }
+  ],
+  "cancelled": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "request-1",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-1",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "SYSTEM-CONTENT"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ],
+      "gen_ai.system_instructions": [
+        {
+          "type": "text",
+          "content": "SYSTEM-CONTENT"
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883100000000",
+      "event.id": "response-event-1",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "tool_call"
+      ],
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 20,
+      "gen_ai.usage.cache_read.input_tokens": 10,
+      "gen_ai.usage.cache_creation.input_tokens": 0,
+      "gen_ai.usage.total_tokens": 120,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "tool-1",
+              "name": "read_file",
+              "arguments": {}
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883200000000",
+      "event.id": "tool-call",
+      "event.name": "tool.call",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "gen_ai.tool.call.arguments": {
+        "target_file": "README.md"
+      },
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883325000000",
+      "event.id": "tool-result",
+      "event.name": "tool.result",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "tool.result.status": "cancelled",
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883400000000",
+      "event.id": "terminal-cancelled",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "cancelled"
+      ]
+    }
+  ],
+  "failed": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "request-1",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-1",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "SYSTEM-CONTENT"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ],
+      "gen_ai.system_instructions": [
+        {
+          "type": "text",
+          "content": "SYSTEM-CONTENT"
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883100000000",
+      "event.id": "response-event-1",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "error"
+      ],
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 20,
+      "gen_ai.usage.cache_read.input_tokens": 10,
+      "gen_ai.usage.cache_creation.input_tokens": 0,
+      "gen_ai.usage.total_tokens": 120,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "tool-1",
+              "name": "read_file",
+              "arguments": {}
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified",
+      "error.type": "rate_limit"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883200000000",
+      "event.id": "terminal-error",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "error"
+      ],
+      "error.type": "rate_limit"
+    }
+  ],
+  "promptOnly": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt-only",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "fail"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "terminal-only",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "error"
+      ],
+      "error.type": "network_error"
+    }
+  ],
+  "sequential": [
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881000000000",
+      "event.id": "prompt",
+      "event.name": "other",
+      "gen_ai.agent.description": "Grok Build coding agent",
+      "gen_ai.data_source.id": "grok-build",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296881100000000",
+      "event.id": "request-1",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-1",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "content": "SYSTEM-CONTENT"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "read"
+            }
+          ]
+        }
+      ],
+      "gen_ai.system_instructions": [
+        {
+          "type": "text",
+          "content": "SYSTEM-CONTENT"
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883100000000",
+      "event.id": "response-event-1",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.response.id": "response-1",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "tool_call"
+      ],
+      "gen_ai.usage.input_tokens": 100,
+      "gen_ai.usage.output_tokens": 20,
+      "gen_ai.usage.cache_read.input_tokens": 10,
+      "gen_ai.usage.cache_creation.input_tokens": 0,
+      "gen_ai.usage.total_tokens": 120,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "tool_call",
+              "id": "tool-1",
+              "name": "read_file",
+              "arguments": {}
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883200000000",
+      "event.id": "tool-call",
+      "event.name": "tool.call",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "gen_ai.tool.call.arguments": {
+        "target_file": "README.md"
+      },
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883325000000",
+      "event.id": "tool-result",
+      "event.name": "tool.result",
+      "gen_ai.step.id": "step-1",
+      "gen_ai.tool.name": "read_file",
+      "gen_ai.tool.call.id": "tool-1",
+      "tool.result.status": "success",
+      "loongsuite.grok.match.strategy": "id",
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296883400000000",
+      "event.id": "request-2",
+      "event.name": "llm.request",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.input.messages_hash": "hash-2",
+      "gen_ai.input.messages_delta": [
+        {
+          "role": "tool",
+          "parts": []
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296887900000000",
+      "event.id": "response-event-2",
+      "event.name": "llm.response",
+      "gen_ai.step.id": "step-2",
+      "gen_ai.response.id": "response-2",
+      "gen_ai.provider.name": "x_ai",
+      "gen_ai.request.model": "grok-code-fast-1",
+      "gen_ai.response.model": "grok-code-fast-1",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ],
+      "gen_ai.usage.input_tokens": 130,
+      "gen_ai.usage.output_tokens": 25,
+      "gen_ai.usage.total_tokens": 155,
+      "gen_ai.output.messages": [
+        {
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "content": "done"
+            }
+          ]
+        }
+      ],
+      "loongsuite.grok.timing.source": "unified"
+    },
+    {
+      "trace_id": "1234567890abcdef1234567890abcdef",
+      "gen_ai.session.id": "grok-session",
+      "gen_ai.turn.id": "grok-prompt",
+      "gen_ai.agent.type": "grok-build",
+      "gen_ai.agent.id": "grok-session",
+      "gen_ai.framework": "grok-build",
+      "user.id": "test-user",
+      "time_unix_nano": "1785296888000000000",
+      "event.id": "terminal",
+      "event.name": "other",
+      "gen_ai.response.finish_reasons": [
+        "stop"
+      ]
+    }
+  ]
+}

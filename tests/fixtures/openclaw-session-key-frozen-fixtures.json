@@ -1,0 +1,1684 @@
+{
+  "schema": 1,
+  "baselineCommit": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+  "source": "tests/unit/flushers/otlp-trace-flusher/openclaw-session-key.test.ts",
+  "sourceHash": "9b661e3841cc792c90184b9a337747c93b85f0b09216ea0469dc8f007c63e495",
+  "producer": "Actual frozen TypeScript turn() AST extracted and executed offline with Node v22.22.3",
+  "projection": [
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "other",
+      "time_unix_nano": "1788220800000000000",
+      "gen_ai.input.messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "llm.request",
+      "time_unix_nano": "1788220800001000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.request.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "llm.response",
+      "time_unix_nano": "1788220800002000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.response.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "tool.call",
+      "time_unix_nano": "1788220800003000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "tool.result",
+      "time_unix_nano": "1788220800004000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:test",
+      "event.name": "other",
+      "time_unix_nano": "1788220800005000000",
+      "agent.openclaw.hook": "llm_output"
+    }
+  ],
+  "invalids": [
+    {
+      "name": "invalid-0",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-1",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": null,
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-2",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-3",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": " ",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-4",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": 42,
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-5",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": {},
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-6",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": [
+            "key"
+          ],
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-7",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "invalid-8",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "key\nvalue",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    }
+  ],
+  "parallel": [
+    [
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "other",
+        "time_unix_nano": "1788220800000000000",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "test"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "llm.request",
+        "time_unix_nano": "1788220800001000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.request.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "llm.response",
+        "time_unix_nano": "1788220800002000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.response.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "tool.call",
+        "time_unix_nano": "1788220800003000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "tool.result",
+        "time_unix_nano": "1788220800004000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000001",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-1",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "other",
+        "time_unix_nano": "1788220800005000000",
+        "agent.openclaw.hook": "llm_output"
+      }
+    ],
+    [
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "other",
+        "time_unix_nano": "1788220800000000000",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "test"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "llm.request",
+        "time_unix_nano": "1788220800001000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.request.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "llm.response",
+        "time_unix_nano": "1788220800002000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.response.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "tool.call",
+        "time_unix_nano": "1788220800003000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "tool.result",
+        "time_unix_nano": "1788220800004000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000002",
+        "gen_ai.turn.id": "turn-2",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-2",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:b",
+        "event.name": "other",
+        "time_unix_nano": "1788220800005000000",
+        "agent.openclaw.hook": "llm_output"
+      }
+    ],
+    [
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "other",
+        "time_unix_nano": "1788220800000000000",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "test"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "llm.request",
+        "time_unix_nano": "1788220800001000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.request.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "llm.response",
+        "time_unix_nano": "1788220800002000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.response.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "tool.call",
+        "time_unix_nano": "1788220800003000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "tool.result",
+        "time_unix_nano": "1788220800004000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000003",
+        "gen_ai.turn.id": "turn-3",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "reset-uuid",
+        "user.id": "test",
+        "agent.openclaw.session_key": "agent:main:a",
+        "event.name": "other",
+        "time_unix_nano": "1788220800005000000",
+        "agent.openclaw.hook": "llm_output"
+      }
+    ],
+    [
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "other",
+        "time_unix_nano": "1788220800000000000",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "test"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "llm.request",
+        "time_unix_nano": "1788220800001000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.request.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "llm.response",
+        "time_unix_nano": "1788220800002000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.response.id": "response",
+        "gen_ai.response.model": "test"
+      },
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "tool.call",
+        "time_unix_nano": "1788220800003000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "tool.result",
+        "time_unix_nano": "1788220800004000000",
+        "gen_ai.step.id": "step",
+        "gen_ai.tool.call.id": "tool",
+        "gen_ai.tool.name": "read"
+      },
+      {
+        "trace_id": "00000000000000000000000000000004",
+        "gen_ai.turn.id": "turn-4",
+        "gen_ai.agent.type": "openclaw",
+        "gen_ai.session.id": "session-4",
+        "user.id": "test",
+        "event.name": "other",
+        "time_unix_nano": "1788220800005000000",
+        "agent.openclaw.hook": "llm_output"
+      }
+    ]
+  ],
+  "conflicts": [
+    {
+      "name": "different-key",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:b",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "ambiguous-marker",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test",
+          "agent.openclaw.session_key.ambiguous": true
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    },
+    {
+      "name": "child-scope",
+      "records": [
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800000000000",
+          "gen_ai.input.messages": [
+            {
+              "role": "user",
+              "parts": [
+                {
+                  "type": "text",
+                  "content": "test"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "llm.request",
+          "time_unix_nano": "1788220800001000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.request.model": "test"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "event.name": "llm.response",
+          "time_unix_nano": "1788220800002000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.response.id": "response",
+          "gen_ai.response.model": "test",
+          "gen_ai.agent.scope": "subagent"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.call",
+          "time_unix_nano": "1788220800003000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "tool.result",
+          "time_unix_nano": "1788220800004000000",
+          "gen_ai.step.id": "step",
+          "gen_ai.tool.call.id": "tool",
+          "gen_ai.tool.name": "read"
+        },
+        {
+          "trace_id": "00000000000000000000000000000001",
+          "gen_ai.turn.id": "turn-1",
+          "gen_ai.agent.type": "openclaw",
+          "gen_ai.session.id": "session-1",
+          "user.id": "test",
+          "agent.openclaw.session_key": "agent:main:a",
+          "event.name": "other",
+          "time_unix_nano": "1788220800005000000",
+          "agent.openclaw.hook": "llm_output"
+        }
+      ]
+    }
+  ],
+  "other": [
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "other",
+      "time_unix_nano": "1788220800000000000",
+      "gen_ai.input.messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "llm.request",
+      "time_unix_nano": "1788220800001000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.request.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "llm.response",
+      "time_unix_nano": "1788220800002000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.response.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "tool.call",
+      "time_unix_nano": "1788220800003000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "tool.result",
+      "time_unix_nano": "1788220800004000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "claude-code",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:a",
+      "event.name": "other",
+      "time_unix_nano": "1788220800005000000",
+      "agent.openclaw.hook": "llm_output"
+    }
+  ],
+  "maskSource": [
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "other",
+      "time_unix_nano": "1788220800000000000",
+      "gen_ai.input.messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "content": "test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "llm.request",
+      "time_unix_nano": "1788220800001000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.request.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "llm.response",
+      "time_unix_nano": "1788220800002000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.response.id": "response",
+      "gen_ai.response.model": "test"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "tool.call",
+      "time_unix_nano": "1788220800003000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "tool.result",
+      "time_unix_nano": "1788220800004000000",
+      "gen_ai.step.id": "step",
+      "gen_ai.tool.call.id": "tool",
+      "gen_ai.tool.name": "read"
+    },
+    {
+      "trace_id": "00000000000000000000000000000001",
+      "gen_ai.turn.id": "turn-1",
+      "gen_ai.agent.type": "openclaw",
+      "gen_ai.session.id": "session-1",
+      "user.id": "test",
+      "agent.openclaw.session_key": "agent:main:AKIAIOSFODNN7EXAMPLE",
+      "event.name": "other",
+      "time_unix_nano": "1788220800005000000",
+      "agent.openclaw.hook": "llm_output"
+    }
+  ]
+}

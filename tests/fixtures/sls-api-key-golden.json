@@ -1,0 +1,25 @@
+{
+  "baseline": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+  "path": "src/flushers/sls-loggroup-codec.ts",
+  "sourceHash": "e57e30e6df36db4c95adce33aca09cd82411a5fb87537e5b7d3621c81dc9e57b",
+  "payload": {
+    "logs": [
+      {
+        "timestamp": 1782820111,
+        "content": {
+          "message": "local mock api key transport test",
+          "test_case": "api-key-transport"
+        }
+      }
+    ],
+    "topic": "api-key-test",
+    "source": "unit-test",
+    "tags": [
+      {
+        "__hostname__": "unit-host"
+      }
+    ]
+  },
+  "hex": "0a54088fda8ed206122c0a076d65737361676512216c6f63616c206d6f636b20617069206b6579207472616e73706f72742074657374121e0a09746573745f6361736512116170692d6b65792d7472616e73706f72741a0c6170692d6b65792d746573742209756e69742d7465737432190a0c5f5f686f73746e616d655f5f1209756e69742d686f7374",
+  "md5": "5EDC1179982B43E3D147022080747B88"
+}

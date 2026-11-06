@@ -1,0 +1,1167 @@
+[
+  {
+    "name": "tests/unit/hooks/pi-coding-agent-extension.test.mjs > Pi Coding Agent extension > emits a fallback LLM request when a response arrives without context",
+    "assets": [
+      {
+        "path": "assets/plugins/mimo-code/plugin.mjs",
+        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+      },
+      {
+        "path": "assets/plugins/pi-coding-agent/index.mjs",
+        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+      },
+      {
+        "path": "assets/plugins/shared/resource-context.mjs",
+        "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      }
+    ],
+    "records": [
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "b9bd62a3-84d3-45ec-b9ad-26e8a732a8c8",
+        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
+        "span_id": "31fad7d52bebee74",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "event.name": "other",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "b2537fb6-ebd4-473d-951c-d074745e8884",
+        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
+        "span_id": "83a8e3cb25057208",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.request",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          }
+        ],
+        "gen_ai.system_instructions": [
+          {
+            "type": "text",
+            "content": "You are a coding agent."
+          }
+        ],
+        "gen_ai.tool.definitions": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+              "type": "object"
+            }
+          },
+          {
+            "type": "function",
+            "name": "bash",
+            "description": "Run a command",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1784188800001000000",
+        "observed_time_unix_nano": "1784188800001000000",
+        "event.id": "db0d2730-a203-491f-a56b-94c2351494d3",
+        "trace_id": "ca55bdcb41ec1cb876c89639aa80fa27",
+        "span_id": "55e7af0f134c94b4",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "b6b4df3d-0fa2-426d-ae8d-3abb4f304108:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.response",
+        "gen_ai.response.model": "claude-sonnet-4-5",
+        "gen_ai.response.finish_reasons": [
+          "stop"
+        ],
+        "gen_ai.usage.input_tokens": 0,
+        "gen_ai.usage.output_tokens": 0,
+        "gen_ai.usage.cache_read.input_tokens": 0,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.total_tokens": 0,
+        "gen_ai.usage.input_cost": 0,
+        "gen_ai.usage.output_cost": 0,
+        "gen_ai.usage.cache_read.input_cost": 0,
+        "gen_ai.usage.cache_creation.input_cost": 0,
+        "gen_ai.usage.total_cost": 0,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "done"
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tests/unit/hooks/pi-coding-agent-extension.test.mjs > Pi Coding Agent extension > emits one turn-level input delta that populates ENTRY and AGENT spans",
+    "assets": [
+      {
+        "path": "assets/plugins/mimo-code/plugin.mjs",
+        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+      },
+      {
+        "path": "assets/plugins/pi-coding-agent/index.mjs",
+        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+      },
+      {
+        "path": "assets/plugins/shared/resource-context.mjs",
+        "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      }
+    ],
+    "records": [
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "1a0d3790-c697-41f4-9fa9-0860d2bd062a",
+        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
+        "span_id": "934b9eb96aa2a00c",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "event.name": "other",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Injected context"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "c2ec8fa1-456f-4c4d-b7b9-6c9897cc177f",
+        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
+        "span_id": "a9a13d56a7527608",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "1849240c-9559-46bb-be3b-6d40eeb592bf:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.request",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "old prompt"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "old response"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Injected context"
+              }
+            ]
+          }
+        ],
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "old prompt"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "old response"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Injected context"
+              }
+            ]
+          }
+        ],
+        "gen_ai.system_instructions": [
+          {
+            "type": "text",
+            "content": "You are a coding agent."
+          }
+        ],
+        "gen_ai.tool.definitions": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+              "type": "object"
+            }
+          },
+          {
+            "type": "function",
+            "name": "bash",
+            "description": "Run a command",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1784188800001000000",
+        "observed_time_unix_nano": "1784188800001000000",
+        "event.id": "67556a33-09e8-474d-a330-0924df7c1939",
+        "trace_id": "f8c78586ec1d09eeacbfa8b95eaf3410",
+        "span_id": "757ec5c961fd10db",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "1849240c-9559-46bb-be3b-6d40eeb592bf",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "1849240c-9559-46bb-be3b-6d40eeb592bf:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.response",
+        "gen_ai.response.model": "claude-sonnet-4-5",
+        "gen_ai.response.finish_reasons": [
+          "stop"
+        ],
+        "gen_ai.usage.input_tokens": 0,
+        "gen_ai.usage.output_tokens": 0,
+        "gen_ai.usage.cache_read.input_tokens": 0,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.total_tokens": 0,
+        "gen_ai.usage.input_cost": 0,
+        "gen_ai.usage.output_cost": 0,
+        "gen_ai.usage.cache_read.input_cost": 0,
+        "gen_ai.usage.cache_creation.input_cost": 0,
+        "gen_ai.usage.total_cost": 0,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "I will inspect it."
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tests/unit/hooks/pi-coding-agent-extension.test.mjs > Pi Coding Agent extension > keeps a tool result strictly later than a call in the same millisecond",
+    "assets": [
+      {
+        "path": "assets/plugins/mimo-code/plugin.mjs",
+        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+      },
+      {
+        "path": "assets/plugins/pi-coding-agent/index.mjs",
+        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+      },
+      {
+        "path": "assets/plugins/shared/resource-context.mjs",
+        "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      }
+    ],
+    "records": [
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "068fa047-3b01-4533-b36a-dfa248cea9c2",
+        "trace_id": "6132ee51362ea8ac0174e5373a093ff3",
+        "span_id": "dedb0f4d13125da8",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "18dc00fc-4a05-4451-8179-9666671e2afb",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "18dc00fc-4a05-4451-8179-9666671e2afb:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "tool.call",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.call.id": "call-fast",
+        "gen_ai.tool.call.arguments": {
+          "path": "README.md"
+        }
+      },
+      {
+        "time_unix_nano": "1784188800001000000",
+        "observed_time_unix_nano": "1784188800001000000",
+        "event.id": "63fc509a-ec14-41fd-9fe1-fdfaa550c553",
+        "trace_id": "6132ee51362ea8ac0174e5373a093ff3",
+        "span_id": "833916516cef3f96",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "18dc00fc-4a05-4451-8179-9666671e2afb",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "18dc00fc-4a05-4451-8179-9666671e2afb:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "tool.result",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.call.id": "call-fast",
+        "tool.result.status": "success",
+        "gen_ai.tool.call.duration": 1,
+        "gen_ai.tool.call.result": {
+          "content": "ok"
+        }
+      }
+    ]
+  },
+  {
+    "name": "tests/unit/hooks/pi-coding-agent-extension.test.mjs > Pi Coding Agent extension > keeps an LLM response strictly later than a request in the same millisecond",
+    "assets": [
+      {
+        "path": "assets/plugins/mimo-code/plugin.mjs",
+        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+      },
+      {
+        "path": "assets/plugins/pi-coding-agent/index.mjs",
+        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+      },
+      {
+        "path": "assets/plugins/shared/resource-context.mjs",
+        "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      }
+    ],
+    "records": [
+      {
+        "time_unix_nano": "1784188800000000000",
+        "observed_time_unix_nano": "1784188800000000000",
+        "event.id": "69c5bd31-ab2d-4a53-86db-3726f342cf27",
+        "trace_id": "cca01bf9d5ed85d2a04e9b138459a399",
+        "span_id": "bb23ad193210c277",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.request",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Inspect the repository"
+              }
+            ]
+          }
+        ],
+        "gen_ai.system_instructions": [
+          {
+            "type": "text",
+            "content": "You are a coding agent."
+          }
+        ],
+        "gen_ai.tool.definitions": [
+          {
+            "type": "function",
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+              "type": "object"
+            }
+          },
+          {
+            "type": "function",
+            "name": "bash",
+            "description": "Run a command",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1784188800001000000",
+        "observed_time_unix_nano": "1784188800001000000",
+        "event.id": "d8319b29-d503-4ff0-864f-f5114a7f4c38",
+        "trace_id": "cca01bf9d5ed85d2a04e9b138459a399",
+        "span_id": "123b510b267a8d20",
+        "user.id": "5a03a7a34975",
+        "gen_ai.session.id": "pi-session-1",
+        "gen_ai.turn.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89",
+        "gen_ai.agent.type": "pi-coding-agent",
+        "gen_ai.agent.id": "pi-coding-agent",
+        "gen_ai.agent.name": "Pi Coding Agent",
+        "gen_ai.agent.system": "pi",
+        "gen_ai.framework": "pi-coding-agent",
+        "agent.pi-coding-agent.cwd": "/workspace/example",
+        "gen_ai.step.id": "d48f56ca-cbdb-4652-a188-ba9af4dfec89:s1",
+        "gen_ai.provider.name": "anthropic",
+        "gen_ai.request.model": "claude-sonnet-4-5",
+        "event.name": "llm.response",
+        "gen_ai.response.model": "claude-sonnet-4-5",
+        "gen_ai.response.finish_reasons": [
+          "stop"
+        ],
+        "gen_ai.usage.input_tokens": 0,
+        "gen_ai.usage.output_tokens": 0,
+        "gen_ai.usage.cache_read.input_tokens": 0,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.total_tokens": 0,
+        "gen_ai.usage.input_cost": 0,
+        "gen_ai.usage.output_cost": 0,
+        "gen_ai.usage.cache_read.input_cost": 0,
+        "gen_ai.usage.cache_creation.input_cost": 0,
+        "gen_ai.usage.total_cost": 0,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [],
+            "finish_reason": "stop"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tests/unit/hooks/mimo-code/plugin-replay.test.mjs > MiMo Code plugin — end-to-end fixture replay > preserves the first user message in later converted LLM spans",
+    "assets": [
+      {
+        "path": "assets/plugins/mimo-code/plugin.mjs",
+        "sha256": "c8565217ff4e2c66c40233f5550f6be158652099b00c529246c20995c6a14f88"
+      },
+      {
+        "path": "assets/plugins/pi-coding-agent/index.mjs",
+        "sha256": "d0a564f417bf3e4ca77735951eed459597f5e05b6c8814e9a82d75c5215805f4"
+      },
+      {
+        "path": "assets/plugins/shared/resource-context.mjs",
+        "sha256": "131cae8ab76d94c84bee45931e7b096cdf758f4fc43563e0638f94bb2de2099f"
+      }
+    ],
+    "records": [
+      {
+        "time_unix_nano": "1793599547973000000",
+        "event.id": "1e5c411a-ce81-4bdd-b217-bc47b5b3c88e",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/tmp",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "other"
+      },
+      {
+        "time_unix_nano": "1783504933421000000",
+        "event.id": "69f6a777-812a-4f9c-9acc-f4405c2d03bb",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.request",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s1",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.input.messages": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "\"List py files. Then read main.py. Then create utils.py with a multiply(a,b) function. Then run python main.py and report output.\"\n"
+              }
+            ]
+          }
+        ],
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "type": "text",
+                "content": "\"List py files. Then read main.py. Then create utils.py with a multiply(a,b) function. Then run python main.py and report output.\"\n"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1783504934593000000",
+        "event.id": "03822dd2-9a4c-425f-a92f-85596ac0520a",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.call",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s1",
+        "gen_ai.tool.name": "bash",
+        "gen_ai.tool.description": "bash",
+        "gen_ai.tool.call.id": "call_08602fda829e44e2998914be",
+        "gen_ai.tool.call.arguments": "{\"command\":\"ls *.py\",\"description\":\"List Python files in directory\"}"
+      },
+      {
+        "time_unix_nano": "1783504934733000000",
+        "event.id": "1ac9c1a1-ba17-4f35-9343-fd2e4a703ac5",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.result",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s1",
+        "gen_ai.tool.name": "bash",
+        "gen_ai.tool.call.id": "call_08602fda829e44e2998914be",
+        "gen_ai.tool.call.result": "main.py\nutils.py\n",
+        "tool.result.status": "success",
+        "gen_ai.tool.call.duration": 9
+      },
+      {
+        "time_unix_nano": "1783504934747000000",
+        "event.id": "94e4bc31-8d40-4e88-9684-4cade9252c8c",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.response",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s1",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.response.model": "mimo-auto",
+        "gen_ai.response.id": "msg_f412d8bf1001qksMpqtcCge6Ex",
+        "gen_ai.response.finish_reasons": [
+          "tool_call"
+        ],
+        "gen_ai.usage.input_tokens": 1643,
+        "gen_ai.usage.output_tokens": 50,
+        "gen_ai.usage.cache_read.input_tokens": 28672,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning_tokens": 64,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_08602fda829e44e2998914be",
+                "name": "bash",
+                "arguments": "{\"command\":\"ls *.py\",\"description\":\"List Python files in directory\"}"
+              },
+              {
+                "type": "text",
+                "content": "I'll start by listing all Python files in the current directory."
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "cost_usd": 0
+      },
+      {
+        "time_unix_nano": "1783504935500000000",
+        "event.id": "283f79c4-7dc7-4cc8-bccd-30e1d9d06ccd",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.request",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s2",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_08602fda829e44e2998914be",
+                "name": "bash",
+                "arguments": "{\"command\":\"ls *.py\",\"description\":\"List Python files in directory\"}"
+              },
+              {
+                "type": "text",
+                "content": "I'll start by listing all Python files in the current directory."
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "call_08602fda829e44e2998914be",
+                "response": "main.py\nutils.py\n"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1783504936211000000",
+        "event.id": "31343c5c-34ce-49f9-8d1d-36587f9d7411",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.call",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s2",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.description": "read",
+        "gen_ai.tool.call.id": "call_89a353a83d0d4a6bbfb468ef",
+        "gen_ai.tool.call.arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/main.py\"}"
+      },
+      {
+        "time_unix_nano": "1783504936250000000",
+        "event.id": "ae248842-67a7-4da7-a60f-b5fdf51ea04b",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.result",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s2",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.call.id": "call_89a353a83d0d4a6bbfb468ef",
+        "gen_ai.tool.call.result": "<path>/home/admin/mimo-fixtures/proj2/main.py</path>\n<type>file</type>\n<content>\n1: def add(a, b):\n2:     return a + b\n3: \n4: from utils import multiply\n5: \n6: print(add(1, 2))\n7: print(multiply(2, 3))\n\n(End of file - total 7 lines)\n</content>",
+        "tool.result.status": "success",
+        "gen_ai.tool.call.duration": 39
+      },
+      {
+        "time_unix_nano": "1783504936257000000",
+        "event.id": "d93c50e2-262e-48a0-8fc4-a7ae8520e7ea",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.response",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s2",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.response.model": "mimo-auto",
+        "gen_ai.response.id": "msg_f412d9768001RG63rcnC2CJ0ub",
+        "gen_ai.response.finish_reasons": [
+          "tool_call"
+        ],
+        "gen_ai.usage.input_tokens": 174,
+        "gen_ai.usage.output_tokens": 44,
+        "gen_ai.usage.cache_read.input_tokens": 30272,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning_tokens": 22,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_89a353a83d0d4a6bbfb468ef",
+                "name": "read",
+                "arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/main.py\"}"
+              },
+              {
+                "type": "text",
+                "content": "Found 2 Python files. Let me read main.py."
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "cost_usd": 0
+      },
+      {
+        "time_unix_nano": "1783504937504000000",
+        "event.id": "c35ef432-ad64-4137-b295-bbb45d95d1ca",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.request",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s3",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_89a353a83d0d4a6bbfb468ef",
+                "name": "read",
+                "arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/main.py\"}"
+              },
+              {
+                "type": "text",
+                "content": "Found 2 Python files. Let me read main.py."
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "call_89a353a83d0d4a6bbfb468ef",
+                "response": "<path>/home/admin/mimo-fixtures/proj2/main.py</path>\n<type>file</type>\n<content>\n1: def add(a, b):\n2:     return a + b\n3: \n4: from utils import multiply\n5: \n6: print(add(1, 2))\n7: print(multiply(2, 3))\n\n(End of file - total 7 lines)\n</content>"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1783504938566000000",
+        "event.id": "2e0018f2-3c3b-41b1-8278-4b25b3c2e3dd",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.call",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s3",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.description": "read",
+        "gen_ai.tool.call.id": "call_4108014394034ff58162d670",
+        "gen_ai.tool.call.arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/utils.py\"}"
+      },
+      {
+        "time_unix_nano": "1783504938584000000",
+        "event.id": "221960ef-4b4d-4d0e-899d-8f850a985fac",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.result",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s3",
+        "gen_ai.tool.name": "read",
+        "gen_ai.tool.call.id": "call_4108014394034ff58162d670",
+        "gen_ai.tool.call.result": "<path>/home/admin/mimo-fixtures/proj2/utils.py</path>\n<type>file</type>\n<content>\n1: def multiply(a, b):\n2:     return a * b\n\n(End of file - total 2 lines)\n</content>",
+        "tool.result.status": "success",
+        "gen_ai.tool.call.duration": 18
+      },
+      {
+        "time_unix_nano": "1783504938589000000",
+        "event.id": "3ee31289-a0de-44a2-9b3a-4bf4a933129b",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.response",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s3",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.response.model": "mimo-auto",
+        "gen_ai.response.id": "msg_f412d9d49001IpW1Td78ruyzpO",
+        "gen_ai.response.finish_reasons": [
+          "tool_call"
+        ],
+        "gen_ai.usage.input_tokens": 212,
+        "gen_ai.usage.output_tokens": 41,
+        "gen_ai.usage.cache_read.input_tokens": 30400,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning_tokens": 27,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_4108014394034ff58162d670",
+                "name": "read",
+                "arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/utils.py\"}"
+              },
+              {
+                "type": "text",
+                "content": "Let me check the current utils.py content."
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "cost_usd": 0
+      },
+      {
+        "time_unix_nano": "1783504940347000000",
+        "event.id": "aca90ea0-e515-4e70-a3b6-8a0669444591",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.request",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s4",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_4108014394034ff58162d670",
+                "name": "read",
+                "arguments": "{\"file_path\":\"/home/admin/mimo-fixtures/proj2/utils.py\"}"
+              },
+              {
+                "type": "text",
+                "content": "Let me check the current utils.py content."
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "call_4108014394034ff58162d670",
+                "response": "<path>/home/admin/mimo-fixtures/proj2/utils.py</path>\n<type>file</type>\n<content>\n1: def multiply(a, b):\n2:     return a * b\n\n(End of file - total 2 lines)\n</content>"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1783504941067000000",
+        "event.id": "afedd862-d582-49c9-9e5d-e7e4039ae59b",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.call",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s4",
+        "gen_ai.tool.name": "bash",
+        "gen_ai.tool.description": "bash",
+        "gen_ai.tool.call.id": "call_5d8d704e3b574788ae100999",
+        "gen_ai.tool.call.arguments": "{\"command\":\"python main.py\",\"description\":\"Run main.py to see output\"}"
+      },
+      {
+        "time_unix_nano": "1783504941166000000",
+        "event.id": "eb0a5aef-419a-408b-8558-4c2fbf1ef35b",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "tool.result",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s4",
+        "gen_ai.tool.name": "bash",
+        "gen_ai.tool.call.id": "call_5d8d704e3b574788ae100999",
+        "gen_ai.tool.call.result": "3\n6\n",
+        "tool.result.status": "success",
+        "gen_ai.tool.call.duration": 48
+      },
+      {
+        "time_unix_nano": "1783504941172000000",
+        "event.id": "3d8c9c2e-8920-4e7d-8776-b2c214c768ce",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.response",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s4",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.response.model": "mimo-auto",
+        "gen_ai.response.id": "msg_f412da665001yHTT2a7s3b2DIM",
+        "gen_ai.response.finish_reasons": [
+          "tool_call"
+        ],
+        "gen_ai.usage.input_tokens": 154,
+        "gen_ai.usage.output_tokens": 55,
+        "gen_ai.usage.cache_read.input_tokens": 30592,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning_tokens": 21,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_5d8d704e3b574788ae100999",
+                "name": "bash",
+                "arguments": "{\"command\":\"python main.py\",\"description\":\"Run main.py to see output\"}"
+              },
+              {
+                "type": "text",
+                "content": "utils.py already exists with the multiply function. Now let me run main.py."
+              }
+            ],
+            "finish_reason": "tool_call"
+          }
+        ],
+        "cost_usd": 0
+      },
+      {
+        "time_unix_nano": "1783504942274000000",
+        "event.id": "bd514ea5-961c-43c9-8780-114fe1a5a516",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.request",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s5",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "tool_call",
+                "id": "call_5d8d704e3b574788ae100999",
+                "name": "bash",
+                "arguments": "{\"command\":\"python main.py\",\"description\":\"Run main.py to see output\"}"
+              },
+              {
+                "type": "text",
+                "content": "utils.py already exists with the multiply function. Now let me run main.py."
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "parts": [
+              {
+                "type": "tool_call_response",
+                "id": "call_5d8d704e3b574788ae100999",
+                "response": "3\n6\n"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "time_unix_nano": "1783504944235000000",
+        "event.id": "d06b4b27-2c31-41c2-9223-345477fdd8ea",
+        "trace_id": "c510d4fbce78c6d2b289589eec94f1ea",
+        "gen_ai.session.id": "ses_0bed275bbffedIvnl7FX6TTZga",
+        "gen_ai.turn.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1",
+        "user.id": "test-user",
+        "gen_ai.agent.type": "mimo-code",
+        "gen_ai.agent.name": "build",
+        "agent.mimo-code.cwd": "/home/admin/mimo-fixtures/proj2",
+        "gen_ai.framework": "mimo-code",
+        "event.name": "llm.response",
+        "gen_ai.step.id": "ses_0bed275bbffedIvnl7FX6TTZga:t1:s5",
+        "gen_ai.provider.name": "mimo",
+        "gen_ai.request.model": "mimo-auto",
+        "gen_ai.response.model": "mimo-auto",
+        "gen_ai.response.id": "msg_f412db07d001ckFN42m5u9oEHd",
+        "gen_ai.response.finish_reasons": [
+          "stop"
+        ],
+        "gen_ai.usage.input_tokens": 117,
+        "gen_ai.usage.output_tokens": 133,
+        "gen_ai.usage.cache_read.input_tokens": 30720,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning_tokens": 68,
+        "gen_ai.output.messages": [
+          {
+            "role": "assistant",
+            "parts": [
+              {
+                "type": "text",
+                "content": "Done. Here's the summary:\n\n**Python files found:** main.py, utils.py\n\n**main.py content:**\n- Defines `add(a, b)` returning `a + b`\n- Imports `multiply` from utils\n- Prints `add(1, 2)` and `multiply(2, 3)`\n\n**utils.py:** Already contains the `multiply(a, b)` function (returns `a * b`)\n\n**Output of `python main.py`:**\n```\n3\n6\n```\n\n- `add(1, 2)` → 3\n- `multiply(2, 3)` → 6"
+              }
+            ],
+            "finish_reason": "stop"
+          }
+        ],
+        "cost_usd": 0
+      }
+    ]
+  }
+]

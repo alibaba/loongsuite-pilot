@@ -1,0 +1,266 @@
+name: Windows Native Contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [loongsuite-pilot-rust]
+    paths: [.github/workflows/windows-native-contracts.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-native-contracts-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  native:
+    name: Native contracts (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - name: Install Rust 1.99.1 for the native runner
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -vV
+          test "$(rustc --version | cut -d' ' -f2)" = 1.99.1
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-release-v1
+          key: ${{ matrix.target }}-opensource
+          cache-on-failure: true
+      - name: Isolate test HOME while preserving the build toolchain
+        run: |
+          set -euo pipefail
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/pilot-native-home"
+          echo "HOME=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+          echo "USERPROFILE=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+      - name: Require actual PS5.1 and PS7 bootstrap in both language modes
+        run: python scripts/testing/windows-bootstrap-contracts.py --timeout-seconds 20
+      - name: Compile native contract binaries without packaging
+        id: compile
+        run: |
+          set -euo pipefail
+          cargo build --locked -p xtask --bin xtask
+          cargo test --locked -p xtask --bin xtask --test windows_services --test jsonl_validate --test trace_validate --no-run
+          cargo test --locked -p loongsuite-pilot --lib --test hooks_native --test openclaw_output_contracts --test installer_native --test installer_dashboard_history --test installer_uninstall_survivability_history --test codex_subagent_lifecycle --test cli_native --test cli_upgrade_history --test codex_http_recovery_history --test codex_delivery --test codex_subagent_lifecycle --test interceptor_native --test upstream_context --test hook_timing --test claude_entry_history --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test qoder_native_wakeup --test qoder_native_transcript_input --test qoder_533_recovery_pipeline --test qoder_533_durability_pipeline --test qoder_ide_lag_history --test qoder_ide_retry_history --test cli_probe_error_contract --test intercept_token_reader_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --test host_plugin_native_projection_history --no-run
+      - name: Verify previously failing Windows paths before broad contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          failures=0
+          log="$RUNNER_TEMP/pilot-windows-regressions.log"
+          : > "$log"
+          check() {
+            printf 'command: %s\n' "$*" >> "$log"
+            if "$@" 2>&1 | tee -a "$log"; then
+              return 0
+            else
+              local results="${PIPESTATUS[*]}"
+              failures=1
+              printf '::error::Native regression failed: %s (pipeline: %s)\n' "$*" "$results"
+            fi
+          }
+          check cargo test --locked -p loongsuite-pilot --lib migration_l88_missing_descendant_behind_directory_alias_has_one_canonical_source -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib resolves_directory_links_including_not_yet_created_descendants -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib private_directory:: -- --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --test local_worker_acl_history windows_private_worker_removes_inherited_access_and_is_idempotent -- --exact --test-threads=1
+          check cargo test --locked -p loongsuite-pilot --lib actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry -- --test-threads=1
+          for filter in installer_openclaw_entry_history:: installer_probe_transport_history:: installer_hermes_rollback_history:: installer_uninstall_public_entry_history:: stale_actual_windows_ps1_cmd_children_preserve_skip_exit_stderr_and_truthful_running_verdicts; do
+            check cargo test --locked -p loongsuite-pilot --test installer_native "$filter" -- --test-threads=1
+          done
+          for filter in source_handoff_l58 native_background_launcher_appends_separate_streams; do
+            check cargo test --locked -p xtask --test windows_services "$filter" -- --test-threads=1
+          done
+          test "$failures" -eq 0
+      - name: Save early regression logs while broad tests continue
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: early-regressions-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pilot-windows-regressions.log
+          retention-days: 3
+          if-no-files-found: error
+      - name: Generated Hook wrappers match production assets
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: ./target/debug/xtask.exe sync-hook-wrappers --check
+      - name: Positive native raw stdin and argv in PS5.1 and PS7 including CLM
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --no-fail-fast --locked -p loongsuite-pilot --test hooks_native --test claude_entry_history -- --nocapture
+      - name: Native installer and uninstall contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --no-fail-fast --locked -p loongsuite-pilot --test installer_native --test installer_dashboard_history --test installer_uninstall_survivability_history -- --nocapture --test-threads=1 --skip uninstall_default_url_and_explicit_candidates_use_the_whole_public_powershell_entry_in_both_shells_and_clm 2>&1 | tee "$RUNNER_TEMP/pilot-windows-installer.log"
+      - name: Save installer logs while remaining contracts continue
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-contracts-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pilot-windows-installer.log
+          retention-days: 3
+          if-no-files-found: error
+      - name: Native CLI contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --no-fail-fast --locked -p loongsuite-pilot --test cli_native --test cli_upgrade_history -- --nocapture
+      - name: Both-shell services, arguments, and restart diagnostics
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --no-fail-fast --locked -p xtask --test windows_services --test powershell_source_policy_history -- --nocapture
+      - name: Native JSONL validation without a JavaScript runtime
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --no-fail-fast --locked -p xtask --test jsonl_validate --test trace_validate -- --nocapture
+      - name: Native package, Hook, and trace validator unit contracts
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          failures=0
+          for filter in package::tests hooks::tests trace_validate::; do
+            cargo test --locked -p xtask --bin xtask "$filter" -- --nocapture || failures=1
+          done
+          test "$failures" -eq 0
+      - name: Native interceptor, upstream context, and Hook timing
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: cargo test --no-fail-fast --locked -p loongsuite-pilot --test codex_http_recovery_history --test codex_delivery --test codex_subagent_lifecycle --test interceptor_native --test upstream_context --test hook_timing --test grok_output_contracts --test openclaw_output_contracts --test runtime_snapshot_allocation --test doubao_delivery --test doubao_pipeline --test hosted_collect_durability --test claude_processor_history --test cursor_dispatch_history --test qoder_trace_cli_history --test qoder_trace_ide_history --test qoder_trace_multimodal_surfaces --test qoder_trace_multimodal_pipeline --test qoder_trace_multimodal_attachments --test qoder_trace_collect_history --test dsh_otlp_history --test qoder_cli_multimodal_contracts --test codex_timing_native_history --test qoder_cn_sqlite_contracts --test workspace_policy_native --test legacy_restore_flows --test always_capture_content_history --test ide_snapshot_flow_history --test hook_jsonl_integration_history --test qoder_native_wakeup --test qoder_native_transcript_input --test qoder_533_recovery_pipeline --test qoder_533_durability_pipeline --test qoder_ide_lag_history --test qoder_ide_retry_history --test cli_probe_error_contract --test intercept_token_reader_history --test updater_metrics_entry --test upstream_link_reparent_history --test local_worker_acl_history --test trace_history --test host_plugin_native_projection_history --test eager_cli_history --test hook_entry_history --test qoder_cold_start_history --test qoder_cli_segment_span_timing_history --test normalization_latest_main_history --test opencode_tool_payload_history --test turn_boundary_latest_main_history -- --nocapture
+
+  lib:
+    name: Complete unit library (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows-2022, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - name: Install Rust 1.99.1 for the native runner
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -vV
+          test "$(rustc --version | cut -d' ' -f2)" = 1.99.1
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: rust-release-v1
+          key: ${{ matrix.target }}-opensource
+          cache-on-failure: true
+      - name: Isolate test HOME while preserving the build toolchain
+        run: |
+          set -euo pipefail
+          echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/pilot-native-home"
+          echo "HOME=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+          echo "USERPROFILE=$RUNNER_TEMP/pilot-native-home" >> "$GITHUB_ENV"
+      - name: Compile the complete native unit library without packaging
+        id: lib_compile
+        run: |
+          set -euo pipefail
+          cargo test --locked -p loongsuite-pilot --lib --no-run 2>&1 | tee "$RUNNER_TEMP/pilot-windows-lib-compile.log"
+      # Hashed recovery metadata must also persist beyond classic MAX_PATH.
+      - name: Complete serial unit library baseline
+        if: ${{ !cancelled() && steps.lib_compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/pilot-windows-lib-baseline.log"
+          pilot_worker_case=core::orchestrator::local_worker_history_contract_tests::actual_native_manifest_worker_uses_the_same_real_adapter_without_node_or_unix_shell_entry
+          pilot_trace_case=core::upstream_link::trace_linker::load_history_tests::original_interleaving_scaling_and_cache_workloads_preserve_all_sizes_and_guards
+          pilot_copilot_case=inputs::copilot_log::disk_governance_tests::replay_at_128_256_512_turns_is_segmented_duplicate_free_and_linear
+          cargo test --locked -p loongsuite-pilot --lib -- --list --color never 2>&1 | tee "$log"
+          python -c 'import pathlib,sys; cases=[line[:-6] for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.endswith(": test")]; separate=sys.argv[2:]; assert len(cases)>len(separate) and len(cases)==len(set(cases)); assert all([name for name in cases if needle in name]==[needle] for needle in separate), [(needle,[name for name in cases if needle in name]) for needle in separate]; print("registered_library_tests=%d baseline_expected=%d separately_executed=%d" % (len(cases),len(cases)-len(separate),len(separate)))' "$log" "$pilot_worker_case" "$pilot_trace_case" "$pilot_copilot_case" | tee -a "$log"
+          set +e
+          cargo test --locked -p loongsuite-pilot --lib -- --nocapture --test-threads=1 --skip "$pilot_worker_case" --skip "$pilot_trace_case" --skip "$pilot_copilot_case" 2>&1 | tee -a "$log"
+          pilot_phase_exit=$?
+          set -e
+          printf 'pipeline_exit=%s\n' "$pilot_phase_exit" | tee -a "$log"
+          exit "$pilot_phase_exit"
+      - name: Save complete unit library baseline and compile logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-lib-baseline-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pilot-windows-lib-compile.log
+            ${{ runner.temp }}/pilot-windows-lib-baseline.log
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Exact TraceLinker load guards in an isolated process
+        if: ${{ !cancelled() && steps.lib_compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/pilot-windows-lib-trace-load.log"
+          pilot_trace_case=core::upstream_link::trace_linker::load_history_tests::original_interleaving_scaling_and_cache_workloads_preserve_all_sizes_and_guards
+          cargo test --locked -p loongsuite-pilot --lib "$pilot_trace_case" -- --exact --list --color never --test-threads=1 2>&1 | tee "$log"
+          python -c 'import pathlib,sys; cases=[line for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.endswith(": test")]; assert cases==[sys.argv[2]+": test"], cases' "$log" "$pilot_trace_case"
+          set +e
+          cargo test --locked -p loongsuite-pilot --lib "$pilot_trace_case" -- --exact --nocapture --test-threads=1 2>&1 | tee -a "$log"
+          pilot_phase_exit=$?
+          set -e
+          printf 'pipeline_exit=%s\n' "$pilot_phase_exit" | tee -a "$log"
+          exit "$pilot_phase_exit"
+      - name: Save exact TraceLinker load guard logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-lib-trace-load-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pilot-windows-lib-trace-load.log
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Exact Copilot replay budget in an isolated process
+        if: ${{ !cancelled() && steps.lib_compile.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/pilot-windows-lib-copilot-replay.log"
+          pilot_copilot_case=inputs::copilot_log::disk_governance_tests::replay_at_128_256_512_turns_is_segmented_duplicate_free_and_linear
+          cargo test --locked -p loongsuite-pilot --lib "$pilot_copilot_case" -- --exact --list --color never --test-threads=1 2>&1 | tee "$log"
+          python -c 'import pathlib,sys; cases=[line for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if line.endswith(": test")]; assert cases==[sys.argv[2]+": test"], cases' "$log" "$pilot_copilot_case"
+          set +e
+          cargo test --locked -p loongsuite-pilot --lib "$pilot_copilot_case" -- --exact --nocapture --test-threads=1 2>&1 | tee -a "$log"
+          pilot_phase_exit=$?
+          set -e
+          printf 'pipeline_exit=%s\n' "$pilot_phase_exit" | tee -a "$log"
+          exit "$pilot_phase_exit"
+      - name: Save exact Copilot replay budget logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-lib-copilot-replay-${{ matrix.target }}-${{ github.sha }}
+          path: ${{ runner.temp }}/pilot-windows-lib-copilot-replay.log
+          retention-days: 3
+          if-no-files-found: warn

@@ -1,0 +1,1678 @@
+[
+  {
+    "source": {
+      "id": "L192:C3",
+      "title": "stamps Qoder IDE hook identity onto every event in the turn",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T00:59:59.000Z",
+          "message": {
+            "role": "user",
+            "content": "read the file"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {
+                  "path": "a.txt"
+                }
+              }
+            ],
+            "stop_reason": "tool_use"
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:01.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ],
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-07-30T00:59:58.500Z"
+        },
+        {
+          "hookEvent": "PreToolUse",
+          "ts": "2026-07-30T01:00:00.500Z"
+        },
+        {
+          "hookEvent": "PostToolUse",
+          "ts": "2026-07-30T01:00:01.500Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-07-30T01:00:03.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L245:C3",
+      "title": "omits identity when the hook payload has no usable extra.user",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {}
+  },
+  {
+    "source": {
+      "id": "L250:C3",
+      "title": "keeps thinking + text + multiple tool_use blocks as one response",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "reason"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:05.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "summary"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:06.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:06.001Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-b",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L261:C3",
+      "title": "does not split parallel tool_use blocks when an early tool_result is interleaved",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.001Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-b",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:00.002Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.003Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-c",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L272:C3",
+      "title": "starts the next response after all tools in the prior response resolve",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:01.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-b",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L282:C3",
+      "title": "uses a completed tool cycle even when progress events place both responses in one window",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "read"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.001Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:01.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "summarize"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.001Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-07-30T00:59:59.000Z"
+        },
+        {
+          "hookEvent": "PostToolUse",
+          "ts": "2026-07-30T01:00:01.500Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-07-30T01:00:03.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L299:C3",
+      "title": "derives the next request from the completed tool result, not progress timing",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-08-03T09:22:25.100000Z",
+          "message": {
+            "role": "user",
+            "content": "run two tools in sequence"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-03T09:22:25.555446Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-b",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-08-03T09:22:26.668419Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-b",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-03T09:22:26.999890Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-c",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-08-03T09:22:27.500000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-c",
+                "content": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-08-03T09:22:25.000000Z"
+        },
+        {
+          "hookEvent": "PreToolUse",
+          "ts": "2026-08-03T09:22:25.996439Z"
+        },
+        {
+          "hookEvent": "PostToolUse",
+          "ts": "2026-08-03T09:22:26.999176Z"
+        },
+        {
+          "hookEvent": "PreToolUse",
+          "ts": "2026-08-03T09:22:27.281923Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-08-03T09:22:28.000000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L350:C3",
+      "title": "starts a complete next step from a failed tool_result, independent of PostToolUseFailure",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T00:59:59.100Z",
+          "message": {
+            "role": "user",
+            "content": "read the missing file"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "read it"
+              },
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {
+                  "path": "missing"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:01.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "file not found",
+                "is_error": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "the file does not exist"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-07-30T00:59:59.000Z"
+        },
+        {
+          "hookEvent": "PreToolUse",
+          "ts": "2026-07-30T01:00:00.500Z"
+        },
+        {
+          "hookEvent": "PostToolUseFailure",
+          "ts": "2026-07-30T01:00:01.500Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-07-30T01:00:03.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L405:C3",
+      "title": "preserves a terminal response when tool_result is missing",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T00:59:59.100Z",
+          "message": {
+            "role": "user",
+            "content": "read the missing file"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {
+                  "path": "missing"
+                }
+              }
+            ],
+            "stop_reason": "tool_use"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:01.900Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "the tool was cancelled"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "the tool was cancelled"
+              }
+            ],
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-07-30T00:59:59.000Z"
+        },
+        {
+          "hookEvent": "PreToolUse",
+          "ts": "2026-07-30T01:00:00.500Z"
+        },
+        {
+          "hookEvent": "PostToolUseFailure",
+          "ts": "2026-07-30T01:00:01.500Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-07-30T01:00:03.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L456:C3",
+      "title": "conservatively merges later assistant rows when both tool_result and stop_reason are missing",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {
+                  "path": "missing"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "the tool state is unknown"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L469:C3",
+      "title": "keeps structure and content identical when third-party PostToolUse progress is present",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:35:58.605Z",
+          "message": {
+            "role": "user",
+            "content": "fix it"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:31.960Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "read"
+              },
+              {
+                "type": "tool_use",
+                "id": "read-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:36:32.017Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "read-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:44.873Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "write"
+              },
+              {
+                "type": "tool_use",
+                "id": "write-a",
+                "name": "Write",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:36:47.452Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "write-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:37:03.225Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ],
+      "qoderSecProgress": [
+        {
+          "hookEvent": "PostToolUse",
+          "hookName": "PostToolUse:Write",
+          "ts": "2026-09-05T02:36:47.814Z"
+        },
+        {
+          "hookEvent": "PostToolUse",
+          "hookName": "PostToolUse:Write",
+          "ts": "2026-09-05T02:36:47.814Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "hookName": "Stop",
+          "ts": "2026-09-05T02:37:05.726Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L515:C3",
+      "title": "keeps responses populated when adjacent groups have the same assistant timestamp",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:35:58.000Z",
+          "message": {
+            "role": "user",
+            "content": "go"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:36:00.100Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L550:C3",
+      "title": "preserves sub-millisecond transcript order in emitted timestamps",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:35:59.999900Z",
+          "message": {
+            "role": "user",
+            "content": "go"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:00.000100Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:36:00.000300Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:00.000900Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L591:C3",
+      "title": "uses the final assistant timestamp when SQLite enrichment is unavailable",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-09-05T02:35:58.000Z",
+          "message": {
+            "role": "user",
+            "content": "explain it"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "reasoning"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-09-05T02:36:02.345Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "answer"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L623:C3",
+      "title": "does not close a parallel response until completion signals cover its declared tools",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-a",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.001Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-b",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:00.500Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "tool-a",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool-c",
+                "name": "Read",
+                "input": {}
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "PostToolUse",
+          "ts": "2026-07-30T01:00:01.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L643:C3",
+      "title": "does not invent a boundary without a completed tool cycle",
+      "suites": [
+        "buildLlmBoundaries complete-response priority"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "first"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:14.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "second"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:20.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "done"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L943:C3",
+      "title": "matches parallel tool results by tool_use_id instead of return order",
+      "suites": [
+        "buildEventsFromBoundaries tool result matching"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "grepResult": {
+        "type": "user",
+        "timestamp": "2026-07-30T01:00:02.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "grep",
+              "content": "grep-result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "readResult": {
+        "type": "user",
+        "timestamp": "2026-07-30T01:00:02.001Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "read",
+              "content": "read-result",
+              "is_error": false
+            }
+          ]
+        }
+      },
+      "problemsResult": {
+        "type": "user",
+        "timestamp": "2026-07-30T01:00:05.002Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "problems",
+              "content": "file not found",
+              "is_error": true
+            }
+          ]
+        }
+      },
+      "content": [
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:00.000Z",
+          "message": {
+            "content": "read files"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-07-30T01:00:01.000Z",
+          "message": {
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "problems",
+                "name": "GetProblems",
+                "input": {}
+              },
+              {
+                "type": "tool_use",
+                "id": "read",
+                "name": "Read",
+                "input": {
+                  "path": "a"
+                }
+              },
+              {
+                "type": "tool_use",
+                "id": "grep",
+                "name": "Grep",
+                "input": {
+                  "pattern": "x"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:02.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "grep",
+                "content": "grep-result",
+                "is_error": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:02.001Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "read",
+                "content": "read-result",
+                "is_error": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-07-30T01:00:05.002Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "problems",
+                "content": "file not found",
+                "is_error": true
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L1020:C3",
+      "title": "keeps the primary prompt and appends meta Image:source text for qoder-cli",
+      "suites": [
+        "buildEventsFromBoundaries CLI image source parts"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "clip": "/tmp/clip.png.png",
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-08-12T09:17:48.318Z",
+          "entrypoint": "cli",
+          "promptId": "p1",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image #0]这个图像在讲什么？"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "url",
+                  "url": "https://example/x.png"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-08-12T09:17:48.529Z",
+          "isMeta": true,
+          "entrypoint": "cli",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image: source: /tmp/clip.png.png]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-12T09:17:55.407Z",
+          "message": {
+            "role": "assistant",
+            "model": "auto",
+            "stop_reason": "end_turn",
+            "content": [
+              {
+                "type": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-08-12T09:17:48.000Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-08-12T09:17:56.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L1072:C3",
+      "title": "does not append Image:source parts for IDE turns",
+      "suites": [
+        "buildEventsFromBoundaries CLI image source parts"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "rows": [
+        {
+          "type": "user",
+          "timestamp": "2026-08-12T09:17:48.318Z",
+          "message": {
+            "role": "user",
+            "content": "解释这张图片"
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-08-12T09:17:48.529Z",
+          "isMeta": true,
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "[Image: source: /tmp/clip.png]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-12T09:17:55.407Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-08-12T09:17:48.000Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-08-12T09:17:56.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L1110:C3",
+      "title": "does not start a new turn on isMeta Image:source rows",
+      "suites": [
+        "buildEventsFromBoundaries CLI image source parts"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "prompt": {
+        "type": "user",
+        "timestamp": "2026-08-12T09:17:48.318Z",
+        "entrypoint": "cli",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Image #0]这个图像在讲什么？"
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "url",
+                "url": "https://example/x.png"
+              }
+            }
+          ]
+        }
+      },
+      "meta": {
+        "type": "user",
+        "timestamp": "2026-08-12T09:17:48.529Z",
+        "isMeta": true,
+        "entrypoint": "cli",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Image: source: /tmp/clip.png.png]"
+            }
+          ]
+        }
+      },
+      "assistant": {
+        "type": "assistant",
+        "timestamp": "2026-08-12T09:17:55.407Z",
+        "message": {
+          "role": "assistant",
+          "model": "auto",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      },
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-08-12T09:17:48.000Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-08-12T09:17:56.000Z"
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "id": "L1167:C3",
+      "title": "reads image_file.filename from the attachment row, not from user/assistant stream",
+      "suites": [
+        "buildEventsFromBoundaries CLI image source parts"
+      ],
+      "parameters": []
+    },
+    "variables": {
+      "filename": "/Users/me/workspace/loongsuite-pilot/picture/pipeline.jpg",
+      "otherFilename": "/Users/me/workspace/other.jpg",
+      "user": {
+        "type": "user",
+        "uuid": "user-1",
+        "timestamp": "2026-08-25T04:56:24.622Z",
+        "entrypoint": "cli",
+        "promptId": "p-at",
+        "message": {
+          "role": "user",
+          "content": "@picture/pipeline.jpg 用一句话说明这张图"
+        }
+      },
+      "attachment": {
+        "type": "attachment",
+        "uuid": "att-1",
+        "parentUuid": "user-1",
+        "timestamp": "2026-08-25T04:56:24.622Z",
+        "entrypoint": "cli",
+        "attachment": {
+          "type": "image_file",
+          "filename": "/Users/me/workspace/loongsuite-pilot/picture/pipeline.jpg",
+          "displayPath": "picture/pipeline.jpg",
+          "url": "https://example.invalid/oss.jpg"
+        }
+      },
+      "otherTurnAttachment": {
+        "type": "attachment",
+        "uuid": "att-2",
+        "parentUuid": "user-other",
+        "timestamp": "2026-08-25T04:56:24.622Z",
+        "attachment": {
+          "type": "image_file",
+          "filename": "/Users/me/workspace/other.jpg"
+        }
+      },
+      "orphanAttachment": {
+        "type": "attachment",
+        "uuid": "att-orphan",
+        "timestamp": "2026-08-25T04:56:24.622Z",
+        "attachment": {
+          "type": "image_file",
+          "filename": "/tmp/orphan.jpg"
+        }
+      },
+      "skillListing": {
+        "type": "attachment",
+        "timestamp": "2026-08-25T04:56:24.623Z",
+        "attachment": {
+          "type": "skill_listing",
+          "content": "ignore me"
+        }
+      },
+      "assistant": {
+        "type": "assistant",
+        "timestamp": "2026-08-25T04:56:27.515Z",
+        "message": {
+          "role": "assistant",
+          "model": "auto",
+          "stop_reason": "end_turn",
+          "content": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ]
+        }
+      },
+      "contentEvents": [
+        {
+          "type": "user",
+          "uuid": "user-1",
+          "timestamp": "2026-08-25T04:56:24.622Z",
+          "entrypoint": "cli",
+          "promptId": "p-at",
+          "message": {
+            "role": "user",
+            "content": "@picture/pipeline.jpg 用一句话说明这张图"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-25T04:56:27.515Z",
+          "message": {
+            "role": "assistant",
+            "model": "auto",
+            "stop_reason": "end_turn",
+            "content": [
+              {
+                "type": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "allParsed": [
+        {
+          "type": "user",
+          "uuid": "user-1",
+          "timestamp": "2026-08-25T04:56:24.622Z",
+          "entrypoint": "cli",
+          "promptId": "p-at",
+          "message": {
+            "role": "user",
+            "content": "@picture/pipeline.jpg 用一句话说明这张图"
+          }
+        },
+        {
+          "type": "attachment",
+          "uuid": "att-1",
+          "parentUuid": "user-1",
+          "timestamp": "2026-08-25T04:56:24.622Z",
+          "entrypoint": "cli",
+          "attachment": {
+            "type": "image_file",
+            "filename": "/Users/me/workspace/loongsuite-pilot/picture/pipeline.jpg",
+            "displayPath": "picture/pipeline.jpg",
+            "url": "https://example.invalid/oss.jpg"
+          }
+        },
+        {
+          "type": "attachment",
+          "uuid": "att-2",
+          "parentUuid": "user-other",
+          "timestamp": "2026-08-25T04:56:24.622Z",
+          "attachment": {
+            "type": "image_file",
+            "filename": "/Users/me/workspace/other.jpg"
+          }
+        },
+        {
+          "type": "attachment",
+          "uuid": "att-orphan",
+          "timestamp": "2026-08-25T04:56:24.622Z",
+          "attachment": {
+            "type": "image_file",
+            "filename": "/tmp/orphan.jpg"
+          }
+        },
+        {
+          "type": "attachment",
+          "timestamp": "2026-08-25T04:56:24.623Z",
+          "attachment": {
+            "type": "skill_listing",
+            "content": "ignore me"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-08-25T04:56:27.515Z",
+          "message": {
+            "role": "assistant",
+            "model": "auto",
+            "stop_reason": "end_turn",
+            "content": [
+              {
+                "type": "text",
+                "text": "ok"
+              }
+            ]
+          }
+        }
+      ],
+      "progress": [
+        {
+          "hookEvent": "UserPromptSubmit",
+          "ts": "2026-08-25T04:56:24.000Z"
+        },
+        {
+          "hookEvent": "Stop",
+          "ts": "2026-08-25T04:56:28.000Z"
+        }
+      ]
+    }
+  }
+]

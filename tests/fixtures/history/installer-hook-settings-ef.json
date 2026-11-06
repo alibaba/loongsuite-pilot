@@ -1,0 +1,104 @@
+{
+  "baseline": {
+    "ref": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+    "tag": "ef",
+    "resources": [
+      {
+        "id": "claude-code",
+        "settingsPath": "~/.claude/settings.json",
+        "resourceHash": "91ba0e0ba0b43a2a8639c9ae2c81de7974beb25b049c3362629b9e3c9a363936",
+        "path": "agents.d/claude-code.json"
+      },
+      {
+        "id": "codex",
+        "settingsPath": "~/.codex/hooks.json",
+        "resourceHash": "0d839570bad54ea1b4cec726c265cb9f6da3d30074d1b16ed3a0f776a6f165ba",
+        "path": "agents.d/codex.json"
+      },
+      {
+        "id": "cursor-cli",
+        "settingsPath": "~/.cursor/hooks.json",
+        "resourceHash": "e7a3694b31d81c4ed367eabc89d6167548f8b4d6fb9b744c428d2ef32e872570",
+        "path": "agents.d/cursor-cli.json"
+      },
+      {
+        "id": "cursor",
+        "settingsPath": "~/.cursor/hooks.json",
+        "resourceHash": "311e95a3e5b5ff9b807474e7c2a9ce3978581bb1b5712eba7176456c2469327e",
+        "path": "agents.d/cursor.json"
+      },
+      {
+        "id": "grok-build",
+        "settingsPath": "$GROK_HOME/hooks/loongsuite-pilot.json",
+        "resourceHash": "d26a6e47929749bdf9bf4bf3fea429c8610997f8286747c53cf08998a4e59801",
+        "path": "agents.d/grok-build.json"
+      },
+      {
+        "id": "kiro-cli",
+        "settingsPath": "~/.kiro/agents/pilot-kiro.json",
+        "resourceHash": "4214934f173f8f77b9ce2638152243f3d2511ed94b74ae00e4cba4abdd449661",
+        "path": "agents.d/kiro-cli.json"
+      },
+      {
+        "id": "qoder-cn",
+        "settingsPath": "~/.qoder-cn/settings.json",
+        "resourceHash": "4a63d16d7693dc1e564fd224f0b3d19dafeb0868855df9445cced39ce0570086",
+        "path": "agents.d/qoder-cn.json"
+      },
+      {
+        "id": "qoder-work-cn",
+        "settingsPath": "~/.qoderworkcn/settings.json",
+        "resourceHash": "d1cdab58ae10b3b77550c275e78ecbbdf68816805b2be6c0107a393adfbcafbe",
+        "path": "agents.d/qoder-work-cn.json"
+      },
+      {
+        "id": "qoder-work",
+        "settingsPath": "~/.qoderwork/settings.json",
+        "resourceHash": "2ee6cf1072a34f1a9cac48bf5087b1d2cede431fbdf3c06f630fc04b33f6a479",
+        "path": "agents.d/qoder-work.json"
+      },
+      {
+        "id": "qoder",
+        "settingsPath": "~/.qoder/settings.json",
+        "resourceHash": "e9362be227a94f897900a20f2ed9f8f64bd81ccb2eb91a3c794fa4bb1a74e5a3",
+        "path": "agents.d/qoder.json"
+      },
+      {
+        "id": "qwen-code-cli",
+        "settingsPath": "~/.qwen/settings.json",
+        "resourceHash": "3d1e3defcf84179f00bfd874491c65bc090a2de888f40a4fe41d554a3a07762c",
+        "path": "agents.d/qwen-code-cli.json"
+      },
+      {
+        "id": "qwen-work-cn",
+        "settingsPath": "~/.qwenworkcn/settings.json",
+        "resourceHash": "52e88a38ef48bf24c620333900945ff4f5d78153ca8f2e00934b0592ce6d237f",
+        "path": "agents.d/qwen-work-cn.json"
+      },
+      {
+        "id": "workbuddy",
+        "settingsPath": "~/.workbuddy/settings.json",
+        "resourceHash": "99e55e735f87a9898a21e292c59c7f27a5604db0bcb75937ccbcb680168cb37c",
+        "path": "agents.d/workbuddy.json"
+      }
+    ],
+    "legacyGenericSettings": [
+      ".claude/settings.json",
+      ".codex/hooks.json",
+      ".cursor/hooks.json",
+      ".kiro/agents/pilot-kiro.json",
+      ".qoder-cn/settings.json",
+      ".qoder/settings.json",
+      ".qoderwork/settings.json",
+      ".qoderworkcn/settings.json",
+      ".qwen/settings.json",
+      ".qwenworkcn/settings.json",
+      ".workbuddy/settings.json"
+    ]
+  },
+  "mainSettingsComparison": {
+    "commit": "dae15826c69496ff010c8be3c4a9ea9b7ca6cbda",
+    "sameGenericSettings": true
+  },
+  "note": "Exact EF hook manifest resources frozen for provenance; only id/settings-path compatibility is asserted. This is not a claim of full equality of current manifest payloads or assets."
+}

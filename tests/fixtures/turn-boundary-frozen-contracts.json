@@ -1,0 +1,1562 @@
+{
+  "schema": 1,
+  "baselineCommit": "ef8953de1b5d2aa6d719cb0409cb5f48f2b99b42",
+  "source": "tests/unit/flushers/otlp-trace-flusher/turn-boundary.test.ts",
+  "sourceHash": "54c5f5d0aa3ad2b521917bb7065feb95726b0d8089fb137790594576b5371593",
+  "producer": "Frozen TypeScript callback operations and literal assertion arguments captured offline; no converter behavior is modeled or treated as execution proof.",
+  "boundarySourceHash": "4f78fe9eccf79f7d09eff61343c6738ef5b5bca1783e2db02d04b277007bd023",
+  "normalizationSourceHash": "606160d581fbd835fc5ced00856ff7da082152e6e524430091e8686d9ef9be80",
+  "cases": [
+    {
+      "source": {
+        "id": "L47:C3",
+        "title": "keeps incremental Hermes retries and overlapping same-session turns until their explicit ends",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1",
+              "gen_ai.turn.start": true
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1"
+            }
+          ],
+          "enrich": true
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ]
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ]
+            }
+          ],
+          "enrich": true
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1",
+              "gen_ai.turn.start": true
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1"
+            }
+          ],
+          "enrich": true
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": true
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "a",
+              "gen_ai.step.id": "a:s1",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": true
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "raw": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "agent.hermes.collection": "realtime-v1",
+              "gen_ai.session.id": "im-session",
+              "gen_ai.turn.id": "b",
+              "gen_ai.step.id": "b:s1",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": true
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 4,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 5,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 5,
+          "kind": "property",
+          "call": 0,
+          "record": "all",
+          "key": "gen_ai.turn.id",
+          "value": "a"
+        },
+        {
+          "after": 6,
+          "kind": "calls",
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L73:C3",
+        "title": "flushes a failed legacy OpenClaw turn without llm_output",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "agent.openclaw.compatibility": "legacy",
+              "agent.openclaw.hook": "agent_end",
+              "agent.openclaw.success": false,
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 3,
+          "kind": "records",
+          "call": 0,
+          "count": 3
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L89:C3",
+        "title": "flushes incomplete legacy cleanup without claiming a model failure",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "agent.openclaw.compatibility": "legacy",
+              "agent.openclaw.hook": "legacy_cleanup",
+              "agent.openclaw.collection.incomplete": true,
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        }
+      ],
+      "literalInputAssertions": [
+        "original terminal property remains undefined",
+        "original terminal property remains undefined"
+      ]
+    },
+    {
+      "source": {
+        "id": "L103:C3",
+        "title": "Signal A: finish_reason=stop triggers immediate flush",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L120:C3",
+        "title": "Signal A: finish_reason=cancelled triggers immediate flush",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "cancelled"
+              ],
+              "agent.codex.turn_status": "interrupted"
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L135:C3",
+        "title": "does not close a Codex turn on intermediate root or subagent stops",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "parent:turn-1"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "parent:turn-1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "parent:turn-1",
+              "gen_ai.agent.scope": "subagent",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "parent:turn-1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "parent:turn-1",
+              "agent.codex.turn_status": "completed",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 4,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 5,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 5,
+          "kind": "records",
+          "call": 0,
+          "count": 5
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L176:C3",
+        "title": "claude-code: a mid-turn error span does NOT end the turn; turn.end does",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ],
+              "error.type": "RateLimitError"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ],
+              "error.type": "RateLimitError",
+              "gen_ai.turn.end": true
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 3,
+          "kind": "records",
+          "call": 0,
+          "count": 3
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L201:C3",
+        "title": "Signal A: finish_reason=tool_calls does NOT end turn",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "tool_calls"
+              ]
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L213:C3",
+        "title": "OpenClaw uses llm_output as its default boundary even after a per-call stop",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-default-boundary",
+              "agent.openclaw.hook": "before_message_write",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-default-boundary",
+              "agent.openclaw.hook": "llm_output"
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L240:C3",
+        "title": "Signal B: new groupKey triggers flush of old buffer",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "aaaa2f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.session.id": "session-a"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "bbbb2f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.session.id": "session-a"
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 1
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L262:C3",
+        "title": "Signal B: does NOT preempt when session identity is unavailable",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "aaaa2f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "bbbb2f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "aaaa2f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 3,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L293:C3",
+        "title": "Signal C: shutdown drains all pending buffers",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "shutdown"
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 3,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L307:C3",
+        "title": "backfills gen_ai.turn.id when using trace_id as group key",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "aaaa2f3577b34da6a3ce929d0e0e4736"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "aaaa2f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "property",
+          "call": 0,
+          "record": "all",
+          "key": "gen_ai.turn.id",
+          "value": "aaaa2f3577b34da6a3ce929d0e0e4736"
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L326:C5",
+        "title": "Codex-like step: tool_call response then tools in same batch does not early-flush",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.step.id": "session-1:t1:s1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.step.id": "session-1:t1:s1",
+              "gen_ai.response.finish_reasons": [
+                "tool_call"
+              ]
+            },
+            {
+              "event.name": "tool.call",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.step.id": "session-1:t1:s1"
+            },
+            {
+              "event.name": "tool.result",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.step.id": "session-1:t1:s1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.step.id": "session-1:t1:s2",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            },
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "agent.codex.turn_status": "completed",
+              "gen_ai.turn.end": true
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 1,
+          "kind": "records",
+          "call": 0,
+          "count": 6
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L367:C5",
+        "title": "Hermes retry batch: error response does not drop the successful retry",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "hermes-session:retry-turn",
+              "gen_ai.step.id": "hermes-session:retry-turn:s1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "hermes-session:retry-turn",
+              "gen_ai.step.id": "hermes-session:retry-turn:s1",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ],
+              "error.type": "RateLimitError"
+            },
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "hermes-session:retry-turn",
+              "gen_ai.step.id": "hermes-session:retry-turn:s2"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "hermes",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "hermes-session:retry-turn",
+              "gen_ai.step.id": "hermes-session:retry-turn:s2",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 1,
+          "kind": "records",
+          "call": 0,
+          "count": 4
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L400:C5",
+        "title": "OpenClaw error/recovery across batches waits for the llm_output marker",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-session:error-turn",
+              "gen_ai.step.id": "openclaw-session:error-turn:model:1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-session:error-turn",
+              "gen_ai.step.id": "openclaw-session:error-turn:model:1",
+              "agent.openclaw.hook": "model_call_ended",
+              "agent.openclaw.outcome": "error",
+              "gen_ai.response.finish_reasons": [
+                "error"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-session:error-turn",
+              "gen_ai.step.id": "openclaw-session:error-turn:model:2"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-session:error-turn",
+              "gen_ai.step.id": "openclaw-session:error-turn:model:2",
+              "agent.openclaw.hook": "before_message_write",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ],
+              "gen_ai.output.messages": [
+                {
+                  "role": "assistant",
+                  "parts": [
+                    {
+                      "type": "text",
+                      "content": "recovered"
+                    }
+                  ],
+                  "finish_reason": "stop"
+                }
+              ],
+              "gen_ai.usage.input_tokens": 7,
+              "gen_ai.usage.output_tokens": 2
+            }
+          ]
+        },
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "other",
+              "gen_ai.agent.type": "openclaw",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "openclaw-session:error-turn",
+              "agent.openclaw.hook": "llm_output"
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 0
+        },
+        {
+          "after": 3,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 3,
+          "kind": "records",
+          "call": 0,
+          "count": 5
+        },
+        {
+          "after": 3,
+          "kind": "subset",
+          "call": 0,
+          "record": -1,
+          "fields": {
+            "agent.openclaw.hook": "llm_output",
+            "event.name": "other"
+          }
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L457:C5",
+        "title": "Claude-like batch: tools sorted before stop are all included in one flush",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            },
+            {
+              "event.name": "tool.call",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            },
+            {
+              "event.name": "tool.result",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 1,
+          "kind": "records",
+          "call": 0,
+          "count": 4
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L485:C5",
+        "title": "Cursor-like batch: records after stop in same batch are kept (differs from master send loop)",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "cursor",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "gen_ai.turn.id": "gen-abc"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "cursor",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "gen_ai.turn.id": "gen-abc",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            },
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "cursor",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "gen_ai.turn.id": "gen-abc",
+              "gen_ai.agent.scope": "subagent",
+              "gen_ai.subagent.parent_tool_call.id": "call-sub"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "cursor",
+              "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "gen_ai.turn.id": "gen-abc",
+              "gen_ai.agent.scope": "subagent",
+              "gen_ai.subagent.parent_tool_call.id": "call-sub",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 1,
+          "kind": "records",
+          "call": 0,
+          "count": 4
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L523:C5",
+        "title": "multi-turn batch: each completed turn flushes once at batch end",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session:t1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            },
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session:t2"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "codex",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session:t2",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "flush"
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 2
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 1,
+          "count": 2
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L555:C5",
+        "title": "cross-batch late entries after stop are still dropped (dual-root guard unchanged)",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection",
+          "sendBatch — regression vs master sequential send()"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            },
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "batch",
+          "records": [
+            {
+              "event.name": "tool.call",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            }
+          ]
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 1,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        }
+      ],
+      "literalInputAssertions": []
+    },
+    {
+      "source": {
+        "id": "L584:C3",
+        "title": "drops late entries for already-flushed turns (prevents dual-root)",
+        "suites": [
+          "OtlpTraceFlusher - turn boundary detection"
+        ],
+        "parameters": []
+      },
+      "operations": [
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.request",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "llm.response",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1",
+              "gen_ai.response.finish_reasons": [
+                "stop"
+              ]
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "tool.call",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "send",
+          "records": [
+            {
+              "event.name": "tool.call",
+              "gen_ai.agent.type": "claude-code",
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "gen_ai.turn.id": "session-1:t1"
+            }
+          ],
+          "enrich": false
+        },
+        {
+          "op": "shutdown"
+        }
+      ],
+      "checkpoints": [
+        {
+          "after": 2,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 2,
+          "kind": "records",
+          "call": 0,
+          "count": 2
+        },
+        {
+          "after": 4,
+          "kind": "calls",
+          "count": 1
+        },
+        {
+          "after": 5,
+          "kind": "calls",
+          "count": 1
+        }
+      ],
+      "literalInputAssertions": []
+    }
+  ]
+}

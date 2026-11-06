@@ -1,0 +1,1888 @@
+[
+  {
+    "source": {
+      "id": "L112:C5",
+      "title": "injects tokens without moving only one side of an incomplete Hook interval",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002030000000",
+        "gen_ai.response.id": "req-A",
+        "observed_time_unix_nano": "1780000001000000000"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 3000,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "end_turn",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 5000
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 200
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.cache_read.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 3000
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002030000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L142:C5",
+      "title": "preserves an already-valid Hook LLM interval",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002030000000",
+        "gen_ai.response.id": "req-A",
+        "observed_time_unix_nano": "1780000009000000000"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 3000,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "end_turn",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 5000
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000001000000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002030000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L176:C5",
+      "title": "only writes tokens to first response of same response.id (thinking+text)",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002010000000",
+        "gen_ai.response.id": "req-A"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 10000,
+          "outputTokens": 500,
+          "cacheReadTokens": 8000,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "end_turn",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 10000
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 500
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 0
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 0
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L202:C5",
+      "title": "injects real model name from segment into llm.request and llm.response",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "req-A",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "req-A",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 0,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": "ultimate"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "ultimate"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "ultimate"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "ultimate"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L228:C5",
+      "title": "does not override model when segment model is empty or unknown",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "req-A",
+        "gen_ai.request.model": "auto"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 0,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "auto"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L250:C5",
+      "title": "handles no matching segments gracefully",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "req-B"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      []
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBeUndefined"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L260:C5",
+      "title": "uses intercept by response id when the segment request id is different",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "chatcmpl-A"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "segment-uuid-A",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "end_turn",
+          "model": "auto"
+        }
+      ],
+      null,
+      [
+        {
+          "id": "chatcmpl-A",
+          "ts": 1780000002000,
+          "promptTokens": 1200,
+          "completionTokens": 80,
+          "cachedTokens": 900,
+          "reasoningTokens": 0,
+          "totalTokens": 1280
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 1200
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 80
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.cache_read.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 900
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 1280
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L285:C5",
+      "title": "gives intercept usage priority over non-zero segment and existing usage",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "chatcmpl-A",
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 1,
+        "gen_ai.usage.total_tokens": 11
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "chatcmpl-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 3000,
+          "cacheCreationTokens": 100,
+          "requestStartTs": 0,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ],
+      null,
+      [
+        {
+          "id": "chatcmpl-A",
+          "ts": 1780000002000,
+          "promptTokens": 1200,
+          "completionTokens": 80,
+          "cachedTokens": 900,
+          "reasoningTokens": 0,
+          "totalTokens": 1280
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 1200
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 80
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.cache_read.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 900
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 1280
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L316:C5",
+      "title": "uses segment only as fallback and does not replace existing positive usage",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "req-A",
+        "gen_ai.usage.input_tokens": 700,
+        "gen_ai.usage.output_tokens": 30,
+        "gen_ai.usage.total_tokens": 730
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 3000,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 0,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 700
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 30
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 730
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L346:C5",
+      "title": "uses the newest valid intercept record and derives total when absent",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "chatcmpl-A"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [],
+      null,
+      [
+        {
+          "id": "chatcmpl-A",
+          "ts": 100,
+          "promptTokens": 100,
+          "completionTokens": 10,
+          "cachedTokens": 900,
+          "reasoningTokens": 0,
+          "totalTokens": 110
+        },
+        {
+          "id": "chatcmpl-A",
+          "ts": 200,
+          "promptTokens": 150,
+          "completionTokens": 20,
+          "cachedTokens": 900,
+          "reasoningTokens": 0,
+          "totalTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 150
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 20
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 170
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L362:C5",
+      "title": "preserves per-tool hook timing when CLI segment timing has no tool ID",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by response completion time)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000200000000",
+        "gen_ai.response.id": "req-tools"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000201000000",
+        "gen_ai.tool.call.id": "slow-tool"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000004201000000",
+        "gen_ai.tool.call.id": "slow-tool",
+        "gen_ai.tool.call.duration": 4000
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "req-tools",
+          "inputTokens": 10,
+          "outputTokens": 2,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000100,
+          "responseEndTs": 1780000000200,
+          "toolFinishedTs": 1780000005000,
+          "stopReason": "tool_call",
+          "model": "qmodel"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000201000000"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000004201000000"
+      },
+      {
+        "path": [
+          2,
+          "gen_ai.tool.call.duration"
+        ],
+        "matcher": "toBe",
+        "value": 4000
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L456:C5",
+      "title": "pairs on the client request id even when the clocks are far apart",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000032000000000",
+        "gen_ai.response.id": "resp_provider_A",
+        "agent.client_request_id": "cli-req-A"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 3000,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 5000
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000032000000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L483:C5",
+      "title": "keeps near-simultaneous responses on their own segments",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000010000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000012000000",
+        "gen_ai.response.id": "resp_B",
+        "agent.client_request_id": "cli-req-B"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 100,
+          "outputTokens": 1,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000000040,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        },
+        {
+          "requestId": "cli-req-B",
+          "inputTokens": 200,
+          "outputTokens": 2,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000000011,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 100
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 200
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000010000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000012000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L515:C5",
+      "title": "falls back to the timestamp pass for entries without the id",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000005000000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000020000000",
+        "gen_ai.response.id": "resp_legacy"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 100,
+          "outputTokens": 1,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000009000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        },
+        {
+          "requestId": "cli-req-legacy",
+          "inputTokens": 200,
+          "outputTokens": 2,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000000030,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 100
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 200
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L544:C5",
+      "title": "does not let the timestamp pass re-consume an exactly matched segment",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000005000000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000020000000",
+        "gen_ai.response.id": "resp_legacy"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 100,
+          "outputTokens": 1,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000000020,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 100
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBeUndefined"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000020000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L578:C5",
+      "title": "does not fall back to proximity when the exact key found no segment",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002000000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-missing"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-other",
+          "inputTokens": 100,
+          "outputTokens": 1,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBeUndefined"
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002000000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L603:C5",
+      "title": "takes usage from a segment with unparseable timestamps without moving any clock",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000099000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000099000000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-A"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000099000000000"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 5000,
+          "outputTokens": 200,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 0,
+          "responseEndTs": 0,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 5000
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000099000000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000099000000000"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000099000000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L642:C5",
+      "title": "joins a zero-usage segment for its timestamps",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000099000000000",
+        "gen_ai.response.id": "resp_A",
+        "agent.client_request_id": "cli-req-A",
+        "gen_ai.usage.input_tokens": 700,
+        "gen_ai.usage.output_tokens": 30
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000099000000000"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "cli-req-A",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 700
+      },
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002000000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000000"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L672:C5",
+      "title": "consumes two segments when two response groups share one client request id",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichCliTurn (segment paired by agent.client_request_id)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "provider-a",
+        "agent.client_request_id": "shared-request"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "provider-b",
+        "agent.client_request_id": "shared-request"
+      }
+    ],
+    "operation": "enrichCliTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "shared-request",
+          "inputTokens": 100,
+          "outputTokens": 1,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000001000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        },
+        {
+          "requestId": "shared-request",
+          "inputTokens": 200,
+          "outputTokens": 2,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000001000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 100
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 200
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L698:C5",
+      "title": "does not request segment for optional model, finish, or tool timing gaps",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "chatcmpl-A",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli"
+      }
+    ],
+    "operation": "enrichCliPrimary",
+    "arguments": [
+      null,
+      [
+        {
+          "id": "chatcmpl-A",
+          "ts": 1780000002000,
+          "promptTokens": 1200,
+          "completionTokens": 80,
+          "cachedTokens": 900,
+          "reasoningTokens": 0,
+          "totalTokens": 1280
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          "@needs_fallback"
+        ],
+        "matcher": "toBe",
+        "value": false
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L726:C5",
+      "title": "requests segment when usage remains missing",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000"
+      }
+    ],
+    "operation": "none",
+    "arguments": [],
+    "assertions": [
+      {
+        "path": [
+          "@needs_fallback"
+        ],
+        "matcher": "toBe",
+        "value": true
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L738:C5",
+      "title": "requests segment when the Hook LLM interval is zero-width despite valid usage",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 2,
+        "gen_ai.usage.total_tokens": 12
+      }
+    ],
+    "operation": "none",
+    "arguments": [],
+    "assertions": [
+      {
+        "path": [
+          "@needs_fallback"
+        ],
+        "matcher": "toBe",
+        "value": true
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L756:C5",
+      "title": "keeps tool timing untouched when segment is read only for missing usage",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "provider-a",
+        "agent.client_request_id": "req-a"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli"
+      }
+    ],
+    "operation": "enrichCliFromSegments",
+    "arguments": [
+      [
+        {
+          "requestId": "req-a",
+          "inputTokens": 100,
+          "outputTokens": 20,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1779999999000,
+          "responseEndTs": 1780000000500,
+          "toolFinishedTs": 1780000002000,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000001000000000"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeUndefined"
+      },
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeUndefined"
+      },
+      {
+        "path": [
+          3,
+          "gen_ai.tool.call.duration"
+        ],
+        "matcher": "toBeUndefined"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L796:C5",
+      "title": "switches tool timing together with an invalid Hook LLM interval",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000004000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000004000000000",
+        "gen_ai.response.id": "provider-a",
+        "agent.client_request_id": "req-a"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli"
+      }
+    ],
+    "operation": "enrichCliFromSegments",
+    "arguments": [
+      [
+        {
+          "requestId": "req-a",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000002000,
+          "toolFinishedTs": 1780000003500,
+          "stopReason": "",
+          "model": ""
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000000"
+      },
+      {
+        "path": [
+          1,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002000000000"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000002000000000"
+      },
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000003500000000"
+      },
+      {
+        "path": [
+          3,
+          "gen_ai.tool.call.duration"
+        ],
+        "matcher": "toBe",
+        "value": 1500
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L835:C5",
+      "title": "does not replace a concrete Hook model while filling other gaps",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "conditional CLI segment fallback"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.request.model": "hook-model"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001000000000",
+        "gen_ai.response.id": "provider-a",
+        "agent.client_request_id": "req-a",
+        "gen_ai.request.model": "hook-model",
+        "gen_ai.response.model": "hook-model"
+      }
+    ],
+    "operation": "enrichCliFromSegments",
+    "arguments": [
+      [
+        {
+          "requestId": "req-a",
+          "inputTokens": 100,
+          "outputTokens": 20,
+          "cacheReadTokens": 0,
+          "cacheCreationTokens": 0,
+          "requestStartTs": 1780000000000,
+          "responseEndTs": 1780000001000,
+          "toolFinishedTs": 0,
+          "stopReason": "",
+          "model": "segment-model"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "hook-model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "hook-model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "hook-model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 120
+      }
+    ]
+  }
+]

@@ -1,0 +1,62 @@
+[
+  {
+    "endpoint": "internal-sls",
+    "prefix": "internal-sls-60b1339816"
+  },
+  {
+    "endpoint": "../../danger/endpoint",
+    "prefix": "danger-endpoint-98dba5092a"
+  },
+  {
+    "endpoint": "danger-endpoint",
+    "prefix": "danger-endpoint-07410ca3d5"
+  },
+  {
+    "endpoint": "a   b",
+    "prefix": "a-b-b4ca49d188"
+  },
+  {
+    "endpoint": "a///b",
+    "prefix": "a-b-7f2a9845c0"
+  },
+  {
+    "endpoint": "a😀😀b",
+    "prefix": "a-b-3bb2619e3a"
+  },
+  {
+    "endpoint": "ＡＰＩ  ／ Ｗｉｄｅ",
+    "prefix": "API-Wide-22f7370a1b"
+  },
+  {
+    "endpoint": "K ﬁ ﬂ ① Ⅳ",
+    "prefix": "K-fi-fl-1-IV-e25f6bca80"
+  },
+  {
+    "endpoint": "＿．－",
+    "prefix": "endpoint-f2e5ee302b"
+  },
+  {
+    "endpoint": "",
+    "prefix": "endpoint-e3b0c44298"
+  },
+  {
+    "endpoint": "---",
+    "prefix": "endpoint-cb3f91d54e"
+  },
+  {
+    "endpoint": "é café",
+    "prefix": "caf-47c57b2972"
+  },
+  {
+    "endpoint": "a  -  b",
+    "prefix": "a---b-1c3e03603c"
+  },
+  {
+    "endpoint": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxdifferent",
+    "prefix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-399705dfc0"
+  },
+  {
+    "endpoint": "ab\u0000\u0001cd",
+    "prefix": "ab-cd-396a25d43a"
+  }
+]

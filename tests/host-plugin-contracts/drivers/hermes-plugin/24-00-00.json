@@ -1,0 +1,4429 @@
+{
+  "case": 24,
+  "parameters": [
+    null
+  ],
+  "events": [
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-0",
+        "user_message": "request-0",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-0"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-0",
+        "session_id": "active-session-0",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-0",
+        "session_id": "active-session-0",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-1",
+        "user_message": "request-1",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-1"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-1",
+        "session_id": "active-session-1",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-1",
+        "session_id": "active-session-1",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-2",
+        "user_message": "request-2",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-2"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-2",
+        "session_id": "active-session-2",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-2",
+        "session_id": "active-session-2",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-3",
+        "user_message": "request-3",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-3"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-3",
+        "session_id": "active-session-3",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-3",
+        "session_id": "active-session-3",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-4",
+        "user_message": "request-4",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-4"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-4",
+        "session_id": "active-session-4",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-4",
+        "session_id": "active-session-4",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-5",
+        "user_message": "request-5",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-5"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-5",
+        "session_id": "active-session-5",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-5",
+        "session_id": "active-session-5",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-6",
+        "user_message": "request-6",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-6"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-6",
+        "session_id": "active-session-6",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-6",
+        "session_id": "active-session-6",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-7",
+        "user_message": "request-7",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-7"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-7",
+        "session_id": "active-session-7",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-7",
+        "session_id": "active-session-7",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-8",
+        "user_message": "request-8",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-8"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-8",
+        "session_id": "active-session-8",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-8",
+        "session_id": "active-session-8",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-9",
+        "user_message": "request-9",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-9"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-9",
+        "session_id": "active-session-9",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-9",
+        "session_id": "active-session-9",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-10",
+        "user_message": "request-10",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-10"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-10",
+        "session_id": "active-session-10",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-10",
+        "session_id": "active-session-10",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-11",
+        "user_message": "request-11",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-11"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-11",
+        "session_id": "active-session-11",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-11",
+        "session_id": "active-session-11",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-12",
+        "user_message": "request-12",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-12"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-12",
+        "session_id": "active-session-12",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-12",
+        "session_id": "active-session-12",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-13",
+        "user_message": "request-13",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-13"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-13",
+        "session_id": "active-session-13",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-13",
+        "session_id": "active-session-13",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-14",
+        "user_message": "request-14",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-14"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-14",
+        "session_id": "active-session-14",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-14",
+        "session_id": "active-session-14",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-15",
+        "user_message": "request-15",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-15"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-15",
+        "session_id": "active-session-15",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-15",
+        "session_id": "active-session-15",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-16",
+        "user_message": "request-16",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-16"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-16",
+        "session_id": "active-session-16",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-16",
+        "session_id": "active-session-16",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-17",
+        "user_message": "request-17",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-17"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-17",
+        "session_id": "active-session-17",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-17",
+        "session_id": "active-session-17",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-18",
+        "user_message": "request-18",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-18"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-18",
+        "session_id": "active-session-18",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-18",
+        "session_id": "active-session-18",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-19",
+        "user_message": "request-19",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-19"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-19",
+        "session_id": "active-session-19",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-19",
+        "session_id": "active-session-19",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-20",
+        "user_message": "request-20",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-20"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-20",
+        "session_id": "active-session-20",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-20",
+        "session_id": "active-session-20",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-21",
+        "user_message": "request-21",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-21"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-21",
+        "session_id": "active-session-21",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-21",
+        "session_id": "active-session-21",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-22",
+        "user_message": "request-22",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-22"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-22",
+        "session_id": "active-session-22",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-22",
+        "session_id": "active-session-22",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-23",
+        "user_message": "request-23",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-23"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-23",
+        "session_id": "active-session-23",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-23",
+        "session_id": "active-session-23",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-24",
+        "user_message": "request-24",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-24"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-24",
+        "session_id": "active-session-24",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-24",
+        "session_id": "active-session-24",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-25",
+        "user_message": "request-25",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-25"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-25",
+        "session_id": "active-session-25",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-25",
+        "session_id": "active-session-25",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-26",
+        "user_message": "request-26",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-26"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-26",
+        "session_id": "active-session-26",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-26",
+        "session_id": "active-session-26",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-27",
+        "user_message": "request-27",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-27"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-27",
+        "session_id": "active-session-27",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-27",
+        "session_id": "active-session-27",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-28",
+        "user_message": "request-28",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-28"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-28",
+        "session_id": "active-session-28",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-28",
+        "session_id": "active-session-28",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-29",
+        "user_message": "request-29",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-29"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-29",
+        "session_id": "active-session-29",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-29",
+        "session_id": "active-session-29",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-30",
+        "user_message": "request-30",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-30"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-30",
+        "session_id": "active-session-30",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-30",
+        "session_id": "active-session-30",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-31",
+        "user_message": "request-31",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-31"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-31",
+        "session_id": "active-session-31",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-31",
+        "session_id": "active-session-31",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-32",
+        "user_message": "request-32",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-32"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-32",
+        "session_id": "active-session-32",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-32",
+        "session_id": "active-session-32",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-33",
+        "user_message": "request-33",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-33"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-33",
+        "session_id": "active-session-33",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-33",
+        "session_id": "active-session-33",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-34",
+        "user_message": "request-34",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-34"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-34",
+        "session_id": "active-session-34",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-34",
+        "session_id": "active-session-34",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-35",
+        "user_message": "request-35",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-35"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-35",
+        "session_id": "active-session-35",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-35",
+        "session_id": "active-session-35",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-36",
+        "user_message": "request-36",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-36"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-36",
+        "session_id": "active-session-36",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-36",
+        "session_id": "active-session-36",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-37",
+        "user_message": "request-37",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-37"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-37",
+        "session_id": "active-session-37",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-37",
+        "session_id": "active-session-37",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-38",
+        "user_message": "request-38",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-38"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-38",
+        "session_id": "active-session-38",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-38",
+        "session_id": "active-session-38",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-39",
+        "user_message": "request-39",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-39"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-39",
+        "session_id": "active-session-39",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-39",
+        "session_id": "active-session-39",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-40",
+        "user_message": "request-40",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-40"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-40",
+        "session_id": "active-session-40",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-40",
+        "session_id": "active-session-40",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-41",
+        "user_message": "request-41",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-41"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-41",
+        "session_id": "active-session-41",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-41",
+        "session_id": "active-session-41",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-42",
+        "user_message": "request-42",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-42"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-42",
+        "session_id": "active-session-42",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-42",
+        "session_id": "active-session-42",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-43",
+        "user_message": "request-43",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-43"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-43",
+        "session_id": "active-session-43",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-43",
+        "session_id": "active-session-43",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-44",
+        "user_message": "request-44",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-44"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-44",
+        "session_id": "active-session-44",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-44",
+        "session_id": "active-session-44",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-45",
+        "user_message": "request-45",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-45"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-45",
+        "session_id": "active-session-45",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-45",
+        "session_id": "active-session-45",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-46",
+        "user_message": "request-46",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-46"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-46",
+        "session_id": "active-session-46",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-46",
+        "session_id": "active-session-46",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-47",
+        "user_message": "request-47",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-47"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-47",
+        "session_id": "active-session-47",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-47",
+        "session_id": "active-session-47",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-48",
+        "user_message": "request-48",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-48"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-48",
+        "session_id": "active-session-48",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-48",
+        "session_id": "active-session-48",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-49",
+        "user_message": "request-49",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-49"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-49",
+        "session_id": "active-session-49",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-49",
+        "session_id": "active-session-49",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-50",
+        "user_message": "request-50",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-50"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-50",
+        "session_id": "active-session-50",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-50",
+        "session_id": "active-session-50",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-51",
+        "user_message": "request-51",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-51"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-51",
+        "session_id": "active-session-51",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-51",
+        "session_id": "active-session-51",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-52",
+        "user_message": "request-52",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-52"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-52",
+        "session_id": "active-session-52",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-52",
+        "session_id": "active-session-52",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-53",
+        "user_message": "request-53",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-53"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-53",
+        "session_id": "active-session-53",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-53",
+        "session_id": "active-session-53",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-54",
+        "user_message": "request-54",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-54"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-54",
+        "session_id": "active-session-54",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-54",
+        "session_id": "active-session-54",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-55",
+        "user_message": "request-55",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-55"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-55",
+        "session_id": "active-session-55",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-55",
+        "session_id": "active-session-55",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-56",
+        "user_message": "request-56",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-56"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-56",
+        "session_id": "active-session-56",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-56",
+        "session_id": "active-session-56",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-57",
+        "user_message": "request-57",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-57"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-57",
+        "session_id": "active-session-57",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-57",
+        "session_id": "active-session-57",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-58",
+        "user_message": "request-58",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-58"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-58",
+        "session_id": "active-session-58",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-58",
+        "session_id": "active-session-58",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-59",
+        "user_message": "request-59",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-59"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-59",
+        "session_id": "active-session-59",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-59",
+        "session_id": "active-session-59",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-60",
+        "user_message": "request-60",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-60"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-60",
+        "session_id": "active-session-60",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-60",
+        "session_id": "active-session-60",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-61",
+        "user_message": "request-61",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-61"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-61",
+        "session_id": "active-session-61",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-61",
+        "session_id": "active-session-61",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-62",
+        "user_message": "request-62",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-62"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-62",
+        "session_id": "active-session-62",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-62",
+        "session_id": "active-session-62",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-63",
+        "user_message": "request-63",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-63"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-63",
+        "session_id": "active-session-63",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-63",
+        "session_id": "active-session-63",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-64",
+        "user_message": "request-64",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-64"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-64",
+        "session_id": "active-session-64",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-64",
+        "session_id": "active-session-64",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-65",
+        "user_message": "request-65",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-65"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-65",
+        "session_id": "active-session-65",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-65",
+        "session_id": "active-session-65",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-66",
+        "user_message": "request-66",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-66"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-66",
+        "session_id": "active-session-66",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-66",
+        "session_id": "active-session-66",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-67",
+        "user_message": "request-67",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-67"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-67",
+        "session_id": "active-session-67",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-67",
+        "session_id": "active-session-67",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-68",
+        "user_message": "request-68",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-68"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-68",
+        "session_id": "active-session-68",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-68",
+        "session_id": "active-session-68",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-69",
+        "user_message": "request-69",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-69"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-69",
+        "session_id": "active-session-69",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-69",
+        "session_id": "active-session-69",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-70",
+        "user_message": "request-70",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-70"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-70",
+        "session_id": "active-session-70",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-70",
+        "session_id": "active-session-70",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-71",
+        "user_message": "request-71",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-71"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-71",
+        "session_id": "active-session-71",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-71",
+        "session_id": "active-session-71",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-72",
+        "user_message": "request-72",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-72"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-72",
+        "session_id": "active-session-72",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-72",
+        "session_id": "active-session-72",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-73",
+        "user_message": "request-73",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-73"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-73",
+        "session_id": "active-session-73",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-73",
+        "session_id": "active-session-73",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-74",
+        "user_message": "request-74",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-74"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-74",
+        "session_id": "active-session-74",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-74",
+        "session_id": "active-session-74",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-75",
+        "user_message": "request-75",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-75"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-75",
+        "session_id": "active-session-75",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-75",
+        "session_id": "active-session-75",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-76",
+        "user_message": "request-76",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-76"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-76",
+        "session_id": "active-session-76",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-76",
+        "session_id": "active-session-76",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-77",
+        "user_message": "request-77",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-77"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-77",
+        "session_id": "active-session-77",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-77",
+        "session_id": "active-session-77",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-78",
+        "user_message": "request-78",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-78"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-78",
+        "session_id": "active-session-78",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-78",
+        "session_id": "active-session-78",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-79",
+        "user_message": "request-79",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-79"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-79",
+        "session_id": "active-session-79",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-79",
+        "session_id": "active-session-79",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-80",
+        "user_message": "request-80",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-80"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-80",
+        "session_id": "active-session-80",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-80",
+        "session_id": "active-session-80",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-81",
+        "user_message": "request-81",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-81"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-81",
+        "session_id": "active-session-81",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-81",
+        "session_id": "active-session-81",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-82",
+        "user_message": "request-82",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-82"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-82",
+        "session_id": "active-session-82",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-82",
+        "session_id": "active-session-82",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-83",
+        "user_message": "request-83",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-83"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-83",
+        "session_id": "active-session-83",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-83",
+        "session_id": "active-session-83",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-84",
+        "user_message": "request-84",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-84"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-84",
+        "session_id": "active-session-84",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-84",
+        "session_id": "active-session-84",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-85",
+        "user_message": "request-85",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-85"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-85",
+        "session_id": "active-session-85",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-85",
+        "session_id": "active-session-85",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-86",
+        "user_message": "request-86",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-86"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-86",
+        "session_id": "active-session-86",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-86",
+        "session_id": "active-session-86",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-87",
+        "user_message": "request-87",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-87"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-87",
+        "session_id": "active-session-87",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-87",
+        "session_id": "active-session-87",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-88",
+        "user_message": "request-88",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-88"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-88",
+        "session_id": "active-session-88",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-88",
+        "session_id": "active-session-88",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-89",
+        "user_message": "request-89",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-89"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-89",
+        "session_id": "active-session-89",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-89",
+        "session_id": "active-session-89",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-90",
+        "user_message": "request-90",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-90"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-90",
+        "session_id": "active-session-90",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-90",
+        "session_id": "active-session-90",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-91",
+        "user_message": "request-91",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-91"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-91",
+        "session_id": "active-session-91",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-91",
+        "session_id": "active-session-91",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-92",
+        "user_message": "request-92",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-92"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-92",
+        "session_id": "active-session-92",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-92",
+        "session_id": "active-session-92",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-93",
+        "user_message": "request-93",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-93"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-93",
+        "session_id": "active-session-93",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-93",
+        "session_id": "active-session-93",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-94",
+        "user_message": "request-94",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-94"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-94",
+        "session_id": "active-session-94",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-94",
+        "session_id": "active-session-94",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-95",
+        "user_message": "request-95",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-95"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-95",
+        "session_id": "active-session-95",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-95",
+        "session_id": "active-session-95",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-96",
+        "user_message": "request-96",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-96"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-96",
+        "session_id": "active-session-96",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-96",
+        "session_id": "active-session-96",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-97",
+        "user_message": "request-97",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-97"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-97",
+        "session_id": "active-session-97",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-97",
+        "session_id": "active-session-97",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-98",
+        "user_message": "request-98",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-98"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-98",
+        "session_id": "active-session-98",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-98",
+        "session_id": "active-session-98",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-99",
+        "user_message": "request-99",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-99"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    },
+    {
+      "hook": "pre_api_request",
+      "payload": {
+        "task_id": "turn-99",
+        "session_id": "active-session-99",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1
+      }
+    },
+    {
+      "hook": "post_api_request",
+      "payload": {
+        "task_id": "turn-99",
+        "session_id": "active-session-99",
+        "platform": "cli",
+        "model": "qwen3-coder-plus",
+        "provider": "alibaba",
+        "api_call_count": 1,
+        "response_model": "qwen3-coder-plus",
+        "finish_reason": "stop",
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1,
+          "total_tokens": 2
+        }
+      }
+    },
+    {
+      "hook": "pre_llm_call",
+      "payload": {
+        "session_id": "active-session-100",
+        "user_message": "request-100",
+        "conversation_history": [
+          {
+            "role": "user",
+            "content": "request-100"
+          }
+        ],
+        "model": "qwen3-coder-plus",
+        "platform": "cli"
+      }
+    }
+  ],
+  "options": {
+    "captureMessageContent": true,
+    "configUser": "pilot-config-user",
+    "dataDirSource": "env",
+    "expectLogFile": true
+  }
+}

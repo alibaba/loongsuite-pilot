@@ -37,6 +37,8 @@ targets 来源：
 | `qodercli-rc` | macOS + Linux | `~/.zshrc` 或 `~/.bashrc`（按 `$SHELL` 判断）是否含 `# loongsuite-pilot BEGIN qodercli-intercept` marker | 向 rc 文件末尾 append wrapper function block |
 | `claude-code-rc` | macOS + Linux | 同上，marker 为 `# loongsuite-pilot BEGIN claude-code-intercept` | 同上 |
 
+Rust 版退役清理只移除精确等于本数据目录或当前 HOME 已知旧标准目录 wrapper 路径的环境覆盖；Windows 比较忽略大小写，不按路径子串或脚本同名匹配。两个 macOS plist 还须符合旧安装器实际生成的完整 `Label`、`ProgramArguments` 与 `RunAtLoad` 结构，且 wrapper 路径属于本安装或当前 HOME 的标准旧数据目录，才会卸载和删除；同名第三方、符号链接或内容异常的文件会保留，复核时发现身份或内容发生变化也会保留并记录告警。合法旧 plist 不依赖应用、wrapper 文件或当前 Agent 选择存在。
+
 shell 目标的前置条件（precondition）要求对应 hook 脚本存在（`qodercli-rc` 对应
 `~/.loongsuite-pilot/hooks/qodercli-runtime-wrapper.sh`）。不满足时静默 skip，不算修复失败。
 
@@ -140,3 +142,5 @@ grep 'intercept-watchdog.repairing\|intercept-watchdog.repaired' ~/.loongsuite-p
 | rc block 反复被修复又丢失 | dotfile 管理工具覆盖 `.zshrc` | 将 pilot block 加入 dotfile 源文件；watchdog 每日最多修复 3 次后自动停止 |
 | `intercept-watchdog.daily-limit` | 同上，已达当日上限 | 次日自动重置计数 |
 | `intercept-watchdog.repair-failed` | 文件权限、磁盘满、launchctl 异常 | 检查 warn 日志中的 error 详情 |
+
+安装、升级/回滚与卸载复用同一 Rust 退役清理组件。发布事务提交后的清理失败会输出可见诊断并保留已发布版本，由后续巡检或安装重试；卸载清理失败会先报告原因，再保留安装文件中止以便重试。安装引导脚本不再另行按路径子串或 plist 文件名清理。

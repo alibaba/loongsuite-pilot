@@ -2,6 +2,15 @@
 
 > 多 AI Agent 轻量数据采集平台 — 自动发现、多种采集方式、多目标数据输出
 
+## Rust 分支开发入口
+
+- Cargo workspace：主程序 `src/main.rs` / `src/cli_main.rs`，开发工具 `xtask/`，工具链固定 Rust 1.99.1。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` 和 Cargo 测试是本地门禁；内嵌测试随源码提交，独立测试分批迁移。
+- 安装后的 Pilot 不依赖 Node/npm/Python；Agent 宿主插件、preload/runtime wrapper、Dashboard 和 Swift UI 按其原生环境保留。
+- 发布矩阵为六平台：Linux GNU x64/ARM64、macOS x64/ARM64、Windows MSVC x64/ARM64；不支持 musl。当前优先历史测试与运行能力迁移，发布可另拆 PR。严格 clippy 清零后才能推送。
+- CI 任务上限为 60 分钟；通过缓存尽量缩短实际耗时，不以缩短上限替代有效回归。发布构建单独计时，每次工作流不超过 10 个 runner 任务。暂缓新增完整 Agent 注入矩阵，不把暂缓当通过。
+- 发布和测试分级见 [Rust 发布与测试优先级](docs/zh-CN/rust-release.md)。未完成映射的历史 TS/MJS 测试保留作行为参考，不宣称它们可对当前 Rust 源码直接运行。
+
 ## 架构总览
 
 ```
@@ -37,14 +46,14 @@
 | 核心编排 | `src/core/` | 启动流程、生命周期、Agent 发现与准入控制 | [产品概览](docs/zh-CN/overview.md) |
 | 输入源 | `src/inputs/` | 6 种采集基类 + 各 Agent 实现 | [新 Agent 接入](docs/zh-CN/agent-onboarding.md) |
 | 数据输出 | `src/flushers/` | SLS / JSONL / HTTP 多目标扇出 | [配置指南](docs/zh-CN/configuration.md) |
-| 文件采集 | `src/file-collection/` | 本地文件采集 → SLS 独立管道 | [SLS 输出](docs/zh-CN/sls-output.md) |
+| 文件采集 | `src/pipeline/input/file/` | 本地文件采集 → SLS 独立管道 | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 部署管理 | `src/deployment/` | 声明式 Agent 部署（Hook / Plugin-Probe） | [Agent 定义](docs/zh-CN/agent-onboarding.md#agent-定义) |
 | 归一化 | `src/normalization/` | 原始数据 → AgentActivityEntry 标准格式 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 | 持久化 | `src/checkpoints/` | StateStore + SnapshotStore 状态管理 | [临时异常下的 Checkpoint](docs/zh-CN/agent-onboarding.md#临时异常下的-checkpoint) |
 | 自动更新 | `src/updater/` | 多版本管理、增量更新、灰度发布、自动回滚 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 本地拦截 | `src/interceptor/` | Qoder Desktop/CLI 同步拦截 hook + 千问办公 command hook / 企业 HTTP + OpenClaw 插件内拦截；HTTP 服务在 collector 进程内 | [本地拦截](docs/zh-CN/interceptor.md) |
 | 运行时 | `deploy/` | 安装、CLI、服务管理、版本指针 | [安装与服务管理](docs/zh-CN/installation.md) |
-| 本地 Dashboard | `src/dashboard/` + `src/status-bar/metrics-summary-writer.ts` | 默认随主进程启停的本地页面；生成并展示 `metrics-summary.json` 汇总 | [安装与服务管理](docs/zh-CN/installation.md) |
+| 本地 Dashboard | `src/dashboard/` + `src/status-bar/metrics_summary_writer.rs` | 默认随主进程启停的本地页面；生成并展示 `metrics-summary.json` 汇总 | [安装与服务管理](docs/zh-CN/installation.md) |
 | 类型定义 | `src/types/` | ClientType、事件结构、配置类型 | [输出事件 Schema](docs/zh-CN/output-event-schema.md) |
 
 ## Agent 采集矩阵
@@ -98,7 +107,9 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 单元测试 | `tests/unit/` | 按模块对应（core / inputs / flushers / deployment / ...） |
+| Rust 单元测试 | `src/**/*.rs` 的 `#[cfg(test)]` 模块、`xtask/src/` | 随源码的行为回归 |
+| Rust 集成测试 | `tests/*.rs`、`xtask/tests/*.rs` | 独立 CLI、安装、传输与工具测试，分批提交 |
+| 历史单元测试 | `tests/unit/` | TS/MJS 行为参考，逐项映射到 Rust |
 | 契约测试 | `tests/contract/` | 输入输出格式验证 |
 | 集成测试 | `tests/integration/` | 跨模块协作测试 |
 | E2E 远程测试 | `tests/e2e-remote/` | 远程开发机场景 |
@@ -130,6 +141,8 @@ AgentDiscoveryService ──发现──→ InputManager ──注册──→ I
 
 ## `restart-collector` / `restart-updater` 不许无声失败
 
+以下故障经过及 TS/MJS 测试名是历史行为参考，不是当前 Node 运行依赖。Rust 对应入口为 `src/utils/restart_breadcrumb.rs`、`src/core/updater_watchdog.rs` 和原生服务管理脚本；迁移必须保留下面的诊断合同。
+
 线上唯一能看到的东西曾经是这一行，没有任何原因：
 
 ```
@@ -147,7 +160,7 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
 
 - 每个非成功出口先 `Write-RestartFailure` / `write_restart_failure` 命名一个 **stage**，再退出；
   **顺序是承重的**（EAP=Stop 下 `Write-Error` 之后的代码不可达）。
-- stage 标签是 `src/utils/restart-breadcrumb.ts` 的 `RESTART_STAGES`，两侧逐字相同、永不本地化 ——
+- stage 标签是 `src/utils/restart_breadcrumb.rs` 的 `RESTART_STAGES`，两侧逐字相同、永不本地化 ——
   它们是告警流里的聚合键，只有一侧认识的标签等于告警查不出来。
 - 面包屑落在 `logs/last-restart-failure-<target>.json`（`schema: 1`，扁平 `diag`），语义同
   `crash-breadcrumb`：**文件还在就代表上一次失败**，所以两个命令入口都先清掉它。诊断走文件而不是流，
@@ -177,7 +190,7 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
 | `tests/unit/scripts/ps1-restart-diagnostics.test.mjs` | `.ps1`：每个 `Write-Error` 之前都有 `Write-RestartFailure`；两个入口都先 `Clear-RestartFailure`；每个 `Start-ScheduledTask` 后面跟着等待；自愈块不门禁 `$initType` 但注册成功会标成 `taskscheduler`；兜底仍然门禁；写文件带 `-Encoding UTF8` + `Move-Item`，diag 手写 JSON object 而不是嵌套 `ConvertTo-Json`；`Wait-ForUpdaterAlive` 只认 pid；诊断只读（不碰会删 pid 文件的 `Test-PidRunning`）；`schtasks` 交叉校验保持 prevEAP/`2>&1`/`$LASTEXITCODE` 那套写法 |
 | `tests/unit/scripts/sh-restart-diagnostics.test.mjs` | `.sh` 对称版，外加 `set -euo pipefail` 的两个坑（可能空手而归的探针必须自己 `\|\| true`）、手写 JSON 的每个插值都过 `json_escape`、面包屑路径与 node 侧 `restartFailurePath()` 对齐；`wait_for_collector_process` 不得调用 `is_running`/`rm`；updater wait 排除 stop 前 pid |
 | `tests/unit/scripts/ps1-restart-best-effort.test.mjs` | 被拒的重新注册不许跳过 `Start-ScheduledTask`（两个独立 try） |
-| `tests/unit/utils/restart-breadcrumb.test.ts` | 带 BOM 能读、未知 schema/截断文件返回 null、新鲜度窗口、摘要长度预算与引号换行清洗；5.1 `{Key,Value}[]` 能被收成 `definition_owner`；timeout writer 落盘 |
+| `src/utils/restart_breadcrumb.rs`（`cargo test --lib utils::restart_breadcrumb::tests`） | 带 BOM 能读、未知 schema/截断文件返回 None、新鲜度窗口、摘要长度预算与引号换行清洗；5.1 `{Key,Value}[]` 能被收成 `definition_owner`；timeout writer 落盘 |
 
 ## 快速入口
 

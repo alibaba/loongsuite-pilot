@@ -1,14 +1,22 @@
-$ErrorActionPreference = "Continue"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Processor = Join-Path $ScriptDir "qwen-work-cn-hook-processor.mjs"
-$PilotDataDir = Split-Path -Parent $ScriptDir
-$env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
-$Common = Join-Path $ScriptDir "shared\common.ps1"
-if (-not [Console]::IsInputRedirected) { exit 0 }
-if (-not (Test-Path $Processor)) { exit 0 }
-if (-not (Test-Path $Common)) { exit 0 }
-. $Common
-$NodeBin = Resolve-NodeBin
-if (-not $NodeBin) { exit 0 }
-try { & $NodeBin $Processor --agent-id qwen-work-cn --log-prefix qwen-work-cn 2>$null | Out-Null } catch {}
+$ErrorActionPreference = 'Stop'
+$EmptyResult = ''
+# Resolve signed built-in modules by their exact PSHOME manifests. Short-name
+# autoload can stall in isolated Windows PowerShell 5.1 environments.
+try {
+    Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+    Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1') -ErrorAction Stop
+} catch {
+    try { Microsoft.PowerShell.Utility\Write-Error '[loongsuite-pilot] built-in PowerShell modules unavailable' -ErrorAction Continue } catch {}
+    if ($EmptyResult) { $EmptyResult }
+    exit 0
+}
+$NativeArgs = @('hook-process', 'qwen-work-cn')
+$NativeArgs += @('--agent-id', 'qwen-work-cn', '--log-prefix', 'qwen-work-cn')
+try {
+    . (Join-Path $PSScriptRoot 'shared\native.ps1')
+    Invoke-PilotNative -HookDir $PSScriptRoot -Arguments $NativeArgs -EmptyResult $EmptyResult
+} catch {
+    Write-Error '[loongsuite-pilot] native hook bootstrap failed' -ErrorAction Continue
+    if ($EmptyResult) { Write-Output $EmptyResult }
+}
 exit 0

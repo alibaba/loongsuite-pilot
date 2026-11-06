@@ -1,0 +1,1084 @@
+{
+  "write-L27": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "model": "claude-sonnet-4-5",
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5,
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L52": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "A"
+          }
+        ],
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L65": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "q"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:50.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello world"
+          }
+        ],
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L78": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "q1"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "a1"
+          }
+        ],
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 1
+        },
+        "stop_reason": "end_turn"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:58:00.000Z",
+      "promptId": "p2",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "q2"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:58:10.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "a2"
+          }
+        ],
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 2
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L96": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:30.000Z",
+      "promptId": "p1",
+      "isMeta": true,
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Continue from where you left off."
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "real user prompt"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L109": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:30.000Z",
+      "promptId": "p1",
+      "isMeta": true,
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Continue from where you left off."
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L122": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:30.000Z",
+      "promptId": "p1",
+      "isMeta": true,
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Continue from where you left off."
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:31.000Z",
+      "message": {
+        "id": "synthetic_1",
+        "model": "<synthetic>",
+        "content": [
+          {
+            "type": "text",
+            "text": "No response requested."
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "stop_reason": "end_turn"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "real prompt"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:40.000Z",
+      "message": {
+        "id": "msg_1",
+        "model": "qwen3.7-max",
+        "content": [
+          {
+            "type": "text",
+            "text": "real answer"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L138": [
+    {
+      "type": "user",
+      "timestamp": "2026-09-16T03:43:03.998Z",
+      "promptId": "p-error",
+      "message": {
+        "content": "trigger error"
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-09-16T03:46:02.445Z",
+      "isApiErrorMessage": true,
+      "apiErrorStatus": 529,
+      "error": "server_error",
+      "requestId": "req-error-11",
+      "message": {
+        "id": "synthetic-error-message",
+        "model": "<synthetic>",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "private upstream detail"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "stop_reason": "stop_sequence"
+      }
+    }
+  ],
+  "write-L177": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "do it"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Bash",
+            "input": {}
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:49.200Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:55.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 10
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L204": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "first turn"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Bash",
+            "input": {}
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:50.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:55.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 10
+        },
+        "stop_reason": "end_turn"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T03:12:32.000Z",
+      "promptId": "p2",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "second turn"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T03:12:40.000Z",
+      "message": {
+        "id": "msg_3",
+        "content": [
+          {
+            "type": "text",
+            "text": "second done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 20,
+          "output_tokens": 5
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L219": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.546Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "hmm"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:51.656Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tool_1",
+            "name": "Read",
+            "input": {
+              "file_path": "/x"
+            }
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:51.879Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "tool_1",
+            "content": "file content"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:56.868Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 30
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L238": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tool_A",
+            "name": "Read",
+            "input": {}
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:50.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tool_B",
+            "name": "Bash",
+            "input": {}
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:50.200Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "tool_A",
+            "content": "result A"
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:50.400Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "tool_B",
+            "content": "result B"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:55.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 10
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L253": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tool_X",
+            "name": "Read",
+            "input": {}
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:49.200Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "tool_X",
+            "content": "data"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:55.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "done"
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 10
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L271": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "read 3 files"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "reading..."
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:51.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "read_1",
+            "name": "Read",
+            "input": {
+              "file_path": "/a.txt"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:51.200Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "read_1",
+            "content": "aaa"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:52.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "read_2",
+            "name": "Read",
+            "input": {
+              "file_path": "/b.txt"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:52.500Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "read_3",
+            "name": "Read",
+            "input": {
+              "file_path": "/c.txt"
+            }
+          }
+        ],
+        "usage": {
+          "input_tokens": 1000,
+          "output_tokens": 100
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:52.800Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "read_2",
+            "content": "bbb"
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:53.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "read_3",
+            "content": "ccc"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:56.000Z",
+      "message": {
+        "id": "msg_2",
+        "content": [
+          {
+            "type": "text",
+            "text": "All three files read."
+          }
+        ],
+        "usage": {
+          "input_tokens": 2000,
+          "output_tokens": 20
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L320": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Bash",
+            "input": {}
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        },
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:49.200Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:55.000Z",
+      "message": {
+        "model": "claude-opus-4-6",
+        "content": [
+          {
+            "type": "text",
+            "text": "All done."
+          }
+        ],
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 30
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ],
+  "write-L368": [
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:30.000Z",
+      "message": {
+        "id": "orphan",
+        "content": []
+      }
+    },
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": "hello"
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:40.000Z",
+      "message": {
+        "id": "m1",
+        "content": []
+      }
+    }
+  ],
+  "write-L383": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": "hello"
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:40.000Z",
+      "message": {
+        "id": "m1",
+        "content": []
+      }
+    }
+  ],
+  "write-L401": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:50.000Z",
+      "message": {
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:40.000Z",
+      "message": {
+        "id": "m1",
+        "content": []
+      }
+    }
+  ],
+  "write-L411": [
+    {
+      "type": "user",
+      "timestamp": "2026-06-04T02:57:32.000Z",
+      "promptId": "p1",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "timestamp": "2026-06-04T02:57:49.000Z",
+      "message": {
+        "id": "msg_1",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 5
+        },
+        "stop_reason": "end_turn"
+      }
+    }
+  ]
+}

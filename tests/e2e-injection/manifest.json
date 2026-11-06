@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "scope": "injection-only",
+  "commonScenarios": ["baseline", "reinstall", "status-read-only", "cleanup", "unicode-split-paths", "preserve-user-config", "invalid-config", "missing-resource", "permission-denied"],
+  "agents": [
+    {"id":"claude-code","deployMode":"hook","extraScenarios":["jsonc-comments"]},
+    {"id":"codex","deployMode":"hook","extraScenarios":["trust-toml", "retired-events"]},
+    {"id":"copilot","deployMode":"copilot-plugin","extraScenarios":["jsonc-comments", "shell-env-ownership", "legacy-install-adoption", "partial-deploy-cleanup", "native-hook-wakeup", "windows-auto-deploy-disabled"]},
+    {"id":"cursor","deployMode":"hook","extraScenarios":["cursor-alias-dedup"]},
+    {"id":"cursor-cli","deployMode":"hook","extraScenarios":["cli-only-discovery", "cursor-alias-dedup"]},
+    {"id":"doubao-work","deployMode":"detection-only","extraScenarios":[]},
+    {"id":"dsh","deployMode":"dsh-yaml-patch","extraScenarios":["environment-directory", "managed-yaml"]},
+    {"id":"grok-build","deployMode":"hook","extraScenarios":["multiple-settings"]},
+    {"id":"hermes-agent","deployMode":"directory-plugin","extraScenarios":["activation-success", "activation-failure-rollback", "deactivation-failure"]},
+    {"id":"kiro-cli","deployMode":"hook","extraScenarios":["default-agent"]},
+    {"id":"mimo-code","deployMode":"plugin-inject","extraScenarios":["replace-legacy-reference"]},
+    {"id":"openclaw","deployMode":"plugin-inject","extraScenarios":["nested-plugin-config"]},
+    {"id":"opencode","deployMode":"plugin-inject","extraScenarios":["jsonc-comments", "file-uri"]},
+    {"id":"pi-coding-agent","deployMode":"plugin-inject","extraScenarios":["extension-array"]},
+    {"id":"qoder","deployMode":"hook","extraScenarios":["interceptor-order-timeout"]},
+    {"id":"qoder-cn","deployMode":"hook","extraScenarios":["nested-matchers"]},
+    {"id":"qoder-jetbrains","deployMode":"detection-only","extraScenarios":[]},
+    {"id":"qoder-work","deployMode":"hook","extraScenarios":["replace-legacy-reference"]},
+    {"id":"qoder-work-cn","deployMode":"hook","extraScenarios":["replace-legacy-reference"]},
+    {"id":"qwen-code-cli","deployMode":"hook","extraScenarios":[]},
+    {"id":"qwen-work-cn","deployMode":"hook","extraScenarios":["interceptor-order-timeout"]},
+    {"id":"workbuddy","deployMode":"hook","extraScenarios":[]}
+  ],
+  "detectionScenarios": ["baseline", "status-read-only"],
+  "crossAgentScenarios": ["selection-combinations", "all-agents", "none-agents", "two-install-isolation"],
+  "noInjection": [{"id":"wukong","reason":"CLI/API polling，无 agents.d 注入声明"}]
+}

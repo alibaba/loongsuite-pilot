@@ -1,0 +1,432 @@
+//! Checkpoint parse/save. Field names match the TypeScript extra.codexTranscript objects.
+use super::types::{
+    CodexActiveTranscriptTurn, CodexDeferredTerminalTurn, CodexForkBootstrap,
+    CodexPendingFusionChild, CodexPendingFusionTurn, CodexPendingSubagentTurn,
+    CodexPendingTerminalTurn, CodexTerminalRecoveryFailure, CodexTranscriptCheckpoint,
+    CodexTranscriptInputContext, CodexTranscriptSourceRange, ForkBootstrapState, FusionConfidence,
+};
+use super::utils::{as_record, i64_value, number_value, string_array, string_value, u64_value};
+use serde_json::{Map, Value};
+pub(super) const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub(super) const MAX_DEFERRED_TERMINALS: usize = 4;
+pub(super) const RECOVERY_RETRY_MIN_MS: u64 = 1_000;
+pub(super) const RECOVERY_RETRY_MAX_MS: u64 = 60_000;
+pub fn checkpoint_to_value(checkpoint: &CodexTranscriptCheckpoint) -> Value {
+    let mut value = serde_json::to_value(checkpoint).unwrap_or(Value::Null);
+    normalize_emitted_active_times(value.get_mut("activeTurn"));
+    if let Some(items) = value
+        .get_mut("deferredTerminals")
+        .and_then(Value::as_array_mut)
+    {
+        for item in items {
+            normalize_emitted_active_times(item.get_mut("activeTurn"));
+        }
+    }
+    if let Some(item) = value.get_mut("pendingSubagent") {
+        normalize_emitted_active_times(item.get_mut("activeTurn"));
+    }
+    if let Some(item) = value.get_mut("forkBootstrap") {
+        normalize_emitted_active_times(item.get_mut("tailCandidate"));
+    }
+    if let Some(children) = value
+        .get_mut("pendingFusion")
+        .and_then(|v| v.get_mut("children"))
+        .and_then(Value::as_array_mut)
+    {
+        for child in children {
+            floor_emitted_time(child.get_mut("spawnedAtMs"));
+        }
+    }
+    value
+}
+
+fn floor_emitted_time(value: Option<&mut Value>) {
+    if let Some(value) = value {
+        if let Some(number) = value.as_f64().filter(|n| n.is_finite()) {
+            *value = serde_json::json!(number.floor());
+        }
+    }
+}
+fn normalize_emitted_active_times(value: Option<&mut Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    floor_emitted_time(value.get_mut("startedAtMs"));
+    floor_emitted_time(value.get_mut("nextStepStartedAtMs"));
+    if let Some(children) = value
+        .get_mut("subagentSpawns")
+        .and_then(Value::as_array_mut)
+    {
+        for child in children {
+            floor_emitted_time(child.get_mut("spawnedAtMs"));
+        }
+    }
+}
+
+// Number.isSafeInteger admits 0.0/1.0. Check exact integers before converting
+// to f64 so large identity-sized JSON integers cannot round into this range.
+fn safe_u64(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    if let Some(n) = value.as_u64() {
+        return (n <= MAX_SAFE_INTEGER).then_some(n);
+    }
+    let n = value.as_f64()?;
+    (n.is_finite() && n >= 0.0 && n <= MAX_SAFE_INTEGER as f64 && n.fract() == 0.0)
+        .then_some(n as u64)
+}
+fn safe_i64(value: Option<&Value>) -> Option<i64> {
+    safe_u64(value).map(|n| n as i64)
+}
+fn safe_number(value: Option<&Value>) -> Option<f64> {
+    safe_u64(value).map(|n| n as f64)
+}
+fn parse_pending_terminal(value: Option<&Value>) -> Option<CodexPendingTerminalTurn> {
+    let pending = value.and_then(as_record)?;
+    let failure = pending
+        .get("failure")
+        .and_then(as_record)
+        .and_then(|failure| {
+            let delay_ms = safe_u64(failure.get("delayMs"))?;
+            if !(RECOVERY_RETRY_MIN_MS..=RECOVERY_RETRY_MAX_MS).contains(&delay_ms) {
+                return None;
+            }
+            Some(CodexTerminalRecoveryFailure {
+                source_version: failure.get("sourceVersion")?.as_str()?.to_owned(),
+                retry_at_ms: safe_number(failure.get("retryAtMs"))?,
+                delay_ms,
+            })
+        });
+    Some(CodexPendingTerminalTurn {
+        turn_id: string_value(pending.get("turnId"))?.to_owned(),
+        terminal_end_offset: safe_i64(pending.get("terminalEndOffset"))?,
+        retry_count: safe_u64(pending.get("retryCount")),
+        first_pending_at_ms: safe_number(pending.get("firstPendingAtMs")),
+        last_attempt_at_ms: safe_number(pending.get("lastAttemptAtMs")),
+        source_record_count: safe_u64(pending.get("sourceRecordCount")),
+        failure,
+    })
+}
+pub fn parse_checkpoint(raw: &Value) -> Option<CodexTranscriptCheckpoint> {
+    let value = as_record(raw)?;
+    let inode = u64_value(value.get("inode"))?;
+    let scan_offset = safe_i64(value.get("scanOffset"))?;
+    let active_turn = parse_active_turn(value.get("activeTurn"));
+    let mut pending_terminal = parse_pending_terminal(value.get("pendingTerminal"));
+    // Bound the persisted prefix before parsing; never walk arbitrary later
+    // positions to fill holes left by malformed early entries.
+    let deferred_terminals = value
+        .get("deferredTerminals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_DEFERRED_TERMINALS)
+        .filter_map(|raw| {
+            let item = as_record(raw)?;
+            let active_turn = parse_active_turn(item.get("activeTurn"))?;
+            let pending_terminal = parse_pending_terminal(item.get("pendingTerminal"))?;
+            (active_turn.turn_id == pending_terminal.turn_id
+                && pending_terminal.terminal_end_offset >= active_turn.start_offset
+                && pending_terminal.terminal_end_offset <= scan_offset)
+                .then_some(CodexDeferredTerminalTurn {
+                    active_turn,
+                    pending_terminal,
+                })
+        })
+        .collect();
+    let pending_fusion = value
+        .get("pendingFusion")
+        .and_then(as_record)
+        .and_then(|fusion| {
+            let children = parse_pending_fusion_children(fusion.get("children"));
+            let turn_id = string_value(fusion.get("turnId"))?.to_owned();
+            let terminal_end_offset = safe_i64(fusion.get("terminalEndOffset"))?;
+            if children.is_empty()
+                || terminal_end_offset > scan_offset
+                || active_turn.as_ref().is_some_and(|active| {
+                    active.turn_id != turn_id || terminal_end_offset < active.start_offset
+                })
+            {
+                return None;
+            }
+            Some(CodexPendingFusionTurn {
+                turn_id,
+                parent_thread_id: string_value(fusion.get("parentThreadId"))?.to_owned(),
+                parent_trace_id: string_value(fusion.get("parentTraceId"))?.to_owned(),
+                terminal_end_offset,
+                children,
+            })
+        });
+    let subagent = value.get("pendingSubagent").and_then(as_record);
+    let pending_subagent = subagent.and_then(|subagent| {
+        let active_turn = parse_active_turn(subagent.get("activeTurn"))?;
+        let turn_id = string_value(subagent.get("turnId"))?.to_owned();
+        let terminal_end_offset = safe_i64(subagent.get("terminalEndOffset"))?;
+        if active_turn.turn_id != turn_id
+            || terminal_end_offset < active_turn.start_offset
+            || terminal_end_offset > scan_offset
+        {
+            return None;
+        }
+        Some(CodexPendingSubagentTurn {
+            turn_id,
+            parent_thread_id: string_value(subagent.get("parentThreadId"))?.to_owned(),
+            parent_turn_id: string_value(subagent.get("parentTurnId"))?.to_owned(),
+            parent_trace_id: string_value(subagent.get("parentTraceId"))?.to_owned(),
+            parent_tool_call_id: string_value(subagent.get("parentToolCallId"))?.to_owned(),
+            confidence: string_value(subagent.get("confidence"))
+                .and_then(FusionConfidence::parse)?,
+            terminal_end_offset,
+            active_turn,
+        })
+    });
+    if pending_subagent.is_none() && pending_terminal.is_none() {
+        if let (Some(subagent), Some(active)) = (subagent, active_turn.as_ref()) {
+            if string_value(subagent.get("turnId")) == Some(active.turn_id.as_str()) {
+                if let Some(end) = safe_i64(subagent.get("terminalEndOffset")) {
+                    // Parsing records no attempt and manufactures no timestamps.
+                    pending_terminal = Some(CodexPendingTerminalTurn {
+                        turn_id: active.turn_id.clone(),
+                        terminal_end_offset: end,
+                        retry_count: None,
+                        first_pending_at_ms: None,
+                        last_attempt_at_ms: None,
+                        source_record_count: None,
+                        failure: None,
+                    });
+                }
+            }
+        }
+    }
+    if pending_terminal.as_ref().is_some_and(|pending| {
+        active_turn.as_ref().is_none_or(|active| {
+            pending.turn_id != active.turn_id
+                || pending.terminal_end_offset < active.start_offset
+                || pending.terminal_end_offset > scan_offset
+        })
+    }) {
+        pending_terminal = None;
+    }
+    Some(CodexTranscriptCheckpoint {
+        first_owned_turn_id: string_value(value.get("firstOwnedTurnId")).map(str::to_owned),
+        inode,
+        scan_offset,
+        active_turn,
+        pending_terminal,
+        deferred_terminals,
+        pending_fusion,
+        pending_subagent,
+        owner_session_meta_offset: safe_i64(value.get("ownerSessionMetaOffset")),
+        fork_bootstrap: parse_fork_bootstrap(value.get("forkBootstrap")),
+    })
+}
+pub fn new_pending_terminal(
+    turn_id: String,
+    terminal_end_offset: i64,
+    source_record_count: u64,
+) -> CodexPendingTerminalTurn {
+    new_pending_terminal_at(
+        turn_id,
+        terminal_end_offset,
+        source_record_count,
+        super::utils::now_ms().floor(),
+    )
+}
+pub(super) fn new_pending_terminal_at(
+    turn_id: String,
+    terminal_end_offset: i64,
+    source_record_count: u64,
+    now: f64,
+) -> CodexPendingTerminalTurn {
+    CodexPendingTerminalTurn {
+        turn_id,
+        terminal_end_offset,
+        retry_count: Some(1),
+        first_pending_at_ms: Some(now),
+        last_attempt_at_ms: Some(now),
+        source_record_count: Some(source_record_count),
+        failure: None,
+    }
+}
+pub fn parse_active_turn(value: Option<&Value>) -> Option<CodexActiveTranscriptTurn> {
+    let active = value.and_then(as_record)?;
+    Some(CodexActiveTranscriptTurn {
+        turn_id: string_value(active.get("turnId"))?.to_owned(),
+        start_offset: safe_i64(active.get("startOffset"))?,
+        started_at_ms: safe_number(active.get("startedAtMs"))?,
+        next_step_started_at_ms: safe_number(active.get("nextStepStartedAtMs")),
+        last_cumulative_token_total: number_value(active.get("lastCumulativeTokenTotal")),
+        model: string_value(active.get("model")).map(str::to_owned),
+        cwd: string_value(active.get("cwd")).map(str::to_owned),
+        developer_instructions: string_value(active.get("developerInstructions"))
+            .map(str::to_owned),
+        emitted_prompt: active.get("emittedPrompt").and_then(Value::as_bool) == Some(true),
+        emitted_step_count: number_value(active.get("emittedStepCount"))
+            .map(|n| n as u64)
+            .unwrap_or(0),
+        emitted_step_request_ids: string_array(active.get("emittedStepRequestIds")),
+        emitted_step_response_ids: string_array(active.get("emittedStepResponseIds")),
+        emitted_tool_call_ids: string_array(active.get("emittedToolCallIds")),
+        emitted_tool_result_ids: string_array(active.get("emittedToolResultIds")),
+        input_context: parse_input_context(active.get("inputContext")),
+        subagent_spawns: parse_pending_fusion_children(active.get("subagentSpawns")),
+        delegation: active
+            .get("delegation")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        delegation_unbound: active.get("delegationUnbound").and_then(Value::as_bool) == Some(true),
+        emitted_trace_id: string_value(active.get("emittedTraceId")).map(str::to_owned),
+        emitted_audit_event_ids: string_array(active.get("emittedAuditEventIds")),
+    })
+}
+
+pub fn parse_pending_fusion_children(value: Option<&Value>) -> Vec<CodexPendingFusionChild> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut children = Vec::new();
+    for item in items {
+        let Some(child) = as_record(item) else {
+            continue;
+        };
+        let Some(parent_tool_call_id) = string_value(child.get("parentToolCallId")) else {
+            continue;
+        };
+        let Some(parent_trace_id) = string_value(child.get("parentTraceId")) else {
+            continue;
+        };
+        let Some(spawned_at_ms) = safe_number(child.get("spawnedAtMs")) else {
+            continue;
+        };
+        children.push(CodexPendingFusionChild {
+            parent_tool_call_id: parent_tool_call_id.to_owned(),
+            parent_trace_id: parent_trace_id.to_owned(),
+            spawned_at_ms,
+            task_name: string_value(child.get("taskName")).map(str::to_owned),
+            agent_path: string_value(child.get("agentPath")).map(str::to_owned),
+            child_thread_id: string_value(child.get("childThreadId")).map(str::to_owned),
+        });
+    }
+    children
+}
+
+fn parse_input_context(value: Option<&Value>) -> Option<CodexTranscriptInputContext> {
+    let context = value.and_then(as_record)?;
+    let hash = string_value(context.get("hash"))?.to_owned();
+    let range = context.get("deltaRange").and_then(as_record);
+    let delta_range = range.and_then(|range| {
+        Some(CodexTranscriptSourceRange {
+            start_offset: i64_value(range.get("startOffset"))?,
+            end_offset: i64_value(range.get("endOffset"))?,
+        })
+    });
+    Some(CodexTranscriptInputContext {
+        hash,
+        delta: context.get("delta").and_then(Value::as_array).cloned(),
+        full_messages: context
+            .get("fullMessages")
+            .and_then(Value::as_array)
+            .cloned(),
+        delta_range,
+    })
+}
+
+fn parse_fork_bootstrap(value: Option<&Value>) -> Option<CodexForkBootstrap> {
+    let record = value.and_then(as_record)?;
+    let search_offset = safe_i64(record.get("searchOffset"))?;
+    let state = match record.get("state").and_then(Value::as_str) {
+        Some("baseline-tail") => ForkBootstrapState::BaselineTail,
+        Some("baseline-search") => ForkBootstrapState::BaselineSearch,
+        Some("live-pending") => ForkBootstrapState::LivePending,
+        _ if record.get("phase").and_then(Value::as_str) == Some("rebuild-owned-tail") => {
+            ForkBootstrapState::BaselineTail
+        }
+        _ if record.get("mode").and_then(Value::as_str) == Some("baseline") => {
+            ForkBootstrapState::BaselineSearch
+        }
+        _ => ForkBootstrapState::LivePending,
+    };
+    let tail = parse_active_turn(record.get("tailCandidate"));
+    Some(CodexForkBootstrap {
+        state,
+        search_offset,
+        initial_turn_id: string_value(record.get("initialTurnId"))
+            .or_else(|| string_value(record.get("turnId")))
+            .map(str::to_owned),
+        recovery_turn_id: string_value(record.get("recoveryTurnId")).map(str::to_owned),
+        tail_candidate: if state == ForkBootstrapState::BaselineTail {
+            tail
+        } else {
+            None
+        },
+    })
+}
+
+pub fn create_active_turn(
+    turn_id: String,
+    start_offset: i64,
+    started_at_ms: f64,
+    emitted_prompt: bool,
+) -> CodexActiveTranscriptTurn {
+    CodexActiveTranscriptTurn {
+        turn_id,
+        start_offset,
+        started_at_ms: started_at_ms.floor(),
+        emitted_prompt,
+        emitted_step_count: 0,
+        ..CodexActiveTranscriptTurn::default()
+    }
+}
+
+pub fn update_active_turn_metadata(
+    active: &mut CodexActiveTranscriptTurn,
+    record: &Map<String, Value>,
+    payload: &Map<String, Value>,
+) {
+    if record.get("type").and_then(Value::as_str) != Some("turn_context") {
+        return;
+    }
+    if let Some(model) = string_value(payload.get("model")) {
+        active.model = Some(model.to_owned());
+    }
+    if let Some(cwd) = string_value(payload.get("cwd")) {
+        active.cwd = Some(cwd.to_owned());
+    }
+    if let Some(text) = string_value(payload.get("developer_instructions")) {
+        active.developer_instructions = Some(text.to_owned());
+    }
+}
+
+pub fn update_active_turn_from_extracted(
+    active: &mut CodexActiveTranscriptTurn,
+    model: &str,
+    cwd: Option<&str>,
+    developer_instructions: Option<&str>,
+) {
+    if !model.is_empty() && model != "unknown" {
+        active.model = Some(model.to_owned());
+    }
+    if let Some(cwd) = cwd {
+        active.cwd = Some(cwd.to_owned());
+    }
+    if let Some(text) = developer_instructions {
+        active.developer_instructions = Some(text.to_owned());
+    }
+}
+
+pub fn empty_checkpoint(inode: u64) -> CodexTranscriptCheckpoint {
+    CodexTranscriptCheckpoint {
+        first_owned_turn_id: None,
+        inode,
+        scan_offset: 0,
+        active_turn: None,
+        pending_terminal: None,
+        deferred_terminals: Vec::new(),
+        pending_fusion: None,
+        pending_subagent: None,
+        owner_session_meta_offset: None,
+        fork_bootstrap: None,
+    }
+}
+
+#[cfg(test)]
+#[path = "identity_precision_tests.rs"]
+mod identity_precision_tests;

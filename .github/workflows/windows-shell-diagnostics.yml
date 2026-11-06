@@ -1,0 +1,31 @@
+name: Windows Shell Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [loongsuite-pilot-rust]
+    paths:
+      - .github/workflows/windows-shell-diagnostics.yml
+      - scripts/testing/windows-shell-diagnostics.py
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Shell pipeline (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Diagnose fixed scripts without compiling or packaging
+        run: python scripts/testing/windows-shell-diagnostics.py --timeout-seconds 5

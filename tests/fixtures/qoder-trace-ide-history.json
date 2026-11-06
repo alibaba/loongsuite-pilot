@@ -1,0 +1,1071 @@
+[
+  {
+    "source": {
+      "id": "L866:C5",
+      "title": "matches IDE turns by session request order and assistant order without timestamp proximity",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-a",
+        "gen_ai.step.id": "turn-a:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-a",
+        "gen_ai.step.id": "turn-a:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-b",
+        "gen_ai.step.id": "turn-b:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000010000000000",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-b",
+        "gen_ai.step.id": "turn-b:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000010000000000",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-ide",
+          "requestId": "request-a",
+          "messageId": "message-a-1",
+          "gmtCreate": 1780000100000,
+          "inputTokens": 100,
+          "outputTokens": 10,
+          "cacheReadTokens": 3,
+          "model": "gm51model"
+        },
+        {
+          "sessionId": "sess-ide",
+          "requestId": "request-b",
+          "messageId": "message-b-1",
+          "gmtCreate": 1780000200000,
+          "inputTokens": 200,
+          "outputTokens": 20,
+          "cacheReadTokens": 4,
+          "model": "qmodel_latest"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.request.id"
+        ],
+        "matcher": "toBe",
+        "value": "request-a"
+      },
+      {
+        "path": [
+          0,
+          "agent.request_id"
+        ],
+        "matcher": "toBe",
+        "value": "request-a"
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.request.id"
+        ],
+        "matcher": "toBe",
+        "value": "request-a"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.id"
+        ],
+        "matcher": "toBe",
+        "value": "message-a-1"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 100
+      },
+      {
+        "path": [
+          2,
+          "gen_ai.request.id"
+        ],
+        "matcher": "toBe",
+        "value": "request-b"
+      },
+      {
+        "path": [
+          2,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "qmodel_latest"
+      },
+      {
+        "path": [
+          3,
+          "gen_ai.response.id"
+        ],
+        "matcher": "toBe",
+        "value": "message-b-1"
+      },
+      {
+        "path": [
+          3,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "qmodel_latest"
+      },
+      {
+        "path": [
+          3,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 200
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L948:C5",
+      "title": "aggregates extra SQLite calls into the last response when assistant counts differ",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-a",
+        "gen_ai.step.id": "turn-a:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-ide",
+        "gen_ai.turn.id": "turn-a",
+        "gen_ai.step.id": "turn-a:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-ide",
+          "requestId": "request-a",
+          "messageId": "message-a-1",
+          "gmtCreate": 1780000100000,
+          "inputTokens": 100,
+          "outputTokens": 10,
+          "cacheReadTokens": 3,
+          "model": "gm51model"
+        },
+        {
+          "sessionId": "sess-ide",
+          "requestId": "request-a",
+          "messageId": "message-a-2",
+          "gmtCreate": 1780000200000,
+          "inputTokens": 200,
+          "outputTokens": 20,
+          "cacheReadTokens": 4,
+          "model": "gm51model"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          1,
+          "gen_ai.response.id"
+        ],
+        "matcher": "toBe",
+        "value": "message-a-2"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 300
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 30
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.total_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 330
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.usage.cache_read.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 7
+      },
+      {
+        "path": [
+          1,
+          "agent.qoder.usage_match_mode"
+        ],
+        "matcher": "toBe",
+        "value": "aggregated_tail"
+      },
+      {
+        "path": [
+          1,
+          "agent.qoder.sqlite_row_count"
+        ],
+        "matcher": "toBe",
+        "value": 2
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1005:C5",
+      "title": "preserves hook tool status and per-ID timing during SQLite enrichment",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "other",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000100000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000200000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.call",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000201000000",
+        "gen_ai.tool.call.id": "slow-tool"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000004201000000",
+        "gen_ai.tool.call.id": "slow-tool",
+        "tool.result.status": "failure",
+        "gen_ai.tool.call.duration": 4000
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000004202000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000005000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-tools",
+          "requestId": "request-tools",
+          "messageId": "message-tools-1",
+          "gmtCreate": 1780000000200,
+          "inputTokens": 100,
+          "outputTokens": 10,
+          "cacheReadTokens": 0,
+          "model": "gm51model"
+        },
+        {
+          "sessionId": "sess-tools",
+          "requestId": "request-tools",
+          "messageId": "message-tools-2",
+          "gmtCreate": 1780000005000,
+          "inputTokens": 200,
+          "outputTokens": 20,
+          "cacheReadTokens": 0,
+          "model": "gm51model"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000201000000"
+      },
+      {
+        "path": [
+          4,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000004201000000"
+      },
+      {
+        "path": [
+          4,
+          "gen_ai.tool.call.duration"
+        ],
+        "matcher": "toBe",
+        "value": 4000
+      },
+      {
+        "path": [
+          4,
+          "tool.result.status"
+        ],
+        "matcher": "toBe",
+        "value": "failure"
+      },
+      {
+        "path": [
+          5,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000004201000001"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1094:C5",
+      "title": "starts a later request after the latest preceding tool result",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000200000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001200000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000001800000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000009999000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-tools",
+        "gen_ai.turn.id": "turn-tools",
+        "gen_ai.step.id": "turn-tools:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000002500000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-tools",
+          "requestId": "request-tools",
+          "messageId": "message-1",
+          "gmtCreate": 1780000000200,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        },
+        {
+          "sessionId": "sess-tools",
+          "requestId": "request-tools",
+          "messageId": "message-2",
+          "gmtCreate": 1780000002500,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          4,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000001800000001"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1157:C5",
+      "title": "keeps the next request after its predecessors when the SQLite clock is earlier",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-clamp",
+        "gen_ai.turn.id": "turn-clamp",
+        "gen_ai.step.id": "turn-clamp:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-clamp",
+        "gen_ai.turn.id": "turn-clamp",
+        "gen_ai.step.id": "turn-clamp:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000200000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "tool.result",
+        "gen_ai.session.id": "sess-clamp",
+        "gen_ai.turn.id": "turn-clamp",
+        "gen_ai.step.id": "turn-clamp:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000006000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-clamp",
+        "gen_ai.turn.id": "turn-clamp",
+        "gen_ai.step.id": "turn-clamp:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000006001000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-clamp",
+        "gen_ai.turn.id": "turn-clamp",
+        "gen_ai.step.id": "turn-clamp:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000005000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-clamp",
+          "requestId": "request-clamp",
+          "messageId": "message-1",
+          "gmtCreate": 1780000000200,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        },
+        {
+          "sessionId": "sess-clamp",
+          "requestId": "request-clamp",
+          "messageId": "message-2",
+          "gmtCreate": 1780000005000,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000006000000001"
+      },
+      {
+        "path": [
+          4,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000006000000002"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeLessThan",
+        "otherPath": [
+          3,
+          "time_unix_nano"
+        ]
+      },
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeLessThan",
+        "otherPath": [
+          4,
+          "time_unix_nano"
+        ]
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1208:C5",
+      "title": "orders adjacent steps when SQLite responses share the same millisecond",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (SQLite structure match)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "other",
+        "gen_ai.session.id": "sess-same-ms",
+        "gen_ai.turn.id": "turn-same-ms",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1779999999900000000",
+        "gen_ai.input.messages_delta": [
+          {
+            "role": "user",
+            "parts": []
+          }
+        ]
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-same-ms",
+        "gen_ai.turn.id": "turn-same-ms",
+        "gen_ai.step.id": "turn-same-ms:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1779999999950000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-same-ms",
+        "gen_ai.turn.id": "turn-same-ms",
+        "gen_ai.step.id": "turn-same-ms:s1",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-same-ms",
+        "gen_ai.turn.id": "turn-same-ms",
+        "gen_ai.step.id": "turn-same-ms:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-same-ms",
+        "gen_ai.turn.id": "turn-same-ms",
+        "gen_ai.step.id": "turn-same-ms:s2",
+        "gen_ai.agent.type": "qoder-cli",
+        "time_unix_nano": "1780000000000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "sessionId": "sess-same-ms",
+          "requestId": "request-same-ms",
+          "messageId": "message-1",
+          "gmtCreate": 1780000000000,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        },
+        {
+          "sessionId": "sess-same-ms",
+          "requestId": "request-same-ms",
+          "messageId": "message-2",
+          "gmtCreate": 1780000000000,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "cacheReadTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000000"
+      },
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000001"
+      },
+      {
+        "path": [
+          4,
+          "time_unix_nano"
+        ],
+        "matcher": "toBe",
+        "value": "1780000000000000002"
+      },
+      {
+        "path": [
+          2,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeLessThan",
+        "otherPath": [
+          3,
+          "time_unix_nano"
+        ]
+      },
+      {
+        "path": [
+          3,
+          "time_unix_nano"
+        ],
+        "matcher": "toBeLessThan",
+        "otherPath": [
+          4,
+          "time_unix_nano"
+        ]
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1263:C5",
+      "title": "matches SQLite rows by timestamp within 1000ms",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (timestamp-based fallback)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780366977467000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "sqlite-req-1",
+          "gmtCreate": 1780366977466,
+          "inputTokens": 24841,
+          "outputTokens": 106,
+          "cacheReadTokens": 23741
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 24841
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.usage.output_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 106
+      },
+      {
+        "path": [
+          0,
+          "gen_ai.response.id"
+        ],
+        "matcher": "toBe",
+        "value": "sqlite-req-1"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1286:C5",
+      "title": "injects SQLite model key into matching IDE request and response entries",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (timestamp-based fallback)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.request",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780366977000000000",
+        "gen_ai.request.model": "auto"
+      },
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780366977467000000",
+        "gen_ai.request.model": "auto",
+        "gen_ai.response.model": "auto"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "sqlite-req-1",
+          "gmtCreate": 1780366977466,
+          "inputTokens": 24841,
+          "outputTokens": 106,
+          "cacheReadTokens": 23741,
+          "model": "gm51model"
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.request.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      },
+      {
+        "path": [
+          1,
+          "gen_ai.response.model"
+        ],
+        "matcher": "toBe",
+        "value": "gm51model"
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1320:C5",
+      "title": "does not match if timestamp difference exceeds the fallback window (5000ms)",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (timestamp-based fallback)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "sqlite-req-far",
+          "gmtCreate": 1780000006000,
+          "inputTokens": 9999,
+          "outputTokens": 99,
+          "cacheReadTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 0
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1342:C5",
+      "title": "matches within the widened window (2000ms, previously rejected)",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (timestamp-based fallback)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000000000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      [
+        {
+          "requestId": "sqlite-req-near",
+          "gmtCreate": 1780000002000,
+          "inputTokens": 777,
+          "outputTokens": 9,
+          "cacheReadTokens": 0
+        }
+      ]
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBe",
+        "value": 777
+      }
+    ]
+  },
+  {
+    "source": {
+      "id": "L1363:C5",
+      "title": "handles empty SQLite data gracefully",
+      "suites": [
+        "QoderTraceInput token-enricher",
+        "enrichIdeTurn (timestamp-based fallback)"
+      ],
+      "parameters": []
+    },
+    "entries": [
+      {
+        "event.id": "e-1",
+        "event.name": "llm.response",
+        "gen_ai.session.id": "sess-1",
+        "gen_ai.turn.id": "turn-1",
+        "gen_ai.step.id": "turn-1:s1",
+        "gen_ai.agent.type": "qoder",
+        "time_unix_nano": "1780000001000000000"
+      }
+    ],
+    "operation": "enrichIdeTurn",
+    "arguments": [
+      []
+    ],
+    "assertions": [
+      {
+        "path": [
+          0,
+          "gen_ai.usage.input_tokens"
+        ],
+        "matcher": "toBeUndefined"
+      }
+    ]
+  }
+]

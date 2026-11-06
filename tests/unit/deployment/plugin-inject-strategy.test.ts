@@ -103,7 +103,7 @@ describe('PluginInjectStrategy', () => {
     const firstConfigPath = path.join(tmpDir, '.config', 'opencode', 'opencode.jsonc');
     const config = JSON.parse(await fs.readFile(firstConfigPath, 'utf8'));
     expect(config.plugin).toEqual([
-      `file://${path.join(dataDir, 'plugins', 'opencode')}`,
+      `file://${path.join(dataDir, 'plugins', 'opencode', 'plugin.mjs')}`,
     ]);
     expect(await strategy.needsDeploy(definition)).toBe(false);
   });

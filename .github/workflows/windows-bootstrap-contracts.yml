@@ -1,0 +1,34 @@
+name: Windows Native Bootstrap Contracts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [loongsuite-pilot-rust]
+    paths:
+      - .github/workflows/windows-bootstrap-contracts.yml
+      - scripts/testing/windows-bootstrap-contracts.py
+      - assets/hooks/**.ps1
+      - assets/hooks/shared/native.ps1
+      - xtask/src/hooks.rs
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    name: Native bootstrap (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          persist-credentials: false
+      - name: Actual production bootstrap in PS5.1 and PS7, FullLanguage and CLM
+        run: python scripts/testing/windows-bootstrap-contracts.py --timeout-seconds 20

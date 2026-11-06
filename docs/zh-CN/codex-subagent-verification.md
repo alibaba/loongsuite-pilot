@@ -1,16 +1,16 @@
 # Codex 子 Agent 实现与验证入口
 
-本文说明本次 Codex 采集实现及可复查入口。目标契约见[子 Agent 数据模型](subagent-data-model.md)。不覆盖其他 Agent 的实现，也不提供展示层逻辑。
+本文说明 Codex 采集合同及可复查入口。Rust 分支的当前执行结果以 [Rust 迁移与发布记录](rust-release.md) 为准；本文后半部的 Node/Vitest 数字是上游历史验证记录，不能作为原生构建通过证据。目标契约见[子 Agent 数据模型](subagent-data-model.md)。不覆盖其他 Agent 的实现，也不提供展示层逻辑。
 
 ## 数据来源与关联
 
-本次不修改 `assets/hooks/codex-loongsuite-pilot-hook.sh`、`assets/hooks/codex-hook-processor.mjs` 或 `agents.d/codex.json`。已有 Hook 保存 transcript 位置与生命周期唤醒信息；业务事实来自 collector 增量读取的原生 rollout JSONL。
+Rust 薄 Hook 将处理交给原生 hook-processor。Hook 保存 transcript 位置与生命周期唤醒信息；业务事实来自 collector 增量读取的原生 rollout JSONL。
 
-- [extractor](../../src/inputs/codex-transcript/codex-transcript-extractor.ts)：owning session、turn、模型波次、工具及输出、token、原生结束/中断；复制的父历史不作为子新工作。
-- [linker](../../src/inputs/codex-transcript/codex-subagent-linker.ts)：委派描述符、明确 child thread、task/activity、新工作匹配及持久工作绑定。incoming 按工作传播，不固化为 session 永久属性。
-- [input](../../src/inputs/codex-transcript/codex-transcript-input.ts)：增量完整行读取、父 invoke/result、子 incoming、晚到结果重试和 checkpoint。挂载父 Trace 不覆盖子 session/turn/step。
-- [Codex 转换边界](../../src/flushers/codex-turn-converter.ts)：独立子轮次转换，子 ENTRY 透明，子 AGENT 连接实际父工具，子内部层级保留。
-- [事件兼容边界](../../src/flushers/trace-event-compat.ts)：模型/工具名称适配及委派审计事件排除。Hermes/OpenClaw 使用的公共 delegated-turn converter 是设计参考，不是 Codex 实际调用链。
+- [extractor](../../src/inputs/codex-transcript/extractor.rs)：owning session、turn、模型波次、工具及输出、token、原生结束/中断；复制的父历史不作为子新工作。
+- [linker](../../src/inputs/codex-transcript/subagent_linker.rs)：委派描述符、明确 child thread、task/activity、新工作匹配及持久工作绑定。incoming 按工作传播，不固化为 session 永久属性。
+- [input](../../src/inputs/codex-transcript/input.rs)：增量完整行读取、父 invoke/result、子 incoming、晚到结果重试和 checkpoint。挂载父 Trace 不覆盖子 session/turn/step。
+- [Codex 转换边界](../../src/flushers/codex_turn_converter.rs)：独立子轮次转换，子 ENTRY 透明，子 AGENT 连接实际父工具，子内部层级保留。
+- [事件兼容边界](../../src/flushers/trace_event_compat.rs)：模型/工具名称适配及委派审计事件排除。Hermes/OpenClaw 使用的公共 delegated-turn converter 是设计参考，不是 Codex 实际调用链。
 
 invocation 为 SHA-256(`['codex-delegation', parentSession, parentTurn, toolCallId, workIndex]`) 的前 32 个十六进制字符。批量每项使用不同 workIndex；重放同一原生事实 ID 不变。新工作、重试采集、取消/等待是不同语义，不能都当成新委派。
 
@@ -47,9 +47,9 @@ Codex 从派发工具参数的 `message`、`prompt` 或 `input` 读取可读内�
 
 ## 持久化与隐私边界
 
-[OTLP flusher](../../src/flushers/otlp-trace-flusher.ts) 与 [journal](../../src/flushers/codex-turn-journal.ts) 将未完成 Codex 轮次前缀持久保存在数据目录的 `logs/codex-pending-turns/`；完整导出成功后先写确认再清理 pending，最近 10,000 轮确认用于抑制重放。退出、内存 buffer 淘汰均不导出伪造半轮。
+[OTLP flusher](../../src/flushers/otlp_trace_flusher.rs) 与 [journal](../../src/flushers/codex_turn_journal.rs) 将未完成 Codex 轮次前缀持久保存在数据目录的 `logs/codex-pending-turns/`；完整导出成功后先写确认再清理 pending，最近 10,000 轮确认用于抑制重放。退出、内存 buffer 淘汰均不导出伪造半轮。
 
-[InputManager](../../src/core/input-manager.ts)、[StateStore](../../src/checkpoints/state-store.ts) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；最终持久接收失败冻结共享 checkpoint，并暂停使用该 StateStore 的新采集和后续批次入队，修复存储或输出后重启恢复。原有失败锁不会因为后续成功或仅重启输入而清除；重启 collector 从磁盘游标重放。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
+[InputManager](../../src/core/input_manager.rs)、[StateStore](../../src/checkpoints/state_store.rs) 将输入游标保存与输出持久接收串联。HTTP 暂时失败由已有 flush 定时器重试同一批次，等待其远端 ACK 后才释放 checkpoint，无需重启；最终持久接收失败冻结共享 checkpoint，并暂停使用该 StateStore 的新采集和后续批次入队，修复存储或输出后重启恢复。原有失败锁不会因为后续成功或仅重启输入而清除；重启 collector 从磁盘游标重放。多目标部分成功及不确定网络回执仍可能重发稳定 ID；不承诺端到端恰好一次。
 
 恢复路径复用当前 workspace 过滤和脱敏策略，不直接回放过期策略的日志。journal 按组增量读取；读取失败阻止启动，写入失败不推进游标。关联状态保存标识/指纹，密文仅做 opaque 指纹比较，不解密，不额外保存工作正文；journal 属于受数据目录保护的遥测持久状态，同样应用当前脱敏规则。
 
@@ -72,6 +72,8 @@ npx vitest run tests/integration/codex-subagent-lifecycle.test.ts tests/integrat
 另需覆盖 flusher、InputManager、StateStore、标准事件 Schema 与验证器相关回归；具体本次执行清单及结果由 PR 验证记录提供，不以文档中的命令示例冒充已执行。
 
 真实安装态应从候选源码构建独立安装产物，确认运行进程使用该产物，再执行[设计矩阵](subagent-data-model.md#8-验收矩阵)。至少实测后台晚到、同一子 session 复用、嵌套与 collector 运行中重启。记录原生工具/线程/轮次、稳定 event ID、invocation 与实际 Span，再比较本地 JSONL、HTTP/SLS 接收记录和 OTLP；云端按集合比较缺失、额外、重复及关键字段，不只统计行数。
+
+> 下列带 Node/Vitest、typecheck 或旧构建计数的记录来自上游 TS 分支；原生测试与失败项见 Rust 迁移记录。
 
 ## 验证证据的边界
 

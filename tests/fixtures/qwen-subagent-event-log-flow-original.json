@@ -1,0 +1,1300 @@
+{
+  "recursive": {
+    "sessionId": "synthetic-session",
+    "main": [
+      {
+        "type": "user",
+        "uuid": "record-1",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:00.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "SENSITIVE_MAIN"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-2",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:01.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "id": "root-call",
+                "name": "agent",
+                "args": {
+                  "prompt": "SENSITIVE_TASK"
+                }
+              }
+            }
+          ]
+        },
+        "model": "qwen3-test",
+        "usageMetadata": {
+          "promptTokenCount": 30,
+          "candidatesTokenCount": 3,
+          "totalTokenCount": 33
+        }
+      },
+      {
+        "type": "tool_result",
+        "uuid": "record-3",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:10.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "root-call",
+                "name": "agent",
+                "response": {
+                  "output": "SENSITIVE_RESULT"
+                }
+              }
+            }
+          ]
+        },
+        "toolCallResult": {
+          "callId": "root-call",
+          "durationMs": 100
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-4",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:11.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Main finished"
+            }
+          ]
+        },
+        "agentRunId": "run-1",
+        "agentRound": 11,
+        "usageMetadata": {
+          "promptTokenCount": 20,
+          "candidatesTokenCount": 2,
+          "totalTokenCount": 22
+        },
+        "model": "qwen3-test"
+      }
+    ],
+    "children": {
+      "agent-child.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-5",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:02.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_CHILD"
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-6",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 3,
+          "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 12
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-7",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.100Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "args": {
+                    "prompt": "SENSITIVE_TASK"
+                  }
+                }
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "tool_result",
+          "uuid": "record-8",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:08.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "functionResponse": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "response": {
+                    "output": "SENSITIVE_RESULT"
+                  }
+                }
+              }
+            ]
+          },
+          "toolCallResult": {
+            "callId": "nested-call",
+            "durationMs": 100
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-9",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:09.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Child finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 9,
+          "usageMetadata": {
+            "promptTokenCount": 12,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 14
+          },
+          "agentId": "child",
+          "isSidechain": true
+        }
+      ],
+      "agent-child.meta.json": {
+        "agentId": "child",
+        "agentType": "child",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": null,
+        "toolUseId": "root-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-grandchild.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-10",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:04.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_GRANDCHILD"
+              }
+            ]
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-11",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:05.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Grandchild finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 5,
+          "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        }
+      ],
+      "agent-grandchild.meta.json": {
+        "agentId": "grandchild",
+        "agentType": "grandchild",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": "child",
+        "toolUseId": "nested-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      }
+    },
+    "config": {}
+  },
+  "parallel": {
+    "sessionId": "synthetic-session",
+    "main": [
+      {
+        "type": "user",
+        "uuid": "record-1",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:00.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "SENSITIVE_MAIN"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-2",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:01.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "id": "root-call",
+                "name": "agent",
+                "args": {
+                  "prompt": "SENSITIVE_TASK"
+                }
+              }
+            },
+            {
+              "functionCall": {
+                "id": "root-call-2",
+                "name": "agent",
+                "args": {}
+              }
+            }
+          ]
+        },
+        "model": "qwen3-test",
+        "usageMetadata": {
+          "promptTokenCount": 30,
+          "candidatesTokenCount": 3,
+          "totalTokenCount": 33
+        }
+      },
+      {
+        "type": "tool_result",
+        "uuid": "record-3",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:10.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "root-call",
+                "name": "agent",
+                "response": {
+                  "output": "SENSITIVE_RESULT"
+                }
+              }
+            }
+          ]
+        },
+        "toolCallResult": {
+          "callId": "root-call",
+          "durationMs": 100
+        }
+      },
+      {
+        "type": "tool_result",
+        "uuid": "record-12",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:10.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "root-call-2",
+                "name": "agent",
+                "response": {
+                  "output": "SENSITIVE_RESULT"
+                }
+              }
+            }
+          ]
+        },
+        "toolCallResult": {
+          "callId": "root-call-2",
+          "durationMs": 100
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-4",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:11.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Main finished"
+            }
+          ]
+        },
+        "agentRunId": "run-1",
+        "agentRound": 11,
+        "usageMetadata": {
+          "promptTokenCount": 20,
+          "candidatesTokenCount": 2,
+          "totalTokenCount": 22
+        },
+        "model": "qwen3-test"
+      }
+    ],
+    "children": {
+      "agent-child.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-5",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:02.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_CHILD"
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-6",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 3,
+          "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 12
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-7",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.100Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "args": {
+                    "prompt": "SENSITIVE_TASK"
+                  }
+                }
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "tool_result",
+          "uuid": "record-8",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:08.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "functionResponse": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "response": {
+                    "output": "SENSITIVE_RESULT"
+                  }
+                }
+              }
+            ]
+          },
+          "toolCallResult": {
+            "callId": "nested-call",
+            "durationMs": 100
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-9",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:09.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Child finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 9,
+          "usageMetadata": {
+            "promptTokenCount": 12,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 14
+          },
+          "agentId": "child",
+          "isSidechain": true
+        }
+      ],
+      "agent-child.meta.json": {
+        "agentId": "child",
+        "agentType": "child",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": null,
+        "toolUseId": "root-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-child2.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-5",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:02.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_CHILD"
+              }
+            ]
+          },
+          "agentId": "child2",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-6",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 3,
+          "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 12
+          },
+          "agentId": "child2",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-7",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.100Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "args": {
+                    "prompt": "SENSITIVE_TASK"
+                  }
+                }
+              }
+            ]
+          },
+          "agentId": "child2",
+          "isSidechain": true
+        },
+        {
+          "type": "tool_result",
+          "uuid": "record-8",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:08.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "functionResponse": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "response": {
+                    "output": "SENSITIVE_RESULT"
+                  }
+                }
+              }
+            ]
+          },
+          "toolCallResult": {
+            "callId": "nested-call",
+            "durationMs": 100
+          },
+          "agentId": "child2",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-9",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:09.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Child finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 9,
+          "usageMetadata": {
+            "promptTokenCount": 12,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 14
+          },
+          "agentId": "child2",
+          "isSidechain": true
+        }
+      ],
+      "agent-child2.meta.json": {
+        "agentId": "child2",
+        "agentType": "child2",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": null,
+        "toolUseId": "root-call-2",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-grandchild.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-10",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:04.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_GRANDCHILD"
+              }
+            ]
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-11",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:05.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Grandchild finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 5,
+          "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        }
+      ],
+      "agent-grandchild.meta.json": {
+        "agentId": "grandchild",
+        "agentType": "grandchild",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": "child",
+        "toolUseId": "nested-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-grandchild2.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-10",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:04.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_GRANDCHILD"
+              }
+            ]
+          },
+          "agentId": "grandchild2",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-11",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:05.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Grandchild finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 5,
+          "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7
+          },
+          "agentId": "grandchild2",
+          "isSidechain": true
+        }
+      ],
+      "agent-grandchild2.meta.json": {
+        "agentId": "grandchild2",
+        "agentType": "grandchild2",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": "child2",
+        "toolUseId": "nested-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      }
+    },
+    "config": {}
+  },
+  "failed": {
+    "sessionId": "synthetic-session",
+    "main": [
+      {
+        "type": "user",
+        "uuid": "record-1",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:00.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "SENSITIVE_MAIN"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-2",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:01.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "id": "root-call",
+                "name": "agent",
+                "args": {
+                  "prompt": "SENSITIVE_TASK"
+                }
+              }
+            }
+          ]
+        },
+        "model": "qwen3-test",
+        "usageMetadata": {
+          "promptTokenCount": 30,
+          "candidatesTokenCount": 3,
+          "totalTokenCount": 33
+        }
+      },
+      {
+        "type": "tool_result",
+        "uuid": "record-3",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:10.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "root-call",
+                "name": "agent",
+                "response": {
+                  "output": "SENSITIVE_RESULT"
+                }
+              }
+            }
+          ]
+        },
+        "toolCallResult": {
+          "callId": "root-call",
+          "durationMs": 100
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-4",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:11.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Main finished"
+            }
+          ]
+        },
+        "agentRunId": "run-1",
+        "agentRound": 11,
+        "usageMetadata": {
+          "promptTokenCount": 20,
+          "candidatesTokenCount": 2,
+          "totalTokenCount": 22
+        },
+        "model": "qwen3-test"
+      }
+    ],
+    "children": {
+      "agent-child.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-5",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:02.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_CHILD"
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-6",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 3,
+          "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 12
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-7",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.100Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "args": {
+                    "prompt": "SENSITIVE_TASK"
+                  }
+                }
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "tool_result",
+          "uuid": "record-8",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:08.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "functionResponse": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "response": {
+                    "output": "SENSITIVE_RESULT"
+                  }
+                }
+              }
+            ]
+          },
+          "toolCallResult": {
+            "callId": "nested-call",
+            "durationMs": 100
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-9",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:09.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Child finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 9,
+          "usageMetadata": {
+            "promptTokenCount": 12,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 14
+          },
+          "agentId": "child",
+          "isSidechain": true
+        }
+      ],
+      "agent-child.meta.json": {
+        "agentId": "child",
+        "agentType": "child",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": null,
+        "toolUseId": "root-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-grandchild.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-10",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:04.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_GRANDCHILD"
+              }
+            ]
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-11",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:05.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Grandchild finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 5,
+          "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        }
+      ],
+      "agent-grandchild.meta.json": {
+        "agentId": "grandchild",
+        "agentType": "grandchild",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": "child",
+        "toolUseId": "nested-call",
+        "isBackgrounded": false,
+        "status": "failed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      }
+    },
+    "config": {}
+  },
+  "legacy-content-optout": {
+    "sessionId": "synthetic-session",
+    "main": [
+      {
+        "type": "user",
+        "uuid": "record-1",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:00.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "SENSITIVE_MAIN"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-2",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:01.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "id": "root-call",
+                "name": "agent",
+                "args": {
+                  "prompt": "SENSITIVE_TASK"
+                }
+              }
+            }
+          ]
+        },
+        "model": "qwen3-test",
+        "usageMetadata": {
+          "promptTokenCount": 30,
+          "candidatesTokenCount": 3,
+          "totalTokenCount": 33
+        }
+      },
+      {
+        "type": "tool_result",
+        "uuid": "record-3",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:10.000Z",
+        "message": {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "root-call",
+                "name": "agent",
+                "response": {
+                  "output": "SENSITIVE_RESULT"
+                }
+              }
+            }
+          ]
+        },
+        "toolCallResult": {
+          "callId": "root-call",
+          "durationMs": 100
+        }
+      },
+      {
+        "type": "assistant",
+        "uuid": "record-4",
+        "sessionId": "synthetic-session",
+        "timestamp": "2026-09-22T04:00:11.000Z",
+        "message": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Main finished"
+            }
+          ]
+        },
+        "agentRunId": "run-1",
+        "agentRound": 11,
+        "usageMetadata": {
+          "promptTokenCount": 20,
+          "candidatesTokenCount": 2,
+          "totalTokenCount": 22
+        },
+        "model": "qwen3-test"
+      }
+    ],
+    "children": {
+      "agent-child.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-5",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:02.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_CHILD"
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-6",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Plan"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 3,
+          "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 12
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-7",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:03.100Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "args": {
+                    "prompt": "SENSITIVE_TASK"
+                  }
+                }
+              }
+            ]
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "tool_result",
+          "uuid": "record-8",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:08.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "functionResponse": {
+                  "id": "nested-call",
+                  "name": "agent",
+                  "response": {
+                    "output": "SENSITIVE_RESULT"
+                  }
+                }
+              }
+            ]
+          },
+          "toolCallResult": {
+            "callId": "nested-call",
+            "durationMs": 100
+          },
+          "agentId": "child",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-9",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:09.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Child finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 9,
+          "usageMetadata": {
+            "promptTokenCount": 12,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 14
+          },
+          "agentId": "child",
+          "isSidechain": true
+        }
+      ],
+      "agent-child.meta.json": {
+        "agentId": "child",
+        "agentType": "child",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": null,
+        "toolUseId": "root-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      },
+      "agent-grandchild.jsonl": [
+        {
+          "type": "user",
+          "uuid": "record-10",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:04.000Z",
+          "message": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "SENSITIVE_GRANDCHILD"
+              }
+            ]
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        },
+        {
+          "type": "assistant",
+          "uuid": "record-11",
+          "sessionId": "synthetic-session",
+          "timestamp": "2026-09-22T04:00:05.000Z",
+          "message": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Grandchild finished"
+              }
+            ]
+          },
+          "agentRunId": "run-1",
+          "agentRound": 5,
+          "usageMetadata": {
+            "promptTokenCount": 5,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 7
+          },
+          "agentId": "grandchild",
+          "isSidechain": true
+        }
+      ],
+      "agent-grandchild.meta.json": {
+        "agentId": "grandchild",
+        "agentType": "grandchild",
+        "parentSessionId": "synthetic-session",
+        "parentAgentId": "child",
+        "toolUseId": "nested-call",
+        "isBackgrounded": false,
+        "status": "completed",
+        "persistedCliFlags": {
+          "model": "qwen3-test"
+        }
+      }
+    },
+    "config": {
+      "agents": {
+        "qwen-code-cli": {
+          "captureMessageContent": false
+        }
+      }
+    }
+  }
+}

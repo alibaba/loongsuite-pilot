@@ -1,0 +1,69 @@
+//! Input collectors ported from `src/inputs`.
+//!
+//! Only the modules listed in `MODS.txt` are declared here. Another agent merges
+//! additional `pub mod` lines into this file.
+
+#[path = "base/mod.rs"]
+pub mod base;
+pub mod qoder;
+#[path = "qoder-cn/mod.rs"]
+pub mod qoder_cn;
+#[path = "qoder-cn-sqlite/mod.rs"]
+pub mod qoder_cn_sqlite;
+#[path = "qoder-cn-trace/mod.rs"]
+pub mod qoder_cn_trace;
+#[path = "qoder-trace/mod.rs"]
+pub mod qoder_trace;
+#[path = "qoder-work/mod.rs"]
+pub mod qoder_work;
+#[path = "qoder-work-log/mod.rs"]
+pub mod qoder_work_log;
+#[path = "qoder-work-sqlite/mod.rs"]
+pub mod qoder_work_sqlite;
+#[path = "qoder-work-trace/mod.rs"]
+pub mod qoder_work_trace;
+#[path = "qwen-work-cn/mod.rs"]
+pub mod qwen_work_cn;
+
+#[path = "claude-code-log/mod.rs"]
+pub mod claude_code_log;
+#[path = "codex-aborted-turn/mod.rs"]
+pub mod codex_aborted_turn;
+#[path = "codex-log/mod.rs"]
+pub mod codex_log;
+#[path = "codex-transcript/mod.rs"]
+pub mod codex_transcript;
+#[path = "copilot-log/mod.rs"]
+pub mod copilot_log;
+#[path = "cursor-hook/mod.rs"]
+pub mod cursor_hook;
+#[path = "doubao-work/mod.rs"]
+pub mod doubao_work;
+#[path = "dsh/mod.rs"]
+pub mod dsh;
+#[path = "dsh-log/mod.rs"]
+pub mod dsh_log;
+#[path = "grok-build-log/mod.rs"]
+pub mod grok_build_log;
+#[path = "hermes-log/mod.rs"]
+pub mod hermes_log;
+#[path = "kiro-cli-log/mod.rs"]
+pub mod kiro_cli_log;
+#[path = "kiro-cli-session/mod.rs"]
+pub mod kiro_cli_session;
+#[path = "mimo-code-log/mod.rs"]
+pub mod mimo_code_log;
+#[path = "openclaw-plugin/mod.rs"]
+pub mod openclaw_plugin;
+#[path = "opencode-log/mod.rs"]
+pub mod opencode_log;
+#[path = "pi-coding-agent-log/mod.rs"]
+pub mod pi_coding_agent_log;
+#[path = "qwen-code-cli-log/mod.rs"]
+pub mod qwen_code_cli_log;
+#[path = "rest_support.rs"]
+pub mod rest_support;
+#[path = "workbuddy/mod.rs"]
+pub mod workbuddy;
+#[path = "wukong/mod.rs"]
+pub mod wukong;

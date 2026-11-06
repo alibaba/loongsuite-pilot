@@ -6,7 +6,7 @@
 // unprinted or lost, and several branches (`systemctl --user is-enabled` missing a unit,
 // a launchd job that is not loaded) said nothing at all. Every non-success exit now names
 // a stage and leaves the same breadcrumb file the .ps1 writes, which the calling
-// collector/updater reads via src/utils/restart-breadcrumb.ts.
+// collector/updater reads via src/utils/restart_breadcrumb.rs.
 //
 // This file also pins the two `set -euo pipefail` hazards that would silently gut the
 // diagnostics on the platforms this script actually runs on.
@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const SERVICE_SH = 'scripts/loongsuite-pilot.sh';
-const BREADCRUMB_TS = 'src/utils/restart-breadcrumb.ts';
+const BREADCRUMB_RS = 'src/utils/restart_breadcrumb.rs';
 const text = readFileSync(SERVICE_SH, 'utf-8');
 
 // Drop comment lines so prose about write_restart_failure cannot satisfy a structural check.
@@ -267,19 +267,22 @@ describe('the breadcrumb writer is safe for the reader', () => {
 });
 
 describe('the two sides agree on the contract', () => {
-  it('puts the breadcrumb where the node reader looks for it', () => {
-    // restartFailurePath() builds <dataDir>/logs/last-restart-failure-<target>.json.
+  it('puts the breadcrumb where the native reader looks for it', () => {
+    // restart_failure_path() builds <dataDir>/logs/last-restart-failure-<target>.json.
     expect(text).toContain('LOG_DIR="$DATA_DIR/logs"');
     expect(bodyOf('restart_failure_file')).toContain('echo "$LOG_DIR/last-restart-failure-$1.json"');
-    expect(readFileSync(BREADCRUMB_TS, 'utf-8')).toContain("'logs', `last-restart-failure-${target}.json`");
+    const reader = readFileSync(BREADCRUMB_RS, 'utf-8');
+    expect(reader).toContain('.join("logs")');
+    expect(reader).toContain('format!("last-restart-failure-{}.json", target.as_str())');
   });
 
-  it('every stage the script writes is known to restart-breadcrumb.ts', () => {
+  it('every stage the script writes is known to restart_breadcrumb.rs', () => {
     // The stages are aggregation keys in the alarm stream. A label only one side knows
     // makes the alarm unqueryable, which is a silent failure of its own.
-    const tsText = readFileSync(BREADCRUMB_TS, 'utf-8');
-    const listed = tsText.slice(tsText.indexOf('RESTART_STAGES = ['), tsText.indexOf('] as const'));
-    const known = new Set([...listed.matchAll(/'([a-z-]+)'/g)].map((m) => m[1]));
+    const rsText = readFileSync(BREADCRUMB_RS, 'utf-8');
+    const listed = rsText.match(/pub const RESTART_STAGES:[\s\S]*?=\s*&\[([\s\S]*?)\];/);
+    expect(listed, 'native stage registry must exist').not.toBeNull();
+    const known = new Set([...listed[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]));
     expect(known.size).toBeGreaterThan(5);
 
     const code = codeOf(text);

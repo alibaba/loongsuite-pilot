@@ -7,10 +7,12 @@
 [![CI](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/loongsuite-pilot/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/alibaba/loongsuite-pilot)](https://github.com/alibaba/loongsuite-pilot/releases/latest)
 [![License](https://img.shields.io/github/license/alibaba/loongsuite-pilot)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.99.1%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-enabled-4F62AD)](https://opentelemetry.io/)
 
 [English](README.md) | **简体中文**
+
+本分支开发面向 `dev/v2.0.0` 的 Rust 版 Pilot 2.0.0，尚未正式发布。Node.js 版 1.x 继续在 `main` 维护，背景见[迁移讨论](https://github.com/alibaba/loongsuite-pilot/issues/511)。
 
 [概览](#概览) | [快速开始](#快速开始) | [文档](#文档) | [社区](#社区) | [参与贡献](#参与贡献)
 
@@ -104,9 +106,11 @@ Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent
 
 前置要求：
 
-- 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）。受支持平台上安装器会下载托管 Node.js 22.22 运行时；系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受。Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。
-- `npm`
-- `curl` 或 `wget`
+- Pilot 安装包自带 Rust 原生二进制，collector、updater、CLI 和独立 Hook processor 不需要 Node.js、npm、Python 或 Rust 工具链。
+- Linux/macOS 需要系统 Shell、`curl` 或 `wget`、`tar`；Windows 需要 PowerShell 5.1 或以上版本。
+- Agent 自身的 JS/Python 插件运行时仍由 Agent 提供，不属于 Pilot 运行依赖。
+
+本分支是 Rust 迁移版本。八平台目标不等于已完成平台验收；旧 OSS 安装入口不保证提供 Rust 包。请优先按[安装指南](docs/zh-CN/installation.md#rust-发行包与平台)选择同一 Release 的安装脚本、平台包和校验和，显式传入包地址。以下 OSS 命令仅适用于历史发布渠道。
 
 从公开包安装：
 
@@ -157,10 +161,8 @@ loongsuite-pilot info
 
 开启后,上游 `traceparent` 经以下两种方案之一到达 Pilot,并在采集时 stamp 到记录(turn 打 `trace_id`、用户输入事件打 `parent_span_id`):
 
-- **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关，但要求采集器和 Agent 插件支持输出本轮用户输入事件；`sessionId` 须等于 Pilot 采集的原生 `gen_ai.session.id`，且内容 hash 或前缀能匹配该输入。OpenClaw / Hermes 需使用包含 [PR #508](https://github.com/alibaba/loongsuite-pilot/pull/508) 全部修复的采集器，Hermes 还需更新已部署的 Pilot 插件并重启进程。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
-- **环境变量**(agent 进程上的 `TRACEPARENT`):仅对调用 `recordUpstreamContextOnce` 写入 session 记录的受支持 Hook 生效，作用于会话首轮；OpenClaw / Hermes 插件本身不直接读取该变量。适用于有对应 Hook 支持、但调用方无法预先拿到 per-turn `sessionId` 的情况。
-
-逐轮关联的文件格式、接入示例、OpenClaw / Hermes 版本要求和验证方法见[逐轮 Trace 上下文关联接入](docs/zh-CN/upstream-trace-correlation.md)。
+- **关联文件**(per-turn):调用方在发送 prompt 时,把 `{sessionId, contentHash, contentPrefix, traceparent}` 写入 `~/.loongsuite-pilot/acp-correlate/<sessionId>.jsonl`。串联与协议无关——唯一要求是 `sessionId` 等于 Pilot 采集该 turn 时的 `gen_ai.session.id`,且内容(hash 或前缀)能匹配采集到的用户文本。ACP client 天然满足(`session/new` 的 id 会贯穿采集),故 ACP 是主要场景。
+- **环境变量**(agent 进程上的 `TRACEPARENT`):经 agent 的 hook 作用于该会话的第一个 turn。适用于调用方无法预先拿到 per-turn `sessionId` 的情况。
 
 对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
 
@@ -237,32 +239,31 @@ loongsuite-pilot menubar start
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
-npm install
-npm run build
-node scripts/postinstall.js
-node dist/index.js
+python3 scripts/build/prepare-rust-dependencies.py
+cargo build --locked --release
+./target/release/loongsuite-pilot --help
 ```
 
 本地开发：
 
 ```bash
-npm install
-npm run build
-npm run typecheck
-npm test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked --all-features
 ```
 
-如需从本地构建包安装为后台服务，请参考 [安装指南](docs/zh-CN/installation.md)。
+工具链固定在 `rust-toolchain.toml`（1.99.1）。不带子命令运行二进制会启动采集并可能部署 Agent 配置；只查看帮助请使用 `--help`。
+
+如需从本地构建包安装为后台服务，请参考[安装指南](docs/zh-CN/installation.md)。发布流程、CI 预算和暂缓测试见 [Rust 发布与测试优先级](docs/zh-CN/rust-release.md)。
 
 ## 参与贡献
 
 欢迎提交 Issue 和 Pull Request。提交变更前，请运行与 CI 一致的核心检查：
 
 ```bash
-npm ci
-npm run typecheck
-npm test
-npm run build
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked --all-features
 ```
 
 如需增加新的 AI Coding Agent 支持，请先阅读[新 Agent 接入指南](docs/zh-CN/agent-onboarding.md)。Bug 和功能建议可通过 [GitHub Issues](https://github.com/alibaba/loongsuite-pilot/issues) 提交。

@@ -8,9 +8,32 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 
 ## 前置要求
 
-- `curl` 或 `wget`
-- Windows 下需要 PowerShell 5.1 或更高版本
-- 能加载 `node:sqlite` 的 Node.js（22.13+、23.4+ 或更新版本）与 `npm`：在受支持平台上由安装器自动下载**托管 Node.js 22.22 运行时**（见下文），无需预装。系统 Node.js 只有在 `require('node:sqlite')` 成功时才会被接受；Node.js 18/20 以及 22.0–22.12 / 23.0–23.3 不够。Linux musl（Alpine）与 Windows ARM64 等没有托管运行时的平台，仍需自备满足该要求的 Node.js 与 `npm`
+- Linux/macOS：系统 Shell、`curl` 或 `wget`、`tar`；Windows：PowerShell 5.1 或以上版本。
+- 安装包自带 Rust 二进制；Pilot 的安装配置处理、collector、updater、CLI 和独立 Hook processor 不依赖 Node.js、npm、Python 或 Rust 工具链。
+- 仅源码开发需要 `rust-toolchain.toml` 固定的 Rust 1.99.1、C/C++ 编译器（SQLite bundled）及 macOS UI 的 Swift 工具链。
+- Agent 进程内的 JS 插件、preload、runtime wrapper 和 Hermes Python 插件仍由各 Agent 宿主执行。
+
+## Rust 发行包与平台
+
+当前固定支持以下六个平台。Linux 仅支持 GNU libc；musl（包括 Alpine）不受支持，Unix 安装器在下载或修改安装态前拒绝 musl 和无法确认的 libc。历史八平台运行、Node 支持声明或 Linux 单测不能替代当前六平台代码的验收。
+
+| 系统 | target triple | 格式 |
+|---|---|---|
+| Linux x64 | `x86_64-unknown-linux-gnu` | tar.gz |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | tar.gz |
+| macOS Intel / Apple Silicon | `x86_64-apple-darwin`、`aarch64-apple-darwin` | tar.gz |
+| Windows x64 / ARM64 | `x86_64-pc-windows-msvc`、`aarch64-pc-windows-msvc` | zip |
+
+从同一 Rust Release 下载 `installer.sh` / `installer.ps1`、`SHA256SUMS` 和 `loongsuite-pilot-<version>-<target>.<格式>`；先核对 SHA-256，再显式安装本地包。例如 Linux x64 GNU：
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+bash ./installer.sh install --package-url "file://$(pwd)/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
+```
+
+Windows 使用 `Get-FileHash -Algorithm SHA256` 与清单逐字核对，再使用 `-PackageUrl` 传入对应 zip。macOS 可用 `shasum -a 256` 核对。版本号和 target 必须替换为实际下载值。
+
+下面的 OSS 示例保留用于历史版本；旧默认地址不保证返回 Rust 包，Rust 安装应显式传入已核验的 `--package-url` / `-PackageUrl`。本次 CI 不上传 OSS，也不自动切换既有安装或更新渠道。
 
 ## 在 Linux 或 macOS 从公开包安装
 
@@ -32,7 +55,7 @@ Invoke-WebRequest `
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 ```
 
-Windows 安装器默认下载 `loongsuite-pilot.zip`。数据目录默认在 `%USERPROFILE%\.loongsuite-pilot`，命令入口安装到 `%USERPROFILE%\.local\bin`。如果安装后当前窗口里找不到 `loongsuite-pilot` 命令，重新打开一个 PowerShell 窗口即可。
+历史默认地址使用通用 `loongsuite-pilot.zip`；Rust 发行必须显式选择带版本及 target 的 zip。数据目录默认在 `%USERPROFILE%\.loongsuite-pilot`，命令入口安装到 `%USERPROFILE%\.local\bin`。如果安装后当前窗口里找不到 `loongsuite-pilot` 命令，重新打开一个 PowerShell 窗口即可。
 
 ## 带常用参数安装
 
@@ -97,52 +120,20 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--cms-workspace <name>` | CMS workspace 值。 |
 | `--service-name-prefix <name>` | 上报后端使用的 service name 前缀。 |
 | `--system-service` | **已废弃** — 忽略。Init 系统现在自动检测（systemd-user → systemd-system → init.d）。 |
-| `--prefer-system-node` | 优先使用系统已安装的 Node.js，仅当系统 Node.js 缺失或无法加载 `node:sqlite`（需要 22.13+ 或 23.4+）时才下载托管运行时（默认行为是始终下载并固定托管运行时）。 |
+| `--prefer-system-node` | 旧版兼容参数；Rust 原生安装无需选择或下载 Node。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
 例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
 
-## 托管 Node.js 运行时
+## 运行时
 
-为避免「用户环境删除/切换 node 导致采集中断」，安装器默认从 OSS 下载并固定一份**托管 Node.js 运行时**与**预编译 node_modules**，采集运行时不再依赖系统 node：
+安装后的采集进程、更新进程和 Hook 处理都是 `loongsuite-pilot` 二进制。版本目录是 `~/.loongsuite-pilot/versions/<版本>/`，其中 `bin/loongsuite-pilot` 是可执行文件，`current` 指向正在使用的版本名。`~/.local/bin/loongsuite-pilot` 是启动脚本，`run` 和 `run-updater` 会执行这个二进制。
 
-1. `ensure_managed_node`：按平台/架构下载 `node-v<版本>-<os>-<arch>` 包，校验 `SHASUMS256.txt` 后解压到 `<数据目录>/runtime/`，并把该 node 路径写入 `<数据目录>/node-bin`。macOS 会执行 `xattr -dr com.apple.quarantine` 去除隔离属性。
-2. `ensure_node_modules`：按 app 版本 × 平台 × 架构下载预编译 `node_modules`（生产依赖是纯 JavaScript；SQLite 读取走 Node 内置 `node:sqlite`（22.13 / 23.4 起无需 `--experimental-sqlite`，托管运行时已满足）），校验后替换安装目录下的 `node_modules`。
-3. 任一步失败都会回退到旧路径（`resolve_node` 找系统 node / `npm install --production --no-optional`）。系统 node 必须能加载 `node:sqlite`，否则安装直接失败并保留原版本可用的运行时，不会在 SQLite 不可用时装成成功。
+版本包通过 `runtime-manifest.json` 记录平台、edition、提交和资源摘要；Rust updater 只接受独立的 `latest-rust.json` 六平台清单，不接受旧 Node 通用包。首次从 Node 版迁移必须使用 Rust 安装器和匹配的平台包，不直接混用旧自动更新渠道。
 
-平台覆盖与回退：
+仍保留的 JavaScript/Python 仅用于 Agent 宿主插件、preload 和 runtime wrapper；Dashboard 为静态前端，macOS 菜单栏为预编译 Swift UI。Pilot 内部 `.mjs` Span enricher 已不支持，见 [Trace 扩展迁移](trace-output.md#自定义-span-属性补齐)。
 
-| 平台/arch | 托管 node | 托管 node_modules | 行为 |
-|---|---|---|---|
-| macOS arm64 / x64 | ✅ | ✅ | 托管下载 |
-| Linux x64 / arm64（glibc） | ✅ | ✅ | 托管下载 |
-| Windows x64 | ✅ | ✅ | 托管下载 |
-| Linux musl（Alpine） | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
-| Windows ARM64 | ❌ | ❌ | 回退系统 node + `npm install`。该 node 必须能加载 `node:sqlite`（22.13+ 或 23.4+），否则安装失败 |
-
-本地布局：
-
-```text
-~/.loongsuite-pilot/
-├── node-bin                       # 固定的 node 路径（默认指向 runtime/ 下的托管 node）
-└── runtime/
-    └── node-v22.22.2-darwin-arm64/
-        └── bin/node               # 托管运行时；daemon 与各 hook 的 fallback 首位
-```
-
-Windows 兼容两种产物布局：`bin\node.exe` 与官方 zip 的根目录 `node.exe`（优先前者）。
-
-运行期自愈：`node-bin` 指向的路径失效时，collector 的自愈逻辑会优先重指 `runtime/` 下的托管 node（永不被 node 版本管理器删除）；各 hook 脚本的只读 fallback 也把托管 runtime 路径放在第一位。
-
-环境变量覆盖（调试/内网镜像用）：
-
-| 变量 | 说明 |
-|------|------|
-| `LOONGSUITE_PILOT_NODE_VERSION` | 托管 node 版本，默认 `22.22.2`。 |
-| `LOONGSUITE_PILOT_NODE_DEPS_URL` | 托管 node 下载 base URL。 |
-| `LOONGSUITE_PILOT_NODE_MODULES_URL` | 预编译 node_modules 下载 base URL。 |
-
-诊断提示：安装日志出现 `下载托管 Node.js` / `Downloading managed Node.js` 即走托管路径；出现 `回退系统 node` / `falling back to system node` 说明托管下载失败或平台不受支持，随后会使用系统 node；`sha256 mismatch` 表示产物校验失败，已中止落盘并回退。
+`loongsuite-pilot --version`、`probe --build-edition`、`check --json` 可做无启动副作用的检查。版本切换、回滚和卸载会修改本地安装，应在保留配置与旧版本备份后明确执行；包预检不代表全生命周期验收。
 
 ## 验证安装
 
@@ -213,7 +204,7 @@ loongsuite-pilot menubar stop
 
 环境变量 `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` 的优先级仍高于配置文件。如果它设置为启用，后续启动 Pilot 时仍可覆盖持久化的 `false`；命令检测到冲突时会给出警告。
 
-源码构建后也可执行 `node dist/index.js menubar start` 或 `node dist/index.js menubar stop`，无需安装新的系统命令。
+源码构建后也可执行 `./target/release/loongsuite-pilot menubar start` 或 `./target/release/loongsuite-pilot menubar stop`。
 
 ### macOS Dashboard 快捷方式
 
@@ -230,7 +221,7 @@ loongsuite-pilot dashboard shortcut uninstall
 `~/Library/Application Support/LoongSuite Pilot/Shortcuts/LoongSuite Pilot Dashboard.webloc`，
 并添加到程序坞的文件区（下载、废纸篓这一侧，不能放在应用区）。点击后使用默认浏览器打开。
 不生成或编译 `.app`，不需要额外安装软件，不增加后台进程，也不会重启 Pilot。
-安装命令只使用 Pilot 已有的 Node 和 macOS 自带工具。
+安装命令由 Rust CLI 调用 macOS 自带的 osascript/JXA，不依赖 Node.js；桥接代码内嵌于二进制，图标随 macOS 平台包提供。
 
 网址在**执行快捷方式安装命令时**读取配置中的 `dashboard.port`，支持
 `AGENT_DATA_COLLECTION_CONFIG` 和安装时的自定义数据目录；端口缺失或不合法时，
@@ -297,10 +288,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Pu
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
-npm install
-npm run build
-node scripts/postinstall.js
-node dist/index.js
+cargo build --locked --release
+./target/release/loongsuite-pilot
 ```
 
 这会以前台方式启动 collector。启动时，Pilot 会读取 `agents.d/` 中的 Agent 定义，自动检测已安装 Agent，并为检测到的 Agent 部署采集能力。
@@ -308,9 +297,17 @@ node dist/index.js
 ## 将本地构建安装为服务
 
 ```bash
-bash deploy/package-opensource.sh
-bash deploy/installer-opensource.sh --package-url "file://$(pwd)/loongsuite-pilot.tar.gz"
+cargo build --locked --release --target x86_64-unknown-linux-gnu
+cargo run --locked -p xtask -- package \
+  --target x86_64-unknown-linux-gnu \
+  --binary target/x86_64-unknown-linux-gnu/release/loongsuite-pilot \
+  --commit "$(git rev-parse HEAD)" --output target/packages
+bash deploy/installer-opensource.sh install --package-url "file://$(pwd)/target/packages/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu/loongsuite-pilot-1.2.0-x86_64-unknown-linux-gnu.tar.gz"
 ```
+
+上述示例仅适用于 Linux x64 GNU，其他平台需要在对应 OS/架构打包；macOS 还必须通过 `--status-bar-binary` 提供同架构 UI。打包默认拒绝未提交修改；本地调试可显式 `--allow-dirty`，这样的包不能发布。版本以 Cargo 为准，输出目录已存在时拒绝覆盖。
+
+发布工作流与测试优先级见 [Rust 发布与测试优先级](rust-release.md)。
 
 ## 下一步
 

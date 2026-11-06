@@ -1,6 +1,6 @@
 {
   "name": "loongsuite-pilot",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "Multi-agent AI coding data collection platform",
   "keywords": [
@@ -26,20 +26,19 @@
     "url": "git+https://github.com/alibaba/loongsuite-pilot.git"
   },
   "license": "Apache-2.0",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "bin": {
-    "loongsuite-pilot": "dist/index.js"
-  },
   "scripts": {
-    "build": "node build.mjs",
-    "start": "node dist/index.js",
+    "build": "cargo build --workspace --release --locked",
+    "start": "cargo run --locked --bin loongsuite-pilot --",
     "perf:cursor-hook": "node tests/performance/cursor-hook-processor.perf.mjs",
-    "perf:turn-stream": "node tests/performance/long-turn.perf.mjs",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "typecheck": "cargo check --workspace --all-targets --all-features --locked",
+    "test": "cargo test --workspace --all-features --locked",
+    "test:host:node-worker": "vitest run tests/host/node-worker-native.test.mjs --cache=false",
+    "test:host:shortcut": "vitest run tests/unit/scripts/dashboard-shortcut.test.mjs",
+    "test:host:openclaw": "vitest run tests/unit/hooks/openclaw/first-token.test.mjs tests/unit/hooks/openclaw/runtime-version.test.mjs tests/unit/hooks/openclaw/legacy-utils.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
+    "test:host:openclaw-native": "vitest run tests/host/openclaw-native-interceptor.test.mjs tests/unit/hooks/openclaw/interceptor.test.mjs",
+    "test:host:claude-fetch": "vitest run tests/unit/hooks/claude-code/fetch-intercept.test.mjs",
+    "test:host:mimo": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/mimo-code/plugin-replay.test.mjs tests/unit/hooks/mimo-code/resource-context.test.mjs",
+    "test:host:pi": "vitest run --config vitest.host-plugins.config.ts tests/unit/hooks/pi-coding-agent-extension.test.mjs",
     "test:e2e": "bash scripts/e2e/run-e2e.sh",
     "test:e2e:down": "docker compose -f tests/e2e-docker/docker-compose.l1.yml down -v",
     "test:e2e:l1": "docker compose -f tests/e2e-docker/docker-compose.l1.yml up --build --exit-code-from e2e-agent",
@@ -49,7 +48,19 @@
     "test:e2e:docker": "npm run test:e2e:l2",
     "test:e2e:docker:down": "npm run test:e2e:l2:down",
     "test:e2e:remote": "npm run test:e2e:l2:remote",
-    "postinstall": "node scripts/postinstall.js"
+    "test:host:hermes": "vitest run tests/unit/hooks/hermes-agent-plugin.test.mjs tests/unit/hooks/hermes-agent-realtime.test.mjs tests/unit/hooks/hermes-agent-ttft.test.mjs tests/unit/hooks/hermes-subagent.test.mjs tests/unit/hooks/hermes-delayed-input.test.mjs",
+    "test:host:opencode": "vitest run tests/unit/hooks/opencode-plugin-cwd.test.mjs tests/unit/hooks/opencode-plugin-session.test.mjs tests/unit/hooks/opencode-plugin-tokens.test.mjs tests/unit/hooks/opencode-plugin-v2.test.mjs",
+    "test:host:jsonl-builder": "vitest run tests/host/jsonl-validation-builder.test.mjs",
+    "test:host:trace-rules": "vitest run tests/host/trace-rule-generator.test.mjs",
+    "test:host:e2e-tools": "vitest run tests/e2e-remote/agent-matrix.test.mjs tests/e2e-remote/agent-probe-body.test.mjs tests/e2e-remote/e2e-scenarios-l1-helpers.test.mjs tests/e2e-remote/expand-features.test.mjs tests/e2e-remote/l1-env.test.mjs tests/e2e-remote/mock-server.test.mjs tests/e2e-remote/propagate-sls-install.test.mjs tests/e2e-remote/qoder-pat.test.mjs tests/e2e-remote/remote-agent-config.test.mjs tests/e2e-remote/version-matrix.test.mjs",
+    "test:host:hook-shell": "vitest run tests/unit/hooks/shared/hook-posix-parse.test.mjs",
+    "test:host:plugins": "bash scripts/testing/verify-host-plugins-glibc234.sh",
+    "test:host:openclaw-flow": "vitest run --config vitest.host-openclaw-flow.config.mjs tests/unit/hooks/openclaw/build-context.test.mjs tests/unit/hooks/openclaw/e2e-assertions.test.mjs tests/unit/hooks/openclaw/legacy.test.mjs tests/unit/hooks/openclaw/session-key-e2e.test.mjs tests/unit/hooks/openclaw/plugin.test.mjs",
+    "test:host:qoder-runtime": "vitest run tests/unit/hooks/qodercli-runtime-wrapper.test.mjs tests/unit/hooks/qodercli-token-intercept.test.mjs tests/unit/hooks/qoderwork-runtime-wrapper.test.mjs --cache=false",
+    "test:host:qwen-wrapper": "vitest run tests/unit/hooks/qwen-work-cn-wrapper-path.test.mjs --cache=false --testNamePattern='derives diagnostics output from the runtime wrapper location'",
+    "test:host:dsh": "vitest run tests/unit/inputs/dsh-log/dsh-plugin.test.ts --cache=false",
+    "test:host:dashboard": "vitest run --config vitest.host-dashboard-history.config.mjs tests/host/dashboard-static-page.test.mjs --cache=false",
+    "test:host:doubao-diagnostics": "vitest run tests/host/doubao/network-probe.test.mjs tests/host/doubao/stream.test.mjs --cache=false"
   },
   "dependencies": {
     "@alicloud/log": "^1.2.6",
@@ -79,13 +90,6 @@
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.60.2"
   },
-  "files": [
-    "dist/",
-    "assets/",
-    "compat/",
-    "scripts/",
-    "agents.d/"
-  ],
   "overrides": {
     "cookie": "1.0.0",
     "tar": "^7.5.16",
@@ -97,5 +101,6 @@
     "protobufjs": "7.6.6",
     "proxy-addr": "2.0.8",
     "qs": "6.16.1"
-  }
+  },
+  "private": true
 }
