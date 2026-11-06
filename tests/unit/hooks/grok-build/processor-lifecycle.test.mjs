@@ -100,6 +100,36 @@ const basePayload = {
 };
 
 describe('Grok Build hook lifecycle', () => {
+  test('resumes a closed native session with a new prompt without replaying the previous turn', () => {
+    const first = { ...basePayload, transcript_path: updatesPath };
+    expect(runHook('user_prompt_submit', first).status).toBe(0);
+    expect(runHook('stop', { ...first, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(runHook('session_end', first).status).toBe(0);
+    const before = records();
+    fs.appendFileSync(chatPath, [
+      { type: 'user', prompt_index: 1, content: '<user_query>resumed prompt</user_query>', timestamp: '2026-07-29T03:50:01.000Z' },
+      { type: 'assistant', content: 'resumed response', model_id: 'grok', timestamp: '2026-07-29T03:50:02.000Z' },
+    ].map(JSON.stringify).join('\n') + '\n');
+    fs.appendFileSync(updatesPath, JSON.stringify({ timestamp: 1785297002, params: {
+      _meta: { promptId: 'prompt-resumed', agentTimestampMs: 1785297002000 },
+      update: { sessionUpdate: 'turn_completed', stopReason: 'end_turn', _meta: { promptIndex: 1 } },
+    } }) + '\n');
+    const resumed = { ...first, prompt_id: 'prompt-resumed', timestamp: '2026-07-29T03:50:01.000Z' };
+    expect(runHook('user_prompt_submit', resumed).status).toBe(0);
+    // An old process can finish its teardown after the new process starts.
+    expect(runHook('session_end', first).status).toBe(0);
+    expect(runHook('stop', { ...resumed, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(runHook('session_end', resumed).status).toBe(0);
+    const after = records();
+    expect(after.filter(row => row['gen_ai.turn.id'] === 'prompt-redacted')).toEqual(before);
+    expect(after.some(row => row['gen_ai.turn.id'] === 'prompt-resumed' && row['event.name'] === 'llm.response')).toBe(true);
+    expect(JSON.stringify(after)).toContain('resumed response');
+    expect(new Set(after.map(row => row['event.id'])).size).toBe(after.length);
+    expect(runHook('stop', { ...first, stop_reason: 'end_turn' }).status).toBe(0);
+    expect(runHook('user_prompt_submit', first).status).toBe(0);
+    expect(records()).toEqual(after);
+  });
+
   test('accepts the current Grok camelCase hook envelope', () => {
     const result = runHook('stop', {
       hookEventName: 'stop',
