@@ -26,6 +26,7 @@ docker run --rm --network none \
     test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.34"
     rustc --version
     mkdir -p "$HOME"
+    python3 scripts/build/prepare-rust-dependencies.py --offline
     if test "$#" -eq 0; then
       set -- cargo test --workspace --all-features --locked --offline
     fi

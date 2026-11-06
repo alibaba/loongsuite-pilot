@@ -8,6 +8,14 @@ Cargo feature or dependency. No test is silently skipped.
 Run explicitly with Rust 1.99.1, GLIBC 2.34, Node 22 and Python 3 available in the
 isolated runner; use synthetic HOME/USERPROFILE/XDG directories and network disabled:
 
+Prepare the pinned dependencies once before entering the offline runner:
+
+```sh
+python3 scripts/build/prepare-rust-dependencies.py
+```
+
+Then, inside the isolated runner:
+
 ```sh
 cargo test --offline --locked --manifest-path tests/host-plugin-contracts/Cargo.toml -- --nocapture
 ```
@@ -24,7 +32,7 @@ snapshots stand in for a live append. The SSE fixture executes the existing test
 helper after replacing only its Vitest mocking adapter in the isolated Node host.
 The helper retains its original stream data, 50ms fake clock and ordering.
 
-The product's locked dependency versions and both vendored Boa patches are reused.
+The product's locked dependency versions and both checksum-verified Boa manifest patches are reused.
 After product dependency graph additions, synchronize this development lock from
 the product lock plus this package block; avoid a full generate-lockfile re-resolve.
 

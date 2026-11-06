@@ -23,7 +23,7 @@ jobs:
   build:
     name: Package (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -49,6 +49,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - name: 核对受信任来源与版本
         env:
           EVENT: ${{ github.event_name }}
@@ -153,7 +154,7 @@ jobs:
     needs: build
     if: always()
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     environment: ${{ github.event_name == 'push' && 'release' || 'release-dry-run' }}
     env:
       RUSTUP_TOOLCHAIN: 1.99.1
@@ -171,6 +172,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: package-*

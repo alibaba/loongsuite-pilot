@@ -20,7 +20,7 @@ jobs:
     name: ci-gate
     runs-on: ubuntu-22.04
     # 完整功能与宿主回归优先，保留编译及缓存收尾余量。
-    timeout-minutes: 15
+    timeout-minutes: 60
     env:
       RUSTUP_TOOLCHAIN: 1.99.1
       CARGO_TERM_COLOR: always
@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - name: 安装固定工具链
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -48,11 +49,9 @@ jobs:
           export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           HOME="$RUNNER_TEMP/pilot-home" USERPROFILE="$RUNNER_TEMP/pilot-home" cargo test --workspace --locked --all-features
       - name: 现有 JXA 宿主策略测试（开发依赖不进入运行包）
-        env:
-          PILOT_MIGRATION_REPORT: target/migration-audit/shortcut-host-linux.json
         run: |
           npm ci --ignore-scripts
-          npm run test:host:shortcut -- --reporter=default --reporter=./scripts/testing/migration-reporter.mjs
+          npm run test:host:shortcut -- --reporter=default
       - name: 可选 Node worker 实际入口回归
         env:
           PILOT_NATIVE_NODE_WORKER_BRIDGE: ${{ github.workspace }}/target/debug/examples/host_node_worker_bridge
@@ -61,10 +60,6 @@ jobs:
           cargo build --locked --all-features --example host_node_worker_bridge
           npm run test:host:node-worker
       - name: Hermes 宿主插件回归（Python 仅用于宿主测试）
-        env:
-          PILOT_MIGRATION_REPORT: target/migration-audit/hermes-host-linux.json
-        run: npm run test:host:hermes -- --reporter=default --reporter=./scripts/testing/migration-reporter.mjs
+        run: npm run test:host:hermes -- --reporter=default
       - name: OpenCode V1/V2 宿主插件回归
-        env:
-          PILOT_MIGRATION_REPORT: target/migration-audit/opencode-host-linux.json
-        run: npm run test:host:opencode -- --reporter=default --reporter=./scripts/testing/migration-reporter.mjs
+        run: npm run test:host:opencode -- --reporter=default

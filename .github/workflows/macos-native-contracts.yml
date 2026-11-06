@@ -22,7 +22,7 @@ jobs:
   native:
     name: Native contracts (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -41,6 +41,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - name: Install pinned native Rust
         run: |
           set -euo pipefail

@@ -33,5 +33,6 @@ exec docker run --rm --network none \
     node --version
     python3 --version
     mkdir -p "$HOME"
+    python3 scripts/build/prepare-rust-dependencies.py --offline
     exec "$@"
   ' pilot-host-plugins "$@"

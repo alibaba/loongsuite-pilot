@@ -262,6 +262,7 @@ The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has high
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
+python3 scripts/build/prepare-rust-dependencies.py
 cargo build --locked --release
 ./target/release/loongsuite-pilot --help
 ```

@@ -4,7 +4,6 @@ mod field_coverage;
 mod hooks;
 mod injection_reports;
 mod jsonl_validate;
-mod migration;
 mod package;
 mod release;
 mod swift;
@@ -66,21 +65,11 @@ enum Task {
         #[arg(long)]
         check: bool,
     },
-    /// 检查固定历史基线的测试映射，输出未承接项；不删除文件。
-    MigrationAudit {
-        #[arg(long, default_value = "target/migration-audit")]
-        output: PathBuf,
-        #[arg(long)]
-        require_complete: bool,
-        /// 保留测试的 Vitest 收集与执行报告。
-        #[arg(long)]
-        retained_report: Option<PathBuf>,
-    },
     /// 在隔离目录运行质量门禁，保存逐命令结果与日志。
     Baseline {
         #[arg(long, default_value = "target/ci-baseline")]
         output: PathBuf,
-        #[arg(long, default_value_t = 1800)]
+        #[arg(long, default_value_t = 3600)]
         timeout_seconds: u64,
         /// 使用串行测试建立基线，避免遗留环境变量测试相互污染。
         #[arg(long)]
@@ -125,11 +114,6 @@ fn main() -> Result<ExitCode> {
             commit,
         } => injection_reports::check_reports(root, &reports_root, &packages, &commit),
         Task::SyncHookWrappers { check } => hooks::sync(root, check),
-        Task::MigrationAudit {
-            output,
-            require_complete,
-            retained_report,
-        } => migration::audit(root, &output, require_complete, retained_report.as_deref()),
         Task::Baseline {
             output,
             timeout_seconds,

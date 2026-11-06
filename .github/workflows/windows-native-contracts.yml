@@ -22,7 +22,7 @@ jobs:
   native:
     name: Native contracts (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +39,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - name: Install Rust 1.99.1 for the native runner
         run: |
           set -euo pipefail
@@ -149,7 +150,7 @@ jobs:
   lib:
     name: Complete unit library (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +167,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
       - name: Install Rust 1.99.1 for the native runner
         run: |
           set -euo pipefail

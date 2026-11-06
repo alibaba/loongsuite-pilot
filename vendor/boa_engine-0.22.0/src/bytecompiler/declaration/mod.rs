@@ -1,1 +1,0 @@
-mod declaration_pattern;
