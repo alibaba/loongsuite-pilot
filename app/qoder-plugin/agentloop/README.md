@@ -22,7 +22,7 @@
 
 要仪表盘时使用 `/agentloop-audit-dashboard` 或说“把这些生成一份报表”。助手复用查询知识，生成 dashboard JSON 和可点击的本地 HTML 链接；确认预览后才发布到 SLS。图表、筛选器与点击交互由通用 `sls-dashboard-builder` 提供。
 
-应用事实合并 agent-event / agent-event-webtracking；意图限定 audit-event 的意图事件；高保真风险使用 incident-event；运行时与实体查询按数据契约选择来源。客户没有花名册时不编造在册人数或覆盖率。公开 Skill 不保存客户空间、真实数据或凭据。
+应用事实合并 agent-event / agent-event-webtracking；意图限定 audit-event 的意图事件；高保真风险使用 incident-event；运行时与实体查询按数据契约选择来源。客户没有花名册时不编造在册人数或覆盖率。SQL、接入材料和报表默认保存在当前项目的 `output/audit/reports/`，也可指定其他目录。
 
 ## 部门与业务团队接入
 
@@ -34,7 +34,7 @@
 先检查花名册快照有效期、员工唯一归属和关联覆盖，再保留零用量员工计算在册人数、使用人数与覆盖率，生成本地预览并检查部门筛选联动。
 ```
 
-具体表名和字段映射保存在本地环境/场景资料，不修改公共 schema。只有事件数据时先做事件洞察；部门字段缺失或身份不匹配时说明限制。示例规格在 [事件洞察](skills/agentloop-audit-dashboard/examples/agent-events-spec.md) 与 [业务团队](skills/agentloop-audit-dashboard/examples/business-team-spec.md)，根据本轮目标适配查询和筛选。
+具体表名和字段映射写入本次项目的场景资料。组织结构和个人账单均可作为外表关联：前者提供人群与归属，后者提供实际费用。只有事件数据时先做事件洞察；部门字段缺失或身份不匹配时说明限制。示例规格在 [事件洞察](skills/agentloop-audit-dashboard/examples/agent-events-spec.md) 与 [业务团队](skills/agentloop-audit-dashboard/examples/business-team-spec.md)，根据本轮目标适配查询和筛选。
 
 ## 身份凭证
 

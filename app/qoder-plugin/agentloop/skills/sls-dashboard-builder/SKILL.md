@@ -156,31 +156,30 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 ## 上游输入
 
-`sls-dashboard-builder` 不维护业务 schema、公共 CTE、业务脚本或报表产物。  
-当上游业务 skill 或用户提供自然语言需求、数据语义、查询方案、已有 JSON 或输出路径时，本 skill 只负责把这些输入落实为 SLS dashboard JSON、图表配置和校验建议。
+根据用户需求、数据语义、查询方案、已有 JSON 和输出路径，生成 SLS dashboard JSON、图表配置与校验建议。
 
 ## Skill Commands
 
 ### render-report
 
-将 dashboard JSON 转成可本地打开的 HTML 预览。该命令是 `sls-dashboard-builder` 对业务 skill 暴露的通用能力；业务 skill 通过 `sls-dashboard-builder.render-report` 生成本地预览。
+将 dashboard JSON 转成可本地打开的 HTML 预览。
 
-该命令只理解通用 SLS dashboard 结构，不内置业务 schema、CTE 或默认过滤值；按 dashboard JSON 中的查询配置渲染预览结果。
+预览器按 dashboard JSON 中的查询配置取数并渲染。
 
-在插件根目录执行：
+在当前项目目录执行，`<插件目录>` 替换为插件安装路径：
 
 ```bash
-python3 scripts/run.py report --dashboard ~/.loongsuite-pilot/audit/reports/<scenario>-dashboard.json
+python3 "<插件目录>/scripts/run.py" report --dashboard output/audit/reports/<scenario>-dashboard.json
 ```
 
 常用参数：
 
 - `--dashboard <path>`：指定 dashboard JSON。
-- `--output <path>`：指定 HTML 输出路径。默认写到 `~/.loongsuite-pilot/audit/reports/<dashboardName>-report.html`。
+- `--output <path>`：指定 HTML 输出路径。默认与 dashboard JSON 放在同一目录；按场景名调用时使用当前项目的 `output/audit/reports/`。
 - `--var key=value`：仅替换 SQL 中精确的 `${{key}}` token；高级模板与交互的预览范围见 [筛选器与变量替换](references/filters-and-variables.md#验证与本地预览)。
 - `--with-diff`：和 git HEAD 中同一路径 dashboard JSON 做 SQL / 结果 diff。
 
-登录由插件附带，不要传 `--profile`。Windows 把 `python3 scripts/run.py` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/run.ps1`，后面的参数不变。
+登录由插件附带，不要传 `--profile`。Windows 把 `python3 "<插件目录>/scripts/run.py"` 换成 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<插件目录>/scripts/run.ps1"`，后面的参数不变。
 
 ## 参考文档索引
 

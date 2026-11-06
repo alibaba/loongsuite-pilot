@@ -4,17 +4,17 @@
 
 ## 插件入口
 
-在插件根目录执行，始终显式传入已确认的 Unix 秒时间范围和承载 Logstore：
+在当前项目目录调用插件脚本，始终显式传入已确认的 Unix 秒时间范围和承载 Logstore。`<插件目录>` 替换为插件安装路径：
 
 ```bash
-python3 scripts/run.py audit --project <project> --region <region> --logstore <logstore> --from <from> --to <to> --query '<已展开的检索或 SQL>' --line 100 --offset 0
+python3 "<插件目录>/scripts/run.py" audit --project <project> --region <region> --logstore <logstore> --from <from> --to <to> --query '<已展开的检索或 SQL>' --line 100 --offset 0
 ```
 
-找不到 `python3` 时用 `python`。Windows 的入口为 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/run.ps1 audit`，参数相同；包含 SQL 双引号时应检查实际传参，未验证的平台不得宣称通过。
+找不到 `python3` 时用 `python`。Windows 的入口为 `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<插件目录>/scripts/run.ps1" audit`，参数相同；包含 SQL 双引号时应检查实际传参，未验证的平台不得宣称通过。
 
 插件的 `--project`、`--logstore`、`--region` 会更新本地目标记录，其余项沿用 `~/.loongsuite-pilot/audit/config-record.json`。多源任务先记录原目标；结束时仅在本轮改变过默认表且用户未要求保留时，用 `audit --logstore <原表> --list` 恢复原表，不能固定改回 agent-event。`--list` 不取日志。独立 SLS 工具按请求绑定目标，无需模拟此本地状态行为。
 
-Project、Region、可用表、组织表及身份映射属于客户环境配置，不写入公开 schema。目标不完整时请用户补缺项，不推测地域。命名 AgentSpace 时同时提供 `--agent-space` 和 `--region`。Region 使用地域 ID；SLS endpoint 为 `{region}.log.aliyuncs.com`，不要与 CMS OTLP 地址互换。
+Project、Region、可用表、组织及账单映射取本次目标的配置。目标不完整时请用户补缺项，不推测地域。命名 AgentSpace 时同时提供 `--agent-space` 和 `--region`。Region 使用地域 ID；SLS endpoint 为 `{region}.log.aliyuncs.com`，不要与 CMS OTLP 地址互换。
 
 脚本有最近一小时的底层默认值，但 Skill 不依赖它。时间未确认时先询问；不得运行任何日志/统计探测。环境元数据检查不等于时间范围授权。
 
@@ -22,7 +22,7 @@ SQL 写法与分页见 [SQL 写作技巧](sql-writing.md)。stdout 为 GetLogsV2
 
 ## 报错
 
-登录没完成，或用户说明是国际站、要用 AccessKey 时，先读 [共享鉴权说明](../../references/auth.md)。不要在这里重写鉴权步骤。授权完成后原样重新执行查询，保留原来的查询目标、时间范围、分页和 `--list` 等全部参数。
+登录没完成，或用户说明是国际站、要用 AccessKey 时，按 [鉴权说明](../../references/auth.md) 完成登录。授权完成后原样重新执行查询，保留原来的查询目标、时间范围、分页和 `--list` 等全部参数。
 
 ### 退出码 1
 
@@ -41,4 +41,4 @@ stdout 每行是 `agentSpace regionId`。这些行不一定包含账号下的全
 
 ### 其他失败
 
-上面的退出码和 stderr 都对不上时，可以阅读脚本，看它实际调用了哪条命令，把这条命令单独拿出来执行，用来确认失败原因。要改参数时，只改你单独执行的那条命令。尽量不要改文件。单独执行的命令已经跑通之后，才可以把同样的改动写回文件。改文件要慎重，改过的文件会被后面的查询接着使用。
+其他失败时，根据 stderr 核对 CLI 参数、权限与网络；必要时查看脚本的实际调用，并单独重试同一请求定位原因。向用户说明错误和未完成的查询。

@@ -10,7 +10,7 @@ CROSS JOIN UNNEST(
 ) AS t(entity)
 ```
 
-TRY 失败返回 NULL；统计数据质量时将解析失败与空数组分开。
+TRY 失败返回 NULL；统计数据质量时将解析失败与空数组分开。托管索引未提供工具参数的动态子字段时，读取已支持的完整 JSON 字段，再用 JSON 函数提取。
 
 ## JOIN 前预聚合
 

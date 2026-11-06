@@ -1,4 +1,4 @@
--- CTE fragment for call-usage.v1, application sources only.
+-- CTE fragment for model call aggregation, application sources only.
 -- Use the same API time bounds for all sources. Append the required SELECT.
 WITH token_event_source_t AS (
   SELECT

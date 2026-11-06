@@ -56,6 +56,7 @@
 - [出现会话](queries/entities.md#出现会话)
 - [共现关系与证据](queries/entities.md#共现关系与证据)
 
-## 组织外表
+## 外表关联
 
+- [组织结构与个人账单](schema.md#外表关联)
 - [部门用量、覆盖率与零用量员工](schema.md#source-dept_roster外表关联示例)
