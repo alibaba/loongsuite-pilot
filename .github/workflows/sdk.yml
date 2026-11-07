@@ -53,6 +53,10 @@ jobs:
           cache-on-failure: true
       - name: Build real library and native host
         run: cargo build --locked --lib --bin loongsuite-pilot
+      # Keep ordinary builds together before dev-dependency test features
+      # change the library graph and would otherwise rebuild it a third time.
+      - name: Build package tools
+        run: cargo build --locked -p xtask
       - name: Foreign ABI, replay, independent hooks, hard deadline and unload
         run: |
           set -euo pipefail
@@ -60,8 +64,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pilot-sdk-home"
           HOME="$RUNNER_TEMP/pilot-sdk-home" USERPROFILE="$RUNNER_TEMP/pilot-sdk-home" \
             cargo test --locked --test sdk_dynamic -- --test-threads=1
-      - name: Build package tools
-        run: cargo build --locked -p xtask
       - name: Compile and run the foreign C host on Windows
         if: runner.os == 'Windows'
         shell: pwsh
