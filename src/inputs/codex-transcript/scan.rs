@@ -73,9 +73,11 @@ pub async fn opened_file_version(file: &tokio::fs::File) -> std::io::Result<File
 }
 pub async fn file_version_snapshot(path: &str) -> std::io::Result<FileVersion> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || version_from_open(&std::fs::File::open(path)?))
-        .await
-        .map_err(std::io::Error::other)?
+    tokio::task::spawn_blocking(move || {
+        version_from_open(&crate::utils::source_access::open(path)?)
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +161,7 @@ pub async fn scan_json_lines(
     if end_offset <= start_offset {
         return Ok(finished_scan(stats));
     }
-    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut file = crate::utils::source_access::open_async(file_path).await?;
     let original_version = opened_file_version(&file).await?;
     let mut last_anchor = Vec::new();
     let mut position = start_offset;
@@ -359,7 +361,7 @@ pub async fn last_complete_jsonl_offset(
     if file_size <= 0 {
         return Ok(0);
     }
-    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut file = crate::utils::source_access::open_async(file_path).await?;
     let mut last = [0u8; 1];
     file.seek(SeekFrom::Start((file_size - 1) as u64)).await?;
     let started = InputRuntimeAccumulator::now();
@@ -392,7 +394,7 @@ pub async fn read_json_line_at(
     offset: i64,
     runtime: Option<&InputRuntime>,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
-    let mut file = tokio::fs::File::open(file_path).await?;
+    let mut file = crate::utils::source_access::open_async(file_path).await?;
     let mut chunks: Vec<u8> = Vec::new();
     let mut position = offset.max(0);
     for _ in 0..16 {
@@ -587,7 +589,7 @@ pub async fn file_meta_snapshot(path: &str) -> std::io::Result<(u64, i64, i64)> 
     {
         let path = path.to_owned();
         tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-            let file = std::fs::File::open(path)?;
+            let file = crate::utils::source_access::open(path)?;
             let identity = crate::utils::file_identity::identity_from_open(&file)?;
             let metadata = file.metadata()?;
             Ok((
@@ -635,7 +637,8 @@ mod native_file_identity_tests {
         let path = root.path().join("rollout-native-id.jsonl");
         tokio::fs::write(&path, "a\n").await.expect("source");
         let path_text = path.to_string_lossy().into_owned();
-        let held_original = std::fs::File::open(&path).expect("hold identity lifetime");
+        let held_original =
+            crate::utils::source_access::open(&path).expect("hold identity lifetime");
         let first = file_meta_snapshot(&path_text)
             .await
             .expect("first snapshot");

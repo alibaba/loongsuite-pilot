@@ -17,7 +17,7 @@ async fn unread_receipt(f: &mut Fixture) -> PathBuf {
     }
     assert_eq!(user_texts(&batch), ["prompt 0"]);
     assert_eq!(f.state[&f.key]["receipts"].as_array().unwrap().len(), 1);
-    let files = std::fs::read_dir(events(f))
+    let files = crate::utils::source_access::read_dir(events(f))
         .unwrap()
         .map(Result::unwrap)
         .map(|e| e.path())
@@ -32,7 +32,12 @@ async fn inventory_names_change_even_when_directory_clock_hints_are_identical() 
         f.source.inner.lock().await.directory_inventory = true;
         unread_receipt(&mut f).await;
         f.collect().await;
-        assert_eq!(std::fs::read_dir(events(&f)).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(events(&f))
+                .unwrap()
+                .count(),
+            0
+        );
         let next = f.file.with_extension("replacement");
         std::fs::write(&next, jsonl(&turn(1, false))).unwrap();
         std::fs::rename(next, &f.file).unwrap();
@@ -55,7 +60,12 @@ async fn inventory_names_change_even_when_directory_clock_hints_are_identical() 
             f.state
         );
         f.collect().await;
-        assert_eq!(std::fs::read_dir(events(&f)).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(events(&f))
+                .unwrap()
+                .count(),
+            0
+        );
         f.restart().await;
         assert!(f.settle().await.is_empty());
     }

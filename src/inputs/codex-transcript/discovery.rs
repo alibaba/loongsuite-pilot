@@ -424,7 +424,7 @@ mod cache_publication_tests {
                 };
                 std::fs::create_dir_all(&target).unwrap();
                 std::fs::write(target.join("rollout-late.jsonl"), "{}\n").unwrap();
-                std::fs::File::open(root.path())
+                crate::utils::source_access::open(root.path())
                     .unwrap()
                     .set_modified(before + std::time::Duration::from_secs(2))
                     .unwrap();

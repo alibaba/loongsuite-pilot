@@ -274,6 +274,9 @@ async fn open_regular(path: &Path) -> Result<tokio::fs::File> {
     options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     #[cfg(windows)]
     options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    if crate::utils::source_access::current().is_some() {
+        return Ok(crate::utils::source_access::open_async(path).await?);
+    }
     Ok(options.open(path).await?)
 }
 async fn snapshot(file: &tokio::fs::File) -> Result<Snapshot> {

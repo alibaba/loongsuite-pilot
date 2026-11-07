@@ -6,7 +6,7 @@ pub(super) fn birth_ms(pid: u32) -> Option<f64> {
         return None;
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(format!("/proc/{pid}/stat"))
+    crate::utils::source_access::open(format!("/proc/{pid}/stat"))
         .ok()?
         .take(8193)
         .read_to_end(&mut bytes)
@@ -18,7 +18,7 @@ pub(super) fn birth_ms(pid: u32) -> Option<f64> {
     // Keep both quantities in the same /proc view. Container providers may
     // virtualize start ticks and uptime while CLOCK_BOOTTIME remains host-wide.
     let mut uptime_bytes = Vec::new();
-    std::fs::File::open("/proc/uptime")
+    crate::utils::source_access::open("/proc/uptime")
         .ok()?
         .take(129)
         .read_to_end(&mut uptime_bytes)

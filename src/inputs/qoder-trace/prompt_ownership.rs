@@ -84,9 +84,11 @@ impl NativeQoderPromptOwnershipResolver {
         let path = path.to_owned();
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
+            crate::utils::source_access::check(&path).map_err(|error| error.to_string())?;
             let conn = rusqlite::Connection::open_with_flags(
                 path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
             )
             .map_err(|e| e.to_string())?;
             conn.busy_timeout(std::time::Duration::ZERO)
@@ -159,7 +161,7 @@ fn number(value: &Value) -> Option<f64> {
 async fn inventory_id(path: &str) -> Option<String> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(Path::new(&path)).ok()?;
+        let file = crate::utils::source_access::open(Path::new(&path)).ok()?;
         let identity = crate::utils::file_identity::identity_from_open(&file).ok()?;
         let encoded = serde_json::to_vec(&json!([path, identity.dev, identity.ino])).ok()?;
         Some(format!("{:x}", Sha256::digest(encoded)))

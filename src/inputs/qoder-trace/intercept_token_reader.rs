@@ -47,6 +47,9 @@ pub async fn read_intercept_file(file_path: &str, since_ts: Option<i64>) -> Inte
     let mut result = InterceptData::default();
     let content = match tokio::fs::metadata(file_path).await {
         Ok(meta) if meta.len() > MAX_FILE_SIZE => {
+            if crate::utils::source_access::current().is_some() {
+                return result;
+            }
             let old = format!("{file_path}.old");
             let _ = tokio::fs::remove_file(&old).await;
             if tokio::fs::rename(file_path, old).await.is_ok() {
@@ -54,7 +57,7 @@ pub async fn read_intercept_file(file_path: &str, since_ts: Option<i64>) -> Inte
             }
             return result;
         }
-        Ok(_) => match tokio::fs::read_to_string(file_path).await {
+        Ok(_) => match crate::utils::source_access::read_to_string(file_path).await {
             Ok(text) => text,
             Err(_) => return result,
         },

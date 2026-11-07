@@ -163,7 +163,7 @@ async fn migration_l88_missing_descendant_behind_directory_alias_has_one_canonic
                 1
             );
             assert_eq!(
-                std::fs::read_dir(
+                crate::utils::source_access::read_dir(
                     f.root
                         .join("state/qoder-transcripts")
                         .join(agent)
@@ -191,7 +191,7 @@ async fn migration_l108_dangling_file_alias_keeps_identity_when_target_appears()
         publish(&f, "Stop", None);
         assert_eq!(f.collect().await.records.len(), 3);
         assert_eq!(
-            std::fs::read_dir(
+            crate::utils::source_access::read_dir(
                 f.root
                     .join("state/qoder-transcripts")
                     .join(agent)

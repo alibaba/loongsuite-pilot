@@ -460,21 +460,38 @@ async fn source_l289_only_saved_completed_ranges_reclaim_notices_and_unsaved_sta
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 1);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            1
+        );
         f.append(&[progress("Stop", 400)]);
         f.wake("Stop", json!({}));
         assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
         let saved = f.state.clone();
-        let before = std::fs::read_dir(&events).unwrap().count();
+        let before = crate::utils::source_access::read_dir(&events)
+            .unwrap()
+            .count();
         let blocked = f.source.read(Some(&saved), false).await.unwrap();
         assert_eq!(blocked.state, saved);
         assert!(!blocked.changed);
         assert!(blocked.records.is_empty());
         assert_eq!(blocked.metrics.bytes_read, 0);
         assert!(blocked.metrics.reads.is_empty());
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), before);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            before
+        );
         f.collect().await;
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         assert!(events.parent().unwrap().join("source.json").exists());
         assert!(f.collect().await.records.is_empty());
     }

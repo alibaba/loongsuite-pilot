@@ -194,6 +194,19 @@ fn package(root: &Path) -> PathBuf {
     };
     let binary = package.join(binary_name);
     fs::copy(executable(), &binary).unwrap();
+    let sdk = if cfg!(windows) {
+        "loongsuite_pilot.dll"
+    } else if cfg!(target_os = "macos") {
+        "libloongsuite_pilot.dylib"
+    } else {
+        "libloongsuite_pilot.so"
+    };
+    let profile = executable().parent().unwrap().to_owned();
+    let source = [profile.join(sdk), profile.join("deps").join(sdk)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .expect("SDK companion must be built");
+    fs::copy(source, package.join("bin").join(sdk)).unwrap();
     fs::write(
         package.join("VERSION"),
         format!("version={}\n", env!("CARGO_PKG_VERSION")),
@@ -217,6 +230,8 @@ fn package(root: &Path) -> PathBuf {
         "agents.d/cursor.json",
         "assets/hooks/fixture.sh",
     ];
+    let sdk_relative = format!("bin/{sdk}");
+    paths.push(&sdk_relative);
     for relative in [
         "agents.d/opencode.json",
         "agents.d/mimo-code.json",

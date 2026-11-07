@@ -610,3 +610,104 @@ pub struct GitHookEvent {
     pub changed_files: Vec<String>,
     pub timestamp: i64,
 }
+
+impl AgentActivityEntry {
+    /// Heap estimate for bounded SDK pre-serialization capture. No JSON encoder
+    /// or cloned serde Value is needed; output encoding happens only afterward.
+    pub(crate) fn estimated_heap_bytes(&self) -> usize {
+        fn value(v: &JsonValue) -> usize {
+            match v {
+                JsonValue::String(s) => s.capacity(),
+                JsonValue::Array(a) => {
+                    a.capacity() * std::mem::size_of::<JsonValue>()
+                        + a.iter().map(value).sum::<usize>()
+                }
+                JsonValue::Object(o) => o.iter().map(|(k, v)| k.capacity() + value(v) + 64).sum(),
+                _ => 0,
+            }
+        }
+        let mut bytes = std::mem::size_of::<Self>();
+        for item in [
+            &self.time_unix_nano,
+            &self.event_id,
+            &self.user_id,
+            &self.session_id,
+            &self.agent_type,
+            &self.provider_name,
+        ] {
+            bytes += item.capacity();
+        }
+        for item in [
+            self.observed_time_unix_nano.as_ref(),
+            self.user_name.as_ref(),
+            self.user_email.as_ref(),
+            self.trace_id.as_ref(),
+            self.span_id.as_ref(),
+            self.parent_span_id.as_ref(),
+            self.host_name.as_ref(),
+            self.host_ip.as_ref(),
+            self.service_name.as_ref(),
+            self.turn_id.as_ref(),
+            self.step_id.as_ref(),
+            self.response_id.as_ref(),
+            self.agent_id.as_ref(),
+            self.agent_name.as_ref(),
+            self.agent_description.as_ref(),
+            self.data_source_id.as_ref(),
+            self.request_id.as_ref(),
+            self.request_model.as_ref(),
+            self.response_model.as_ref(),
+            self.input_messages_hash.as_ref(),
+            self.tool_name.as_ref(),
+            self.tool_call_id.as_ref(),
+            self.tool_call_exec_id.as_ref(),
+            self.tool_result_status.as_ref(),
+            self.skill_name.as_ref(),
+            self.skill_id.as_ref(),
+            self.skill_description.as_ref(),
+            self.skill_version.as_ref(),
+            self.git_repo.as_ref(),
+            self.git_branch.as_ref(),
+            self.git_repo_root.as_ref(),
+            self.git_domain.as_ref(),
+            self.workspace_current_root.as_ref(),
+            self.workspace_path.as_ref(),
+            self.error_type.as_ref(),
+            self.error_message.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes += item.capacity();
+        }
+        for item in [
+            self.input_messages_delta.as_ref(),
+            self.input_messages.as_ref(),
+            self.input_multimodal_metadata.as_ref(),
+            self.input_multimodal_metadata_delta.as_ref(),
+            self.output_messages.as_ref(),
+            self.output_multimodal_metadata.as_ref(),
+            self.tool_call_arguments.as_ref(),
+            self.tool_call_result.as_ref(),
+            self.system_instructions.as_ref(),
+            self.tool_definitions.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes += value(item);
+        }
+        if let Some(items) = &self.finish_reasons {
+            bytes += items.capacity() * std::mem::size_of::<String>()
+                + items.iter().map(String::capacity).sum::<usize>();
+        }
+        for (key, item) in self
+            .extra
+            .iter()
+            .chain(self.resource_attributes.iter().flat_map(|map| map.iter()))
+        {
+            bytes += key.capacity() + value(item) + 64;
+        }
+        bytes
+    }
+}

@@ -105,3 +105,25 @@ fn read_stdin_sync() -> Result<String, ()> {
     io::stdin().read_to_string(&mut buf).map_err(|_| ())?;
     Ok(buf)
 }
+
+/// Reuse the installed Hook protocol and identity checks without letting a
+/// worker write Agent stdout. The native host owns its hard deadline.
+pub async fn run_hook_captured(args: &[String], stdin: String) -> (i32, String) {
+    let logger = create_logger("InterceptorCli");
+    let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured = output.clone();
+    let mut deps = HookCliDeps {
+        read_stdin: Box::new(move || Ok(stdin.clone())),
+        write_stdout: Box::new(move |text| captured.lock().unwrap().push_str(&text)),
+        log: Box::new(move |message, extra| logger.warn(message, extra)),
+        runtime_path: None,
+        resolve_surface: None,
+        create_client: None,
+        write_access_log: Some(Box::new(|entry| {
+            write_interceptor_access_log(entry, None, AccessLogLimits::default());
+        })),
+    };
+    let code = run_hook(args, &mut deps).await;
+    let text = output.lock().unwrap().clone();
+    (code, text)
+}

@@ -200,6 +200,33 @@ fn push_raw(buf: &mut String, key: &str, raw_json: &str) {
 }
 
 fn emit(level: PinoLevel, tag: &str, message: &str, meta: Option<&Map<String, Value>>) {
+    if let Some(scope) = super::source_access::current() {
+        if matches!(level, PinoLevel::Trace | PinoLevel::Debug) {
+            return;
+        }
+        let config = crate::types::MaskConfig {
+            mode: crate::types::MaskMode::All,
+            types: Vec::new(),
+            replacement_mode: None,
+        };
+        let plan = crate::mask::load_mask_plan(&config);
+        let message = crate::mask::mask_string(
+            message,
+            crate::mask::PlanOrRules::Plan(&plan),
+            &crate::mask::StringMaskOptions::default(),
+        );
+        // Instance logs retain diagnostics without copying raw input metadata.
+        scope.log_line(&format_pino_line(
+            level.label(),
+            &iso_now(),
+            std::process::id(),
+            hostname(),
+            tag,
+            &message,
+            None,
+        ));
+        return;
+    }
     if !level_enabled(level) {
         return;
     }

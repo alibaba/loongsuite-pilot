@@ -248,7 +248,7 @@ pub fn resolve_all_qoder_db_paths() -> Vec<String> {
         .join("db")
         .join("local.db");
     let mut candidates = vec![Path::new(&root).join(&tail).to_string_lossy().into_owned()];
-    if let Ok(entries) = std::fs::read_dir(&root) {
+    if let Ok(entries) = crate::utils::source_access::read_dir(&root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name == "SharedClientCache" {

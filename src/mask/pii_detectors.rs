@@ -125,30 +125,25 @@ fn collect_id_card_at(
     current_date_number: i32,
     replacement_mode: MaskReplacementMode,
 ) {
-    let mut end = start;
-    let mut chars = Vec::with_capacity(18);
-    for _ in 0..18 {
-        if end >= value.len() {
-            return;
-        }
-        let Some(ch) = value[end..].chars().next() else {
-            return;
-        };
-        chars.push(ch);
-        end += ch.len_utf8();
+    // Identity numbers are exactly 18 ASCII bytes. Reject fragmented runs
+    // before allocating or decoding 18 characters at every numeric position.
+    let Some(bytes) = value.as_bytes().get(start..start.saturating_add(18)) else {
+        return;
+    };
+    if bytes[..17].iter().any(|byte| !byte.is_ascii_digit()) {
+        return;
     }
+    let last = bytes[17];
+    if !last.is_ascii_digit() && last != b'X' && last != b'x' {
+        return;
+    }
+    let end = start + 18;
     if end < value.len() && is_ascii_alnum(code_at(value, end)) {
         return;
     }
-    if chars[..17].iter().any(|ch| !ch.is_ascii_digit()) {
-        return;
-    }
-    let last = chars[17];
-    if !last.is_ascii_digit() && last != 'X' && last != 'x' {
-        return;
-    }
-    let candidate: String = chars.iter().collect();
-    if !is_valid_id_card(&candidate, current_date_number) {
+    // All eighteen bytes are ASCII, so both endpoints are UTF-8 boundaries.
+    let candidate = &value[start..end];
+    if !is_valid_id_card(candidate, current_date_number) {
         return;
     }
     ranges.push(create_range(

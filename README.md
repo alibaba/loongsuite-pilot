@@ -257,15 +257,22 @@ The `LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP` environment variable still has high
 
 [Developer Guide](docs/agent-onboarding.md) - Add support for a new AI coding agent
 
+[Rust SDK integration](docs/zh-CN/sdk.md) - C ABI, explicit sources, callback delivery and Hook lifecycle
+
 ## Development
 
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
 python3 scripts/build/prepare-rust-dependencies.py
-cargo build --locked --release
+cargo build --locked --release --lib --bin loongsuite-pilot
 ./target/release/loongsuite-pilot --help
 ```
+
+The native executable loads the same Rust SDK used by embedding hosts. Packaged
+runtimes keep both files together in bin/; source builds put them together in
+the Cargo profile directory. Copy the shared library with the executable.
+The C header and minimal foreign host are in include/ and examples/.
 
 The root npm manifest is private and contains optional host-plugin development tools.\nIts default build, start, typecheck and test commands delegate to Cargo. Installing\nthose tools does not deploy Hooks; use the native CLI for installation. Host-only\nchecks have explicit `test:host:*` scripts.\n\nFor local development:
 

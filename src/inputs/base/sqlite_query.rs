@@ -21,8 +21,17 @@ pub fn query_readonly_sync(
     sql: &str,
     params: &[Value],
 ) -> Result<Vec<Value>, String> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|err| err.to_string())?;
+    crate::utils::source_access::check(db_path).map_err(|error| error.to_string())?;
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | if crate::utils::source_access::current().is_some() {
+                OpenFlags::SQLITE_OPEN_NOFOLLOW
+            } else {
+                OpenFlags::empty()
+            },
+    )
+    .map_err(|err| err.to_string())?;
     conn.pragma_update(None, "query_only", "ON")
         .map_err(|err| err.to_string())?;
     let mut stmt = conn.prepare(sql).map_err(|err| err.to_string())?;

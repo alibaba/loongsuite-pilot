@@ -384,7 +384,7 @@ impl CodexTranscriptInput {
         let wakeup = wakeup_dir
             .map(str::to_owned)
             .unwrap_or_else(default_wakeup_dir);
-        let mut entries = match tokio::fs::read_dir(&wakeup).await {
+        let mut entries = match crate::utils::source_access::read_dir_async(&wakeup).await {
             Ok(entries) => entries,
             Err(_) => return false,
         };

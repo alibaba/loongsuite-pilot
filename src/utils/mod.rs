@@ -133,3 +133,5 @@ pub(crate) mod file_identity;
 
 #[cfg(all(test, windows))]
 pub(crate) mod windows_test_junction;
+
+pub mod source_access;

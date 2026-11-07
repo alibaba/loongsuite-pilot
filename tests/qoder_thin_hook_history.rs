@@ -1,4 +1,7 @@
 //! Shipped Native CLI contracts replacing the historical thin Node producer.
+#[path = "support/native_sdk.rs"]
+mod native_sdk;
+
 use loongsuite_pilot::utils::candidate_process::CandidateChild;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -125,6 +128,7 @@ fn shipped_thin_cli_publishes_all_four_events_from_a_128mib_unreadable_transcrip
         "native"
     });
     std::fs::copy(env!("CARGO_BIN_EXE_loongsuite-pilot"), &binary).unwrap();
+    native_sdk::copy_sdk(&root);
     for agent in ["qoder", "qoder-cn"] {
         let data = root.join(agent);
         std::fs::create_dir(&data).unwrap();
