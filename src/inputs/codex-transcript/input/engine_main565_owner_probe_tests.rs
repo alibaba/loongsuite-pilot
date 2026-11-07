@@ -123,6 +123,15 @@ async fn main565_original_persisted_absence_repairs_invalidate_with_empty_lru_an
                 .inner
                 .body
                 .with_shared(|shared| shared.owner_offset_probes.clear());
+            let before = crate::inputs::codex_transcript::scan::file_version_snapshot(&path)
+                .await
+                .unwrap();
+            if mode == "same-size" {
+                // File-system change timestamps can share a clock tick on Unix
+                // as well as Windows. This fixture restores mtime, so ensure
+                // its separate change-time witness can actually distinguish it.
+                tokio::time::sleep(Duration::from_millis(32)).await;
+            }
             if mode == "append" {
                 f.append(&path, &owner_header()).await;
             } else {
@@ -150,6 +159,16 @@ async fn main565_original_persisted_absence_repairs_invalidate_with_empty_lru_an
                         .set_modified(stat.modified().unwrap()),
                 )
                 .unwrap();
+            if mode == "same-size" {
+                let after = crate::inputs::codex_transcript::scan::file_version_snapshot(&path)
+                    .await
+                    .unwrap();
+                assert_eq!(after.modified, before.modified);
+                assert_ne!(
+                    after.changed, before.changed,
+                    "same-size fixture must expose a distinct change-time witness"
+                );
+            }
             assert_eq!(
                 probe_owner(&f, &path, None).await,
                 Some(if mode == "append" {
