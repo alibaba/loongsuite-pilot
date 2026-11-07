@@ -127,6 +127,9 @@ fn spawn_named_watcher(
     dir: &str,
     on_change: impl Fn(Option<String>) + Send + Sync + 'static,
 ) -> Option<RecommendedWatcher> {
+    if crate::utils::source_access::current().is_some() {
+        return None;
+    }
     let directory = Path::new(dir).to_path_buf();
     let callback_directory = directory.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {

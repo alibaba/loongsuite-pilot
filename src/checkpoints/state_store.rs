@@ -404,6 +404,10 @@ impl StateStore {
 
 impl StateStore {
     /// Cheap mutation token for adapter caches; source progress remains owned by StateStore.
+    pub(crate) fn snapshot_text(&self) -> String {
+        render_states(&self.mu.lock().unwrap().states)
+    }
+
     pub fn revision(&self) -> u64 {
         self.mu.lock().unwrap().revision
     }
@@ -713,7 +717,6 @@ impl StateStore {
         json_file::write_text_atomic(&self.file_path, text).await
     }
 
-    #[cfg(test)]
     pub(crate) fn set_write_hook<F, Fut>(&self, hook: F)
     where
         F: Fn(PathBuf, String) -> Fut + Send + Sync + 'static,

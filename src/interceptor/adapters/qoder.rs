@@ -1,7 +1,7 @@
 //! Qoder desktop and qodercli hook payloads.
 
 use crate::interceptor::types::{HookEventName, HookRequest, InterceptorAgent};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 pub fn canonicalize_hook_event(raw: Option<&str>) -> Option<HookEventName> {
     match raw? {
@@ -44,38 +44,8 @@ pub fn parse_hook_request(
 }
 
 pub fn render_qoder_block(request: &HookRequest, reason: &str) -> String {
-    let text = if reason.is_empty() {
-        "Blocked by security policy"
-    } else {
-        reason
-    };
-    let body = match request.event {
-        HookEventName::UserPromptSubmit => {
-            let decision = if request.agent == InterceptorAgent::Qoder {
-                "block"
-            } else {
-                "deny"
-            };
-            json!({ "decision": decision, "reason": text })
-        }
-        HookEventName::PostToolUse => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "updatedToolOutput": text
-            }
-        }),
-        HookEventName::PreToolUse => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": text
-            }
-        }),
-    };
-    format!(
-        "{}\n",
-        serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string())
-    )
+    crate::sdk::hook_protocol::render_block(request.agent.as_str(), request.event.as_str(), reason)
+        .unwrap_or_default()
 }
 
 pub(crate) fn string_field(payload: &Map<String, Value>, key: &str) -> Option<String> {
@@ -93,7 +63,9 @@ pub(crate) fn present(value: Option<&Value>) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::interceptor::types::{HookEventName, HookRequest, InterceptorAgent};
-    use serde_json::{json, Map, Value};
+    #[cfg(test)]
+    use serde_json::json;
+    use serde_json::{Map, Value};
 
     fn base(agent: InterceptorAgent, event: HookEventName) -> HookRequest {
         HookRequest {

@@ -385,10 +385,18 @@ pub type EntriesHandler = Arc<dyn Fn(&[AgentActivityEntry]) + Send + Sync>;
 pub type ErrorHandler = Arc<dyn Fn(&str) + Send + Sync>;
 pub type DeltaHandler = Arc<dyn Fn(&InputRuntimeDelta) + Send + Sync>;
 
+type CycleHook = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub struct HostedInput<T: InputBody> {
     pub runtime: InputRuntime,
     pub body: T,
     entries_handlers: Mutex<Vec<EntriesHandler>>,
+    cycle_begin: Mutex<Option<CycleHook>>,
+    cycle_accept: Mutex<Option<CycleHook>>,
     error_handlers: Mutex<Vec<ErrorHandler>>,
     delta_handlers: Mutex<Vec<DeltaHandler>>,
     running_flag: AtomicBool,
@@ -439,6 +447,8 @@ impl<T: InputBody> HostedInput<T> {
             },
             body,
             entries_handlers: Mutex::new(Vec::new()),
+            cycle_begin: Mutex::new(None),
+            cycle_accept: Mutex::new(None),
             error_handlers: Mutex::new(Vec::new()),
             delta_handlers: Mutex::new(Vec::new()),
             running_flag: AtomicBool::new(false),
@@ -471,6 +481,12 @@ impl<T: InputBody> HostedInput<T> {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .push(Arc::new(handler));
+    }
+
+    /// Optional SDK transaction boundaries; ordinary collectors keep their callbacks.
+    pub(crate) fn set_cycle_hooks(&self, begin: CycleHook, accept: CycleHook) {
+        *self.cycle_begin.lock().unwrap() = Some(begin);
+        *self.cycle_accept.lock().unwrap() = Some(accept);
     }
 
     pub fn on_collect_error(&self, handler: impl Fn(&str) + Send + Sync + 'static) {
@@ -850,6 +866,10 @@ impl<T: InputBody> HostedInput<T> {
             .state_store
             .begin_collect(self.body.checkpoint_namespaces());
         let produced = async {
+            let begin = self.cycle_begin.lock().unwrap().clone();
+            if let Some(begin) = begin {
+                begin().await?;
+            }
             let entries = self.body.collect(&self.runtime).await?;
             self.runtime
                 .lifecycle
@@ -886,6 +906,10 @@ impl<T: InputBody> HostedInput<T> {
                 );
             }
             self.body.on_entries_queued(&self.runtime).await?;
+            let accept = self.cycle_accept.lock().unwrap().clone();
+            if let Some(accept) = accept {
+                accept().await?;
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;

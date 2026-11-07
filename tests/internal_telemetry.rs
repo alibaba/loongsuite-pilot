@@ -1,12 +1,11 @@
-//! Private self-monitoring configuration -> production sender -> real HTTP.
+//! Public entry never activates private telemetry, including all-features builds.
 //! Run the child with its own environment so this test cannot alter the user's
 //! configuration or the global sender used by another test.
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{fs, process::Stdio, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
-async fn loaded_data_directory_configures_only_the_private_builds_real_sender() {
+async fn public_entry_never_activates_private_telemetry() {
     const CHILD: &str = "PILOT_TELEMETRY_INTEGRATION_CHILD";
     if std::env::var_os(CHILD).is_some() {
         let config = loongsuite_pilot::core::load_config().await.unwrap();
@@ -14,10 +13,7 @@ async fn loaded_data_directory_configures_only_the_private_builds_real_sender() 
             ("version".into(), "2.0.0".into()),
             ("label".into(), "真实心跳🚀".into()),
         ]);
-        assert_eq!(
-            loongsuite_pilot::internal::post_alarm("pilot_alarm", &data, 3000).await,
-            cfg!(feature = "proprietary"),
-        );
+        assert!(!loongsuite_pilot::internal::post_alarm("pilot_alarm", &data, 3000).await);
         assert!(config.data_dir.ends_with("configured-data"));
         return;
     }
@@ -47,53 +43,14 @@ async fn loaded_data_directory_configures_only_the_private_builds_real_sender() 
 
     let server = tokio::spawn(async move {
         let accepted = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
-        if !cfg!(feature = "proprietary") {
-            assert!(
-                accepted.is_err(),
-                "public build must not open a self-monitoring connection"
-            );
-            return;
-        }
-        let (mut socket, _) = accepted.unwrap().unwrap();
-        let mut raw = Vec::new();
-        let (offset, length) = loop {
-            let mut chunk = [0u8; 4096];
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            raw.extend_from_slice(&chunk[..n]);
-            if let Some(offset) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&raw[..offset]);
-                let length = head
-                    .lines()
-                    .find_map(|line| {
-                        let (key, value) = line.split_once(':')?;
-                        key.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                break (offset + 4, length);
-            }
-        };
-        while raw.len() < offset + length {
-            let mut chunk = [0u8; 4096];
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            raw.extend_from_slice(&chunk[..n]);
-        }
-        let body: Value = serde_json::from_slice(&raw[offset..offset + length]).unwrap();
-        assert_eq!(body["__topic__"], "pilot_alarm");
-        assert_eq!(body["__logs__"][0]["label"], "真实心跳🚀");
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
+        assert!(
+            accepted.is_err(),
+            "public source must not open a private self-monitoring connection"
+        );
     });
     let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
     command
-        .args([
-            "--exact",
-            "loaded_data_directory_configures_only_the_private_builds_real_sender",
-        ])
+        .args(["--exact", "public_entry_never_activates_private_telemetry"])
         .env_clear()
         .env(CHILD, "1")
         .env("HOME", root.path())

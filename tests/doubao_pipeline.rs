@@ -276,12 +276,15 @@ impl Harness {
         assert!(self.fixture.input.collector_running());
     }
     async fn stop(&self) {
-        // The capture exporter can complete before the concurrent JSONL child.
-        // Observe actual all-output acceptance before exercising bounded shutdown.
-        tokio::time::timeout(Duration::from_secs(3), self.fixture.store.save())
-            .await
-            .unwrap()
-            .unwrap();
+        // Quiesce collection before observing all-output acceptance: a live
+        // watcher can enqueue another batch after save() has returned.
+        // Stop the producer directly so InputManager does not cancel queued output.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            self.fixture.input.stop().await.unwrap();
+            self.fixture.store.save().await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(!self.fixture.store.waiting_for_output());
         self.manager.stop_all().await;
         self.output.flush().await.unwrap();

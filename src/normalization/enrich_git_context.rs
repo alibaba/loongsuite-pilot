@@ -167,6 +167,9 @@ pub async fn enrich_canonical_entry_with_git(
     record: &Map<String, Value>,
     namespace: impl IntoNamespaces,
 ) -> Result<(), String> {
+    if crate::utils::source_access::current().is_some() {
+        return Ok(());
+    }
     let mut infer = |dir: &str| Ok(infer_git_context_sync(dir));
     enrich_entry_using(entry, record, namespace, &mut infer)
 }

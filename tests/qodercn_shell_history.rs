@@ -1,6 +1,9 @@
 //! Actual Unix shell launchers, Native asset upgrade and the real CN collector.
 //! Optional dash follows the historical platform precondition. No Node executable.
 #[cfg(unix)]
+#[path = "support/native_sdk.rs"]
+mod native_sdk;
+#[cfg(unix)]
 mod unix {
     use async_trait::async_trait;
     use loongsuite_pilot::checkpoints::StateStore;
@@ -210,6 +213,7 @@ mod unix {
             package.join("bin/loongsuite-pilot"),
         )
         .unwrap();
+        super::native_sdk::copy_sdk(&package.join("bin"));
         for (relative, content) in [
             (
                 "agents.d/qoder-cn.json",

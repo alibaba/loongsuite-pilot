@@ -283,7 +283,7 @@ async fn find_files(session_id: &str, segments_root: &str) -> FileScan {
     let root_read = async {
         #[cfg(test)]
         test_io::root()?;
-        tokio::fs::read_dir(&root).await
+        crate::utils::source_access::read_dir_async(&root).await
     }
     .await;
     let mut cwd_dirs = match root_read {
@@ -314,7 +314,7 @@ async fn find_files(session_id: &str, segments_root: &str) -> FileScan {
         let directory_read = async {
             #[cfg(test)]
             test_io::directory()?;
-            tokio::fs::read_dir(&seg_dir).await
+            crate::utils::source_access::read_dir_async(&seg_dir).await
         }
         .await;
         let mut entries = match directory_read {
@@ -356,7 +356,7 @@ async fn open_segment_file(path: String) -> std::io::Result<FoundFile> {
         test_io::stat()?;
     }
     tokio::task::spawn_blocking(move || {
-        let opened = std::fs::File::open(&path)?;
+        let opened = crate::utils::source_access::open(&path)?;
         let identity = crate::utils::file_identity::identity_from_open(&opened)?;
         Ok(FoundFile {
             path,

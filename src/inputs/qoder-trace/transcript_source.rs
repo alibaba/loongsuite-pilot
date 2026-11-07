@@ -124,7 +124,7 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
     let mut notice_versions = None;
     let inventory = if inspect_inventory {
         let mut entries = Vec::new();
-        for (index, entry) in std::fs::read_dir(path)?.enumerate() {
+        for (index, entry) in crate::utils::source_access::read_dir(path)?.enumerate() {
             if index >= MAX_CONTEXTS {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -468,7 +468,7 @@ impl Collector {
             return Ok(());
         }
         if self.discovery.is_none() {
-            match std::fs::read_dir(&self.root) {
+            match crate::utils::source_access::read_dir(&self.root) {
                 Ok(d) => self.discovery = Some(d),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e.into()),
@@ -513,7 +513,7 @@ impl Collector {
             snapshot(&dir.join("source.json"), MAX_NOTICES)?.0
         };
         let mut contexts = vec![source.clone()];
-        for entry in std::fs::read_dir(&events)?.take(MAX_CONTEXTS) {
+        for entry in crate::utils::source_access::read_dir(&events)?.take(MAX_CONTEXTS) {
             let entry = entry?;
             if !entry.file_type()?.is_file()
                 || !entry.file_name().to_string_lossy().ends_with(".json")

@@ -54,7 +54,9 @@ pub fn open_regular(path: &Path) -> std::io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         o.custom_flags(libc::O_NONBLOCK);
     }
+    crate::utils::source_access::check(path)?;
     let f = o.open(path)?;
+    crate::utils::source_access::verify_open(&f, path)?;
     version(&f)?;
     Ok(f)
 }
@@ -138,7 +140,7 @@ pub struct ScanBudget {
 impl Default for ScanBudget {
     fn default() -> Self {
         Self {
-            remaining: SCAN_BYTES as i64,
+            remaining: crate::utils::source_access::read_limit(SCAN_BYTES) as i64,
             metrics: ScanMetrics::default(),
         }
     }

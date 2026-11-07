@@ -149,7 +149,7 @@ async fn collector_l413_bad_notice_json_preserves_unread_source_then_repairs_wit
         .join("state/qoder-transcripts/qoder-cn/sources")
         .join(&f.key)
         .join("events");
-    let path = std::fs::read_dir(events)
+    let path = crate::utils::source_access::read_dir(events)
         .unwrap()
         .next()
         .unwrap()
@@ -289,7 +289,7 @@ async fn collector_l301_real_same_watermark_publication_after_old_read_survives_
             .join("sources")
             .join(&key)
             .join("events");
-        let notice = std::fs::read_dir(&events)
+        let notice = crate::utils::source_access::read_dir(&events)
             .unwrap()
             .next()
             .unwrap()
@@ -369,7 +369,12 @@ async fn same_directory_mtime_new_generation_refreshes_notices_and_acknowledges_
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         let modified = std::fs::metadata(&events).unwrap().modified().unwrap();
         let replacement = f.file.with_extension("new");
         std::fs::write(&replacement, jsonl(&closed_turn(1, false))).unwrap();
@@ -378,7 +383,7 @@ async fn same_directory_mtime_new_generation_refreshes_notices_and_acknowledges_
         // Force exactly the stale-cache precondition, without sleep, clear, or
         // extra hook: mtime alone cannot identify a directory generation.
         #[cfg(unix)]
-        let directory = std::fs::File::open(&events).unwrap();
+        let directory = crate::utils::source_access::open(&events).unwrap();
         #[cfg(windows)]
         let directory = {
             use std::os::windows::fs::OpenOptionsExt;
@@ -397,7 +402,12 @@ async fn same_directory_mtime_new_generation_refreshes_notices_and_acknowledges_
         );
         assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
         f.collect().await;
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         f.restart().await;
         assert!(f.collect().await.records.is_empty());
     }
@@ -430,7 +440,7 @@ async fn same_name_real_publication_refreshes_coalesced_metadata_without_any_dur
                 assert_eq!(f.state, json!({}));
                 std::fs::remove_file(legacy).unwrap();
             }
-            let events = std::fs::read_dir(
+            let events = crate::utils::source_access::read_dir(
                 f.root
                     .join("state/qoder-transcripts")
                     .join(agent)
@@ -443,7 +453,7 @@ async fn same_name_real_publication_refreshes_coalesced_metadata_without_any_dur
             .path()
             .join("events");
             let names = || {
-                std::fs::read_dir(&events)
+                crate::utils::source_access::read_dir(&events)
                     .unwrap()
                     .map(|e| e.unwrap().file_name())
                     .collect::<Vec<_>>()
@@ -504,7 +514,7 @@ async fn match_cached_directory_clock_hints(f: &Fixture, events: &Path) {
 
 fn restore_directory_mtime(events: &Path, modified: std::time::SystemTime) {
     #[cfg(unix)]
-    let directory = std::fs::File::open(events).unwrap();
+    let directory = crate::utils::source_access::open(events).unwrap();
     #[cfg(windows)]
     let directory = {
         use std::os::windows::fs::OpenOptionsExt;
@@ -534,7 +544,12 @@ async fn default_cache_hint_collision_cannot_hide_recreated_directory_and_transc
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         let modified = std::fs::metadata(&events).unwrap().modified().unwrap();
 
         std::fs::remove_dir(&events).unwrap();
@@ -548,7 +563,12 @@ async fn default_cache_hint_collision_cannot_hide_recreated_directory_and_transc
 
         assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
         f.collect().await;
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         f.restart().await;
         assert!(f.collect().await.records.is_empty());
     }
@@ -575,23 +595,40 @@ async fn default_cache_hint_collision_preserves_unsaved_ack_gate_and_saved_notic
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 1);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            1
+        );
         f.append(&[progress("Stop", 400)]);
         f.wake("Stop", json!({}));
         match_cached_directory_clock_hints(&f, &events).await;
 
         assert_eq!(user_texts(&f.settle().await), ["prompt 0"]);
         let saved = f.state.clone();
-        let before = std::fs::read_dir(&events).unwrap().count();
+        let before = crate::utils::source_access::read_dir(&events)
+            .unwrap()
+            .count();
         let blocked = f.source.read(Some(&saved), false).await.unwrap();
         assert_eq!(blocked.state, saved);
         assert!(!blocked.changed);
         assert!(blocked.records.is_empty());
         assert_eq!(blocked.metrics.bytes_read, 0);
         assert!(blocked.metrics.reads.is_empty());
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), before);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            before
+        );
         f.collect().await;
-        assert_eq!(std::fs::read_dir(&events).unwrap().count(), 0);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&events)
+                .unwrap()
+                .count(),
+            0
+        );
         assert!(events.parent().unwrap().join("source.json").exists());
         assert!(f.collect().await.records.is_empty());
     }
@@ -652,7 +689,12 @@ async fn same_version_stop_before_late_rewrite_retries_without_another_notice() 
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&pending).unwrap().count(), 1);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&pending)
+                .unwrap()
+                .count(),
+            1
+        );
         f.write(&turn(1, false));
         let after = scanner::version(&scanner::open_regular(&f.file).unwrap()).unwrap();
         assert_eq!(after.size, committed);
@@ -694,7 +736,12 @@ async fn same_version_stop_insufficient_fingerprint_budget_keeps_progress_and_re
             .join("sources")
             .join(&f.key)
             .join("events");
-        assert_eq!(std::fs::read_dir(&pending).unwrap().count(), 1);
+        assert_eq!(
+            crate::utils::source_access::read_dir(&pending)
+                .unwrap()
+                .count(),
+            1
+        );
         f.source.inner.lock().await.scan_bytes = original_budget;
         assert_eq!(user_texts(&f.settle().await), ["prompt 1"]);
         assert_eq!(number(&f.state[&f.key], "committedOffset"), after.size);

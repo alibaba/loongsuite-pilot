@@ -268,7 +268,7 @@ pub fn qoder_default_allowed_root_paths() -> Vec<String> {
             .to_string_lossy()
             .into_owned(),
     ];
-    if let Ok(entries) = std::fs::read_dir(&app_root) {
+    if let Ok(entries) = crate::utils::source_access::read_dir(&app_root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name == "SharedClientCache" {

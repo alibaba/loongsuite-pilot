@@ -1,5 +1,8 @@
 //! 正式 Rust 安装辅助入口及两端参数桥接；只操作隔离目录，不调用安装器主流程。
 
+#[path = "support/native_sdk.rs"]
+mod native_sdk;
+
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -25,6 +28,7 @@ impl Fixture {
             "bin/loongsuite-pilot"
         });
         fs::copy(env!("CARGO_BIN_EXE_loongsuite-pilot"), &binary).unwrap();
+        native_sdk::copy_sdk(&candidate.join("bin"));
         // 证明 helper 不经过全局 load_config 或 collector 初始化。
         fs::write(
             root.path().join("unrelated.json"),

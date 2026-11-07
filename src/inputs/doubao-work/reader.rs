@@ -1340,13 +1340,14 @@ mod tests {
             let mut reader = DoubaoWorkNativeReader::new(options(temp.path()));
             drain(&mut reader, CID, 256 * 1024).await;
             let old = std::fs::metadata(&file).unwrap();
-            #[cfg(windows)]
-            let old_change = windows_change_stamp(&std::fs::File::open(&file).unwrap()).unwrap();
-            #[cfg(windows)]
+            let old_change = stamp_of(&File::open(&file).await.unwrap())
+                .await
+                .unwrap()
+                .changed;
             if mode == "same-size" {
-                // NTFS change-time observations can share a clock tick. Make
-                // this fixture's change witness distinct while restoring mtime
-                // exactly below; all content/reset assertions remain unchanged.
+                // Change-time observations can share a clock tick on Unix and
+                // Windows. Keep the fixture's witness distinct while restoring
+                // mtime exactly; content/reset assertions remain unchanged.
                 tokio::time::sleep(Duration::from_millis(32)).await;
             }
             if mode == "replacement" {
@@ -1369,9 +1370,11 @@ mod tests {
                     std::fs::metadata(&file).unwrap().modified().unwrap(),
                     old.modified().unwrap()
                 );
-                #[cfg(windows)]
                 assert_ne!(
-                    windows_change_stamp(&std::fs::File::open(&file).unwrap()).unwrap(),
+                    stamp_of(&File::open(&file).await.unwrap())
+                        .await
+                        .unwrap()
+                        .changed,
                     old_change,
                     "the restored-mtime fixture must expose a distinct change-time witness"
                 );

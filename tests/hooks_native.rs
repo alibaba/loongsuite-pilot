@@ -1,5 +1,7 @@
 //! 原生 Hook 的本地协议测试，不代表真实 Agent 会话或跨平台注入验收。
 
+#[path = "support/native_sdk.rs"]
+mod native_sdk;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -129,6 +131,7 @@ fn fixture(root: &Path) -> PathBuf {
         "原生 程序🚀"
     });
     fs::copy(env!("CARGO_BIN_EXE_loongsuite-pilot"), &bin).unwrap();
+    native_sdk::copy_sdk(root);
     fs::write(hooks.join("pilot-bin"), format!("{}\n", bin.display())).unwrap();
     fs::create_dir(root.join("other-cache")).unwrap();
     fs::write(root.join("other-cache/current"), "../../unrelated").unwrap();

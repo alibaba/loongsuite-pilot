@@ -144,6 +144,17 @@ pub trait BaseFlusher: Send + Sync {
         logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError>;
 
+    /// Callback delivery persists these already serialized activity bytes.
+    /// Other protocols retain their existing conversion.
+    async fn send_prepared_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+    ) -> Result<(), FlushError> {
+        let lengths = encoded.iter().map(|row| row.len() as f64).collect();
+        self.send_batch(entries, Some(lengths)).await
+    }
+
     async fn flush(&self) -> Result<(), FlushError>;
 
     async fn shutdown(&self) -> Result<(), FlushError>;

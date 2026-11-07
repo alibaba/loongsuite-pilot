@@ -368,7 +368,7 @@ async fn recovery_l163_damaged_line_cannot_steal_a_different_inventory_prompt() 
             .lock()
             .await
             .acknowledge(&f.state, &f.source.stopped);
-        assert!(std::fs::read_dir(
+        assert!(crate::utils::source_access::read_dir(
             f.root
                 .join("state/qoder-transcripts")
                 .join(agent)

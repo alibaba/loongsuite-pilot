@@ -38,6 +38,18 @@ pub fn load_sensitive_rules_from_manifest(manifest: &Value) -> Vec<CompiledMaskR
 }
 
 pub fn load_sensitive_rules() -> Vec<CompiledMaskRule> {
+    if let Some(scope) = crate::utils::source_access::current() {
+        // Embedded instances never discover a rule manifest from host HOME,
+        // cwd, or another instance. Reuse the compiled-in Pilot rules.
+        return scope
+            .mask_rules
+            .get_or_init(|| {
+                let manifest: Value = serde_json::from_str(PACKAGED_SENSITIVE_RULES)
+                    .expect("checked-in rule manifest");
+                load_sensitive_rules_from_manifest(&manifest)
+            })
+            .clone();
+    }
     CACHED_RULES
         .get_or_init(load_sensitive_rules_uncached)
         .clone()

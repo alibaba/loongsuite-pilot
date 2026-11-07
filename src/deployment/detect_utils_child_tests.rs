@@ -85,12 +85,13 @@ async fn lookup_timeout_reaps_real_native_child() {
     let bin = root.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let locator = bin.join(if cfg!(windows) { "where.exe" } else { "which" });
-    std::fs::copy(std::env::current_exe().unwrap(), &locator).unwrap();
+    // Execute the immutable native fixture through PATH. Copying the ELF here
+    // can race overlayfs' writable references and fail with ETXTBSY before the
+    // production two-second lookup timer has a child to supervise.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&locator, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &locator).unwrap();
+    #[cfg(windows)]
+    std::fs::copy(std::env::current_exe().unwrap(), &locator).unwrap();
     // Windows searches the loaded application's directory before PATH. Keep
     // both parent harness and fake where.exe in this isolated directory so the
     // real production lookup cannot resolve System32/where.exe instead.

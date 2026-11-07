@@ -127,7 +127,7 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 
 ## 运行时
 
-安装后的采集进程、更新进程和 Hook 处理都是 `loongsuite-pilot` 二进制。版本目录是 `~/.loongsuite-pilot/versions/<版本>/`，其中 `bin/loongsuite-pilot` 是可执行文件，`current` 指向正在使用的版本名。`~/.local/bin/loongsuite-pilot` 是启动脚本，`run` 和 `run-updater` 会执行这个二进制。
+安装后的采集进程、更新进程和 Hook 处理都是 `loongsuite-pilot` 二进制。版本目录是 `~/.loongsuite-pilot/versions/<版本>/`，其中 `bin/loongsuite-pilot` 是原生外壳，实际加载同目录的 Rust SDK 动态库（Linux .so、macOS .dylib、Windows .dll），两者必须一起保留；`current` 指向正在使用的版本名。`~/.local/bin/loongsuite-pilot` 是启动脚本，`run` 和 `run-updater` 会执行这个二进制。
 
 版本包通过 `runtime-manifest.json` 记录平台、edition、提交和资源摘要；Rust updater 只接受独立的 `latest-rust.json` 六平台清单，不接受旧 Node 通用包。首次从 Node 版迁移必须使用 Rust 安装器和匹配的平台包，不直接混用旧自动更新渠道。
 
@@ -288,7 +288,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer uninstall -Pu
 ```bash
 git clone https://github.com/alibaba/loongsuite-pilot.git
 cd loongsuite-pilot
-cargo build --locked --release
+cargo build --locked --release --lib --bin loongsuite-pilot
 ./target/release/loongsuite-pilot
 ```
 

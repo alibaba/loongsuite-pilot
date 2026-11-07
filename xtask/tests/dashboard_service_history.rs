@@ -48,6 +48,21 @@ fn bounded(mut command: Command) -> Output {
         stderr: fs::read(err).unwrap(),
     }
 }
+// Concurrent test processes can briefly inherit a copied executable's writer.
+// Retry only ETXTBSY; all other spawn errors remain immediate failures.
+fn spawn_with_writer_retry(command: &mut Command, deadline: Instant) -> std::io::Result<Child> {
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
+}
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -134,15 +149,7 @@ impl Fixture {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let deadline = Instant::now() + Duration::from_secs(1);
-        let child = loop {
-            match c.spawn() {
-                Ok(child) => break child,
-                Err(e) if e.raw_os_error() == Some(26) && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(5))
-                }
-                Err(e) => panic!("private spawn failed: {e}"),
-            }
-        };
+        let child = spawn_with_writer_retry(&mut c, deadline).unwrap();
         let mut process = Process(child);
         let start = Instant::now();
         while !log.exists() {
@@ -418,8 +425,9 @@ fn dashboard_l196_actual_generated_initd_status_and_stop_preserve_reused_pids_fo
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut reused = Process(c.spawn().unwrap());
         let wait = Instant::now();
+        let mut reused =
+            Process(spawn_with_writer_retry(&mut c, wait + Duration::from_secs(5)).unwrap());
         while !log.exists() {
             assert!(wait.elapsed() < Duration::from_secs(5));
             std::thread::sleep(Duration::from_millis(5));
