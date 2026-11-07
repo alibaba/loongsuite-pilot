@@ -180,6 +180,7 @@ export class AgentDefLoader {
       .replace(/\$PILOT_DIR/g, this.pilotDir)
       .replace(/\$PILOT_DATA/g, this.dataDir)
       .replace(/\$DOUBAO_WORK_DATA/g, () => resolveDoubaoWorkPaths().userDataRoot ?? '$DOUBAO_WORK_DATA')
+      .replace(/\$DOUBAO_APP_DATA/g, () => resolveDoubaoWorkPaths('doubao').userDataRoot ?? '$DOUBAO_APP_DATA')
       .replace(/\$HERMES_CLI/g, hermesCli)
       .replace(/\$HERMES_HOME/g, hermesHome)
       .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)
