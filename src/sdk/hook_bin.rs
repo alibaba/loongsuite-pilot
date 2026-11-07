@@ -75,8 +75,14 @@ fn worker(args: Vec<String>, started: Instant) -> Option<String> {
     // host process. Expired requests can no longer produce a valid verdict.
     let mut count = 0;
     for entry in std::fs::read_dir(&spool).ok()?.take(65).flatten() {
-        let meta = entry.metadata().ok()?;
-        if meta.modified().ok()?.elapsed().ok()? > Duration::from_secs(5) {
+        // Another SDK worker may consume a request between read_dir and
+        // metadata. Its disappearance must not discard this unrelated hook.
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        if meta.modified().ok()?.elapsed().unwrap_or_default() > Duration::from_secs(5) {
             let _ = std::fs::remove_file(entry.path());
         } else {
             count += 1;

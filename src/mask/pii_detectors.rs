@@ -258,7 +258,7 @@ fn collect_formatted_numeric_candidate(
         return;
     }
     let first = code_at(value, raw_start);
-    let initial_phone = detect_phone && is_potential_phone_start(first);
+    let initial_phone = detect_phone && is_potential_phone_prefix(value, raw_start, end);
     let initial_bank = detect_bank_card && is_potential_bank_card_start(first);
     let max_len = if initial_bank {
         MAX_BANK_CARD_CANDIDATE_LENGTH
@@ -284,7 +284,7 @@ fn collect_formatted_numeric_candidate(
     let mut start = raw_start;
     while start < end {
         let start_code = code_at(value, start);
-        let possible_phone = detect_phone && is_potential_phone_start(start_code);
+        let possible_phone = detect_phone && is_potential_phone_prefix(value, start, end);
         let possible_bank = detect_bank_card && is_potential_bank_card_start(start_code);
         let window = if possible_bank {
             MAX_BANK_CARD_CANDIDATE_LENGTH
@@ -294,7 +294,7 @@ fn collect_formatted_numeric_candidate(
         let bounded_end = end.min(start + window);
         let mut digit_count = 0usize;
         let mut sub_end = start + 1;
-        while sub_end <= bounded_end {
+        while (possible_phone || possible_bank) && sub_end <= bounded_end {
             if is_ascii_digit(code_at(value, sub_end - 1)) {
                 digit_count += 1;
             }
@@ -335,6 +335,20 @@ fn collect_formatted_numeric_candidate(
         }
         start = sep + 1;
     }
+}
+
+// A mobile candidate must begin with 1 followed by 3..9 after optional
+// separators. Reject other prefixes before walking every possible suffix of
+// long fragmented numeric runs; this preserves all supported phone formats.
+fn is_potential_phone_prefix(value: &str, start: usize, end: usize) -> bool {
+    let code = code_at(value, start);
+    if code == '1' as i32 {
+        return value.as_bytes()[start + 1..end.min(start + MAX_PHONE_CANDIDATE_LENGTH)]
+            .iter()
+            .find(|byte| **byte != b' ' && **byte != b'-')
+            .is_some_and(|byte| (b'3'..=b'9').contains(byte));
+    }
+    is_potential_phone_start(code)
 }
 
 fn is_potential_phone_start(code: i32) -> bool {
@@ -500,22 +514,21 @@ fn is_valid_bank_card(candidate: &str) -> bool {
 }
 
 fn has_valid_simple_separators(candidate: &str, allow_leading_plus: bool) -> bool {
-    let chars: Vec<char> = candidate.chars().collect();
-    for (index, ch) in chars.iter().copied().enumerate() {
-        let code = ch as i32;
-        if is_ascii_digit(code) {
+    let bytes = candidate.as_bytes();
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte.is_ascii_digit() {
             continue;
         }
-        if allow_leading_plus && code == '+' as i32 && index == 0 {
+        if allow_leading_plus && byte == b'+' && index == 0 {
             continue;
         }
-        if code != ' ' as i32 && code != '-' as i32 {
+        if byte != b' ' && byte != b'-' {
             return false;
         }
         if index == 0
-            || index + 1 >= chars.len()
-            || !is_ascii_digit(chars[index - 1] as i32)
-            || !is_ascii_digit(chars[index + 1] as i32)
+            || index + 1 >= bytes.len()
+            || !bytes[index - 1].is_ascii_digit()
+            || !bytes[index + 1].is_ascii_digit()
         {
             return false;
         }
