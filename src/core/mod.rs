@@ -14,6 +14,7 @@ mod intercept_result_linker;
 mod legacy_sls_failed_log_cleanup;
 mod log_retention_service;
 mod orchestrator;
+mod runtime_options;
 mod updater_watchdog;
 mod upstream_link;
 mod workspace_policy;
@@ -42,6 +43,7 @@ pub use log_retention_service::{
     SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
 };
 pub use orchestrator::{Orchestrator, OrchestratorEvent};
+pub use runtime_options::CollectorRuntimeOptions;
 pub use updater_watchdog::{
     UpdaterWatchdog, UpdaterWatchdogOptions, UpdaterWatchdogResult, UpdaterWatchdogStatus,
 };

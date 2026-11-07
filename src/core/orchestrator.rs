@@ -4,6 +4,7 @@
 //! wrappers. Codex transcript, aborted-turn recovery, Wukong, and WorkBuddy
 //! use the same hosted collector surface as the other Rust inputs.
 
+use super::CollectorRuntimeOptions;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
@@ -200,6 +201,7 @@ pub enum OrchestratorEvent {
 type OrchestratorListener = Arc<dyn Fn(OrchestratorEvent) + Send + Sync>;
 
 pub struct Orchestrator {
+    runtime_options: CollectorRuntimeOptions,
     config: AnalyticsConfig,
     data_dir: String,
     agents: Arc<crate::types::AgentsConfig>,
@@ -291,8 +293,24 @@ impl Orchestrator {
             test_interceptor_port: None,
             #[cfg(test)]
             test_detection_entries: Mutex::new(Vec::new()),
+            runtime_options: CollectorRuntimeOptions::default(),
             config,
         }
+    }
+
+    /// Reuse the collector with explicit ownership of process services/output.
+    /// This is the runtime seam; it does not replace HCD source authorization.
+    pub fn with_runtime_options(
+        config: AnalyticsConfig,
+        options: CollectorRuntimeOptions,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            options.manage_host_services || Path::new(&config.data_dir).is_absolute(),
+            "embedded runtime requires an absolute data directory"
+        );
+        let mut runtime = Self::new(config);
+        runtime.runtime_options = options;
+        Ok(runtime)
     }
 
     pub fn data_dir(&self) -> &str {
@@ -327,11 +345,15 @@ impl Orchestrator {
     async fn start_components(self: &Arc<Self>) -> anyhow::Result<()> {
         logger("Orchestrator").info("starting orchestrator", None);
         // 在启动输出、后台任务及任何 Agent 部署之前，先拒绝损坏或未提交的安装报告。
-        let hook_report = crate::deployment::read_committed_hook_install_report(
-            &hook_install_result_path(&self.data_dir),
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
+        let hook_report = if self.runtime_options.manage_host_services {
+            crate::deployment::read_committed_hook_install_report(&hook_install_result_path(
+                &self.data_dir,
+            ))
+            .await
+            .map_err(anyhow::Error::msg)?
+        } else {
+            None
+        };
         ensure_dir(&self.data_dir).await;
         ensure_dir(&self.data_dir_join("logs")).await;
         clean_stale_tmp_files(&self.data_dir_join("logs"), DEFAULT_STALE_TMP_MAX_AGE_MS).await;
@@ -389,11 +411,16 @@ impl Orchestrator {
         ));
         verdicts.restore(chrono::Utc::now().timestamp_millis());
         *self.verdicts.lock().expect("verdicts") = Some(Arc::clone(&verdicts));
-        let interceptor_config = load_interceptor_config(None).await;
+        let interception_enabled = if self.runtime_options.manage_host_services {
+            let config = load_interceptor_config(None).await;
+            !resolve_enabled_interceptor_types(&config).is_empty()
+        } else {
+            false
+        };
         self.inputs
             .set_intercept_result_linker(Arc::new(InterceptResultLinker::new(
                 Arc::clone(&verdicts),
-                !resolve_enabled_interceptor_types(&interceptor_config).is_empty(),
+                interception_enabled,
             )));
         if self.config.upstream_link.enabled {
             let correlate = self.data_dir_join("acp-correlate");
@@ -410,54 +437,65 @@ impl Orchestrator {
             *self.correlate_retention.lock().expect("correlate") = Some(retention);
             logger("Orchestrator").info("upstream trace linking enabled", Some(&fields(serde_json::json!({ "correlateDir": correlate, "ttlMs": self.config.upstream_link.ttl_ms }))));
         }
-        self.start_multimodal().await;
-        let pilot_dir = resolve_pilot_dir(&self.data_dir, &[]).map_err(anyhow::Error::msg)?;
-        self.restore_pi_sdk(&alarm).await;
-        let deployment = Arc::new(
-            DeploymentManager::new(DeploymentManagerOptions {
-                data_dir: self.data_dir.clone(),
-                pilot_dir: pilot_dir.clone(),
-                builtin_agents_dir: None,
-                installed_by: Some(InstalledBy::Daemon),
-            })
-            .with_config_identity(&self.config),
-        );
-        deployment.load_definitions().await;
-        *self.deployment.lock().expect("deploy") = Some(Arc::clone(&deployment));
-        self.apply_deployment_scope(hook_report.as_ref());
-        self.relay_hook_install_alarm(hook_report.as_ref()).await;
-        self.reconcile_recorded().await;
-        if self.bits.lock().expect("bits").scope == DeploymentScopeMode::Auto {
-            let bits = Arc::clone(&self.bits);
-            let agents = Arc::clone(&self.agents);
-            let config = self.config.clone();
-            deployment
-                .deploy_all(Some(&move |def: &AgentDefinition| {
-                    listener_on(
-                        &config,
-                        &agents,
-                        &bits.lock().expect("bits"),
-                        &def.id,
-                        &def.id,
-                    )
-                }))
-                .await;
+        let pilot_dir = match &self.runtime_options.resource_dir {
+            Some(path) => path.clone(),
+            None => resolve_pilot_dir(&self.data_dir, &[]).map_err(anyhow::Error::msg)?,
+        };
+        let (deployment, watchdog) = if self.runtime_options.manage_host_services {
+            self.start_multimodal().await;
+            self.restore_pi_sdk(&alarm).await;
+            let deployment = Arc::new(
+                DeploymentManager::new(DeploymentManagerOptions {
+                    data_dir: self.data_dir.clone(),
+                    pilot_dir: pilot_dir.clone(),
+                    builtin_agents_dir: None,
+                    installed_by: Some(InstalledBy::Daemon),
+                })
+                .with_config_identity(&self.config),
+            );
+            deployment.load_definitions().await;
+            *self.deployment.lock().expect("deploy") = Some(Arc::clone(&deployment));
+            self.apply_deployment_scope(hook_report.as_ref());
+            self.relay_hook_install_alarm(hook_report.as_ref()).await;
+            self.reconcile_recorded().await;
+            if self.bits.lock().expect("bits").scope == DeploymentScopeMode::Auto {
+                let bits = Arc::clone(&self.bits);
+                let agents = Arc::clone(&self.agents);
+                let config = self.config.clone();
+                deployment
+                    .deploy_all(Some(&move |def: &AgentDefinition| {
+                        listener_on(
+                            &config,
+                            &agents,
+                            &bits.lock().expect("bits"),
+                            &def.id,
+                            &def.id,
+                        )
+                    }))
+                    .await;
+            } else {
+                logger("Orchestrator").info("recorded deployment scope; skipping deployAll", None);
+            }
+            let watchdog = Arc::new(self.build_watchdog(&deployment));
+            let workers = LocalWorkerActivationService::new(
+                self.data_dir.clone(),
+                pilot_dir.clone(),
+                deployment.get_definitions(),
+                ProbeSupervisor {
+                    probe: PluginProbeStrategy::new(self.data_dir.clone(), pilot_dir.clone()),
+                },
+            );
+            workers.start().await;
+            *self.workers.lock().expect("workers") = Some(workers);
+            (Some(deployment), Some(watchdog))
         } else {
-            logger("Orchestrator").info("recorded deployment scope; skipping deployAll", None);
-        }
-        let watchdog = Arc::new(self.build_watchdog(&deployment));
-        let workers = LocalWorkerActivationService::new(
-            self.data_dir.clone(),
-            pilot_dir.clone(),
-            deployment.get_definitions(),
-            ProbeSupervisor {
-                probe: PluginProbeStrategy::new(self.data_dir.clone(), pilot_dir.clone()),
-            },
-        );
-        workers.start().await;
-        *self.workers.lock().expect("workers") = Some(workers);
+            (None, None)
+        };
         let detection = self.register_all_inputs(&state_store).await;
-        let deploy_entries = self.deploy_detection_entries(&deployment);
+        let deploy_entries = deployment
+            .as_ref()
+            .map(|deployment| self.deploy_detection_entries(deployment))
+            .unwrap_or_default();
         let mut entries = detection;
         entries.extend(deploy_entries);
         #[cfg(test)]
@@ -483,14 +521,17 @@ impl Orchestrator {
         ));
         retention.start();
         *self.retention.lock().expect("retention") = Some(retention);
-        watchdog.start();
-        *self.hook_watchdog.lock().expect("watchdog") = Some(watchdog);
-        self.watch_hook_install_signal();
-        if self
-            .config
-            .auto_update
-            .as_ref()
-            .is_some_and(|update| update.enabled)
+        if let Some(watchdog) = watchdog {
+            watchdog.start();
+            *self.hook_watchdog.lock().expect("watchdog") = Some(watchdog);
+            self.watch_hook_install_signal();
+        }
+        if self.runtime_options.manage_host_services
+            && self
+                .config
+                .auto_update
+                .as_ref()
+                .is_some_and(|update| update.enabled)
         {
             let updater = Arc::new(UpdaterWatchdog::new(UpdaterWatchdogOptions {
                 enabled: true,
@@ -509,7 +550,7 @@ impl Orchestrator {
             updater.start();
             *self.updater_watchdog.lock().expect("updater") = Some(updater);
         }
-        if self.config.pipeline.enabled {
+        if self.runtime_options.manage_host_services && self.config.pipeline.enabled {
             let pipeline = Arc::new(PipelineManager::new(PipelineManagerOptions {
                 workspace_policy: Some(pipeline_policy),
                 config_dir: self.data_dir_join("configs/local"),
@@ -530,136 +571,140 @@ impl Orchestrator {
         if let Some(sls) = self.sls.lock().expect("sls").clone() {
             sls.set_alarm_manager(Arc::new(AlarmBridge(Arc::clone(&alarm))));
         }
-        let metrics = Arc::new(self.metrics_writer(&version, Arc::clone(&alarm)));
-        metrics.start().await;
-        *self.metrics.lock().expect("metrics") = Some(metrics);
-        let package_version = self.read_package_version();
-        let package_git = self.read_package_git_commit();
-        let runtime = RuntimeWriter::new(
-            &self.data_dir,
-            self.config.status_bar.clone(),
-            package_version.clone(),
-            package_git.clone(),
-        );
-        let runtime_for_task = RuntimeWriter::new(
-            &self.data_dir,
-            self.config.status_bar.clone(),
-            package_version.clone(),
-            package_git.clone(),
-        );
-        let interval = runtime.refresh_interval_ms().max(1);
-        *self.runtime_task.lock().expect("runtime task") = Some(tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(interval));
-            loop {
-                ticker.tick().await;
-                let _ = runtime_for_task.write_once().await;
-            }
-        }));
-        *self.runtime_writer.lock().expect("runtime") = Some(runtime);
-        let summary = MetricsSummaryWriter::new(
-            &self.data_dir,
-            self.config.status_bar.clone(),
-            self.config
-                .flushers
-                .jsonl
-                .as_ref()
-                .map(|jsonl| jsonl.output_dir.as_str()),
-        );
-        let summary_for_task = MetricsSummaryWriter::new(
-            &self.data_dir,
-            self.config.status_bar.clone(),
-            self.config
-                .flushers
-                .jsonl
-                .as_ref()
-                .map(|jsonl| jsonl.output_dir.as_str()),
-        );
-        let summary_interval = self.config.status_bar.metrics_summary_interval_ms.max(1);
-        *self.summary_task.lock().expect("summary task") = Some(tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(summary_interval));
-            loop {
-                ticker.tick().await;
-                summary_for_task.refresh().await;
-            }
-        }));
-        *self.summary_writer.lock().expect("summary") = Some(summary);
-        let dashboard = dashboard::DashboardServer::new(dashboard::DashboardServerOptions {
-            data_dir: self.data_dir.clone(),
-            asset_path: Path::new(&pilot_dir)
-                .join("assets")
-                .join("dashboard")
-                .join("index.html")
-                .to_string_lossy()
-                .into_owned(),
-            host: None,
-            port: Some(self.config.dashboard.port),
-        });
-        if let Err(err) = dashboard.start() {
-            logger("Orchestrator").warn(
-                "dashboard start failed (non-fatal)",
-                Some(&fields(serde_json::json!({ "error": err }))),
+        if self.runtime_options.manage_host_services {
+            let metrics = Arc::new(self.metrics_writer(&version, Arc::clone(&alarm)));
+            metrics.start().await;
+            *self.metrics.lock().expect("metrics") = Some(metrics);
+            let package_version = self.read_package_version();
+            let package_git = self.read_package_git_commit();
+            let runtime = RuntimeWriter::new(
+                &self.data_dir,
+                self.config.status_bar.clone(),
+                package_version.clone(),
+                package_git.clone(),
             );
-        }
-        if let Some(error) = dashboard.last_start_error() {
-            self.emit(OrchestratorEvent::ComponentFailure {
-                component: "dashboard".into(),
-                error,
-            });
-        }
-        *self.dashboard.lock().expect("dashboard") = Some(dashboard);
-        let inputs_for_prompt = Arc::clone(&self.inputs);
-        match self
-            .start_collector_interceptor(StartInterceptorServiceOptions {
+            let runtime_for_task = RuntimeWriter::new(
+                &self.data_dir,
+                self.config.status_bar.clone(),
+                package_version.clone(),
+                package_git.clone(),
+            );
+            let interval = runtime.refresh_interval_ms().max(1);
+            *self.runtime_task.lock().expect("runtime task") = Some(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(interval));
+                loop {
+                    ticker.tick().await;
+                    let _ = runtime_for_task.write_once().await;
+                }
+            }));
+            *self.runtime_writer.lock().expect("runtime") = Some(runtime);
+            let summary = MetricsSummaryWriter::new(
+                &self.data_dir,
+                self.config.status_bar.clone(),
+                self.config
+                    .flushers
+                    .jsonl
+                    .as_ref()
+                    .map(|jsonl| jsonl.output_dir.as_str()),
+            );
+            let summary_for_task = MetricsSummaryWriter::new(
+                &self.data_dir,
+                self.config.status_bar.clone(),
+                self.config
+                    .flushers
+                    .jsonl
+                    .as_ref()
+                    .map(|jsonl| jsonl.output_dir.as_str()),
+            );
+            let summary_interval = self.config.status_bar.metrics_summary_interval_ms.max(1);
+            *self.summary_task.lock().expect("summary task") = Some(tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_millis(summary_interval));
+                loop {
+                    ticker.tick().await;
+                    summary_for_task.refresh().await;
+                }
+            }));
+            *self.summary_writer.lock().expect("summary") = Some(summary);
+            let dashboard = dashboard::DashboardServer::new(dashboard::DashboardServerOptions {
                 data_dir: self.data_dir.clone(),
-                version: package_version.clone(),
-                git_commit: if package_git.is_empty() {
-                    None
-                } else {
-                    Some(package_git)
-                },
-                verdict_store: Some(verdicts),
-                emit_blocked_prompt: Some(Arc::new(move |entry| {
-                    let inputs = Arc::clone(&inputs_for_prompt);
-                    tokio::spawn(async move {
-                        if let Err(err) = inputs.flush_prepared_entries(vec![entry]).await {
-                            logger("Orchestrator").warn(
-                                "blocked prompt flush failed",
-                                Some(&fields(serde_json::json!({ "error": err }))),
-                            );
-                        }
-                    });
-                })),
-            })
-            .await
-        {
-            Ok(service) => {
-                *self.interceptor.lock().expect("interceptor") = Some(service);
-            }
-            Err(err) => logger("Orchestrator").warn(
-                "interceptor start failed (non-fatal)",
-                Some(&fields(serde_json::json!({ "error": err.to_string() }))),
-            ),
-        }
-        if cfg!(target_os = "macos") && self.config.status_bar.enabled {
-            let status = StatusBarAppManager::new(
-                self.data_dir.clone(),
-                package_version,
-                ProcessOps::native(&self.data_dir),
-            )
-            .with_source_roots(vec![pilot_dir.clone()]);
-            if let Err(err) = status.sync_desired_state(true).await {
+                asset_path: Path::new(&pilot_dir)
+                    .join("assets")
+                    .join("dashboard")
+                    .join("index.html")
+                    .to_string_lossy()
+                    .into_owned(),
+                host: None,
+                port: Some(self.config.dashboard.port),
+            });
+            if let Err(err) = dashboard.start() {
                 logger("Orchestrator").warn(
-                    "status bar app start failed (non-fatal)",
+                    "dashboard start failed (non-fatal)",
                     Some(&fields(serde_json::json!({ "error": err }))),
                 );
             }
-            *self.status_bar.lock().expect("status") = Some(status);
+            if let Some(error) = dashboard.last_start_error() {
+                self.emit(OrchestratorEvent::ComponentFailure {
+                    component: "dashboard".into(),
+                    error,
+                });
+            }
+            *self.dashboard.lock().expect("dashboard") = Some(dashboard);
+            let inputs_for_prompt = Arc::clone(&self.inputs);
+            match self
+                .start_collector_interceptor(StartInterceptorServiceOptions {
+                    data_dir: self.data_dir.clone(),
+                    version: package_version.clone(),
+                    git_commit: if package_git.is_empty() {
+                        None
+                    } else {
+                        Some(package_git)
+                    },
+                    verdict_store: Some(verdicts),
+                    emit_blocked_prompt: Some(Arc::new(move |entry| {
+                        let inputs = Arc::clone(&inputs_for_prompt);
+                        tokio::spawn(async move {
+                            if let Err(err) = inputs.flush_prepared_entries(vec![entry]).await {
+                                logger("Orchestrator").warn(
+                                    "blocked prompt flush failed",
+                                    Some(&fields(serde_json::json!({ "error": err }))),
+                                );
+                            }
+                        });
+                    })),
+                })
+                .await
+            {
+                Ok(service) => {
+                    *self.interceptor.lock().expect("interceptor") = Some(service);
+                }
+                Err(err) => logger("Orchestrator").warn(
+                    "interceptor start failed (non-fatal)",
+                    Some(&fields(serde_json::json!({ "error": err.to_string() }))),
+                ),
+            }
+            if cfg!(target_os = "macos") && self.config.status_bar.enabled {
+                let status = StatusBarAppManager::new(
+                    self.data_dir.clone(),
+                    package_version,
+                    ProcessOps::native(&self.data_dir),
+                )
+                .with_source_roots(vec![pilot_dir.clone()]);
+                if let Err(err) = status.sync_desired_state(true).await {
+                    logger("Orchestrator").warn(
+                        "status bar app start failed (non-fatal)",
+                        Some(&fields(serde_json::json!({ "error": err }))),
+                    );
+                }
+                *self.status_bar.lock().expect("status") = Some(status);
+            }
         }
         *self.running.lock().expect("running") = true;
         logger("Orchestrator").info("orchestrator started", None);
-        let cleanup = Arc::new(LegacySlsFailedLogCleanupService::new(&self.data_dir));
-        cleanup.start();
-        *self.legacy_cleanup.lock().expect("legacy") = Some(cleanup);
+        if self.runtime_options.manage_host_services {
+            let cleanup = Arc::new(LegacySlsFailedLogCleanupService::new(&self.data_dir));
+            cleanup.start();
+            *self.legacy_cleanup.lock().expect("legacy") = Some(cleanup);
+        }
         Ok(())
     }
 
@@ -1606,6 +1651,13 @@ impl Orchestrator {
         Option<Arc<SlsFlusher>>,
         Option<Arc<OtlpTraceFlusher>>,
     )> {
+        if let Some(flusher) = &self.runtime_options.flusher {
+            if let Err(error) = flusher.start().await {
+                let _ = flusher.shutdown().await;
+                return Err(anyhow::Error::new(error));
+            }
+            return Ok((Arc::clone(flusher), None, None));
+        }
         let mut flushers: Vec<Arc<dyn BaseFlusher>> = Vec::new();
         let mut sls = None;
         let version = self.read_package_version();
@@ -5651,3 +5703,7 @@ mod trace_runtime_main541_tests;
 #[cfg(test)]
 #[path = "orchestrator_dsh_runtime_main553_tests.rs"]
 mod dsh_runtime_main553_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_embedded_tests.rs"]
+mod embedded_runtime_tests;
