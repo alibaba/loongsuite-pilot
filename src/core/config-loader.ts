@@ -139,6 +139,16 @@ export interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
     logDir?: string;
+    /**
+     * log-watch trajectory agents (e.g. trae-agent): directory scanned for
+     * `trajectory*.json` files. Overrides the built-in default watch dir.
+     */
+    trajectoryDir?: string;
+    /**
+     * log-watch trajectory agents: explicit single trajectory file to poll.
+     * Takes precedence over `trajectoryDir` discovery when set.
+     */
+    trajectoryFile?: string;
   }>;
 
   retention?: {
@@ -825,6 +835,7 @@ function buildListenersConfig(
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'trae-agent-trajectory': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -832,12 +843,20 @@ function buildListenersConfig(
   // Merge file-level listener overrides
   if (file?.listeners) {
     for (const [key, val] of Object.entries(file.listeners)) {
-      result[key] = {
+      const merged: ListenerConfig = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
         ...(key === 'doubao-work' && typeof val.logDir === 'string' && val.logDir.trim()
           ? { logDir: path.resolve(resolveHome(val.logDir.trim())) } : {}),
       };
+      // Preserve log-watch trajectory discovery overrides (P1-1) so an operator
+      // can point trae-agent at a custom dir or pin one exact file. Fall back to
+      // any previously-resolved value so a partial override doesn't drop the other.
+      const trajectoryDir = val.trajectoryDir ?? result[key]?.trajectoryDir;
+      const trajectoryFile = val.trajectoryFile ?? result[key]?.trajectoryFile;
+      if (trajectoryDir !== undefined) merged.trajectoryDir = trajectoryDir;
+      if (trajectoryFile !== undefined) merged.trajectoryFile = trajectoryFile;
+      result[key] = merged;
     }
   }
 
@@ -1063,7 +1082,10 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     appendAgentTypeToServiceName: config.serviceName ? false : undefined,
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     debug: otlp?.debug ?? config.cms.debug ?? false,
-    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    // Keep a bounded fallback for agents whose explicit terminal record can be
+    // lost (for example when a trajectory file is overwritten between polls).
+    // Five minutes is deliberately much larger than the default 30s poll cycle.
+    turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 300_000,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),

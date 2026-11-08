@@ -1858,6 +1858,17 @@ describe('ConfigLoader', () => {
       );
     });
 
+    it('defaults turn idle fallback well above the 30s polling interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+      expect(result!.turnIdleTimeoutMs).toBe(300_000);
+    });
+
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,

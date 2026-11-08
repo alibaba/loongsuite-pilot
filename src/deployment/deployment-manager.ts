@@ -14,6 +14,7 @@ import { DirectoryPluginStrategy } from './directory-plugin-strategy.js';
 import { DetectionOnlyStrategy } from './detection-only-strategy.js';
 import { DshYamlPatchStrategy } from './dsh-yaml-patch-strategy.js';
 import { CopilotPluginStrategy } from './copilot-plugin-strategy.js';
+import { LogWatchStrategy } from './log-watch-strategy.js';
 import { writeDeployNotification } from './deploy-notification.js';
 import { runPluginMigration } from './plugin-migration.js';
 import { HookManager } from '../hooks/hook-manager.js';
@@ -47,6 +48,7 @@ export class DeploymentManager {
   private readonly detectionOnlyStrategy: DetectionOnlyStrategy;
   private readonly dshYamlPatchStrategy: DshYamlPatchStrategy;
   private readonly copilotPluginStrategy: CopilotPluginStrategy;
+  private readonly logWatchStrategy: LogWatchStrategy;
   private readonly loader: AgentDefLoader;
   private readonly stateFilePath: string;
   private state: DeployedAgentsState = {};
@@ -73,6 +75,7 @@ export class DeploymentManager {
     this.detectionOnlyStrategy = new DetectionOnlyStrategy();
     this.dshYamlPatchStrategy = new DshYamlPatchStrategy(opts.dataDir);
     this.copilotPluginStrategy = new CopilotPluginStrategy({ dataDir: opts.dataDir });
+    this.logWatchStrategy = new LogWatchStrategy();
 
     const loaderOpts: AgentDefLoaderOptions = {
       builtinDir: opts.builtinAgentsDir ?? path.join(opts.pilotDir, 'agents.d'),
@@ -555,6 +558,8 @@ export class DeploymentManager {
         return this.dshYamlPatchStrategy;
       case 'copilot-plugin':
         return this.copilotPluginStrategy;
+      case 'log-watch':
+        return this.logWatchStrategy;
       default:
         throw new Error(`unknown deployMode: ${def.deployMode}`);
     }

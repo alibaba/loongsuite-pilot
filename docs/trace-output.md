@@ -46,7 +46,7 @@ source, output, installed-runtime and cloud evidence.
       "deployment.environment": "prod"
     },
     "debug": false,
-    "turnIdleTimeoutMs": 0
+    "turnIdleTimeoutMs": 300000
   }
 }
 ```
@@ -60,7 +60,7 @@ source, output, installed-runtime and cloud evidence.
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
-| `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
+| `otlpTrace.turnIdleTimeoutMs` | Idle fallback for incomplete turn buffers. Defaults to `300000` (5 minutes), well above the default 30-second polling interval. Set `0` to disable it. |
 
 Environment variables:
 

@@ -11,7 +11,8 @@ export type DeployMode =
   | 'directory-plugin'
   | 'detection-only'
   | 'dsh-yaml-patch'
-  | 'copilot-plugin';
+  | 'copilot-plugin'
+  | 'log-watch';
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
