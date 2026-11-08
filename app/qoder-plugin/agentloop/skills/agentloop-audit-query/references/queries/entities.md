@@ -44,6 +44,7 @@ SELECT coalesce(f.entity_type, r.entity_type) AS entity_type,
   f.first_time, f.latest_time, r.risk_count, r.high_risk_count
 FROM facts f FULL JOIN risks r
   ON f.entity_type = r.entity_type AND f.entity_id = r.entity_id
+ORDER BY entity_type, entity_id LIMIT 10000
 ```
 
 ## 出现会话
@@ -70,6 +71,8 @@ SELECT e.entity_type, e.entity_id, 'same_event' AS relation_type,
 FROM entity_occurrences e JOIN focus_facts f
   ON e.fact_source = f.fact_source AND e.fact_id = f.fact_id
 WHERE e.entity_id <> '{{entity_id}}'
+ORDER BY e.fact_source, e.fact_id, e.entity_type, e.entity_id,
+  e.source_scope, e.session_id LIMIT 10000
 ```
 
 同会话共现改用完整会话身份关联。调用、文件访问和外联关系需要对应原事件证据；共现不表示因果或操作已执行。

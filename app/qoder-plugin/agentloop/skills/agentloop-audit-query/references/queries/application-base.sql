@@ -1,4 +1,5 @@
--- CTE fragment: replace integer {{from}} / {{to}}, then append SELECT.
+-- Query CTE: bind integer {{from}} / {{to}}, then append SELECT.
+-- For relative dashboards, adapt time predicates per ../sql-writing.md.
 WITH event_raw AS (
   SELECT __time__ AS ts, "event.id" AS event_id, "event.name" AS raw_event_name,
     "user.id" AS user_id, "gen_ai.session.id" AS session_id,

@@ -24,7 +24,7 @@ ORDER BY high_risk_count DESC, risk_count DESC, latest_time DESC, user_id LIMIT 
   count(DISTINCT incident_event_id) AS risks
 FROM "incident-event"
 GROUP BY "user", risk_type, risk_subtype, severity, hour_ts
-ORDER BY hour_ts, user_id
+ORDER BY hour_ts, user_id, risk_type, risk_subtype, severity LIMIT 10000
 ```
 
 移除不需要的分组维度，可分别得到用户概览、时间分布或风险构成。

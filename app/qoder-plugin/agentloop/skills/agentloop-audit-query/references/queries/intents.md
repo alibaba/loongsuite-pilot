@@ -15,7 +15,7 @@ WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
   event_domain, count(*) AS intents
 FROM "audit-event"
 WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
-GROUP BY hour_ts, event_domain ORDER BY hour_ts, event_domain
+GROUP BY hour_ts, event_domain ORDER BY hour_ts, event_domain LIMIT 10000
 ```
 
 ## 意图分类与 Token 分布
@@ -27,7 +27,8 @@ GROUP BY hour_ts, event_domain ORDER BY hour_ts, event_domain
 FROM "audit-event"
 WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
   AND event_domain = 'user_intent'
-GROUP BY intent_category, intent_subcategory ORDER BY intents DESC
+GROUP BY intent_category, intent_subcategory
+ORDER BY intents DESC, intent_category, intent_subcategory LIMIT 10000
 ```
 
 usage_total_tokens 是意图分摊量，不是完整 Session 用量。
@@ -60,7 +61,8 @@ ORDER BY __time__ DESC, audit_event_id DESC LIMIT 0, 20
 
 ```sql
 , labels AS (
-  SELECT DISTINCT source_scope, "user" AS user_id, service_name,
+  SELECT DISTINCT source_scope, "user" AS user_id,
+    nullif(nullif(service_name, ''), 'null') AS service_name,
     evidence_session_id AS session_id, intent_category, intent_subcategory
   FROM "audit-event"
   WHERE event_name IN ('intent.user_intent','intent.custom_user_intent')
@@ -76,6 +78,7 @@ FROM session_model_usage u JOIN labels i
   AND (u.service_name = i.service_name
     OR (u.service_name IS NULL AND i.service_name IS NULL))
 GROUP BY i.intent_category, i.intent_subcategory, u.model
+ORDER BY i.intent_category, i.intent_subcategory, u.model LIMIT 10000
 ```
 
 同一 Session 可有多个意图，跨意图不能相加；关联覆盖与身份规则见 schema。

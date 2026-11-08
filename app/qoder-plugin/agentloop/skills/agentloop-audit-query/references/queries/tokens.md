@@ -13,7 +13,15 @@ FROM usage_events WHERE user_id IS NOT NULL
 GROUP BY user_id ORDER BY total_tokens DESC, user_id LIMIT 20
 ```
 
-按 model 或 agent_type 分组得到模型或 Agent 排行；总量查询省略分组。
+模型或 Agent 排行将 SELECT、GROUP BY、ORDER BY 中的 user_id 同时替换为 model 或 agent_type，并移除 `WHERE user_id IS NOT NULL`，保留匿名用量。总量单独查询：
+
+```sql
+SELECT sum(observed_tokens) AS total_tokens,
+  sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
+  count(*) AS model_responses,
+  count_if(input_tokens IS NOT NULL AND output_tokens IS NOT NULL) AS complete_responses
+FROM usage_events
+```
 
 调用归并使用 [call-usage.sql](call-usage.sql)。先确认稳定 ID 覆盖，再聚合调用：
 
@@ -32,7 +40,7 @@ SELECT count(*) AS calls, sum(total_tokens) AS total_tokens FROM token_call_t
 ```sql
 SELECT cast(floor(ts / 3600) * 3600 AS bigint) AS hour_ts,
   sum(observed_tokens) AS total_tokens
-FROM usage_events GROUP BY hour_ts ORDER BY hour_ts
+FROM usage_events GROUP BY hour_ts ORDER BY hour_ts LIMIT 10000
 ```
 
 平均 Session 消耗先聚合会话，再按末次观测时间归桶。
@@ -40,7 +48,7 @@ FROM usage_events GROUP BY hour_ts ORDER BY hour_ts
 ```sql
 SELECT cast(floor(latest_time / 3600) * 3600 AS bigint) AS hour_ts,
   avg(session_tokens) AS avg_session_tokens
-FROM session_usage GROUP BY hour_ts ORDER BY hour_ts
+FROM session_usage GROUP BY hour_ts ORDER BY hour_ts LIMIT 10000
 ```
 
 平均 Turn 消耗将 session_usage/session_tokens 换为 turn_usage/turn_tokens。周期对比使用相同 SQL 分别查询当前与比较窗口；固定 24 小时视图以选定范围的结束时间为锚点。
@@ -77,7 +85,7 @@ SELECT turn_count, count(*) AS sessions,
   avg(latest_time - first_time) AS avg_duration_seconds,
   avg(session_tokens) AS avg_tokens,
   approx_percentile(session_tokens, 0.95) AS p95_tokens
-FROM session_usage GROUP BY turn_count ORDER BY turn_count
+FROM session_usage GROUP BY turn_count ORDER BY turn_count LIMIT 10000
 ```
 
 按 Turn 数分桶即可生成长对话分布；缺失 Turn ID 不计真实轮数。
@@ -115,7 +123,7 @@ SELECT model,
   1.0 * sum(CASE WHEN cache_valid THEN cache_read_tokens END)
     / nullif(sum(CASE WHEN cache_valid THEN input_tokens END), 0) AS cache_hit_ratio,
   count_if(cache_valid) AS valid_responses, count(*) AS responses
-FROM usage_events GROUP BY model
+FROM usage_events GROUP BY model ORDER BY model LIMIT 10000
 ```
 
 有效样本定义见 schema；输入已包含缓存，计算总 Token 时不重复相加。

@@ -22,7 +22,7 @@
 
 插件环境使用 [execution](execution.md) 的 `scripts/run.py audit`，显式传目标、范围和最终 query。已有 SLS CLI 时可使用其 GetLogsV2 入口，按当前 CLI 帮助确认参数/响应；不要求用户安装本插件才能消费 SQL。调用前后的 shell 转义不得改变 SQL 内的双引号，复杂 SQL 优先使用参数数组或请求文件。
 
-GetLogsV2 结构包括 query、from、to；纯检索用 line/offset 分页，分析 SQL 用 `ORDER BY ... LIMIT offset,count`，不要用接口 line 或 offset 声称分析结果已取全。完成状态为 meta.progress；执行成功但 Incomplete 的结果不能标为准确全量。
+GetLogsV2 结构包括 query、from、to；纯检索用 line/offset 分页，分析 SQL 用 `ORDER BY ... LIMIT offset,count`，不要用接口 line 或 offset 声称分析结果已取全。完成状态为 meta.progress；执行成功但 Incomplete 的结果不能标为准确全量；Complete 也不代表没有被 LIMIT 截断，行数检查与 SQL 分页见 [SQL 写作技巧](sql-writing.md#sql-分页)。
 
 ## Python SDK 调用骨架
 
@@ -47,7 +47,7 @@ def query_complete(client, project, logstore, start, end, query_template):
     raise RuntimeError("Query remains incomplete; do not report an exact result")
 ```
 
-此骨架消费含 `{{from}}` / `{{to}}` 整数时间标记的模板，用同一 start/end 展开 SQL 与接口时间；其他筛选先按类型安全展开。这里只返回完整的一页/一个 SQL 结果集；需要下一页时按查询类型构造下一条请求。服务封装应加超时、受控退避、查询预算与错误分类，权限失败不换账号自动重试。distinct、比例和分位数不能在分页/分时后随意相加。
+此骨架消费含 `{{from}}` / `{{to}}` 整数时间标记的模板，用同一 start/end 展开 SQL 与接口时间；其他筛选先按类型安全展开。这里只返回执行完成的一页/一个有行数上限的 SQL 结果集，不保证所有分组均已取回；结果达到 LIMIT 时按稳定排序继续 SQL 分页，或先 COUNT 确认规模。服务封装应加超时、受控退避、查询预算与错误分类，权限失败不换账号自动重试。distinct、比例和分位数不能在分页/分时后随意相加。
 
 SDK `is_completed()` 与 CLI meta.progress 是不同响应封装。参考 [SLS Python 查询示例](https://help.aliyun.com/en/sls/developer-reference/use-getlogs-to-query-logs-46) 和 [分页查询](https://help.aliyun.com/en/sls/paged-query)，按客户实际 SDK/API 版本验证，不从工具包装后的 success 标记推断分析已完成。
 

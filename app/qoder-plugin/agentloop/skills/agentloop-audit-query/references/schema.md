@@ -229,7 +229,7 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 
 以下示例展示“事实合并与清洗 → 响应用量”的组合接口。按报表需要裁剪字段和 CTE，或补充已披露的工具等字段；完整查询以 `* |` 起始，在 CTE 后接目标 SELECT。
 
-应用事实的公共 CTE 见 [application-base.sql](queries/application-base.sql)。绑定整数 `{{from}}` / `{{to}}`，在 `WITH ...` 后接目标 SELECT，再加 `* |` 前缀。字段按本轮查询裁剪；两张物理表使用同一时间范围。该构件包含事实清洗与模型响应用量，调用归并的区别见 [Token 参考 SQL](queries/tokens.md)。
+应用事实的公共 CTE 见 [application-base.sql](queries/application-base.sql)。一次性查询绑定整数 `{{from}}` / `{{to}}`，在 `WITH ...` 后接目标 SELECT，再加 `* |` 前缀；相对时间仪表盘的适配见 [SQL 时间窗口](sql-writing.md#时间窗口)。字段按本轮查询裁剪；两张物理表使用同一时间范围。该构件包含事实清洗与模型响应用量，调用归并的区别见 [Token 参考 SQL](queries/tokens.md)。
 
 | 构件 | 粒度与用途 |
 |---|---|
@@ -386,6 +386,7 @@ FROM dept_user d
 LEFT JOIN user_activity a ON d.work_no = a.user_id
 LEFT JOIN user_usage u ON d.work_no = u.user_id
 GROUP BY d.dept_name_2, d.dept_name_3
+ORDER BY d.dept_name_2, d.dept_name_3 LIMIT 10000
 ```
 
 示例中两张事实聚合表均为每用户一行，因此 LEFT JOIN 后仍为每员工一行，`count(*)` 才能作为在册人数。若保留日期、Agent、模型等维度，一名员工可对应多行；在册人数和使用人数应从员工集合重新去重统计，不能逐行计数或相加。

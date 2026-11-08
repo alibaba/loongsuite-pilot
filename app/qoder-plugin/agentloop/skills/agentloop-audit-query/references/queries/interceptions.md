@@ -14,7 +14,7 @@ FROM guardrail_events WHERE triggered = 'true'
 ```sql
 SELECT cast(floor(ts / 3600) * 3600 AS bigint) AS hour_ts, count(*) AS blocked_events
 FROM guardrail_events WHERE triggered = 'true' AND action = 'block'
-GROUP BY hour_ts ORDER BY hour_ts
+GROUP BY hour_ts ORDER BY hour_ts LIMIT 10000
 ```
 
 按用户、Agent 等维度分组可查看对应分布。

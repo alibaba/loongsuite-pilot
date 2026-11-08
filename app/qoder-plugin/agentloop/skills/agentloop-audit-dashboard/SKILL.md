@@ -37,7 +37,7 @@ description: |
 ## Workflow
 
 1. 确定 `<scenario>`，读取或创建场景 spec。
-2. 按 References 与 Query Skill 的核心面板目录确定数据源、口径和查询构件，完成字段与代表性查询验证。
+2. 按 References 与 Query Skill 的核心面板目录确定数据源、口径和查询构件，按 [SQL 时间窗口](../agentloop-audit-query/references/sql-writing.md#时间窗口) 适配仪表盘时间，完成字段与代表性查询验证。
 3. 解析 spec，将自然语言需求转成视图清单：指标、SQL、图表类型、布局、筛选器和说明块。
 4. 使用 `sls-dashboard-builder` 生成或更新 dashboard JSON。
 5. 生成本地 HTML 预览，调用方式见 Preview。

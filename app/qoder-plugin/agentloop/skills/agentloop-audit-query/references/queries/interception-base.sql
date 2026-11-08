@@ -1,4 +1,5 @@
--- CTE fragment. Bind integer {{from}} / {{to}} and append SELECT.
+-- Query CTE: bind integer {{from}} / {{to}}, then append SELECT.
+-- For relative dashboards, adapt time predicates per ../sql-writing.md.
 WITH guardrail_events AS (
   SELECT __time__ AS ts, "event.id" AS event_id,
     "user.id" AS user_id, "gen_ai.agent.type" AS agent_type,

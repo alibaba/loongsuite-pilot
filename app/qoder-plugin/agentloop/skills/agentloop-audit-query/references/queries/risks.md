@@ -22,7 +22,7 @@ WHERE risk_type IS NOT NULL AND risk_type <> '' AND risk_type <> '-'
   count(DISTINCT nullif(nullif(nullif("user", ''), 'null'), '-')) AS users
 FROM "incident-event" WHERE severity IN ('critical','high')
 GROUP BY risk_type, risk_subtype
-ORDER BY applications DESC, risks DESC, risk_type, risk_subtype
+ORDER BY applications DESC, risks DESC, risk_type, risk_subtype LIMIT 10000
 ```
 
 ## 日周对比与恶化风险
@@ -30,7 +30,7 @@ ORDER BY applications DESC, risks DESC, risk_type, risk_subtype
 以下查询续接 [risk-periods.sql](risk-periods.sql)。接口时间覆盖当前、前日和前周三个窗口。
 
 ```sql
-SELECT * FROM risk_growth ORDER BY current_count DESC, risk_type, risk_subtype
+SELECT * FROM risk_growth ORDER BY current_count DESC, risk_type, risk_subtype LIMIT 10000
 ```
 
 恶化评分兼顾增长量与增长率，保留内置参考中的平滑和封顶参数。
@@ -60,7 +60,7 @@ ORDER BY score DESC, current_count DESC, risk_type, risk_subtype LIMIT 1
   count(DISTINCT CASE WHEN severity IN ('critical','high')
     THEN incident_event_id END) AS high_risks,
   count(DISTINCT risk_type) AS risk_types
-FROM "incident-event" GROUP BY hour_ts ORDER BY hour_ts
+FROM "incident-event" GROUP BY hour_ts ORDER BY hour_ts LIMIT 10000
 ```
 
 摘要移除时间分组；会话影响面按 schema 的完整身份聚合。

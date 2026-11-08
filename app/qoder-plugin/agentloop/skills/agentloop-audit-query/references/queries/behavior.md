@@ -22,7 +22,7 @@ FROM event_base
 SELECT cast(floor(ts / 3600) * 3600 AS bigint) AS hour_ts,
   agent_type, event_name, count(*) AS events
 FROM event_base
-GROUP BY hour_ts, agent_type, event_name ORDER BY hour_ts, agent_type, event_name
+GROUP BY hour_ts, agent_type, event_name ORDER BY hour_ts, agent_type, event_name LIMIT 10000
 ```
 
 按 model、tool_name 分组可得到模型和工具构成；命令、文件、网络分类按 schema 中的工具语义提取。
@@ -70,7 +70,7 @@ ORDER BY total_behavior DESC, latest_time DESC, session_id LIMIT 20
   FROM event_base WHERE session_id IS NOT NULL AND turn_id IS NOT NULL
   GROUP BY source_scope, user_id, service_name, session_id, turn_id
 )
-SELECT actions, count(*) AS turns FROM turns GROUP BY actions ORDER BY actions
+SELECT actions, count(*) AS turns FROM turns GROUP BY actions ORDER BY actions LIMIT 10000
 ```
 
 Turn 动作量不等于业务产出。日内活跃度使用同一 turns CTE，将末尾 SELECT 换为：
