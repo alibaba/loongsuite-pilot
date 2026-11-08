@@ -117,7 +117,7 @@ JSON 输入和事件视图都是 UTF-8 地址加字节长度，不要求 NUL。�
 
 SDK 的自监控包括以下字段与口径：
 
-- `pilot.metrics.l1`：宿主进程 CPU/RSS/FD、实例身份、输入输出窗口，以及 SDK 数据目录的有界磁盘采样。目录采样沿用 30 秒首次延迟、10 分钟周期和已有资源告警阈值；未知大小不伪造为零。队列 `disk_bytes` 包含 SQLite、WAL 和 SHM 的物理文件大小，`pending_bytes` 仍是未 ACK 的 JSON 负载。
+- `pilot.metrics.l1`：宿主进程 CPU/RSS/FD、实例身份、输入输出窗口，以及 SDK 数据目录的有界磁盘采样。Linux 沿用 `/proc`；Mac/Windows 使用已依赖的 sysinfo，仅刷新当前宿主 PID。`cpu_available`、`mem_available`、`open_fd_available` 说明可用性，CPU 首次采样尚无时间区间或采样失败时不伪造零值；不提供受管运行时的堆指标。目录采样沿用 30 秒首次延迟、10 分钟周期和已有资源告警阈值；未知大小不伪造为零。队列 `disk_bytes` 包含 SQLite、WAL 和 SHM 的物理文件大小，`pending_bytes` 仍是未 ACK 的 JSON 负载。
 - `pilot.metrics.l2`：Agent/Input/callback 指标，以及 cloud/local 两路 Hook 的次数、总耗时和最大耗时。Hook 行带 `hook_channel`、原 `hook_event` 与 `timing_scope=sdk_verdict`；它测量 SDK 裁决段，不是 bin 冷启动到 Agent 收到结果的整条耗时。callback 的 `total_delay_ms` 是成功 ACK 事件从入队到交接的累计延迟；另列 `callback_duration_ms_total`、启动时间及最近 ACK 时间。
 - `pilot.token_usage`：按 Agent、UTC 日期持久累计的 `llm_responses_total`、`responses_with_usage`、input/output/cache tokens。它与来源进度、outbox 同事务提交，活动 RETRY、恢复重放及 ACK 不重复累计。`usage_basis=accepted_normalized_llm_response`、`source_scan_performed=false` 明确其基于 SDK 接受的归一化响应，不是独立扫描 Agent 原生文件，不用于替代其他口径的计费核对。升级前已接收的活动不会倒推补计；`since_unix` 标明起点。缺少 token 的响应不冒充已知的零用量。
 - `pilot.trace_runtime`：`buffer_scope=sdk_delivery_outbox` 下的待交付数量、字节及最老积压时长。活动回调模式不运行 OTLP 转换器，因此 `converter_available=false`，不虚构完整模式的转换缓冲或转换耗时。完整 Pilot 的 OTLP 监控继续走原实现。

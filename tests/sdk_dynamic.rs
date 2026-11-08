@@ -786,6 +786,17 @@ fn real_library_reports_version_hook_and_durable_usage_without_host_mapping() {
     policy["sdk_options"]["delivery"]["retry_alarm_after_ms"] = json!(1);
     let mut host = Host::start(&data, policy, ctx);
     host.ready();
+    until(|| {
+        host.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["event.name"] == "pilot.metrics.l1"
+                && r["metric_json"]["cpu_available"] == "true"
+                && r["metric_json"]["mem_available"] == "true"
+                && r["mem"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .is_some_and(|m| m > 1.0)
+        })
+    });
     std::thread::sleep(Duration::from_millis(350));
     let record = json!({"event.id":"usage-wire-original","event.name":"llm.response","version":"agent-version","time_unix_nano":"1794066484438000000","gen_ai.agent.type":"qoder","gen_ai.session.id":"wire-session","gen_ai.turn.id":"wire-turn","gen_ai.step.id":"wire-step","gen_ai.response.id":"wire-response","gen_ai.response.model":"model","gen_ai.response.finish_reasons":["stop"],"gen_ai.usage.input_tokens":23,"gen_ai.usage.output_tokens":7,"gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":"done"}]}],"gen_ai.sdk_unknown":{"integer":18446744073709551615u64}});
     writeln!(
