@@ -768,3 +768,110 @@ fn qoder_native_wakeup_transcript_and_checkpoint_share_the_dynamic_delivery_path
     until(|| host.snapshot()["delivery"]["pending_events"] == 0);
     host.stop();
 }
+
+#[test]
+fn real_library_reports_version_hook_and_durable_usage_without_host_mapping() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let file = source.join(format!(
+        "qoder-{}.jsonl",
+        chrono::Local::now().format("%Y-%m-%d")
+    ));
+    std::fs::write(&file, "").unwrap();
+    let data = root.path().join("data");
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut policy = qoder_policy(&source);
+    policy["sdk_options"]["delivery"]["retry_alarm_after_ms"] = json!(1);
+    let mut host = Host::start(&data, policy, ctx);
+    host.ready();
+    std::thread::sleep(Duration::from_millis(350));
+    let record = json!({"event.id":"usage-wire-original","event.name":"llm.response","version":"agent-version","time_unix_nano":"1794066484438000000","gen_ai.agent.type":"qoder","gen_ai.session.id":"wire-session","gen_ai.turn.id":"wire-turn","gen_ai.step.id":"wire-step","gen_ai.response.id":"wire-response","gen_ai.response.model":"model","gen_ai.response.finish_reasons":["stop"],"gen_ai.usage.input_tokens":23,"gen_ai.usage.output_tokens":7,"gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":"done"}]}],"gen_ai.sdk_unknown":{"integer":18446744073709551615u64}});
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap(),
+        "{record}"
+    )
+    .unwrap();
+    until(|| {
+        host.ctx.rows.lock().unwrap().iter().any(|b| {
+            serde_json::from_slice::<Value>(b).unwrap()["event.id"] == "usage-wire-original"
+        })
+    });
+    let payload = json!({"hook_event_name":"PreToolUse","session_id":"wire-session","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/sdk-test"}});
+    let _ = hook_command(&data, "cloud", "PreToolUse", &payload)
+        .wait_with_output()
+        .unwrap();
+    until(|| {
+        host.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["event.name"] == "pilot.metrics.l2"
+                && r["hooks"].as_array().is_some_and(|h| {
+                    h.iter()
+                        .any(|r| r["hook_channel"] == "cloud" && r["hook_event"] == "PreToolUse")
+                })
+        })
+    });
+    until(|| {
+        host.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["event.name"] == "pilot.token_usage"
+                && r["input_tokens_total"] == 23
+                && r["llm_responses_total"] == 1
+        })
+    });
+    until(|| {
+        host.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["alarm_type"] == "SDK_DELIVERY_RETRY"
+                && r["user_id"] == "sdk-acceptance"
+                && r.get("alarm_level").is_some()
+                && r.get("__time__").is_some()
+        })
+    });
+    let original = host
+        .ctx
+        .rows
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|b| serde_json::from_slice::<Value>(b).unwrap()["event.id"] == "usage-wire-original")
+        .unwrap()
+        .clone();
+    let decoded: Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(decoded["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        decoded["gen_ai.sdk_unknown"]["integer"].as_u64(),
+        Some(u64::MAX)
+    );
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    until(|| {
+        host.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["event.name"] == "pilot.metrics.l2"
+                && r["flushers"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["flusher"] == "callback"
+                            && !row["last_flush_time"].as_str().unwrap_or("").is_empty()
+                            && row["total_delay_ms"]
+                                .as_str()
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(0)
+                                > 0
+                    })
+                })
+        })
+    });
+    host.stop();
+    drop(host);
+    let mut resumed = Host::start(&data, qoder_policy(&source), Box::default());
+    resumed.ready();
+    until(|| {
+        resumed.ctx.metrics.lock().unwrap().iter().any(|r| {
+            r["event.name"] == "pilot.token_usage"
+                && r["input_tokens_total"] == 23
+                && r["llm_responses_total"] == 1
+        })
+    });
+    resumed.stop();
+}

@@ -508,7 +508,9 @@ impl Session {
             &instance.init.data_dir.join("outbox"),
             policy.delivery.clone(),
         )?;
+        queue.identity.write().unwrap()["user_id"] = json!(instance.init.user_id);
         *instance.queue.lock().unwrap() = Some(queue.clone());
+        let mut monitoring = super::monitoring::Monitoring::new(&instance.init, &queue)?;
         let callbacks = instance.callbacks;
         let activity_queue = queue.clone();
         let activity_owner = Arc::downgrade(instance);
@@ -539,12 +541,7 @@ impl Session {
         let owner = Arc::downgrade(instance);
         let monitor_queue = session.queue.clone();
         session.monitor=Some(std::thread::Builder::new().name("pilot-monitoring".into()).spawn(move||{
-            let Some(first) = owner.upgrade() else { return; };
-            let mut options = crate::metrics::MetricsCollectorOptions::new(
-                env!("CARGO_PKG_VERSION"), &first.init.user_id, first.init.data_dir.to_string_lossy());
-            options.auto_update_enabled = false;
-            let mut metrics = crate::metrics::MetricsCollector::from_options(options);
-            drop(first);
+            monitoring.enter_scope();
             let mut pending:Option<MonitoringBatch>=None;
             let mut last_options=monitor_queue.options.read().unwrap().clone();
             let mut rotation=0usize;
@@ -556,30 +553,13 @@ impl Session {
                 if options!=last_options { pending=None;last_options=options.clone(); }
                 if pending.is_none(){if let Some(instance)=owner.upgrade(){
                     let alarms=monitor_queue.alarm_batch();
-                    let mut flow = instance.flow.lock().unwrap().clone();
-                    flow.flushers.insert("cloud-callback".into(),crate::metrics::FlusherEndpointStats {
-                        kind:"callback".into(), in_entries: monitor_queue.accepted_events.load(Ordering::SeqCst) as i64,
-                        in_bytes: monitor_queue.accepted_bytes.load(Ordering::SeqCst) as i64,
-                        out_entries: monitor_queue.acked_events.load(Ordering::SeqCst) as i64,
-                        out_bytes: monitor_queue.acked_bytes.load(Ordering::SeqCst) as i64,
-                        out_failed: monitor_queue.retries.load(Ordering::SeqCst) as i64,
-                        ..Default::default()
-                    });
-                    let mut l1=serde_json::to_value(metrics.collect_l1(&flow)).expect("L1 metrics");
-                    for key in ["updater_pid_alive","runtime_bin_valid","current_version_valid","rollback_available","version_count","init_type"] {
-                        l1[key]=json!("not-applicable");
-                    }
-                    l1["event.name"]=json!("pilot.metrics.l1"); l1["metrics_scope"]=json!("host_process");
-                    let mut rows=vec![serde_json::to_vec(&l1).expect("L1 JSON"),
-                        serde_json::to_vec(&json!({"event.name":"pilot.monitoring","snapshot":instance.snapshot()})).expect("monitoring JSON")];
-                    if let Some(mut l2)=serde_json::to_value(metrics.collect_l2(&flow)).ok().filter(|v|!v.is_null()) {
-                        l2["event.name"]=json!("pilot.metrics.l2"); rows.push(serde_json::to_vec(&l2).expect("L2 JSON"));
-                    }
+                    let flow=instance.flow.lock().unwrap().clone();
+                    let mut rows=monitoring.collect(flow,instance.snapshot(),&monitor_queue);
                     let metric_count=rows.len();
                     rows.rotate_left(rotation%metric_count);rotation=rotation.wrapping_add(1);
                     let mut selected=Vec::new();let mut acknowledged=Vec::new();let mut bytes=0usize;
                     // Persistent alarms take priority over coalescible metric snapshots.
-                    for (row,alarm) in alarms.into_iter().map(|alarm|(alarm.1.as_bytes().to_vec(),Some(alarm)))
+                    for (row,alarm) in alarms.into_iter().filter_map(|alarm|{match serde_json::from_str::<Value>(&alarm.1).ok().filter(Value::is_object){Some(row)=>Some((serde_json::to_vec(&monitor_queue.decorate_alarm(row)).expect("alarm JSON"),Some(alarm))),None=>{*monitor_queue.last_error.lock().unwrap()=Some("invalid persisted alarm retained".into());None}}})
                         .chain(rows.into_iter().map(|row|(row,None))) {
                         if row.len()>options.max_event_bytes || row.len()>options.max_batch_bytes {
                             *monitor_queue.last_error.lock().unwrap()=Some("monitoring event exceeds current delivery limit; retained alarms wait for a policy update".into());
@@ -600,7 +580,7 @@ impl Session {
                     if ack==ACK{monitor_queue.ack_alarms(alarms);pending=None;}
                     else if ack!=RETRY {monitor_queue.alarm("SDK_MONITORING_PROTOCOL","on_monitoring returned an unknown code; batch retained");}
                 }
-                for _ in 0..10{if monitor_queue.stopping.load(Ordering::SeqCst){break;}std::thread::sleep(Duration::from_millis(100));}
+                monitoring.pause(&monitor_queue.stopping);
             }
         })?);
         session.hooks = Some(Hooks::start(

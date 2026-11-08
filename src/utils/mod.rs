@@ -125,8 +125,8 @@ pub use win_archive::{
 
 pub mod segmented_jsonl_writer;
 pub use segmented_jsonl_writer::{
-    append_segmented_jsonl, parse_output_segment, with_jsonl_file_lock,
-    DEFAULT_JSONL_SEGMENT_BYTES, LOCAL_LOG_EMERGENCY_FILE_BYTES,
+    append_segmented_jsonl, append_segmented_jsonl_batch, parse_output_segment,
+    with_jsonl_file_lock, DEFAULT_JSONL_SEGMENT_BYTES, LOCAL_LOG_EMERGENCY_FILE_BYTES,
 };
 
 pub(crate) mod file_identity;

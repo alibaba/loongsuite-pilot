@@ -110,13 +110,18 @@ impl Hooks {
                         let scope=crate::utils::source_access::SourceScope::new(Vec::new(),0,0);
                         if let Some(root)=spool.parent(){scope.set_log(root.join("hook.log"));}
                         crate::utils::source_access::install(Some(scope));
+                        let hook_started=Instant::now();
                         let result=process(&packet,&spool,channel,&settings,callback,(context,&queue),deadline);
+                        queue.record_hook(&packet.agent, &format!("{channel}:{}",packet.event),hook_started.elapsed().as_secs_f64()*1000.0);
                         if Instant::now()<deadline && !stop.load(Ordering::SeqCst){
                             let response=json!({"id":packet.id,"instance":instance,"action":result.0,"reason":result.1});
                             if let Ok(bytes)=serde_json::to_vec(&response){if bytes.len()<=MAX_REPLY && socket.send_to(&bytes,peer).is_ok(){record_native_verdict(&queue,&settings,&result);}}
                         }
                         // Record delivery is independent of the Agent verdict.
                         let activity=json!({"event.id":uuid::Uuid::new_v4().to_string(),"event.name":"other","time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),"gen_ai.agent.type":packet.agent,"gen_ai.session.id":result.2.as_ref().and_then(|r|r.session_id.as_deref()).unwrap_or(""),"gen_ai.provider.name":"pilot","event.kind":"interceptor.result","hook.channel":channel,"hook.request_id":packet.id,"hook.action":result.0,"hook.reason":result.1,"hook.late":Instant::now()>=deadline});
+                        let mut activity=activity;
+                        activity["version"]=json!(env!("CARGO_PKG_VERSION"));
+                        activity["user.id"]=queue.identity.read().unwrap()["user_id"].clone();
                         if let Err(error)=queue.enqueue_hook(&activity.to_string().into_bytes()){queue.alarm("SDK_HOOK_RECORD_FULL",&error.to_string());}
                     }){running.push(thread);}
                 }

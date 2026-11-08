@@ -175,6 +175,31 @@ pub fn project_log_entry(
     out
 }
 
+/// Project the already serialized activity without cloning nested messages.
+/// Only the outer keys are filtered; raw JSON values retain their exact types.
+pub fn project_encoded_log_entry(
+    encoded: &[u8],
+    agent_type: &str,
+    options: &SerialiseLogEntryOptions,
+) -> serde_json::Result<Vec<u8>> {
+    let mut fields: indexmap::IndexMap<String, &serde_json::value::RawValue> =
+        serde_json::from_slice(encoded)?;
+    fields.retain(|key, value| {
+        if value.get() == "null" || is_legacy_alias(key) {
+            return false;
+        }
+        if key == OPENCLAW_SESSION_KEY {
+            return agent_type == "openclaw"
+                && serde_json::from_str::<Value>(value.get())
+                    .is_ok_and(|value| is_openclaw_session_key(&value));
+        }
+        !(options.drop_agent_scoped_fields
+            && key.starts_with("agent.")
+            && AGENT_SCOPED_FIELD_RE.is_match(key))
+    });
+    serde_json::to_vec(&fields)
+}
+
 pub fn serialise_log_entry(
     entry: &AgentActivityEntry,
     options: &SerialiseLogEntryOptions,
@@ -1618,5 +1643,41 @@ mod tests {
         assert_eq!(out.get("userId").map(String::as_str), Some("uid"));
         assert_eq!(out.get("repoId").map(String::as_str), Some("repo"));
         assert_eq!(out.get("customField").map(String::as_str), Some("keep-me"));
+    }
+}
+
+#[cfg(test)]
+mod prepared_projection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prepared_projection_matches_owned_projection_without_retyping_values() {
+        for agent in ["codex", "qoder", "openclaw"] {
+            for drop in [false, true] {
+                let mut entry = AgentActivityEntry {
+                    agent_type: agent.into(),
+                    ..Default::default()
+                };
+                entry.extra.extend(serde_json::from_value::<Map<String,Value>>(json!({
+                    "unknown\nkey": {"integer":18446744073709551615u64,"fraction":1.25,"text":"中文\n\"\\"},
+                    "gen_ai.input.messages":[{"role":"user","parts":[{"text":"hello","agent.nested.keep":true}]}],
+                    "agent.codex.cwd":"/tmp/workspace", "agent.nested":null,
+                    "agent.type":"legacy", "empty":null,
+                    "agent.openclaw.session_key":"agent:main:session:acceptance"
+                })).unwrap());
+                let options = SerialiseLogEntryOptions {
+                    drop_agent_scoped_fields: drop,
+                };
+                let expected = Value::Object(project_log_entry(&entry, &options));
+                let actual = project_encoded_log_entry(
+                    &serde_json::to_vec(&entry).unwrap(),
+                    agent,
+                    &options,
+                )
+                .unwrap();
+                assert_eq!(serde_json::from_slice::<Value>(&actual).unwrap(), expected);
+            }
+        }
     }
 }

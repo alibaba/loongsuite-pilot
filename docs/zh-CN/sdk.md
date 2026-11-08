@@ -115,6 +115,16 @@ JSON 输入和事件视图都是 UTF-8 地址加字节长度，不要求 NUL。�
 
 监控独立于活动交付，复用现有 L1/L2 指标，并报告队列、来源和 SDK 告警。CPU/RSS 标注 `metrics_scope=host_process`；安装、更新器等不适用于嵌入模式的指标标为 not-applicable。监控状态可以合并，持久告警直到其实际批次 ACK 后才移除。
 
+SDK 的自监控包括以下字段与口径：
+
+- `pilot.metrics.l1`：宿主进程 CPU/RSS/FD、实例身份、输入输出窗口，以及 SDK 数据目录的有界磁盘采样。目录采样沿用 30 秒首次延迟、10 分钟周期和已有资源告警阈值；未知大小不伪造为零。队列 `disk_bytes` 包含 SQLite、WAL 和 SHM 的物理文件大小，`pending_bytes` 仍是未 ACK 的 JSON 负载。
+- `pilot.metrics.l2`：Agent/Input/callback 指标，以及 cloud/local 两路 Hook 的次数、总耗时和最大耗时。Hook 行带 `hook_channel`、原 `hook_event` 与 `timing_scope=sdk_verdict`；它测量 SDK 裁决段，不是 bin 冷启动到 Agent 收到结果的整条耗时。callback 的 `total_delay_ms` 是成功 ACK 事件从入队到交接的累计延迟；另列 `callback_duration_ms_total`、启动时间及最近 ACK 时间。
+- `pilot.token_usage`：按 Agent、UTC 日期持久累计的 `llm_responses_total`、`responses_with_usage`、input/output/cache tokens。它与来源进度、outbox 同事务提交，活动 RETRY、恢复重放及 ACK 不重复累计。`usage_basis=accepted_normalized_llm_response`、`source_scan_performed=false` 明确其基于 SDK 接受的归一化响应，不是独立扫描 Agent 原生文件，不用于替代其他口径的计费核对。升级前已接收的活动不会倒推补计；`since_unix` 标明起点。缺少 token 的响应不冒充已知的零用量。
+- `pilot.trace_runtime`：`buffer_scope=sdk_delivery_outbox` 下的待交付数量、字节及最老积压时长。活动回调模式不运行 OTLP 转换器，因此 `converter_available=false`，不虚构完整模式的转换缓冲或转换耗时。完整 Pilot 的 OTLP 监控继续走原实现。
+- `pilot.alarm`：保留 SDK 专有告警，并补齐旧告警的 `alarm_type`、`alarm_level`、`alarm_count`、`alarm_message`、`user_id`、`ip`、`ver`、`__time__`。CPU/内存告警标为宿主进程口径，队列、来源及 SDK 数据目录告警标为实例口径。告警不含活动正文。
+
+活动在首次持久交付前补充 SDK `version`；与完整模式的 SLS 出口一致，该已知元数据使用 SDK 版本覆盖同名来值，其余未知字段保留。裁决审计事件也带 `version` 和 `user.id`。因此版本筛选和旧告警字段不需要云壳另补 SDK 本身已知的信息；宿主仍负责其安全上下文和接收端存储。
+
 ## 两条 Hook 与截止
 
 SDK 分别发布 `sdk-hooks-cloud.json` 和 `sdk-hooks-local.json`，包含进程号、实际 loopback UDP 端口、实例标识和随机 token。两个入口各自最多同时运行 8 个裁决工作，互不占用对方的并发额度。

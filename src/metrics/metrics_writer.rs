@@ -271,6 +271,17 @@ impl MetricsWriter {
     pub fn sampler(&self) -> &Arc<DiskUsageSampler> {
         &self.sampler
     }
+
+    /// Embedding hosts retain these rows until their own delivery ACK.
+    pub(crate) fn drain_resource_alarms(&self) -> Vec<crate::metrics::AlarmEntry> {
+        self.inner
+            .lock()
+            .expect("writer")
+            .alarm_manager
+            .as_ref()
+            .map(AlarmManager::serialize)
+            .unwrap_or_default()
+    }
 }
 
 struct Shared {

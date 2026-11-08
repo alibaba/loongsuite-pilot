@@ -270,13 +270,18 @@ fn bind<T: InputBody>(
             let manager = manager.clone();
             let id = id.clone();
             Box::pin(async move {
-                let entries = {
+                let mut entries = {
                     let mut cycle = buffer.lock().unwrap();
                     if let Some(error) = &cycle.failure {
                         anyhow::bail!(error.clone());
                     }
                     std::mem::take(&mut cycle.entries)
                 };
+                for entry in &mut entries {
+                    entry
+                        .extra
+                        .insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
+                }
                 manager
                     .upgrade()
                     .ok_or_else(|| anyhow::anyhow!("SDK source manager stopped"))?

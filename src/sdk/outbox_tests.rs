@@ -231,3 +231,80 @@ async fn invalid_ack_is_retry_and_corrupt_outbox_is_never_replaced() {
         bytes
     );
 }
+
+#[tokio::test]
+async fn token_totals_commit_with_progress_survive_ack_and_restart_without_counting_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let state = StateStore::new(root.path().join("state.json"));
+    let queue = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
+    let encoded=serde_json::to_vec(&json!({"event.name":"llm.response","event.id":"usage-original","gen_ai.agent.type":"codex","time_unix_nano":"1794066484438000000","gen_ai.usage.input_tokens":64,"gen_ai.usage.output_tokens":32,"gen_ai.usage.cache_read.input_tokens":8})).unwrap();
+    queue
+        .accept("source", &state, &[encoded], &AtomicBool::new(false))
+        .await
+        .unwrap();
+    assert_eq!(queue.token_rows()[0]["input_tokens_total"], 64);
+    let first = queue.read_batch(&Delivery::default()).unwrap().0;
+    let retry = queue.read_batch(&Delivery::default()).unwrap().0;
+    assert_eq!(first, retry);
+    assert_eq!(queue.token_rows()[0]["llm_responses_total"], 1);
+    queue.ack(&first).unwrap();
+    assert_eq!(queue.token_rows()[0]["output_tokens_total"], 32);
+    assert!(queue.last_ack_ms.load(Ordering::SeqCst) > 0);
+    drop(queue);
+    let resumed = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
+    assert_eq!(resumed.token_rows()[0]["llm_responses_total"], 1);
+    assert_eq!(resumed.token_rows()[0]["cache_read_tokens_total"], 8);
+    assert_eq!(resumed.snapshot()["pending_events"], 0);
+}
+
+#[tokio::test]
+async fn token_counter_saturates_without_rolling_back_collection_progress() {
+    let root = tempfile::tempdir().unwrap();
+    let state = StateStore::new(root.path().join("state.json"));
+    let q = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
+    let row=serde_json::to_vec(&json!({"event.name":"llm.response","gen_ai.agent.type":"codex","time_unix_nano":"1794066484438000000","gen_ai.usage.input_tokens":i64::MAX})).unwrap();
+    for _ in 0..2 {
+        q.accept(
+            "source",
+            &state,
+            std::slice::from_ref(&row),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        q.token_rows()[0]["input_tokens_total"].as_i64(),
+        Some(i64::MAX)
+    );
+    assert_eq!(q.token_rows()[0]["llm_responses_total"], 2);
+    assert_eq!(q.snapshot()["pending_events"], 2);
+}
+
+#[tokio::test]
+async fn trace_gauges_use_durable_queue_counters_and_do_not_fabricate_failed_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let store = StateStore::new(root.path().join("state.json"));
+    let q = Outbox::open(&root.path().join("outbox"), Delivery::default()).unwrap();
+    let bytes = b"{\"event.name\":\"other\"}".to_vec();
+    q.accept(
+        "source",
+        &store,
+        std::slice::from_ref(&bytes),
+        &AtomicBool::new(false),
+    )
+    .await
+    .unwrap();
+    let row = &q.trace_rows()[0];
+    assert_eq!(row["pending_records"], 1);
+    assert_eq!(row["pending_logical_bytes"], bytes.len());
+    assert_eq!(row["buffer_scope"], "sdk_delivery_outbox");
+    assert_eq!(row["converter_available"], false);
+    q.db.lock()
+        .unwrap()
+        .execute("DROP TABLE queue_size", [])
+        .unwrap();
+    let row = &q.trace_rows()[0];
+    assert_eq!(row["collection_status"], "unavailable");
+    assert!(row.get("pending_records").is_none());
+}

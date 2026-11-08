@@ -32,7 +32,7 @@ pub use enrich_git_context::{
 };
 pub use entry_builder::{
     build_agent_activity_entry, build_from_code_generation_event, infer_provider_name,
-    normalize_event_name, normalize_finish_reasons, project_log_entry,
+    normalize_event_name, normalize_finish_reasons, project_encoded_log_entry, project_log_entry,
     redact_code_generation_fields, serialise_log_entry, timestamp_to_unix_nanos, to_json_value,
     unix_nanos_to_millis, SerialiseLogEntryOptions,
 };

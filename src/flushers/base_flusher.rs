@@ -132,6 +132,10 @@ impl TraceRuntimeSnapshot {
 pub trait BaseFlusher: Send + Sync {
     fn name(&self) -> &str;
 
+    fn uses_prepared_batch(&self) -> bool {
+        false
+    }
+
     async fn send(
         &self,
         entry: AgentActivityEntry,
