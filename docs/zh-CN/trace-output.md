@@ -55,7 +55,11 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
-| `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
+| `otlpTrace.turnIdleTimeoutMs` | turn 级 Trace 聚合空闲超时，默认 `0`（禁用）。实时 Hermes 轮次始终等待原生调用结束；即使配置超时，也不会提前关闭，首次达到阈值时输出一次诊断。旧版 producer 保留空闲刷新行为。 |
+
+Hermes 通过实际调用结束收口，包括跳过原生结束 hook 的提前返回、失败和取消路径。
+正常结束 hook 和调用结束观察不会重复发送结束记录；同一 session 的其他活动调用继续采集。
+更新插件后需重新启动 Hermes 宿主进程，使其加载新插件。
 
 环境变量：
 

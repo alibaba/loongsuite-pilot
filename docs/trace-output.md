@@ -60,7 +60,11 @@ source, output, installed-runtime and cloud evidence.
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
-| `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
+| `otlpTrace.turnIdleTimeoutMs` | Turn-level aggregation idle timeout; defaults to `0` (disabled). Realtime Hermes turns always wait for native completion, including when this timeout is configured; a warning is emitted once if an idle Hermes turn reaches it. Legacy producers retain idle flushing. |
+
+Hermes observes actual call completion, including early returns, failures and cancellation that bypass
+native completion hooks. Normal hooks and the call observer do not emit duplicate completion records;
+other active calls in the same session continue collecting. Restart Hermes after updating the plugin.
 
 Environment variables:
 

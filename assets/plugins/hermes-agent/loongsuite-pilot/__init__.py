@@ -62,6 +62,81 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+_NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
+
+
+def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
+    scope = _NATIVE_RUN_SCOPE.get()
+    if scope is None or turn["session_id"] != scope["session_id"]:
+        return
+    owned = scope["turns"]
+    if len(owned) < MAX_ACTIVE_TURNS:
+        owned[turn["fallback_turn_id"]] = (state, turn)
+
+
+def _finish_native_run(scope: Dict[str, Any], result: Any) -> None:
+    # Hermes v2026.6.5 has error/interrupt returns before on_session_end.
+    # The native call has actually returned here: no idle/finish-reason guess
+    # and no adoption of another foreground/background invocation by session.
+    payload = {}
+    if isinstance(result, dict):
+        if isinstance(result.get("messages"), list):
+            payload["conversation_history"] = result["messages"]
+        if isinstance(result.get("final_response"), str):
+            payload["assistant_response"] = result["final_response"]
+    with _STATE_LOCK:
+        for state, turn in scope["turns"].values():
+            if state["turns"].get(turn["fallback_turn_id"]) is turn:
+                _flush_turn(state, turn, payload)
+
+
+def _install_run_completion_observer() -> None:
+    global _NATIVE_RUN_SCOPE
+    # Plugin discovery can happen inside model_tools while run_agent.AIAgent
+    # is still undefined. v2026.6.5's class forwards to this native loop; wrap
+    # that boundary so the very first invocation is covered after cold import.
+    try:
+        owner = importlib.import_module("agent.conversation_loop")
+    except ImportError:
+        module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+        owner = getattr(module, "AIAgent", None)
+    original = getattr(owner, "run_conversation", None)
+    if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
+        return
+    if hasattr(original, "_pilot_run_scope"):
+        # Re-registration must not nest wrappers or strand an in-flight token.
+        _NATIVE_RUN_SCOPE = original._pilot_run_scope
+        original._pilot_run_finish = _finish_native_run
+        return
+
+    @functools.wraps(original)
+    def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+        context = observed._pilot_run_scope
+        try:
+            scope = {"session_id": getattr(agent, "session_id", None), "turns": {}}
+            token = context.set(scope)
+        except Exception:
+            return original(agent, *args, **kwargs)
+        result = None
+        try:
+            # No telemetry lock spans the application call. Native hooks run
+            # normally, and results/exceptions/cancellation retain identity.
+            result = original(agent, *args, **kwargs)
+            return result
+        finally:
+            try:
+                observed._pilot_run_finish(scope, result)
+            except Exception as error:
+                _report_internal_error("native run completion", error)
+            finally:
+                try:
+                    context.reset(token)
+                except Exception as error:
+                    _report_internal_error("native run context restore", error)
+
+    observed._pilot_run_scope = _NATIVE_RUN_SCOPE
+    observed._pilot_run_finish = _finish_native_run
+    owner.run_conversation = observed
 
 
 def _stream_api_for_agent(agent: Any) -> Optional[Dict[str, Any]]:
@@ -304,10 +379,14 @@ def _config() -> Dict[str, Any]:
 
 
 def _report_internal_error(operation: str, error: Exception) -> None:
-    print(
-        "[loongsuite-pilot] %s failed: %s" % (operation, type(error).__name__),
-        file=sys.stderr,
-    )
+    try:
+        print(
+            "[loongsuite-pilot] %s failed: %s" % (operation, type(error).__name__),
+            file=sys.stderr,
+        )
+    except Exception:
+        # A closed stderr must not replace an application result/exception.
+        pass
 
 
 def _hostname() -> str:
@@ -1441,6 +1520,7 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     _capture_turn_input(turn, messages)
     turn["initial_messages"] = _bounded_value(messages)
     _remember_turn(state, turn, payload)
+    _bind_native_run(state, turn)
 
 
 def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
@@ -1461,6 +1541,7 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         turn["user_message"] = payload["user_message"]
         _capture_turn_input(turn, [{"role": "user", "content": payload["user_message"]}])
     _remember_turn(state, turn, payload)
+    _bind_native_run(state, turn)
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
@@ -1750,6 +1831,10 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
 def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
+    try:
+        _install_run_completion_observer()
+    except Exception as error:
+        _report_internal_error("native run observer installation", error)
     _purge_old_logs()
     for hook_name in HOOKS:
         try:
