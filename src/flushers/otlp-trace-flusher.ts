@@ -1583,6 +1583,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
     this.patchCopilotCustomAttributes(spans, records);
+    this.patchToolResultCustomAttributes(spans, records);
 
     const exportState = this.getOrCreateExportState(agentType, serviceName);
 
@@ -1825,17 +1826,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+  }
 
+  private patchToolResultCustomAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
     // TOOL: copy gen_ai.tool.success / error.code / error.message /
     // permission.* from tool.result records onto the matching TOOL span
     // (matched by gen_ai.tool.call.id). The converter's
     // applyExecuteToolFinishAttributes only sets standard fields
     // (gen_ai.tool.call.id / gen_ai.tool.name / gen_ai.tool.call.arguments /
-    // gen_ai.tool.call.result) — it does not propagate Copilot's
-    // permission/denied-state fields. Without this patch, scenario B
-    // (permission denied) TOOL spans lose success/error context.
+    // gen_ai.tool.call.result) — it does not propagate Copilot's permission
+    // fields or DSH's explicit tool success flag.
     const toolResultRecords = records.filter(r =>
       (r as Record<string, unknown>)['event.name'] === 'tool.result'
+      && (r['gen_ai.agent.type'] === 'copilot' || r['gen_ai.agent.type'] === 'dsh')
     );
     if (toolResultRecords.length > 0) {
       const toolSpans = spans.filter(s => s.kind === SpanKind.INTERNAL
