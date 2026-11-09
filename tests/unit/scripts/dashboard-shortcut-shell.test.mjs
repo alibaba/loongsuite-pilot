@@ -82,7 +82,7 @@ resolve_node false
 [ ! -e "$NODE_PIN_FILE" ] || exit 10
 resolve_node`;
     execFileSync('/bin/bash', ['-c', script], { env: {
-      ...process.env, TEST_NODE: process.execPath, NODE_PIN_FILE: pin,
+      ...process.env, TEST_NODE: process.execPath, NODE_PIN_FILE: pin, DATA_DIR: join(root, 'data'),
     } });
     expect(readFileSync(pin, 'utf8').trim()).toBe(process.execPath);
   });
