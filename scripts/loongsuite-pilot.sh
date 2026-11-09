@@ -712,15 +712,18 @@ NODE_PIN_FILE="$CACHE_DIR/node-bin"
 
 resolve_node() {
     local persist_pin="${1:-true}"
-    # 1. Pinned file
-    if [ -f "$NODE_PIN_FILE" ]; then
-        local pinned
-        pinned=$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$pinned" ] && _node_is_suitable "$pinned"; then
-            echo "$pinned"
-            return 0
+    # 1. Keep a valid cache pin first; custom installs also pin Node in DATA_DIR.
+    local pin_file pinned
+    for pin_file in "$NODE_PIN_FILE" "$DATA_DIR/node-bin"; do
+        if [ -f "$pin_file" ]; then
+            pinned=$(cat "$pin_file" 2>/dev/null)
+            pinned=${pinned%$'\r'}
+            if [ -n "$pinned" ] && _node_is_suitable "$pinned"; then
+                echo "$pinned"
+                return 0
+            fi
         fi
-    fi
+    done
 
     # 2. Fallback search: prefer user-managed Node over app-bundled PATH shims.
     local _candidates=()
