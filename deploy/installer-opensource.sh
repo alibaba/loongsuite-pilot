@@ -58,7 +58,11 @@ SLS_LOGSTORE=""
 SLS_AK_ID=""
 SLS_AK_SECRET=""
 SLS_API_KEY=""
-DATA_DIR="$DEFAULT_DATA_DIR"
+DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-}"
+if [ -z "$DATA_DIR" ] && [ -f "$HOME/.loongsuite-pilot/data-dir" ]; then
+    DATA_DIR=$(cat "$HOME/.loongsuite-pilot/data-dir")
+fi
+DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
 DASHBOARD_PORT=""
 DASHBOARD_PORT_SET=0
 LOG_LEVEL=""
@@ -1381,6 +1385,10 @@ install_loongsuite_pilot_command() {
     local loongsuite_pilot_cmd="$global_bin_dir/loongsuite-pilot"
     cp -f "$PERMANENT_DIR/scripts/loongsuite-pilot.sh" "$loongsuite_pilot_cmd"
     chmod +x "$loongsuite_pilot_cmd"
+    # Preserve the install selection for new CLI/upgrade processes, separately from the cache.
+    DATA_DIR="$(cd "$DATA_DIR" && pwd)"
+    mkdir -p "$HOME/.loongsuite-pilot"
+    printf '%s\n' "$DATA_DIR" > "$HOME/.loongsuite-pilot/data-dir"
     msg "    ✅ 已安装: $loongsuite_pilot_cmd" "    ✅ Installed: $loongsuite_pilot_cmd"
 
     # If /usr/local/bin is writable (root), create a symlink for immediate PATH access
@@ -3142,6 +3150,7 @@ cmd_uninstall() {
     if [ "$PURGE" -eq 1 ]; then
         msg "==> 删除数据目录 (--purge)..." "==> Removing data directory (--purge)..."
         rm -rf "$DATA_DIR"
+        rm -f "$HOME/.loongsuite-pilot/data-dir"
         msg "    ✅ 已删除 $DATA_DIR" "    ✅ Removed $DATA_DIR"
     else
         msg "📁 数据目录已保留: $DATA_DIR" \
