@@ -32,6 +32,7 @@ import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
   dataDir?: string;
+  resolveTraceContext?: (entries: AgentActivityEntry[]) => Promise<void>;
   /** Cached multimodal policy; IDE + CLI extraction when enabled. */
   multimodal?: {
     enabled: boolean;
@@ -124,7 +125,7 @@ export class QoderTraceInput extends BaseInput {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
     this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder',
-      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir, opts.resolveTraceContext);
     this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = opts.multimodal?.processor ?? null;

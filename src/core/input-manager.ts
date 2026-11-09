@@ -135,6 +135,12 @@ export class InputManager extends EventEmitter {
     this.traceLinker = linker;
   }
 
+  /** Native delegation needs the final upstream context before a parent turn
+   * finishes. Reuse the same claims/cache as ordinary output processing. */
+  async stampTraceContext(entries: AgentActivityEntry[]): Promise<void> {
+    await this.traceLinker?.stamp(entries);
+  }
+
   setInterceptResultLinker(linker: InterceptResultLinker): void {
     this.interceptResultLinker = linker;
   }

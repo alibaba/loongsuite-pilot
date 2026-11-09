@@ -31,6 +31,7 @@ const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
   dataDir?: string;
+  resolveTraceContext?: (entries: AgentActivityEntry[]) => Promise<void>;
 }
 
 /**
@@ -63,7 +64,7 @@ export class QoderCnTraceInput extends BaseInput {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder-cn/history');
     this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder-cn',
-      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir);
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir, opts.resolveTraceContext);
   }
 
   override async stop(): Promise<void> {

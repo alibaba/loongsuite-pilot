@@ -109,6 +109,15 @@ describe('QoderTraceInput token-enricher', () => {
   // response time must sit within the join tolerance of its responseEndTs - the
   // hook fires just after the response lands, 0-32ms later on real data.
   describe('enrichCliTurn (segment paired by response completion time)', () => {
+    it('requires an exact native request ID before borrowing segment usage for a child', () => {
+      const child = makeEntry({ 'agent.qoder.subagent_id': 'child', 'gen_ai.response.id': 'provider-child' });
+      const segment = makeSegment({ requestId: 'req-parent', responseEndTs: 1780000001000, inputTokens: 300, outputTokens: 20 });
+      enrichCliFromSegments([child], [segment]);
+      expect(child['gen_ai.usage.input_tokens']).toBeUndefined();
+      child['agent.client_request_id'] = 'req-parent';
+      enrichCliFromSegments([child], [segment]);
+      expect(child['gen_ai.usage.input_tokens']).toBe(300);
+    });
     it('injects tokens without moving only one side of an incomplete Hook interval', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
@@ -863,6 +872,24 @@ describe('QoderTraceInput token-enricher', () => {
   });
 
   describe('enrichIdeTurn (SQLite structure match)', () => {
+    it('keeps child native usage and never assigns nearby parent SQLite rows to an unproven child', () => {
+      const parent = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.response.id': 'parent-model',
+        'gen_ai.turn.id': 'parent-turn', 'gen_ai.step.id': 'parent-step' });
+      const child = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.agent.id': 'child',
+        'gen_ai.response.id': 'child-model', 'agent.qoder.subagent_id': 'child',
+        'gen_ai.turn.id': 'child-turn', 'gen_ai.step.id': 'child-step',
+        'gen_ai.usage.input_tokens': 17, 'gen_ai.usage.output_tokens': 3 });
+      const missing = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.response.id': 'missing-model',
+        'agent.qoder.subagent_id': 'other-child', 'gen_ai.turn.id': 'other-child-turn', 'gen_ai.step.id': 'other-child-step' });
+      const row: SqliteTokenData = { sessionId: 'sess-1', requestId: 'parent-request', messageId: 'parent-model',
+        gmtCreate: 1780000001000, inputTokens: 200, outputTokens: 20, cacheReadTokens: 30, model: 'parent-model-name' };
+      enrichIdeTurn([parent, child, missing], [row]);
+      expect(parent['gen_ai.usage.input_tokens']).toBe(200);
+      expect(child['gen_ai.usage.input_tokens']).toBe(17);
+      expect(child['gen_ai.usage.output_tokens']).toBe(3);
+      expect(missing['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(missing['gen_ai.request.model']).not.toBe('parent-model-name');
+    });
     it('matches IDE turns by session request order and assistant order without timestamp proximity', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({

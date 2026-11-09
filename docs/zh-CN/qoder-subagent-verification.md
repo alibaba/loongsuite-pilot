@@ -1,0 +1,52 @@
+# Qoder 子 Agent 采集
+
+Qoder CLI 与 Agent SDK 的原生 sidechain 使用独立 transcript，同时可能与主 Agent 共用 `sessionId`。Pilot 保留原生 session，通过 `agentId` 区分执行者，并为每个原生输入建立独立、可恢复的 turn；不会把子执行覆盖成父 turn，也不会为共享 session 的运行时伪造子 session。
+
+## 数据来源与关联
+
+- `SubagentStart` / `SubagentStop` Hook 发布有界元数据，定位子 transcript；不读取消息正文，不启动额外重试进程。开始通知允许早于文件创建。
+- 子文件来自原生 `agent_transcript_path`，或标准 `<session>/subagents/agent-<agent_id>.jsonl` 布局。父文件和子文件使用独立来源键、偏移和缓存。
+- collector 从父 transcript 的 `Agent` / `Task` tool use 建立委派。子输入的 `isDelegatedTask`、`parent_tool_use_id` 和可用的 `parent_agent_id` 提供匹配证据；不按名称、文本相似度或时间邻近匹配。
+- invocation 为父 session、父 Agent、父 turn 和 tool call ID 的确定性摘要；同一来源重放不改变 ID，新任务使用新 ID。关联状态只保存标识与上下文，不复制任务正文。
+- 原生 `sessionId` 相同不代表 turn 相同。父子独立收口；父先完成或 collector 重启不结束仍运行的子 turn。
+
+已确认的结构为 `父 AGENT → 委派 TOOL → 子 AGENT → STEP → LLM/TOOL`。子虚拟 ENTRY 对转换透明；父工具使用预留的实际 Span ID，耗时到原生工具返回为止。子工作只汇总自己的模型用量。
+
+启用上游关联时，主输入先通过与 InputManager 共用的 TraceLinker 确认上下文，再登记委派。子工作继承这个已确认的 Trace，不消耗主 session 的额外关联记录。
+
+## 日志语义
+
+| 事实 | 输出 |
+| --- | --- |
+| 原生委派已发生，主 turn 仍在运行 | `gen_ai.agent.invoke`；不等待子结果或主 turn 结束 |
+| Agent 工具返回“已启动” | 保留 `tool.result`，不生成成功的 Agent result |
+| 同步 `agent-result` 明确交付结果，或明确派发失败 | `gen_ai.agent.result`，沿用原 invocation |
+| 后台结果通过原生 task notification 交付 | result 归属实际接收它的父 turn，仍关联原 invocation |
+| 旧子 Agent 被再次委派 | 保留 Agent/session 身份，新 turn 和新 invocation |
+| 用户直接在旧子执行中输入独立任务 | 不继承此前的 incoming invocation |
+
+后台通知必须同时具有原生 `isMeta` 和 `origin.kind=task-notification` 标识；普通用户文本中的 XML 标签不构成结果证据。通知会唤起独立的父模型轮次，不新建委派。重复通知不重复输出同一结果。
+
+invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使用 `gen_ai.output.messages`。原始工具参数/结果继续保留在工具事件，统一经过工作区过滤和脱敏。当前版本始终采集消息内容，旧 `captureMessageContent=false` 不提供关闭内容的能力。
+
+模型边界优先读取本次响应的原生 usage；流式多条记录的 usage 不累加。缺少 usage 时沿用已有的精确 ID 补全路径。日志新增审计事件不会额外制造模型、工具、STEP 或 Token。
+
+## 恢复与容量
+
+使用现有 `qoderTranscripts` checkpoint 保存来源偏移、当前工作上下文和委派索引。重启后继续读取未结束 turn，已提交事件不重放；半行、临时读取失败和晚到子文件保留原状态。来源出现顺序不影响可靠关联。
+
+未找到父工具时最多等待 60 秒；未变化的待关联文件不会重复读取正文。到期后明确诊断并保留独立子执行，不猜父级，也不在导出后重发 Span 伪装成补挂。委派索引最多保留 4096 项、最长 7 天；容量不足时先回收子执行已结束且结果已交付的关系，全部仍未完成时报告 `subagent-link-capacity`，无法确认的关系按上述规则降级。扫描、单 turn 和正文缓存继续使用原 tailer 的容量限制。
+
+输入与各输出保留现有的接收、重试与 checkpoint 契约。此改动不承诺跨输出端到端恰好一次，也不自动修复历史数据。
+
+## 验证入口与范围
+
+```bash
+npm run typecheck
+npm test -- tests/integration/qoder-subagent-lifecycle.test.ts tests/unit/inputs/qoder-subagent-boundaries.test.mjs tests/unit/flushers/qoder-turn-converter.test.ts
+npm run build
+```
+
+合成输入覆盖 Qoder/QoderCN 的并行、复用、嵌套、后台通知、重启、上游上下文、脱敏、缺失父级和最终 Span 挂载。原生协议依据 Qoder CLI 1.1.81；实际 CLI/SDK 安装态、CMS 回读、版本与测试窗口由对应候选验收报告绑定。GUI、Windows 与其他版本的真实交互不能由这些合成测试替代。
+
+来源：[Qoder Hook](https://docs.qoder.com/cli/hooks)、[Qoder SDK 类型](https://docs.qoder.com/cli/sdk/references-typescript)、[统一子 Agent 模型](subagent-data-model.md)。

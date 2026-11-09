@@ -11,7 +11,7 @@ import { recordUpstreamContextOnce } from '../shared/upstream-context.mjs';
 
 export const MAX_WAKEUP_BYTES = 16 * 1024;
 export const MAX_WAKEUPS_PER_SOURCE = 128;
-const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd']);
+const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SessionEnd', 'SubagentStart', 'SubagentStop']);
 const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 const require = createRequire(import.meta.url);
 let GateDatabase;
@@ -146,7 +146,15 @@ export function withQoderWakeupLock(directory, action, waitMs = 25) {
 /** No transcript body, tool input/result or prompt is read or copied here. */
 export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } = {}) {
   const sessionId = field(payload?.session_id ?? payload?.conversation_id, 512);
-  const suppliedPath = field(payload?.transcript_path);
+  const parentPath = field(payload?.transcript_path);
+  const subagentId = field(payload?.agent_id, 512);
+  // Native sidechains share session_id but have their own agent_id and file.
+  // Start can precede creation; never publish against the parent's cursor.
+  if (subagentId && !/^[a-zA-Z0-9_-]+$/.test(subagentId)) return false;
+  const suppliedPath = subagentId && parentPath
+    ? field(payload.agent_transcript_path) ?? path.join(path.dirname(parentPath),
+      path.basename(parentPath, '.jsonl'), 'subagents', `agent-${subagentId}.jsonl`)
+    : parentPath;
   if (!sessionId || !suppliedPath || !path.isAbsolute(suppliedPath) || payload.stop_hooks_active) return false;
   let transcriptPath;
   let stat;
@@ -166,6 +174,8 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   const event = EVENTS.has(payload.hook_event_name) ? payload.hook_event_name : 'Stop';
   const record = {
     schema: 1, key, agentId, sessionId, transcriptPath, event,
+    ...(subagentId ? { subagentId, parentTranscriptPath: canonicalSourcePath(parentPath),
+      ...(field(payload.agent_type, 512) ? { subagentName: payload.agent_type } : {}) } : {}),
     observationId: crypto.randomUUID(),
     ...(field(payload.request_set_id, 512) ? { requestSetId: payload.request_set_id } : {}),
     ...(transcriptPath !== suppliedPath ? { suppliedPath } : {}),
@@ -209,7 +219,16 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
     return false;
   }
   if (!published.value) return false;
-  recordUpstreamContextOnce({ agentId, sessionId, dataDir });
+  if (!subagentId) recordUpstreamContextOnce({ agentId, sessionId, dataDir });
+  else {
+    const parentKey = qoderSourceKey(sessionId, canonicalSourcePath(parentPath));
+    if (!fs.existsSync(path.join(root, parentKey, 'source.json'))) {
+      // Index a still-running parent before its Stop arrives. This is discovery,
+      // not a terminal observation, and carries no transcript/tool contents.
+      publishQoderWakeup({ ...payload, agent_id: undefined, agent_transcript_path: undefined,
+        hook_event_name: 'SubagentStart' }, { dataDir, agentId, userIdentity });
+    }
+  }
   return true;
 }
 
