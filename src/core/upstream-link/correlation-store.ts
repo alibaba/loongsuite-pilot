@@ -290,7 +290,10 @@ export class CorrelationStore {
     const project = (record: TurnRecord): TurnContext | null => {
       const context: TurnContext = {
         ...(traceEnabled && record.traceparent !== undefined ? { traceparent: record.traceparent } : {}),
-        ...(attributesEnabled && record.attributes ? { attributes: { ...record.attributes } } : {}),
+        // A legacy Trace-only record still occupies its request's FIFO slot
+        // when only business enrichment is enabled. Do not let a later identical
+        // prompt's attribute record slide into that slot.
+        ...(attributesEnabled ? { attributes: { ...record.attributes } } : {}),
       };
       return Object.keys(context).length ? context : null;
     };

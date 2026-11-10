@@ -7,6 +7,8 @@ export type RequestAttributes = Record<string, RequestAttributeValue>;
 /** Retained in event/journal records so replay can apply the current mask policy. */
 export const REQUEST_ATTRIBUTE_KEYS_FIELD = 'agent.pilot.request.attribute.keys';
 export const MAX_REQUEST_ATTRIBUTE_COUNT = 64;
+// A producer (e.g. Grok env) and a per-turn file can each supply 64 keys.
+const MAX_TRACKED_ATTRIBUTE_COUNT = MAX_REQUEST_ATTRIBUTE_COUNT * 2;
 export const MAX_REQUEST_ATTRIBUTE_BYTES = 8 * 1024;
 export const MAX_REQUEST_ATTRIBUTE_KEY_LENGTH = 128;
 export const MAX_REQUEST_ATTRIBUTE_STRING_LENGTH = 512;
@@ -67,13 +69,13 @@ export function stampRequestAttributes(entry: AgentActivityEntry, attributes: Re
   const keys = Object.keys(snapshot);
   if (keys.length === 0) return;
   for (const key of keys) entry[key] = snapshot[key];
-  entry[REQUEST_ATTRIBUTE_KEYS_FIELD] = keys;
+  entry[REQUEST_ATTRIBUTE_KEYS_FIELD] = [...new Set([...requestAttributeKeys(entry), ...keys])];
 }
 
 /** Dynamic fields eligible for masking, including after a durable-journal replay. */
 export function requestAttributeKeys(entry: AgentActivityEntry): ReadonlySet<string> {
   const raw = entry[REQUEST_ATTRIBUTE_KEYS_FIELD];
-  if (!Array.isArray(raw) || raw.length > MAX_REQUEST_ATTRIBUTE_COUNT) return new Set();
+  if (!Array.isArray(raw) || raw.length > MAX_TRACKED_ATTRIBUTE_COUNT) return new Set();
   return new Set(raw.filter((key): key is string =>
     typeof key === 'string'
     && key === key.trim()

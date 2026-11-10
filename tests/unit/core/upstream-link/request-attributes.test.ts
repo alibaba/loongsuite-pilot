@@ -175,6 +175,16 @@ describe('request-scoped correlation attributes', () => {
     expect(entry.parent_span_id).toBeUndefined();
   });
 
+  it('reserves a legacy trace-only turn in attribute mode instead of consuming future same-prompt attributes', async () => {
+    append('s1', { traceparent: TRACEPARENT });
+    append('s1', { attributes: { 'memory.user_id': 'U002' } });
+    const entries = [input('s1', 't1'), input('s1', 't2')];
+    await linker(false).stamp(entries);
+    expect(entries[0]['memory.user_id']).toBeUndefined();
+    expect(entries[1]['memory.user_id']).toBe('U002');
+    expect(entries.every(entry => entry.trace_id === LOCAL_TRACE)).toBe(true);
+  });
+
   it('filters reserved fields, sensitive names, complex and oversized values before output', async () => {
     append('s1', { attributes: {
       'memory.user_id': 'U001', 'gen_ai.session.id': 'wrong', 'user.id': 'wrong',

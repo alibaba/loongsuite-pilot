@@ -11,6 +11,7 @@ import { BaseInput } from '../../src/inputs/base/base-input.js';
 import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
 import { OtlpTraceFlusher, type TraceExporterLike } from '../../src/flushers/otlp-trace-flusher.js';
 import { contentHash } from '../../src/utils/content-hash.js';
+import { stampRequestAttributes } from '../../src/normalization/request-attributes.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../src/types/index.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 
@@ -185,6 +186,48 @@ describe('request attributes through the production input and Trace pipeline', (
       expect(spans.every(s => s.attributes['memory.note'] === '[APIKEY_MASKED]')).toBe(true);
       expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain(sensitiveValue);
     } finally { await trace.shutdown(); }
+  });
+
+  it('keeps producer attribute mask eligibility when a file adds different request fields', async () => {
+    const dir = root();
+    const sensitiveValue = 'sk-1234567890abcdefghijklmnop';
+    context(dir, 's1', { 'memory.user_id': 'U001' });
+    const entries = completedTurn(ClientType.GrokBuildHook, 's1', 't1', 'a'.repeat(32));
+    // Grok's environment producer uses this shared stamping API before the
+    // records reach the public per-turn file-correlation processing stage.
+    for (const entry of entries) stampRequestAttributes(entry, { 'memory.note': sensitiveValue });
+    const result = await execute(dir, [{ agent: ClientType.GrokBuildHook, session: 's1', entries }], false, true);
+    expect(result.spans.length).toBeGreaterThan(0);
+    expect(result.entries.every(entry => entry['memory.user_id'] === 'U001'
+      && entry['memory.note'] === '[APIKEY_MASKED]')).toBe(true);
+    expect(result.spans.every(span => span.attributes['memory.user_id'] === 'U001'
+      && span.attributes['memory.note'] === '[APIKEY_MASKED]')).toBe(true);
+    expect(JSON.stringify(result.spans.map(span => span.attributes))).not.toContain(sensitiveValue);
+  });
+
+  it('masks the union of the maximum producer and file attribute groups before conversion', async () => {
+    const dir = root();
+    const sensitiveValue = 'sk-1234567890abcdefghijklmnop';
+    const producer = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`memory.env${i}`, sensitiveValue]));
+    const attributes = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`memory.file${i}`, sensitiveValue]));
+    context(dir, 's1', attributes);
+    const entries = completedTurn(ClientType.GrokBuildHook, 's1', 't1', 'a'.repeat(32));
+    for (const entry of entries) stampRequestAttributes(entry, producer);
+    const result = await execute(dir, [{ agent: ClientType.GrokBuildHook, session: 's1', entries }], false, true);
+    for (const entry of result.entries) {
+      const business = Object.entries(entry).filter(([key]) => key.startsWith('memory.'));
+      expect(business).toHaveLength(128);
+      expect(business.every(([, value]) => value === '[APIKEY_MASKED]')).toBe(true);
+    }
+    // The existing SDK Span attribute-count limit can omit fields, but every
+    // business field that is exported must already be masked, from both groups.
+    expect(result.spans.length).toBeGreaterThan(0);
+    for (const span of result.spans) {
+      const business = Object.entries(span.attributes).filter(([key]) => key.startsWith('memory.'));
+      expect(business.length).toBeGreaterThan(0);
+      expect(business.every(([, value]) => value === '[APIKEY_MASKED]')).toBe(true);
+    }
+    expect(JSON.stringify(result.spans.map(span => span.attributes))).not.toContain(sensitiveValue);
   });
 
   it('applies request attributes and the existing upstream parent in the same exported trace', async () => {
