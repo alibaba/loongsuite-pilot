@@ -3,8 +3,11 @@ set -euo pipefail
 
 # Cursor hook entrypoint — delegates to cursor-hook-processor.mjs.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Use a physical path so the processor entrypoint check also works through a symlinked data directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROCESSOR="$SCRIPT_DIR/cursor-hook-processor.mjs"
+PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export LOONGSUITE_PILOT_DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$PILOT_DATA_DIR}"
 EMPTY_RESULT='{}'
 
 log_error() {
@@ -104,7 +107,7 @@ sort_version_dirs_desc() {
   done | sort -r | cut -d'|' -f2-
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
 
 NODE_BIN=""
 

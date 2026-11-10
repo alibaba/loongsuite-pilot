@@ -19,7 +19,7 @@ describe('persisted deploy paths', () => {
       .toBe(path.resolve('/tmp/pi-agent'));
   });
 
-  it('records Grok and Pi absolute paths and ignores other agents', () => {
+  it('records scoped hook and Pi absolute paths and ignores unsupported agents', () => {
     expect(lifecycleFieldsForDeploy({
       id: 'grok-build',
       displayName: 'Grok',
@@ -67,8 +67,8 @@ describe('persisted deploy paths', () => {
     });
 
     expect(lifecycleFieldsForDeploy({
-      id: 'cursor',
-      displayName: 'Cursor',
+      id: 'sample-agent',
+      displayName: 'Sample Agent',
       deployMode: 'hook',
       detection: { paths: ['/home/user/.cursor'], commands: [] },
       hook: {

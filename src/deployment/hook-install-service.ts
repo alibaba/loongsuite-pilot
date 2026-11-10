@@ -365,8 +365,28 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
   for (const [id, def] of byId) {
     if (supportsSystemHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
   }
-  const homes = opts.homes ?? {};
+  const homes = { ...opts.homes };
   const enabled = opts.enabled ?? (() => true);
+  // IDE and CLI read the same hooks.json and use the same producer. Keep one
+  // lifecycle owner even when only cursor-agent is installed or both IDs were
+  // selected. Ordinary unscoped home installation retains its existing route.
+  const cursor = byId.get('cursor');
+  const cursorCli = byId.get('cursor-cli');
+  if (cursor && cursorCli && (opts.deploymentScope !== undefined || manager.isSystemInstallation('cursor'))) {
+    if (enabled('cursor-cli')) {
+      byId.set('cursor', { ...cursor, detection: { paths: [...cursor.detection.paths, ...cursorCli.detection.paths],
+        commands: [...cursor.detection.commands, ...cursorCli.detection.commands] } });
+      byId.delete('cursor-cli');
+      if (selection.kind === 'named') selection.ids = [...new Set(selection.ids.map(id => id === 'cursor-cli' ? 'cursor' : id))];
+    }
+    if (homes['cursor-cli']) {
+      if (homes.cursor && path.resolve(homes.cursor) !== path.resolve(homes['cursor-cli'])) {
+        throw new Error('Cursor and cursor-cli share one hook registration; select one home');
+      }
+      homes.cursor = homes['cursor-cli'];
+      delete homes['cursor-cli'];
+    }
+  }
   const euid = opts.euid ?? (typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.() ?? 0);
   const homeOwner = opts.homeOwner ?? defaultHomeOwner;
   const statusOnly = opts.mode === 'status';
@@ -474,6 +494,8 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
       agent.hookScope = 'system';
       agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
       agent.collectionStatus = 'not-verified';
+      if (agent.id === 'cursor') agent.hint = [agent.hint,
+        'System hooks require Cursor Enterprise. Registration does not verify plan eligibility or actual hook execution.'].filter(Boolean).join(' ');
     } else if (opts.deploymentScope === 'system' && (agent.id === 'pi-coding-agent' || agent.id === 'dsh')
       && (agent.status === 'ok' || agent.status === 'up-to-date')) {
       agent.settingsPath = manager.recordedConfigPath(agent.id) ?? agent.settingsPath;
