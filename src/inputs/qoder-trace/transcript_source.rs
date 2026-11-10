@@ -1203,12 +1203,19 @@ impl Collector {
             .get("resourceAttributes")
             .and_then(Value::as_object)
             .unwrap_or(&empty);
-        let filtered = value
-            .rows
-            .iter()
-            .filter(|r| !qoder_is_control_user_row(r))
-            .cloned()
-            .collect::<Vec<_>>();
+        let filtered: std::borrow::Cow<'_, [Value]> =
+            if value.rows.iter().any(qoder_is_control_user_row) {
+                std::borrow::Cow::Owned(
+                    value
+                        .rows
+                        .iter()
+                        .filter(|r| !qoder_is_control_user_row(r))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(&value.rows)
+            };
         let user_identity = selected
             .get("userIdentity")
             .filter(|identity| !identity.is_null())
