@@ -7,6 +7,7 @@ import { createLogger } from '../../utils/logger.js';
 const logger = createLogger('SegmentTokenReader');
 
 const READ_CHUNK_SIZE = 1024 * 1024;
+// Skip records above this payload size even if they contain valid JSON.
 const MAX_RECORD_BYTES = 32 * 1024 * 1024;
 const EXPECTED_ID_RETRY_DELAY_MS = 25;
 const SESSION_IDLE_MS = 60_000;
