@@ -1678,7 +1678,9 @@ describe('QoderTraceInput multimodal', () => {
       ]);
       expect(extractMarkdownImagePaths('![x](/tmp/a.png)', cwd)).toEqual(['/tmp/a.png']);
       expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)', cwd)).toEqual(['/tmp/My Image.png']);
-      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual(['images/a.png']);
+      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual([
+        path.resolve('images/a.png'),
+      ]);
     });
 
     it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {

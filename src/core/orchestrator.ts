@@ -1394,11 +1394,20 @@ export class Orchestrator extends EventEmitter {
 
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNAgentCfg = this.config.agents['qwen-work-cn'] ?? {};
+    const qwenWorkCNMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qwen-work-cn', qwenWorkCNAgentCfg);
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
       pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      multimodal: {
+        enabled: qwenWorkCNMultimodalEnabled,
+        uploadMode: qwenWorkCNAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qwenWorkCNAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
