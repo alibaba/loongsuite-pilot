@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-10T09:22:31.273464Z",
+  "updated_at": "2026-11-10T09:58:21.600137Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -653,13 +653,13 @@
       "id": "dev",
       "kind": "dev",
       "version": "dev",
-      "commit": "78f362edf7c2897b9f12b1393a4b6f1785570c2a",
-      "recorded_at": "2026-11-10T09:11:27.264270Z",
+      "commit": "aca0206fa21d3267f20ae95d0e505fb16ad0febd",
+      "recorded_at": "2026-11-10T09:53:15.635350Z",
       "status": "passed",
       "method_id": "github-full-pilot-qoder-native-v1",
-      "environment_id": "befe15ae110d5baf6b32c132fd5371886046c709ccff35b74d9f48389cf52976",
+      "environment_id": "b3e052770111049ae261fa0aa48a92f0b5f8a1df5e169ecf1e4d3919b4bff729",
       "environment": {
-        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "cpu_model": "AMD EPYC 9V45 96-Core Processor",
         "runner_os": "Linux",
         "runner_image": "ubuntu22/20261101.347.1",
         "container_digest": "sha256:8700da48cc6592503feabf399d242414f932197c3b44f43970d2cbc5671e06b0",
@@ -669,20 +669,20 @@
         "cpus": 4,
         "node_version": "v22.23.4"
       },
-      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42787903082",
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42793964774",
       "workloads": {
         "idle": {
           "repeats": 3,
           "p95_ms": null,
           "cpu_percent": {
-            "median": 4.820874825521432,
-            "min": 4.785406389699565,
-            "max": 4.833010228977519
+            "median": 2.730656523992969,
+            "min": 1.8766956176254426,
+            "max": 3.041939889887712
           },
           "rss_mib": {
-            "median": 41.73046875,
-            "min": 41.09375,
-            "max": 42.22265625
+            "median": 41.41796875,
+            "min": 41.19921875,
+            "max": 42.5546875
           },
           "quality": {
             "passed": true,
@@ -693,19 +693,19 @@
         "low": {
           "repeats": 3,
           "p95_ms": {
-            "median": 243.79533,
-            "min": 240.306154,
-            "max": 245.838361
+            "median": 240.689151,
+            "min": 239.716138,
+            "max": 242.915577
           },
           "cpu_percent": {
-            "median": 7.01131717667723,
-            "min": 7.001058415893565,
-            "max": 7.075754976748326
+            "median": 4.600107045495955,
+            "min": 3.227534862722984,
+            "max": 4.8868712663350315
           },
           "rss_mib": {
-            "median": 42.375,
-            "min": 42.04296875,
-            "max": 43.0859375
+            "median": 41.73046875,
+            "min": 41.0625,
+            "max": 42.8046875
           },
           "quality": {
             "passed": true,
@@ -716,19 +716,19 @@
         "high": {
           "repeats": 3,
           "p95_ms": {
-            "median": 282.298412,
-            "min": 281.499476,
-            "max": 284.755598
+            "median": 267.952677,
+            "min": 266.825708,
+            "max": 273.277231
           },
           "cpu_percent": {
-            "median": 24.24093812255947,
-            "min": 24.170350143427484,
-            "max": 24.308102953969083
+            "median": 13.042630217415747,
+            "min": 11.913792923837375,
+            "max": 15.894265624290677
           },
           "rss_mib": {
-            "median": 55.51953125,
-            "min": 55.28125,
-            "max": 56.0859375
+            "median": 56.2265625,
+            "min": 55.875,
+            "max": 56.55859375
           },
           "quality": {
             "passed": true,
@@ -743,13 +743,13 @@
       },
       "provenance": {
         "entry_sha256": "340af0b2b1a315089f7f60c393f006c78fde0610d6d3c5addecdc7171fa93961",
-        "library_sha256": "404e463ee88c5c5a10a70fae46f5607cac7183fa6b9ef993c4575c68c2a8c9a3",
-        "fixture_sha256": "55304f8b461341a0528497758654b55cac44bedadee20ff442eb70820c5fb72b",
+        "library_sha256": "fbd616077fd0cf9598a320a8faccb46354b4036933ef61751c93b70e8cfd9195",
+        "fixture_sha256": "ead957ff4c64e51c0f8c2f72c100e9b48558f71ff28ee4c848df6c83ce210636",
         "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
       },
       "publication": {
-        "run_number": 5,
-        "run_id": "42787903082"
+        "run_number": 9,
+        "run_id": "42793964774"
       }
     }
   ],
