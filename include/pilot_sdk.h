@@ -41,6 +41,9 @@ typedef int32_t (*PilotOnHook)(void *, PilotJsonView, uint32_t, uint8_t *, size_
  * Reports allocated by the SDK must be freed once, using string_free from the
  * SAME loaded SDK. NULL is accepted by string_free. Stop a failed start too.
  * After on_stop returns, retry destroy while BUSY. Unload only after OK.
+ * For physical unload, prefer a dedicated host control thread for API calls,
+ * dispatch and string_free. Join it after destroy succeeds, then close the
+ * library. Caller-thread TLS or other references can keep loader mappings live.
  */
 typedef struct PilotApiV2 {
     uint32_t abi_version;
