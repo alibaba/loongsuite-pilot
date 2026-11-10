@@ -92,11 +92,11 @@ ones only with reviewed public-source plus actual smoke evidence. Missing
 assets, network failures, builds, OOM, bad config or unknown failures do not
 advance that boundary. Resume pending infrastructure failures explicitly.
 
-CPU/RSS deltas require adjacent complete, quality-passed nodes with the same
-method and environment identities and a positive previous value. Hosted runner
-hardware changes can make nodes incomparable. Old remote measurements must not
-be relabelled as this new method or subjected to an absolute cross-hardware
-50%-of-JS gate.
+The chart's resource-value delta uses the preceding node containing valid data
+and a positive previous value. This is arithmetic on the displayed values,
+including previews; it does not establish a hardware-controlled causal result.
+Old remote measurements must not be relabelled as this new method or subjected
+to an absolute cross-hardware 50%-of-JS gate.
 
 Workflow and publisher code live in source; generated history/HTML live on a
 separate results branch and Pages. Raw samples, fixtures and logs are Actions
@@ -138,5 +138,5 @@ matched the package manifest; all 104 resources matched their hashes. Clean
 shutdown passed and the owned container was removed. This smoke produced no
 performance report node or comparable CPU/RSS result.
 
-All 27 protocol-helper/publication unit checks passed in an isolated remote directory, including designated-dev filtering, live binding changes and separate numeric-preview preservation; public JS1.15.2/1.16.0 smoke, effective 100-ms polling canary, cgroup-v2 execution and complete nine-round aggregation remain to be verified before routine publication. The short smoke's initial `metrics-summary.json`
+All 31 protocol-helper/publication unit checks passed in an isolated remote directory, including bounded gate contention, rollback release and one-time native/token writes. GitHub runs for public v1.16.0 and the designated dev completed all nine rounds and publication. Public v1.15.2 passed smoke and eight rounds before a SQLite gate infrastructure failure; this is not a compatibility cutoff. The gate repair still requires its full-run retry, and the explicit polling canary remains separate. The short smoke's initial `metrics-summary.json`
 is not a completed self-monitoring or token-summary acceptance result.

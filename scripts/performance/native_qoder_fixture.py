@@ -53,6 +53,24 @@ def atomic_json(path, value, exclusive=False):
             pass
 
 
+def begin_notice_transaction(connection, started, deadline):
+    """Match the public publisher's zero-busy-timeout, bounded gate acquisition."""
+    while True:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                raise RuntimeError("infrastructure: notice SQLite lock budget exhausted stage=begin elapsed_ms=%.3f budget_ms=25" %
+                                   ((now - started) * 1000)) from error
+            time.sleep(min(.001, remaining))
+
+
 class Fixture:
     def __init__(self, round_directory, container_root="/bench", sessions=64):
         self.root = Path(round_directory)
@@ -99,26 +117,23 @@ class Fixture:
         # Public JS and Rust publishers/ACK use this same SQLite gate. Never
         # delete it: removal would create a second lock domain.
         gate = directory / ".wakeup-gate.sqlite"
-        deadline = time.monotonic() + .025
+        started = time.monotonic()
+        deadline = started + .025
         connection = sqlite3.connect(str(gate), timeout=0, isolation_level=None)
         try:
-            while True:
-                try:
-                    connection.execute("BEGIN IMMEDIATE")
-                    break
-                except sqlite3.OperationalError as error:
-                    if "locked" not in str(error).lower() or time.monotonic() >= deadline:
-                        raise
-                    time.sleep(.001)
+            begin_notice_transaction(connection, started, deadline)
             if not destination.exists() and len(list(events.iterdir())) >= 128:
                 raise RuntimeError("public per-source notice capacity reached")
             atomic_json(directory / "source.json", value, exclusive=True)
             atomic_json(destination, value)
-            connection.execute("COMMIT")
         finally:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            connection.close()
+            try:
+                if connection.in_transaction:
+                    # The persistent database is only a mutex; all notice data
+                    # is in files. Public JS/Rust publishers release by rollback.
+                    connection.execute("ROLLBACK")
+            finally:
+                connection.close()
 
     def append_turn(self, session, identifier, measured=True):
         now = datetime.datetime.now(datetime.timezone.utc)

@@ -4,6 +4,7 @@ import hashlib
 import io
 from pathlib import Path
 import tempfile
+import sqlite3
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -11,9 +12,93 @@ import urllib.error
 from linux_cgroup import locate
 from prepare_public import download_release, is_target_dev, load_history, select_backfill, source_runtime, stable_releases
 from runtime_layout import resolve
+from native_qoder_fixture import Fixture, atomic_json, begin_notice_transaction
+
+
+class FakeNoticeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class FakeNoticeConnection:
+    def __init__(self, begin_failures=0):
+        self.failures = {"BEGIN IMMEDIATE": begin_failures}
+        self.calls = []
+        self.in_transaction = False
+        self.closed = False
+
+    def execute(self, statement):
+        self.calls.append(statement)
+        remaining = self.failures.get(statement, 0)
+        if remaining:
+            self.failures[statement] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        self.in_transaction = statement == "BEGIN IMMEDIATE"
+
+    def close(self):
+        self.closed = True
 
 
 class Helpers(unittest.TestCase):
+    def test_notice_begin_contention_retries_gate_without_rewriting_inputs_and_releases_by_rollback(self):
+        clock = FakeNoticeClock()
+        connection = FakeNoticeConnection(begin_failures=2)
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Fixture(temporary, sessions=0)
+            with patch("native_qoder_fixture.sqlite3.connect", return_value=connection), \
+                 patch("native_qoder_fixture.time.monotonic", side_effect=clock.monotonic), \
+                 patch("native_qoder_fixture.time.sleep", side_effect=clock.sleep), \
+                 patch("native_qoder_fixture.atomic_json", wraps=atomic_json) as write_notice:
+                fixture.append_turn(0, "begin-contention")
+            self.assertEqual(connection.calls, ["BEGIN IMMEDIATE", "BEGIN IMMEDIATE", "BEGIN IMMEDIATE", "ROLLBACK"])
+            self.assertEqual(write_notice.call_count, 2)
+            self.assertEqual(len(fixture.file(0).read_text().splitlines()), 9)
+            self.assertEqual(len(fixture.tokens.read_text().splitlines()), 2)
+            self.assertEqual(list(fixture.expected), ["begin-contention"])
+            self.assertTrue(connection.closed)
+            self.assertLessEqual(clock.now, .025)
+
+    def test_notice_begin_exhaustion_reports_stage_and_total_budget(self):
+        clock = FakeNoticeClock(); connection = FakeNoticeConnection(begin_failures=1000)
+        with patch("native_qoder_fixture.time.monotonic", side_effect=clock.monotonic), \
+             patch("native_qoder_fixture.time.sleep", side_effect=clock.sleep):
+            with self.assertRaisesRegex(RuntimeError, r"stage=begin elapsed_ms=25\.000 budget_ms=25"):
+                begin_notice_transaction(connection, 0, .025)
+        self.assertAlmostEqual(clock.now, .025)
+        self.assertEqual(set(connection.calls), {"BEGIN IMMEDIATE"})
+
+    def test_notice_action_error_rolls_back_and_closes_without_repeating_inputs(self):
+        clock = FakeNoticeClock()
+        connection = FakeNoticeConnection()
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = Fixture(temporary, sessions=0)
+            with patch("native_qoder_fixture.sqlite3.connect", return_value=connection), \
+                 patch("native_qoder_fixture.time.monotonic", side_effect=clock.monotonic), \
+                 patch("native_qoder_fixture.time.sleep", side_effect=clock.sleep), \
+                 patch("native_qoder_fixture.atomic_json", side_effect=OSError("injected notice write failure")) as write_notice:
+                with self.assertRaisesRegex(OSError, "injected notice write failure"):
+                    fixture.append_turn(0, "action-error")
+            self.assertEqual(connection.calls, ["BEGIN IMMEDIATE", "ROLLBACK"])
+            self.assertEqual(write_notice.call_count, 1)
+            self.assertTrue(connection.closed)
+            self.assertEqual(len(fixture.file(0).read_text().splitlines()), 9)
+            self.assertEqual(len(fixture.tokens.read_text().splitlines()), 2)
+
+    def test_notice_non_lock_sql_error_is_not_retried(self):
+        connection = FakeNoticeConnection()
+        with patch.object(connection, "execute", side_effect=sqlite3.OperationalError("disk I/O error")) as execute, \
+             patch("native_qoder_fixture.time.sleep") as sleep:
+            with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O"):
+                begin_notice_transaction(connection, 0, .025)
+        self.assertEqual(execute.call_count, 1)
+        sleep.assert_not_called()
+
     def test_only_the_designated_official_dev_branch_is_publishable(self):
         history = {"configuration": {"dev_branch": "codex/cloudshell-sdk-20261107"}}
         self.assertTrue(is_target_dev("alibaba/loongsuite-pilot", "codex/cloudshell-sdk-20261107", history))
