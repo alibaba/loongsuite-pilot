@@ -40,7 +40,7 @@
   <div id="charts" class="compact-hidden" aria-live="polite"></div>
   <footer class="foot">
     <div><p><strong>读数方式</strong>　CPU 100% 表示用满一个核，200% 表示两个核。RSS 为容器内各进程 RSS 之和，单位 MiB，可能重复计入共享页；不可与旧单进程口径直接比较。</p><p>圆点是有效轮次的中位数，竖线是最小—最大范围；范围不是置信区间。</p></div>
-    <div><p><strong>变化百分比</strong>　只与紧邻前节点比较，要求方法和环境相同、质量通过、至少三轮且前值大于 0。绿色表示降低，橙色表示升高。</p><p>缺测、失败或不可比时保留空位，不连线、不填 0。鼠标停留或键盘聚焦可看详细记录。</p></div>
+    <div><p><strong>变化百分比</strong>　资源值与前一有数据节点比较；绿色表示降低，橙色表示升高。</p><p>缺测保留空位，不填 0；曲线连接实际数值点。鼠标停留或键盘聚焦可看详细记录。</p></div>
     <p class="source-note" id="source-note">尚无测试记录；页面没有预填任何性能成绩。</p>
   </footer>
 </main>
@@ -104,7 +104,7 @@
   const label = node => node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
   const number = (value,digits=2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN",{minimumFractionDigits:digits,maximumFractionDigits:digits}) : "—";
   const valueText = (value,metric) => number(value,metric.digits)+(metric.unit === "%" ? "%" : " MiB");
-  const shortSha = value => typeof value === "string" && value.length ? value.slice(0,10) : "未记录";
+  const shortSha = value => typeof value === "string" && value.length ? value.slice(0,8) : "未记录";
   function date(value) {
     const d = new Date(value);
     if (!value || !Number.isFinite(d.getTime())) return "未记录";
@@ -126,26 +126,14 @@
     return node.status === "passed" && quality(node,load) && Number.isInteger(n) && n >= 3 && !!stats(node,load,metric);
   }
   function comparison(index,load,metric) {
-    const node=nodes[index], previous=nodes[index-1];
-    const fail = reason => ({ok:false,reason,previous});
-    if (!previous) return fail("首个节点，没有前值");
-    if(node._preview && previous._preview) {
-      const before=stats(previous,load,metric)?.median, current=stats(node,load,metric)?.median;
-      if(!(before>0) || !Number.isFinite(current)) return fail("前值不可用");
-      return {ok:true,previous,before,current,delta:(current-before)/before*100};
-    }
-    if(node._preview || previous._preview) return fail("前一节点待测试或数据尚不可比");
-    const repeats=node.workloads?.[load]?.repeats, previousRepeats=previous.workloads?.[load]?.repeats;
-    if ((Number.isInteger(repeats) && repeats < 3) || (Number.isInteger(previousRepeats) && previousRepeats < 3)) return fail("有效轮次尚未达到三轮");
-    if (!usable(node,load,metric)) return fail("当前节点尚无通过验收的有效数据");
-    if (!usable(previous,load,metric)) return fail("紧邻前节点缺测、未通过或质量未达标");
-    if (typeof node.method_id !== "string" || !node.method_id || typeof previous.method_id !== "string" || !previous.method_id || node.method_id !== previous.method_id) return fail("测试方法不同或未记录");
-    const knownEnvironment=id=>typeof id === "string" && id.length>0 && !["unknown","missing","unavailable","inconclusive"].includes(id.toLowerCase());
-    if (!knownEnvironment(node.environment_id) || !knownEnvironment(previous.environment_id) || node.environment_id !== previous.environment_id) return fail("测试环境不同或未记录");
+    const node=nodes[index]; let previous=null;
+    for(let before=index-1;before>=0;before--) if(usable(nodes[before],load,metric)){previous=nodes[before];break;}
+    const fail = () => ({ok:false,previous});
+    if (!previous || !usable(node,load,metric)) return fail();
     const before=stats(previous,load,metric).median, current=stats(node,load,metric).median;
-    if (before === 0) return fail("前值为 0，无法计算变化百分比");
+    if (!(before > 0)) return fail();
     const delta=(current-before)/before*100;
-    if (!Number.isFinite(delta)) return fail("变化百分比超出可计算范围");
+    if (!Number.isFinite(delta)) return fail();
     return {ok:true,previous,before,current,delta};
   }
   function deltaText(delta) {
@@ -156,7 +144,6 @@
     try { const url=new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.pathname.includes("/actions/runs/") ? url.href : null; }
     catch { return null; }
   }
-  function row(list,key,value) { list.append(text("dt",key),text("dd",value)); }
   function positionTip() {
     if (tip.hidden || !focused) return;
     const box=focused.element.getBoundingClientRect(), width=tip.offsetWidth, height=tip.offsetHeight;
@@ -172,30 +159,17 @@
     focused={element,index,load,metric}; tip.replaceChildren();
     const node=nodes[index], s=stats(node,load.id,metric), n=node.workloads?.[load.id]?.repeats, c=comparison(index,load.id,metric);
     tip.append(text("div",label(node)+" · "+load.name+" · "+metric.name,"tip-title"));
-    if(!node._preview) tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
-    tip.append(text("div",usable(node,load.id,metric)?valueText(s.median,metric):"暂无有效成绩","tip-value"));
-    tip.append(text("div",c.ok ? "较 "+label(c.previous)+" "+deltaText(c.delta) : "不可比较 · "+c.reason,"tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
-    if(node._preview) { tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip(); return; }
-    const list=text("dl","","tip-rows");
-    row(list,"当前值",s?valueText(s.median,metric)+(usable(node,load.id,metric)?"":"（未作为有效成绩绘图）"):"未测量");
-    row(list,"前节点",c.previous?label(c.previous):"无");
-    const prev=c.previous && stats(c.previous,load.id,metric);
-    row(list,"前值",prev?valueText(prev.median,metric):"未测量");
-    row(list,"有效轮次",Number.isInteger(n)?String(n)+" 轮":"未记录");
-    row(list,"各轮范围",s?valueText(s.min,metric)+" — "+valueText(s.max,metric):"未记录");
+    const valid=usable(node,load.id,metric);
+    tip.append(text("div",valid?valueText(s.median,metric):"待测试","tip-value"));
+    const change=c.ok?(c.delta<0?"降低 "+number(Math.abs(c.delta),1)+"%（提升）":c.delta>0?"增加 "+number(c.delta,1)+"%（回退）":"持平"):"—";
+    tip.append(text("div",c.ok?"资源值较 "+label(c.previous)+" "+change:"—","tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
+    if(valid && !node._preview && Number.isInteger(n)) tip.append(text("div",n+"轮 · 范围 "+valueText(s.min,metric)+" — "+valueText(s.max,metric),"tip-sub"));
     const q=node.workloads?.[load.id]?.quality;
-    row(list,"数据质量",q? (q.passed?"通过":"未通过")+"；缺失 "+String(q.missing ?? "未记录")+"，重复 "+String(q.duplicates ?? "未记录") : "未记录");
-    row(list,"日期",date(node.recorded_at)); row(list,"提交",node.commit || "未记录");
-    row(list,"方法",node.method_id || "未记录"); row(list,"环境",node.environment_id || "未记录");
-    row(list,"处理器",node.environment?.cpu_model || "未记录");
-    row(list,"系统 / 镜像",[node.environment?.runner_os,node.environment?.runner_image].filter(Boolean).join(" / ") || "未记录");
-    row(list,"cgroup 版本",node.environment?.cgroup_version || "未记录");
-    row(list,"源码分支",node.source ? node.source.repository+" · "+node.source.ref : "未记录");
-    row(list,"内存口径",dataMethodRssBasis());
-    tip.append(list);
+    if(valid && !node._preview && q) tip.append(text("div","质量"+(q.passed?"通过":"未通过")+" · 缺失"+q.missing+"/重复"+q.duplicates,"tip-sub"));
+    if(valid && !node._preview) tip.append(text("div",date(node.recorded_at)+" · "+shortSha(node.commit),"tip-sub"));
+    if(node.kind==="dev" && node.source?.ref) tip.append(text("div","分支 "+node.source.ref,"tip-sub"));
     const link=safeRunUrl(node.run_url);
     if (link) { const a=text("a","查看这次 GitHub 运行 ↗","tip-link"); a.href=link; a.target="_blank"; a.rel="noopener noreferrer"; a.tabIndex=-1; tip.append(a); }
-    tip.append(text("div","← → 切换节点 · Esc 关闭"+(link?" · Enter 打开运行记录":""),"tip-hint"));
     tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip();
   }
   function hideTip() { if(focused) focused.element.removeAttribute("aria-describedby"); focused=null; tip.hidden=true; }
@@ -207,9 +181,6 @@
     const scale=10**Math.floor(Math.log10(value)), step=value/scale;
     const result=(step<=1?1:step<=2?2:step<=5?5:10)*scale;
     return Number.isFinite(result)?result:value;
-  }
-  function dataMethodRssBasis() {
-    return "容器内各进程 RSS 之和；共享页可能重复计入";
   }
   function drawChart(load,metric) {
     const card=text("article","","chart"), head=text("div","","chart-head"), title=text("h3",metric.name);
@@ -232,7 +203,7 @@
     }
     let path="", connected=false;
     nodes.forEach((node,index) => {
-      if(!usable(node,load.id,metric)){connected=false;return;}
+      if(!usable(node,load.id,metric)) return;
       path+=(connected?" L ":" M ")+x(index)+" "+y(stats(node,load.id,metric).median); connected=true;
     });
     if(path) plot.append(svg("path",{d:path,class:"series"}));
@@ -273,7 +244,7 @@
       });
       targets.push(group); plot.append(group);
     });
-    scroll.append(plot); card.append(scroll); if(!usingPreview) card.append(text("p","变化以紧邻前节点为参照；不可比较时显示 —。可横向滚动查看全部版本。","chart-note")); return card;
+    scroll.append(plot); card.append(scroll); if(!usingPreview) card.append(text("p","变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。","chart-note")); return card;
   }
   function render(payload,source) {
     const preview=payload?.temporary_preview;
