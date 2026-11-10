@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "repository": "alibaba/loongsuite-pilot",
+  "updated_at": "2026-11-10T08:27:19Z",
+  "method": {
+    "id": "github-full-pilot-qoder-native-v1",
+    "window_seconds": 30,
+    "session_count": 64,
+    "cpu_limit": 2,
+    "memory_limit": "1 GiB",
+    "poll_interval_ms": 100,
+    "rss_basis": "sum_of_owned_process_tree_rss_shared_pages_may_repeat",
+    "loads": {
+      "idle": {
+        "turns_per_second": 0
+      },
+      "low": {
+        "turns_per_second": 10
+      },
+      "high": {
+        "turns_per_second": 200
+      }
+    }
+  },
+  "compatibility": {
+    "excluded_at_or_before": null,
+    "reason": "历史 release 尚未回填；确认原生采集协议不兼容后才停止更早版本。"
+  },
+  "nodes": [
+    {
+      "id": "v1.16.0",
+      "kind": "release",
+      "version": "v1.16.0",
+      "commit": "78fdb118981be947b9a85fa70ba0ac01fa8a74d1",
+      "recorded_at": "2026-11-10T08:27:19Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {
+        "cpu_model": "待测",
+        "runner_os": "Linux",
+        "runner_image": "待测"
+      },
+      "run_url": "",
+      "workloads": {}
+    },
+    {
+      "id": "main",
+      "kind": "main",
+      "version": "main",
+      "commit": "7cc3d7f3af03e95dff8a069d7b9b06903f227816",
+      "recorded_at": "2026-11-10T08:27:19Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {
+        "cpu_model": "待测",
+        "runner_os": "Linux",
+        "runner_image": "待测"
+      },
+      "run_url": "",
+      "workloads": {}
+    },
+    {
+      "id": "dev",
+      "kind": "dev",
+      "version": "dev",
+      "commit": "48b87b407e225b80702269679931da284d988e57",
+      "recorded_at": "2026-11-10T08:27:19Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {
+        "cpu_model": "待测",
+        "runner_os": "Linux",
+        "runner_image": "待测"
+      },
+      "run_url": "",
+      "workloads": {}
+    }
+  ]
+}
