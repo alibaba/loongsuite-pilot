@@ -22,6 +22,8 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 OFFICIAL = "alibaba/loongsuite-pilot"
+SITE_WORKFLOW = ".github/workflows/performance-site.yml"
+RESULT_FILES = {"history.json", "index.html", ".nojekyll", SITE_WORKFLOW}
 
 
 def version_key(value):
@@ -331,6 +333,17 @@ def render(template, history):
     return template.replace(marker, encoded)
 
 
+def stage_site_workflow(destination, trusted):
+    """Copy only the fixed workflow from trusted source, never artifact code."""
+    source = Path(trusted) / SITE_WORKFLOW
+    target = Path(destination) / SITE_WORKFLOW
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    marker = Path(destination) / ".nojekyll"
+    if not marker.exists():
+        marker.touch()
+
+
 def release_provenance(release, selection):
     """Recheck the official asset identity; a downloaded hash is not a published hash."""
     checksum = selection.get("asset_sha256", "")
@@ -466,9 +479,8 @@ def github_publish():
         if branch_exists:
             git(history_root, "fetch", "--no-prune", "--no-tags", "--refmap=", "origin", "sdk-performance-results")
             git(history_root, "checkout", "-B", "sdk-performance-results", "FETCH_HEAD")
-            allowed = {"history.json", "index.html", ".nojekyll"}
             tracked = git(history_root, "ls-files").stdout.decode().splitlines()
-            if any(path not in allowed for path in tracked):
+            if any(path not in RESULT_FILES for path in tracked):
                 raise ValueError("results branch unexpectedly contains source or raw test files")
         elif not (history_root / ".git/HEAD").read_text().endswith("sdk-performance-results\n"):
             git(history_root, "checkout", "--orphan", "sdk-performance-results")
@@ -529,7 +541,8 @@ def github_publish():
         encoded_html = render(template, history)
         history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         (history_root / "index.html").write_text(encoded_html, encoding="utf-8")
-        git(history_root, "add", "--", "history.json", "index.html")
+        stage_site_workflow(history_root, trusted)
+        git(history_root, "add", "--", "history.json", "index.html", ".nojekyll", SITE_WORKFLOW)
         if git(history_root, "diff", "--cached", "--quiet", check=False).returncode == 0:
             final_history = history
             break

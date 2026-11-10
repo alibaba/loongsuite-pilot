@@ -1,5 +1,7 @@
 """Data-only publication regressions; no network, Docker, build or benchmark."""
 import copy
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +29,30 @@ def history():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_generated_site_workflow_is_copied_only_from_trusted_source_and_data_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); trusted = root / "trusted"; destination = root / "results"
+            source = trusted / publisher.SITE_WORKFLOW; source.parent.mkdir(parents=True)
+            source.write_text("name: trusted static site\n")
+            destination.mkdir(); (destination / "history.json").write_text("original history")
+            (destination / "index.html").write_text("original page")
+            (destination / ".nojekyll").write_text("preserved marker")
+            publisher.stage_site_workflow(destination, trusted)
+            self.assertEqual((destination / publisher.SITE_WORKFLOW).read_text(), source.read_text())
+            self.assertEqual((destination / "history.json").read_text(), "original history")
+            self.assertEqual((destination / "index.html").read_text(), "original page")
+            self.assertEqual((destination / ".nojekyll").read_text(), "preserved marker")
+            self.assertEqual(publisher.RESULT_FILES, {"history.json", "index.html", ".nojekyll", publisher.SITE_WORKFLOW})
+
+    def test_missing_trusted_site_workflow_cannot_replace_generated_workflow(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); destination = root / "results"
+            workflow = destination / publisher.SITE_WORKFLOW; workflow.parent.mkdir(parents=True)
+            workflow.write_text("previous trusted workflow")
+            with self.assertRaises(FileNotFoundError):
+                publisher.stage_site_workflow(destination, root / "missing-source")
+            self.assertEqual(workflow.read_text(), "previous trusted workflow")
+
     def test_temporary_preview_is_preserved_without_becoming_a_ci_node(self):
         data = history()
         reference = {"schema": 1, "kind": "temporary_preview", "rows": [

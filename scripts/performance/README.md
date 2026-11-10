@@ -104,6 +104,17 @@ artifacts. The write job uses trusted workflow code and validates compact data;
 candidate execution receives no write credentials. Fork/PR runs do not publish.
 No generated result is committed to the source PR or main branch.
 
+The results branch also contains the trusted `performance-site.yml` workflow,
+copied by the publisher from its own source checkout. This independent workflow
+deploys the exact results commit on push or explicit dispatch, without building
+or measuring Pilot. The measurement workflow only dispatches it after publication;
+this is necessary because a GITHUB_TOKEN push does not start another push workflow.
+Old site reruns skip when their data commit is no longer current. Initial setup
+requires a maintainer push that seeds this workflow on the results branch and
+permits that branch in the github-pages environment. Verify registration and the
+first run before enabling routine dispatch; a missing workflow/API failure must
+remain visible and does not mean a site was deployed.
+
 An optional `temporary_preview` in results history contains only numeric
 overrides for `v1.15.2` and `dev`. These values are projected onto the existing
 release/main/dev nodes without changing their stored status. Each override stops
@@ -138,5 +149,5 @@ matched the package manifest; all 104 resources matched their hashes. Clean
 shutdown passed and the owned container was removed. This smoke produced no
 performance report node or comparable CPU/RSS result.
 
-All 31 protocol-helper/publication unit checks passed in an isolated remote directory, including bounded gate contention, rollback release and one-time native/token writes. GitHub runs for public v1.16.0 and the designated dev completed all nine rounds and publication. Public v1.15.2 passed smoke and eight rounds before a SQLite gate infrastructure failure; this is not a compatibility cutoff. The gate repair still requires its full-run retry, and the explicit polling canary remains separate. The short smoke's initial `metrics-summary.json`
+All 33 protocol-helper/publication unit checks passed in an isolated remote directory, including bounded gate contention, rollback release, one-time native/token writes and trusted site-workflow copying. GitHub runs for public v1.16.0, v1.15.2 and the designated dev completed all nine rounds and publication after the fixture repair. The explicit polling canary remains separate. The short smoke's initial `metrics-summary.json`
 is not a completed self-monitoring or token-summary acceptance result.

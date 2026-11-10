@@ -335,38 +335,16 @@ jobs:
           SMOKE_EVIDENCE_URL: ${{ inputs.smoke_evidence_url }}
         run: python3 scripts/performance/publish_history.py --github-publish
 
-  pages:
+  site-dispatch:
     if: always() && needs.publish.result == 'success' && needs.publish.outputs.site_updated == 'true' && vars.PILOT_PERFORMANCE_PAGES == 'true'
     needs: publish
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
-      contents: read
-      pages: write
-      id-token: write
-    # This may coalesce derived deployments, never measurements. Each queued
-    # deployment reads the CURRENT results branch, not an old run's site artifact.
-    concurrency:
-      group: pilot-performance-pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      actions: write
     steps:
-      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
-        with:
-          ref: sdk-performance-results
-          persist-credentials: false
-      - name: Stage generated files only
+      - name: Dispatch the independent site workflow at the results commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/site"
-          cp index.html history.json "$RUNNER_TEMP/site/"
-      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
-        with:
-          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/site
-      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
-        id: deployment
-        with:
-          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          gh api -X POST "repos/$GITHUB_REPOSITORY/actions/workflows/performance-site.yml/dispatches" -f ref=sdk-performance-results
