@@ -62,6 +62,10 @@ source, output, installed-runtime and cloud evidence.
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
 | `otlpTrace.turnIdleTimeoutMs` | Optional idle timeout for grouping turn-level trace data. |
 
+OpenClaw observes completion with `agent_end` and retains the `llm_output` collection boundary. It does
+not register `before_agent_finalize`: that answer-revision hook makes supporting hosts buffer replies
+until the turn ends. Restart the host after updating the plugin to remove existing listeners.
+
 Environment variables:
 
 | Variable | Description |

@@ -958,3 +958,206 @@ async fn source_cycle_identity_multi_turn_and_next_actual_collect_resolve_fresh_
         f.source.stop();
     }
 }
+
+// SCRATCH ONLY: append inside the existing transcript_source_history module.
+// Uses its Fixture; no new dependency or production freshness/cache path.
+// Not compiled or executed locally. Parent owns actual remote gates.
+
+fn arc_metadata_json(source: &Arc<Value>, contexts: &[Arc<Value>]) -> Vec<u8> {
+    let references = contexts.iter().map(Arc::as_ref).collect::<Vec<_>>();
+    serde_json::to_vec(&(source.as_ref(), references)).unwrap()
+}
+
+#[tokio::test]
+async fn source_metadata_arc_hit_preserves_pointer_identity_and_unknown_json() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, true));
+        let unknown = json!({"nested":{"unicode":"云壳😀", "escaped":"quote\"\\\n", "array":[null,false,18446744073709551615u64]}});
+        f.wake("Stop", json!({"unknown_extension":unknown}));
+        let directory = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key);
+        let mut inner = f.source.inner.lock().await;
+        let (first_source, first_contexts) = inner.metadata_for(&directory).unwrap();
+        let (second_source, second_contexts) = inner.metadata_for(&directory).unwrap();
+        assert!(Arc::ptr_eq(&first_source, &second_source), "{agent}");
+        assert_eq!(first_contexts.len(), 2, "source and one notice: {agent}");
+        assert_eq!(first_contexts.len(), second_contexts.len(), "{agent}");
+        let cache = inner
+            .metadata
+            .get(&directory)
+            .expect("small entry remains cached");
+        assert!(Arc::ptr_eq(&first_source, &cache.source), "{agent}");
+        for ((first, second), cached) in first_contexts
+            .iter()
+            .zip(&second_contexts)
+            .zip(&cache.contexts)
+        {
+            assert!(
+                Arc::ptr_eq(first, second) && Arc::ptr_eq(first, cached),
+                "{agent}"
+            );
+            assert_eq!(first["unknown_extension"], unknown, "{agent}");
+        }
+        assert!(
+            first_contexts.iter().any(|v| Arc::ptr_eq(v, &first_source)),
+            "source Value must be shared, not copied: {agent}"
+        );
+        // The old Value-based serialization oracle includes source twice and the
+        // normalized notice receipt, preserving all unknown nested fields.
+        let values = first_contexts
+            .iter()
+            .map(|v| v.as_ref().clone())
+            .collect::<Vec<_>>();
+        let oracle = serde_json::to_vec(&(first_source.as_ref().clone(), values)).unwrap();
+        assert_eq!(
+            arc_metadata_json(&first_source, &first_contexts),
+            oracle,
+            "{agent}"
+        );
+        assert_eq!(
+            arc_metadata_json(&second_source, &second_contexts),
+            oracle,
+            "{agent}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_metadata_arc_survives_drop_stop_and_same_name_notice_generation() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        f.wake("Stop", json!({"unknown_extension":{"generation":"old"}}));
+        let directory = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key);
+        let (held_source, held_contexts) = f
+            .source
+            .inner
+            .lock()
+            .await
+            .metadata_for(&directory)
+            .unwrap();
+        let held_bytes = arc_metadata_json(&held_source, &held_contexts);
+        {
+            let mut inner = f.source.inner.lock().await;
+            inner.drop_metadata(&directory);
+            assert!(!inner.metadata.contains_key(&directory));
+            assert_eq!(inner.metadata_bytes, 0);
+        }
+        assert_eq!(
+            arc_metadata_json(&held_source, &held_contexts),
+            held_bytes,
+            "{agent}"
+        );
+        // Refill, then retain this cached snapshot while the real stop path clears.
+        let (before_stop_source, before_stop_contexts) = f
+            .source
+            .inner
+            .lock()
+            .await
+            .metadata_for(&directory)
+            .unwrap();
+        let before_stop_bytes = arc_metadata_json(&before_stop_source, &before_stop_contexts);
+        f.source.stop();
+        {
+            let inner = f.source.inner.lock().await;
+            assert!(inner.metadata.is_empty());
+            assert_eq!(inner.metadata_bytes, 0);
+        }
+        assert_eq!(
+            arc_metadata_json(&held_source, &held_contexts),
+            held_bytes,
+            "{agent}"
+        );
+        assert_eq!(
+            arc_metadata_json(&before_stop_source, &before_stop_contexts),
+            before_stop_bytes,
+            "{agent}"
+        );
+        f.source.start();
+        let (cached_source, cached_contexts) = f
+            .source
+            .inner
+            .lock()
+            .await
+            .metadata_for(&directory)
+            .unwrap();
+        let cached_bytes = arc_metadata_json(&cached_source, &cached_contexts);
+        let notice = std::fs::read_dir(directory.join("events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let original_name = notice.file_name().unwrap().to_owned();
+        let mut changed: Value = serde_json::from_slice(&std::fs::read(&notice).unwrap()).unwrap();
+        // Existing DirectoryVersion notices must observe this same-name rewrite.
+        // Different serialized length makes it deterministic without sleeps/mtime tricks.
+        changed["unknown_extension"] =
+            json!({"generation":"new-and-longer", "keep":["extra",{"nested":true}]});
+        changed["observationId"] = json!("fixture-same-name-new-generation");
+        std::fs::write(&notice, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert_eq!(notice.file_name().unwrap(), original_name.as_os_str());
+        let (new_source, new_contexts) = f
+            .source
+            .inner
+            .lock()
+            .await
+            .metadata_for(&directory)
+            .unwrap();
+        let new_notice = new_contexts
+            .iter()
+            .find(|v| v.get("receipt").is_some())
+            .unwrap();
+        let old_notice = cached_contexts
+            .iter()
+            .find(|v| v.get("receipt").is_some())
+            .unwrap();
+        assert_eq!(
+            new_notice["unknown_extension"], changed["unknown_extension"],
+            "{agent}"
+        );
+        assert_ne!(
+            new_notice["receipt"]["version"], old_notice["receipt"]["version"],
+            "{agent}"
+        );
+        assert!(
+            !Arc::ptr_eq(new_notice, old_notice),
+            "new notice generation must not reuse old Value: {agent}"
+        );
+        assert!(
+            Arc::ptr_eq(&new_source, &cached_source),
+            "unchanged source descriptor remains shared: {agent}"
+        );
+        assert_eq!(
+            arc_metadata_json(&cached_source, &cached_contexts),
+            cached_bytes,
+            "{agent}"
+        );
+        assert_eq!(
+            arc_metadata_json(&held_source, &held_contexts),
+            held_bytes,
+            "{agent}"
+        );
+        assert_eq!(
+            arc_metadata_json(&before_stop_source, &before_stop_contexts),
+            before_stop_bytes,
+            "{agent}"
+        );
+        assert_ne!(
+            arc_metadata_json(&new_source, &new_contexts),
+            cached_bytes,
+            "{agent}"
+        );
+        f.source.stop();
+    }
+}

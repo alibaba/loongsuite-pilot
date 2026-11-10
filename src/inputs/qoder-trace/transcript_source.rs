@@ -161,8 +161,8 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
 }
 struct Metadata {
     version: DirectoryVersion,
-    source: Value,
-    contexts: Vec<Value>,
+    source: Arc<Value>,
+    contexts: Vec<Arc<Value>>,
     bytes: usize,
 }
 struct Collector {
@@ -506,7 +506,7 @@ impl Collector {
         }
         Ok(())
     }
-    fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Value, Vec<Value>)> {
+    fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Arc<Value>, Vec<Arc<Value>>)> {
         let events = dir.join("events");
         #[cfg(not(test))]
         let inspect_inventory = true;
@@ -517,15 +517,15 @@ impl Collector {
         // the existing bounded metadata budget; no transcript body is read here.
         if let Some(m) = self.metadata.get(dir) {
             if m.version == version {
-                return Ok((m.source.clone(), m.contexts.clone()));
+                return Ok((Arc::clone(&m.source), m.contexts.clone()));
             }
         }
         let source = if let Some(m) = self.metadata.get(dir) {
-            m.source.clone()
+            Arc::clone(&m.source)
         } else {
-            snapshot(&dir.join("source.json"), MAX_NOTICES)?.0
+            Arc::new(snapshot(&dir.join("source.json"), MAX_NOTICES)?.0)
         };
-        let mut contexts = vec![source.clone()];
+        let mut contexts = vec![Arc::clone(&source)];
         for entry in crate::utils::source_access::read_dir(&events)?.take(MAX_CONTEXTS) {
             let entry = entry?;
             if !entry.file_type()?.is_file()
@@ -539,7 +539,7 @@ impl Collector {
             };
             v["receipt"] =
                 json!({"name":entry.file_name().to_string_lossy(),"version":notice_version(&v,&s)});
-            contexts.push(v);
+            contexts.push(Arc::new(v));
         }
         contexts.sort_by(|a, b| {
             number(a, "observedSize")
@@ -556,8 +556,12 @@ impl Collector {
             versions.len() * std::mem::size_of::<FileVersion>()
                 + std::mem::size_of::<Vec<FileVersion>>()
         });
-        let bytes =
-            crate::utils::json_size::serialized_json_size(&(&source, &contexts))? + inventory_bytes;
+        let references = contexts.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        let arc_overhead = (contexts.len() + 1) * 4 * std::mem::size_of::<usize>()
+            + (contexts.capacity() + 1) * std::mem::size_of::<Arc<Value>>();
+        let bytes = crate::utils::json_size::serialized_json_size(&(&*source, &references))?
+            + inventory_bytes
+            + arc_overhead;
         if let Some(prior) = self.metadata.shift_remove(dir) {
             self.metadata_bytes -= prior.bytes;
         }
@@ -571,7 +575,7 @@ impl Collector {
                 dir.to_owned(),
                 Metadata {
                     version,
-                    source: source.clone(),
+                    source: Arc::clone(&source),
                     contexts: contexts.clone(),
                     bytes,
                 },
@@ -923,7 +927,7 @@ impl Collector {
     fn initialize(
         &self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         stat: &FileVersion,
         migrate: bool,
     ) -> anyhow::Result<Value> {
@@ -985,7 +989,7 @@ impl Collector {
     fn find_bootstrap(
         &mut self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         cp: &mut Value,
         budget: &mut ScanBudget,
     ) -> anyhow::Result<bool> {
@@ -1146,7 +1150,7 @@ impl Collector {
     fn build(
         &mut self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         cp: &mut Value,
         value: &ActiveRows,
         end: u64,
@@ -1174,6 +1178,7 @@ impl Collector {
                                     .contains(&text(c, "event"))))
                 })
             })
+            .map(Arc::as_ref)
             .unwrap_or(&fallback);
         let first = value
             .rows
@@ -1400,7 +1405,7 @@ impl Collector {
     async fn scan_source(
         &mut self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         cp: &mut Value,
         stat: &FileVersion,
         budget: &mut ScanBudget,

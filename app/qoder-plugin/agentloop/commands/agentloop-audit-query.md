@@ -1,31 +1,9 @@
 ---
-description: 查询审计日志。
+description: 查询 AgentLoop 审计数据，返回结果、验证 SQL 或接入材料。
 ---
 
-# 查询审计日志
+# 审计查询
 
-用户要看 loongsuite-pilot 的审计日志时使用。
+按 [agentloop-audit-query](../skills/agentloop-audit-query/SKILL.md) 执行。用户未确认时间范围时先询问，不先取数；查询、追问与下钻复用已确认范围。默认回答结果，用户要 SQL 或 build-kit 时按对应交付契约输出，不生成仪表盘。
 
-按 [agentloop-audit-query](../skills/agentloop-audit-query/SKILL.md) 技能执行。在插件根目录执行。先按 [capabilities.md](../skills/agentloop-audit-query/references/capabilities.md) 选定 logstore。
-
-用户要筛选、对比范围，或从汇总再看某一个人、某一种 Agent、某一个会话时，先读技能里的 [plugin-usage.md](../skills/agentloop-audit-query/references/plugin-usage.md)，再按它指向的筛选与下钻文档写查询。不要生成仪表盘 JSON。
-
-## 环境
-
-先检测当前环境，只执行对应的一条命令。
-
-### Linux 和 macOS
-
-找不到 `python3` 时用 `python`。
-
-```bash
-python3 scripts/run.py audit --query "<检索或 SQL>"
-```
-
-### Windows
-
-参数名与 Linux 和 macOS 相同。
-
-```powershell
-powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/run.ps1 audit --query "<检索或 SQL>"
-```
+先按 [核心面板目录](../skills/agentloop-audit-query/references/catalog.md) 和共享 schema 选来源与口径；插件调用与鉴权见 [执行契约](../skills/agentloop-audit-query/references/execution.md)。

@@ -882,7 +882,7 @@ impl<T: InputBody> HostedInput<T> {
                 anyhow::bail!("input checkpoint is frozen after output failure");
             }
             let filtered = self.runtime.with_workspace_policy(|policy| {
-                policy.filter_entries(&entries, self.runtime.agent_type)
+                policy.filter_entries_owned(entries, self.runtime.agent_type)
             });
             if !filtered.is_empty() {
                 let handlers = self
