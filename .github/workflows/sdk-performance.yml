@@ -40,10 +40,11 @@ permissions:
   contents: read
 
 # Each distinct release has its own key: release events cannot evict one another.
-# Main/dev keep only the newest queued request. Backfill requests all mean
+# Main keeps only the newest queued request; each dev source/ref queues independently.
+# Unrelated branches cannot evict the designated dev branch's pending request. Backfill requests all mean
 # "select the next untested release" and can safely coalesce without skipping a tag.
 concurrency:
-  group: pilot-performance-${{ github.repository }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || 'dev' }}
+  group: pilot-performance-${{ github.repository }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || format('dev-{0}-{1}', inputs.public_repository || github.repository, inputs.public_ref || github.ref_name) }}
   cancel-in-progress: false
 
 jobs:
@@ -59,6 +60,7 @@ jobs:
       commit: ${{ steps.select.outputs.commit }}
       kind: ${{ steps.select.outputs.kind }}
       version: ${{ steps.select.outputs.version }}
+      is_target_dev: ${{ steps.select.outputs.is_target_dev }}
       asset_sha256: ${{ steps.select.outputs.asset_sha256 }}
       asset_id: ${{ steps.select.outputs.asset_id }}
       asset_name: ${{ steps.select.outputs.asset_name }}
@@ -115,9 +117,14 @@ jobs:
               value=json.loads((out/'selection.json').read_text())
           value['mode']=mode
           (out/'selection.json').write_text(json.dumps(value,indent=2)+'\n')
+          if not value.get('complete'):
+              import html
+              summary={key:value.get(key) for key in ('repository','ref','commit','kind','is_target_dev')}
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as report:
+                  report.write('### Measured public source\n<pre>'+html.escape(json.dumps(summary,indent=2))+'</pre>\n')
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:
-              for key in ('complete','confirmation_only','mode','repository','ref','commit','runtime','kind','version','package','native_entry','asset_sha256','asset_id','asset_name','asset_size_bytes','asset_url','checksum_source'):
-                  item=value.get(key,False if key=='confirmation_only' else '')
+              for key in ('complete','confirmation_only','mode','repository','ref','commit','runtime','kind','version','is_target_dev','package','native_entry','asset_sha256','asset_id','asset_name','asset_size_bytes','asset_url','checksum_source'):
+                  item=value.get(key,False if key in ('confirmation_only','is_target_dev') else '')
                   text=str(item).lower() if isinstance(item,bool) else str(item)
                   if any(c in text for c in '\r\n\0'): raise ValueError('invalid workflow output')
                   output.write(key+'='+text+'\n')
@@ -165,7 +172,7 @@ jobs:
           export HOME="$RUNNER_TEMP/pilot-build-home"
           export LOONGSUITE_PILOT_DATA_DIR="$RUNNER_TEMP/pilot-build-data"
           mkdir -p "$HOME" "$LOONGSUITE_PILOT_DATA_DIR"
-          npm ci --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts=false --no-audit --no-fund
           npm run build
           mkdir -p "$RUNNER_TEMP/pilot-runtime"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/pilot-runtime"
@@ -181,7 +188,7 @@ jobs:
           export LOONGSUITE_PILOT_DATA_DIR="$RUNNER_TEMP/pilot-dependency-data"
           mkdir -p "$HOME" "$LOONGSUITE_PILOT_DATA_DIR"
           if [ ! -d "$PACKAGE/node_modules" ]; then
-            npm ci --prefix "$PACKAGE" --omit=dev --ignore-scripts --no-audit --no-fund
+            npm ci --prefix "$PACKAGE" --omit=dev --ignore-scripts=false --no-audit --no-fund
           fi
       - name: Prepare shared public runtime image before timing
         if: steps.select.outputs.complete == 'false' && steps.select.outputs.confirmation_only != 'true'
@@ -289,7 +296,7 @@ jobs:
         run: exit 1
 
   publish:
-    if: always() && github.repository == 'alibaba/loongsuite-pilot' && github.event_name != 'pull_request' && needs.measure.outputs.node_ready == 'true'
+    if: always() && github.repository == 'alibaba/loongsuite-pilot' && github.event_name != 'pull_request' && needs.measure.outputs.node_ready == 'true' && (needs.measure.outputs.kind != 'dev' || needs.measure.outputs.is_target_dev == 'true')
     needs: measure
     runs-on: ubuntu-22.04
     timeout-minutes: 60

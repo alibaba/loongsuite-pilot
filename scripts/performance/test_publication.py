@@ -27,6 +27,40 @@ def history():
 
 
 class PublicationTests(unittest.TestCase):
+    def test_temporary_preview_is_preserved_without_becoming_a_ci_node(self):
+        data = history()
+        reference = {"schema": 1, "kind": "temporary_preview", "rows": [
+            {"id": str(index), "label": label, "workloads": {load: {"cpu_percent": 1, "rss_mib": 20} for load in publisher.LOADS}}
+            for index, label in enumerate(["JS 1.15.2", "上一版Rust", "上一版SDK", "dev"])]}
+        data["temporary_preview"] = copy.deepcopy(reference)
+        publisher.merge(data, node("release", "1.16.0"))
+        self.assertEqual(data["temporary_preview"], reference)
+        self.assertEqual([item["id"] for item in data["nodes"]], ["v1.16.0"])
+        from prepare_public import select_backfill
+        with patch("prepare_public.stable_releases", return_value=[{"tag_name": "v1.15.2"}]):
+            self.assertEqual(select_backfill(publisher.OFFICIAL, data)["tag_name"], "v1.15.2")
+        data["temporary_preview"]["rows"][0]["workloads"]["idle"]["cpu_percent"] = float("nan")
+        with self.assertRaises(ValueError):
+            publisher.validate_history(data)
+        data["temporary_preview"] = copy.deepcopy(reference)
+        data["temporary_preview"]["rows"][0]["commit"] = "private identity must not enter preview"
+        with self.assertRaises(ValueError):
+            publisher.validate_history(data)
+
+    def test_live_results_configuration_rejects_old_branch_after_switch_without_affecting_main_release(self):
+        data = history(); data["configuration"] = {"dev_branch": "codex/first"}
+        old = node("dev"); old["source"]["ref"] = "codex/first"
+        self.assertTrue(publisher.target_dev_matches(data, old))
+        data["configuration"]["dev_branch"] = "codex/second"
+        self.assertFalse(publisher.target_dev_matches(data, old))
+        new = node("dev"); new["source"]["ref"] = "codex/second"
+        self.assertTrue(publisher.target_dev_matches(data, new))
+        new["source"]["repository"] = "public-fork/loongsuite-pilot"
+        self.assertFalse(publisher.target_dev_matches(data, new))
+        self.assertTrue(publisher.target_dev_matches({}, node("main")))
+        self.assertTrue(publisher.target_dev_matches({}, node("release")))
+        self.assertFalse(publisher.target_dev_matches({}, old))
+
     def test_invalid_history_and_duplicate_slots_fail_before_cutoff_or_merge(self):
         data = history(); data["nodes"] = [node(), node()]
         with self.assertRaises(ValueError):

@@ -134,6 +134,31 @@ def validate_history(history):
         raise ValueError("invalid compatibility boundary")
     if compatibility and compatibility.get("excluded_at_or_before"):
         version_key(compatibility["excluded_at_or_before"])
+    if history.get("temporary_preview") is not None:
+        validate_temporary_preview(history["temporary_preview"])
+
+
+def validate_temporary_preview(value):
+    """Only four numeric rows; no private identities or formal CI status."""
+    if not isinstance(value, dict) or set(value) != {"schema", "kind", "rows"} or value.get("schema") != 1 or value.get("kind") != "temporary_preview":
+        raise ValueError("invalid temporary preview envelope")
+    rows = value["rows"]
+    labels = ["JS 1.15.2", "上一版Rust", "上一版SDK", "dev"]
+    if not isinstance(rows, list) or len(rows) != len(labels):
+        raise ValueError("temporary preview requires four numeric rows")
+    identities = set()
+    for row, label in zip(rows, labels):
+        if not isinstance(row, dict) or set(row) != {"id", "label", "workloads"} or row.get("label") != label or not isinstance(row.get("id"), str) or not re.fullmatch(r"[a-z0-9_-]{1,32}", row["id"]) or row["id"] in identities:
+            raise ValueError("invalid temporary preview row")
+        identities.add(row["id"])
+        if not isinstance(row["workloads"], dict) or set(row["workloads"]) != set(LOADS):
+            raise ValueError("temporary preview requires three loads")
+        for sample in row["workloads"].values():
+            if not isinstance(sample, dict) or set(sample) != {"cpu_percent", "rss_mib"}:
+                raise ValueError("temporary preview contains non-numeric metadata")
+            for metric, number in sample.items():
+                if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0 or (metric == "rss_mib" and number <= 0):
+                    raise ValueError("invalid temporary preview measurement")
 
 
 def contains(source_repo, ancestor, descendant):
@@ -285,6 +310,17 @@ def ensure_main_slot(history, current_main, method_id):
         "run_url": "", "workloads": {}, "source": {"repository": OFFICIAL, "ref": "main"}})
     history["nodes"].sort(key=node_order)
     return True  # identity only; no invented main measurement or borrowed release values
+
+
+def target_dev_matches(history, node):
+    """The latest results-branch configuration is the sole dev publication authority."""
+    if node["kind"] != "dev":
+        return True
+    configuration = history.get("configuration")
+    source = node.get("source") or {}
+    branch = configuration.get("dev_branch") if isinstance(configuration, dict) else None
+    return (isinstance(branch, str) and bool(branch) and source.get("repository") == OFFICIAL
+            and source.get("ref") == branch)
 
 
 def render(template, history):
@@ -442,6 +478,14 @@ def github_publish():
             "schema": 1, "repository": OFFICIAL, "updated_at": None,
             "method": method, "compatibility": None, "nodes": []}
         validate_history(history)
+        # Check after EVERY fresh fetch. A configuration switch creates a new
+        # results commit: an in-flight old branch either fails this gate, or its
+        # ordinary push conflicts and the next CAS retry rejects it.
+        if node and not target_dev_matches(history, node):
+            print("::notice::Dev result retained as artifact only: its public source is not the current designated branch.")
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                output.write("site_updated=false\n")
+            return
         # Resolve on EVERY CAS retry, not just once before a slow publication.
         current_main = resolve(OFFICIAL, "main")
         ensure_public_commit(OFFICIAL, current_main)

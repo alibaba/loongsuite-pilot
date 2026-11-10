@@ -9,11 +9,18 @@ from unittest.mock import patch
 import urllib.error
 
 from linux_cgroup import locate
-from prepare_public import download_release, load_history, select_backfill, source_runtime, stable_releases
+from prepare_public import download_release, is_target_dev, load_history, select_backfill, source_runtime, stable_releases
 from runtime_layout import resolve
 
 
 class Helpers(unittest.TestCase):
+    def test_only_the_designated_official_dev_branch_is_publishable(self):
+        history = {"configuration": {"dev_branch": "codex/cloudshell-sdk-20261107"}}
+        self.assertTrue(is_target_dev("alibaba/loongsuite-pilot", "codex/cloudshell-sdk-20261107", history))
+        self.assertFalse(is_target_dev("alibaba/loongsuite-pilot", "dev/v2.0.0", history))
+        self.assertFalse(is_target_dev("public-fork/loongsuite-pilot", "codex/cloudshell-sdk-20261107", history))
+        self.assertFalse(is_target_dev("alibaba/loongsuite-pilot", "codex/cloudshell-sdk-20261107", {}))
+
     def test_unified_cgroup_uses_mount_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

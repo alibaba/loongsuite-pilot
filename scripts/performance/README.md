@@ -104,6 +104,27 @@ artifacts. The write job uses trusted workflow code and validates compact data;
 candidate execution receives no write credentials. Fork/PR runs do not publish.
 No generated result is committed to the source PR or main branch.
 
+An optional `temporary_preview` in results history contains only four labelled
+numeric rows for the six charts. It is displayed until the first passed node
+for the current CI method exists. It never creates formal nodes or changes
+backfill selection, quality gates or compatibility boundaries.
+
+The single dev slot is bound by `history.json` on `sdk-performance-results`:
+`configuration.dev_branch` names one branch in `alibaba/loongsuite-pilot`.
+Other branches and PRs retain measurement artifacts but cannot replace this
+public dev slot. The selector checks the binding before publication, and the
+publisher rechecks the latest results commit on every CAS retry. A concurrent
+binding change therefore rejects an old branch's in-flight result. Missing
+binding fails closed for dev; main and releases remain independent. No repository
+variable, PAT or additional secret is used for this authority.
+
+To switch the displayed development branch, maintainers update that one JSON
+field in a fresh results commit and clear the old dev node or replace it with a
+pending node for the new branch's actual SHA. Never relabel old branch values as
+new measurements. The page shows each node's recorded source and the current
+binding. Each dev source/ref has independent workflow concurrency, so unrelated
+branches cannot evict the designated branch's pending measurement.
+
 ## Verification status
 
 The authorized remote functional smoke passed with the clean public
@@ -115,5 +136,5 @@ matched the package manifest; all 104 resources matched their hashes. Clean
 shutdown passed and the owned container was removed. This smoke produced no
 performance report node or comparable CPU/RSS result.
 
-All 24 protocol-helper/publication unit checks passed in an isolated remote directory; public JS1.15.2/1.16.0 smoke, effective 100-ms polling canary, cgroup-v2 execution and complete nine-round aggregation remain to be verified before routine publication. The short smoke's initial `metrics-summary.json`
+All 27 protocol-helper/publication unit checks passed in an isolated remote directory, including designated-dev filtering, live binding changes and separate numeric-preview preservation; public JS1.15.2/1.16.0 smoke, effective 100-ms polling canary, cgroup-v2 execution and complete nine-round aggregation remain to be verified before routine publication. The short smoke's initial `metrics-summary.json`
 is not a completed self-monitoring or token-summary acceptance result.

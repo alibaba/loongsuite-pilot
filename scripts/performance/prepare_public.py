@@ -127,6 +127,12 @@ def select_backfill(repository, history):
     return None
 
 
+def is_target_dev(repository, ref, history):
+    configuration = history.get("configuration")
+    branch = configuration.get("dev_branch") if isinstance(configuration, dict) else None
+    return repository == "alibaba/loongsuite-pilot" and isinstance(branch, str) and bool(branch) and ref == branch
+
+
 def download_release(repository, release, destination):
     candidates = [value for value in release.get("assets", []) if value["name"].endswith(".tar.gz")
                   and ("x86_64-unknown-linux-gnu" in value["name"] or value["name"] == "loongsuite-pilot.tar.gz")]
@@ -205,6 +211,7 @@ def main():
     result = {"complete": False, "repository": args.repository, "ref": ref,
               "commit": resolve(args.repository, ref), "kind": "release" if release else args.mode,
               "version": ref if release else args.mode}
+    result["is_target_dev"] = result["kind"] == "dev" and is_target_dev(args.repository, ref, history)
     if release:
         result.update(download_release(args.repository, release, args.output))
         result["release_url"] = release["html_url"]
