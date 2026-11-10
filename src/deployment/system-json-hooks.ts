@@ -8,6 +8,7 @@ import { withDeployedStateLock } from './deployed-state-merge.js';
 /** Claude Code 2.1.83+ reads independent policy fragments from this directory. */
 export const SYSTEM_JSON_HOOK_PATHS: Record<string, string> = {
   'claude-code': '/etc/claude-code/managed-settings.d/50-loongsuite-pilot.json',
+  cursor: '/etc/cursor/hooks.json',
 };
 
 export function supportsSystemJsonHooks(id: string): boolean {
@@ -75,6 +76,12 @@ function updatedText(def: AgentDefinition, raw: string, install: boolean): strin
   const hooks: JsonObject = object(document.hooks) ? document.hooks : {};
   const prefix = commandPrefix(def);
   let next = text;
+  if (def.id === 'cursor' && install) {
+    if (document.version !== undefined && document.version !== 1) {
+      throw new Error('Invalid JSON hook version; expected Cursor hooks version 1; original file preserved');
+    }
+    if (document.version === undefined) next = editJsonc(next, ['version'], 1);
+  }
   const nextHooks = { ...hooks };
   for (const event of new Set([...Object.keys(hooks), ...(install ? def.hook!.events : [])])) {
     const rows = hooks[event];
