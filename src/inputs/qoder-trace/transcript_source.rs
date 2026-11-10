@@ -543,7 +543,8 @@ impl Collector {
             versions.len() * std::mem::size_of::<FileVersion>()
                 + std::mem::size_of::<Vec<FileVersion>>()
         });
-        let bytes = serde_json::to_vec(&json!([source, contexts]))?.len() + inventory_bytes;
+        let bytes =
+            crate::utils::json_size::serialized_json_size(&(&source, &contexts))? + inventory_bytes;
         if let Some(prior) = self.metadata.shift_remove(dir) {
             self.metadata_bytes -= prior.bytes;
         }

@@ -134,4 +134,5 @@ pub(crate) mod file_identity;
 #[cfg(all(test, windows))]
 pub(crate) mod windows_test_junction;
 
+pub(crate) mod json_size;
 pub mod source_access;

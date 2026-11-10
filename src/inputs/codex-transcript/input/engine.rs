@@ -1917,7 +1917,7 @@ fn persisted_input_context(
     range: Option<&super::super::types::CodexTranscriptSourceRange>,
 ) -> CodexTranscriptInputContext {
     let delta = context.delta.clone().unwrap_or_default();
-    let bytes = json_bytes(&Value::Array(delta.clone()));
+    let bytes = json_bytes(&delta);
     if bytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || range.is_none() {
         CodexTranscriptInputContext {
             hash: context.hash.clone(),
@@ -3869,3 +3869,52 @@ impl CodexTranscriptEngine<'_> {
 #[cfg(test)]
 #[path = "engine_history.rs"]
 mod history_contracts;
+
+// Append this module to src/inputs/codex-transcript/input/engine.rs.
+#[cfg(test)]
+mod cpu_optimization_checkpoint_budget_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_context_keeps_legacy_threshold_and_missing_range_behavior() {
+        let source_range = super::super::super::types::CodexTranscriptSourceRange {
+            start_offset: 10,
+            end_offset: 20,
+        };
+        for target in [
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES - 1,
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES,
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES + 1,
+        ] {
+            let delta = vec![Value::String("x".repeat(target - 4))];
+            let old_bytes = serde_json::to_vec(&Value::Array(delta.clone()))
+                .unwrap()
+                .len();
+            assert_eq!(old_bytes, target);
+            assert_eq!(json_bytes(&delta), old_bytes);
+            let context = CodexTranscriptInputContext {
+                hash: "original-hash".into(),
+                delta: Some(delta.clone()),
+                full_messages: Some(vec![json!({"role":"system", "content":"preserved"})]),
+                delta_range: None,
+            };
+            let actual = persisted_input_context(&context, Some(&source_range));
+            assert_eq!(actual.hash, context.hash);
+            assert_eq!(actual.full_messages, context.full_messages);
+            if old_bytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES {
+                assert_eq!(actual.delta.as_ref(), Some(&delta));
+                assert!(actual.delta_range.is_none());
+            } else {
+                assert!(actual.delta.is_none());
+                assert_eq!(actual.delta_range.as_ref(), Some(&source_range));
+            }
+            // With no recoverable source range, the old implementation keeps the
+            // actual delta even above the size cap. Preserve that recovery contract.
+            let without_range = persisted_input_context(&context, None);
+            assert_eq!(without_range.delta.as_ref(), Some(&delta));
+            assert!(without_range.delta_range.is_none());
+            assert_eq!(without_range.hash, context.hash);
+            assert_eq!(without_range.full_messages, context.full_messages);
+        }
+    }
+}
