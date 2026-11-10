@@ -8,7 +8,7 @@ import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
 import { postAlarm } from '../internal/post-alarm.js';
-import { systemTomlDefinition, supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { systemHookDefinition, supportsSystemHooks } from './system-hook-config.js';
 import { areSystemHookAssetsHealthy } from './system-hook-assets.js';
 
 const logger = createLogger('HookInstall');
@@ -363,7 +363,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
   const byId = new Map(defs.map(def => [def.id, def]));
   // An unqualified status/install follows the persisted target after restart.
   for (const [id, def] of byId) {
-    if (supportsSystemTomlHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
+    if (supportsSystemHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
   }
   const homes = opts.homes ?? {};
   const enabled = opts.enabled ?? (() => true);
@@ -398,13 +398,13 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     // Scope changes choose a deployment strategy; they must not turn automatic
     // discovery into installation of agents that are absent from this machine.
     if (selection.kind === 'detect' && !(await manager.isAgentDetected(def))) continue;
-    const scope = supportsSystemTomlHooks(def.id) ? opts.deploymentScope : undefined;
+    const scope = supportsSystemHooks(def.id) ? opts.deploymentScope : undefined;
     const home = homes[def.id];
     if (home && manager.isSystemInstallation(def.id) && opts.deploymentScope === undefined) {
       throw new Error('An existing system hook installation requires explicit --scope user before --home');
     }
     const targeted = scope === 'system'
-      ? systemTomlDefinition(def, opts.systemConfigPath)
+      ? systemHookDefinition(def, opts.systemConfigPath)
       : home ? definitionAtInstallHome(def, home) : scope === 'user'
         ? { ...def, hook: def.hook ? { ...def.hook, scope: 'user' as const } : undefined } : def;
     if (home && !targeted) {
@@ -448,7 +448,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
           agents.push({ id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: active.deployMode });
           continue;
         }
-        const known = supportsSystemTomlHooks(def.id) && settingsPath
+        const known = supportsSystemHooks(def.id) && settingsPath
           ? manager.recordedSettingsPaths(def.id).includes(path.resolve(settingsPath))
           : manager.hasRecord(def.id);
         agents.push(failed(def.id, known ? 'overwritten' : 'not-detected', active.deployMode, settingsPath));
@@ -468,7 +468,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
   for (const agent of agents) {
     const definition = byId.get(agent.id);
-    const system = Boolean(definition && supportsSystemTomlHooks(definition.id))
+    const system = Boolean(definition && supportsSystemHooks(definition.id))
       && (opts.deploymentScope === 'system' || (opts.deploymentScope === undefined && manager.isSystemInstallation(agent.id)));
     if (system) {
       agent.hookScope = 'system';

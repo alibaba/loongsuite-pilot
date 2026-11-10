@@ -8,9 +8,21 @@ export const CODEX_SYSTEM_HOOK_ASSETS = [
   'shared/resource-context.mjs', 'shared/sync-file-lock.mjs', 'shared/upstream-context.mjs',
 ] as const;
 
+export const CLAUDE_SYSTEM_HOOK_ASSETS = [
+  'claude-code-loongsuite-pilot-hook.sh', 'claude-code-loongsuite-pilot-hook.ps1',
+  'claude-code-hook-processor.mjs', 'agent-event-normalizer.mjs',
+  'claude-code/message-converter.mjs', 'claude-code/state.mjs',
+  'claude-code/tool-context.mjs', 'claude-code/transcript-parser.mjs',
+  'shared/decode-payload.mjs', 'shared/error-logger.mjs', 'shared/event-emitter.mjs',
+  'shared/qoder-db-utils.mjs', 'shared/resource-context.mjs', 'shared/stdin-reader.mjs',
+  'shared/sync-file-lock.mjs', 'shared/upstream-context.mjs',
+  'shared/workspace-policy.mjs', 'shared/workspace-privacy.mjs',
+] as const;
+
 function manifest(agentId: string): readonly string[] {
   if (agentId === 'grok-build') return GROK_BUILD_HOOK_ASSETS;
   if (agentId === 'codex') return CODEX_SYSTEM_HOOK_ASSETS;
+  if (agentId === 'claude-code') return CLAUDE_SYSTEM_HOOK_ASSETS;
   throw new Error(`No system hook runtime for ${agentId}`);
 }
 

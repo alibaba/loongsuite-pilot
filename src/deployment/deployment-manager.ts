@@ -27,7 +27,7 @@ import {
 } from './persisted-deploy-paths.js';
 import { mergeDeployedAgentsState, mergeHookSettingsPaths, withDeployedStateLock } from './deployed-state-merge.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from './system-hook-assets.js';
-import { supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { supportsSystemHooks } from './system-hook-config.js';
 
 const logger = createLogger('DeploymentManager');
 
@@ -166,7 +166,7 @@ export class DeploymentManager {
     });
     let ok = false;
     try {
-      if (supportsSystemTomlHooks(def.id) && !(await this.recoverHookMigration(def))) throw new Error('Hook migration cleanup remains pending');
+      if (supportsSystemHooks(def.id) && !(await this.recoverHookMigration(def))) throw new Error('Hook migration cleanup remains pending');
       const target = applyPersistedDeployTargets(def, this.state[def.id]);
       ok = target.deployMode === 'hook'
         ? await this.hookStrategy.undeploy(target)
@@ -205,7 +205,7 @@ export class DeploymentManager {
    */
   async undeployAgent(def: AgentDefinition): Promise<boolean> {
     await this.loadState();
-    if (supportsSystemTomlHooks(def.id)) {
+    if (supportsSystemHooks(def.id)) {
       if (!(await this.recoverHookMigration(def))) return false;
       const paths = mergeHookSettingsPaths(this.state[def.id]);
       if (paths.length > 0) {
@@ -280,7 +280,7 @@ export class DeploymentManager {
 
   /** Explicit scope changes migrate only previously recorded Pilot registrations. */
   deployHookScope(def: AgentDefinition): Promise<DeployResult> {
-    if (!supportsSystemTomlHooks(def.id) || !def.hook) throw new Error('This agent does not support native system hook scope');
+    if (!supportsSystemHooks(def.id) || !def.hook) throw new Error('This agent does not support native system hook scope');
     return this.runExclusive(() => withDeployedStateLock(path.join(this.dataDir, `${def.id === 'grok-build' ? 'grok' : def.id}-scope.lock`), async () => {
       await this.loadState();
       if (!(await this.recoverHookMigration(def))) return {
@@ -397,12 +397,12 @@ export class DeploymentManager {
   repairHookSettings(def: AgentDefinition): Promise<DeployResult> {
     return this.runExclusive(async () => {
       await this.loadState();
-      if (supportsSystemTomlHooks(def.id) && this.pendingHookMigration(def.id)) return {
+      if (supportsSystemHooks(def.id) && this.pendingHookMigration(def.id)) return {
         success: false, agentId: def.id, deployMode: 'hook',
         error: 'Hook scope installation is pending; retry hook install before starting collection',
       };
-      const paths = supportsSystemTomlHooks(def.id) ? mergeHookSettingsPaths(this.state[def.id]) : [];
-      if (!supportsSystemTomlHooks(def.id) || paths.length === 0) {
+      const paths = supportsSystemHooks(def.id) ? mergeHookSettingsPaths(this.state[def.id]) : [];
+      if (!supportsSystemHooks(def.id) || paths.length === 0) {
         const result = await this.deployAgent(def);
         await this.saveState();
         return result;
@@ -450,12 +450,12 @@ export class DeploymentManager {
     return this.runExclusive(async () => {
       await this.loadState();
       const defTarget = applyPersistedDeployTargets(def, this.state[def.id]);
-      if (supportsSystemTomlHooks(def.id) && this.pendingHookMigration(def.id)) return true;
+      if (supportsSystemHooks(def.id) && this.pendingHookMigration(def.id)) return true;
       if (defTarget.deployMode === 'dsh-yaml-patch') {
         const target = await this.dshYamlPatchStrategy.resolveTarget(defTarget, this.state[def.id]);
         return target ? this.dshYamlPatchStrategy.needsDeployAt(defTarget, target) : true;
       }
-      if (supportsSystemTomlHooks(def.id)) {
+      if (supportsSystemHooks(def.id)) {
         if (opts?.settingsPath) {
           const targeted = definitionAtHookSettings({ ...def,
             hook: def.hook ? { ...def.hook, scope: opts.scope ?? defTarget.hook?.scope } : undefined,
@@ -493,11 +493,11 @@ export class DeploymentManager {
     def: AgentDefinition,
     opts?: { preserveHookSettings?: boolean; preservePluginConfig?: boolean; assumeDetected?: boolean; scopeInstall?: boolean },
   ): Promise<DeployResult> {
-    if (supportsSystemTomlHooks(def.id) && this.pendingHookMigration(def.id) && !opts?.scopeInstall) {
+    if (supportsSystemHooks(def.id) && this.pendingHookMigration(def.id) && !opts?.scopeInstall) {
       return { success: false, agentId: def.id, deployMode: def.deployMode,
         error: 'Hook scope installation is pending; retry hook install before starting collection' };
     }
-    if (supportsSystemTomlHooks(def.id) && !opts?.preserveHookSettings) {
+    if (supportsSystemHooks(def.id) && !opts?.preserveHookSettings) {
       const paths = mergeHookSettingsPaths(this.state[def.id]);
       if (paths.length > 1) {
         let last: DeployResult | undefined;
@@ -558,7 +558,7 @@ export class DeploymentManager {
           const selected = await this.pluginInjectStrategy.resolveExistingConfigPath(def.pluginInject);
           if (selected) record.pluginInjectConfigPath = path.resolve(selected);
         }
-        if (supportsSystemTomlHooks(def.id) && def.hook?.settingsPath) {
+        if (supportsSystemHooks(def.id) && def.hook?.settingsPath) {
           this.rememberHookPath(def.id, def.hook.settingsPath);
         }
       }
@@ -617,7 +617,7 @@ export class DeploymentManager {
         };
       }
       Object.assign(newRecord, lifecycleFieldsForDeploy(def, result));
-      if (supportsSystemTomlHooks(def.id)) {
+      if (supportsSystemHooks(def.id)) {
         const written = newRecord.hookSettingsPath ?? def.hook?.settingsPath;
         newRecord.hookSettingsPaths = mergeHookSettingsPaths(previous, written);
         if (written) newRecord.hookSettingsPath = path.resolve(written);

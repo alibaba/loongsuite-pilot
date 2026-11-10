@@ -132,7 +132,7 @@ describe('Grok system managed configuration', () => {
 });
 
 describe('Grok system installation lifecycle', () => {
-  for (const agentsFlag of [undefined, 'grok-build,claude-code']) {
+  for (const agentsFlag of [undefined, 'grok-build,sample-agent']) {
     it(`uses system/home routes in a mixed ${agentsFlag ? 'named' : 'automatic'} installation`, async () => {
       const dataDir = path.join(root, 'data');
       const builtin = path.join(root, 'agents.d');
@@ -142,12 +142,12 @@ describe('Grok system installation lifecycle', () => {
       const grok = { ...def, detection: { paths: [home], commands: [] },
         hook: { ...def.hook!, scope: undefined, systemSettingsPath: def.hook!.settingsPath,
           settingsPath: path.join(home, 'hooks/loongsuite-pilot.json') } };
-      const settings = path.join(home, 'claude-settings.json');
+      const settings = path.join(home, 'sample-settings.json');
       await fs.writeFile(settings, '{"theme":"keep-me"}');
       await fs.writeFile(path.join(builtin, 'grok.json'), JSON.stringify(grok));
-      await fs.writeFile(path.join(builtin, 'claude.json'), JSON.stringify({
-        id: 'claude-code', displayName: 'Claude', deployMode: 'hook', detection: { paths: [home], commands: [] },
-        hook: { settingsPath: settings, hookCommand: path.join(dataDir, 'hooks/claude-code-hook.sh'), events: ['Stop'], format: 'nested' },
+      await fs.writeFile(path.join(builtin, 'sample.json'), JSON.stringify({
+        id: 'sample-agent', displayName: 'Sample', deployMode: 'hook', detection: { paths: [home], commands: [] },
+        hook: { settingsPath: settings, hookCommand: path.join(dataDir, 'hooks/sample-agent-hook.sh'), events: ['Stop'], format: 'nested' },
       }));
       const opts = { dataDir, pilotDir: path.resolve('.'), builtinAgentsDir: builtin, agentsFlag,
         deploymentScope: 'system' as const, writeResult: true };
@@ -155,14 +155,14 @@ describe('Grok system installation lifecycle', () => {
       expect(result.exitCode).toBe(0);
       expect(result.report.agents).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'grok-build', hookScope: 'system', runtimeHealthy: true }),
-        expect.objectContaining({ id: 'claude-code', status: 'ok', settingsPath: settings }),
+        expect.objectContaining({ id: 'sample-agent', status: 'ok', settingsPath: settings }),
       ]));
-      expect(result.report.agents.find(agent => agent.id === 'claude-code')).not.toHaveProperty('hookScope');
+      expect(result.report.agents.find(agent => agent.id === 'sample-agent')).not.toHaveProperty('hookScope');
       expect(await fs.readFile(def.hook!.settingsPath, 'utf8')).toContain('# BEGIN loongsuite-pilot:grok-build');
       expect(await fs.readFile(grok.hook.settingsPath, 'utf8').catch(() => null)).toBeNull();
       const claude = JSON.parse(await fs.readFile(settings, 'utf8'));
       expect(claude.theme).toBe('keep-me');
-      expect(claude.hooks.Stop[0].hooks[0].command).toContain('claude-code-hook.sh');
+      expect(claude.hooks.Stop[0].hooks[0].command).toContain('sample-agent-hook.sh');
       expect((await runHookInstall(opts)).exitCode).toBe(0);
       expect(JSON.parse(await fs.readFile(settings, 'utf8')).hooks.Stop).toHaveLength(1);
     });
