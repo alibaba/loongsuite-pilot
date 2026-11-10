@@ -72,7 +72,10 @@ export class QoderSubagentLinks {
 
   register(source, checkpoint, row) {
     const added = [];
-    if (row?.type !== 'assistant' || !checkpoint.turnId || !checkpoint.traceContext) return added;
+    // IDE and CN have separate source contracts. Only activate this adapter
+    // for the international CLI protocol, including hosts of that runtime.
+    if (source.agentId !== 'qoder' || row?.entrypoint !== 'cli'
+      || row.type !== 'assistant' || !checkpoint.turnId || !checkpoint.traceContext) return added;
     for (const block of blocks(row)) {
       if (!['Agent', 'Task'].includes(block?.name) || !text(block.id)
         || !block.input || typeof block.input !== 'object') continue;
@@ -103,7 +106,8 @@ export class QoderSubagentLinks {
 
   /** Bind only a native delegated input. A direct input in a reused child is independent. */
   incoming(source, prompt) {
-    if (!source.subagentId || prompt?.isDelegatedTask !== true || !text(prompt.parent_tool_use_id)) return;
+    if (source.agentId !== 'qoder' || !source.subagentId
+      || prompt?.isDelegatedTask !== true || !text(prompt.parent_tool_use_id)) return;
     if (text(prompt.agentId) && prompt.agentId !== source.subagentId) return;
     return this.find(source.sessionId, prompt.parent_tool_use_id, text(prompt.parent_agent_id));
   }

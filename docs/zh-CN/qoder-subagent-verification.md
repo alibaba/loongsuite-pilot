@@ -4,7 +4,9 @@ Qoder CLI 与 Agent SDK 的原生 sidechain 使用独立 transcript，同时可�
 
 ## 应用边界
 
-本次实现针对 CLI 原生 sidechain；复用相同运行时与 Hook/transcript 协议的 SDK 或桌面封装可以共用此路径。QoderCN Input 已接入共用采集器，但现有子 Agent 集成用例使用 CLI 形态，不能据此宣称 QoderCN IDE 已支持。Qoder Work 不在本次改动范围内。
+本次实现针对 Qoder CLI 原生 sidechain；复用相同运行时与 Hook/transcript 协议的 SDK 或桌面封装可以共用此路径。QoderCN 的专属子 Agent Hook 和上游上下文接线不在本次改动范围内；共用读取/转换组件不代表已经支持 QoderCN。Qoder Work 不在本次改动范围内。
+
+委派登记仅在 `qoder` 来源且原生记录 `entrypoint=cli` 时启用，避免 IDE 或 CN 主会话仅因调用同名 Agent 工具便进入这套 CLI 适配。
 
 **Qoder IDE / QoderCN IDE 的独立子会话仍需额外适配。** 两者 1.37.0 的真实测试样本使用独立的子 `sessionId`，文件位于项目 `transcript/<childSessionId>.jsonl`，没有 CLI 的 `isDelegatedTask`、`parent_tool_use_id` 或初始用户输入；父工具的 `toolUseResult` 也可能是字符串。仅添加 `SubagentStart/Stop` 声明不足以让当前 CLI tailer 完整读取这些子执行。
 
@@ -55,6 +57,6 @@ npm test -- tests/integration/qoder-subagent-lifecycle.test.ts tests/unit/inputs
 npm run build
 ```
 
-CLI 形态的合成输入覆盖 Qoder/QoderCN Input 的并行、复用、嵌套、后台通知、重启、上游上下文、脱敏、缺失父级和最终 Span 挂载。原生协议依据 Qoder CLI 1.1.81；实际 CLI/SDK 安装态、CMS 回读、版本与测试窗口由对应候选验收报告绑定。GUI、Windows 与其他版本的真实交互不能由这些合成测试替代，尤其不能将这些用例当作 IDE 独立子会话适配的证明。
+CLI 形态的合成输入覆盖 Qoder Input 的并行、复用、嵌套、后台通知、重启、上游上下文、脱敏、缺失父级和最终 Span 挂载。原生协议依据 Qoder CLI 1.1.81；实际 CLI/SDK 安装态、CMS 回读、版本与测试窗口由对应候选验收报告绑定。GUI、Windows 与其他版本的真实交互不能由这些合成测试替代，尤其不能将这些用例当作 IDE 独立子会话适配的证明。
 
 来源：[Qoder Hook](https://docs.qoder.com/cli/hooks)、[Qoder SDK 类型](https://docs.qoder.com/cli/sdk/references-typescript)、[统一子 Agent 模型](subagent-data-model.md)。

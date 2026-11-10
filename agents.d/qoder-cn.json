@@ -8,7 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.qoder-cn/settings.json",
-    "events": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit", "SubagentStart", "SubagentStop"],
+    "events": ["Stop", "PreToolUse", "PostToolUse", "UserPromptSubmit"],
     "hookCommand": "$PILOT_DATA/hooks/qodercn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",

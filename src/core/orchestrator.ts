@@ -1228,7 +1228,6 @@ export class Orchestrator extends EventEmitter {
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
-      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
       dataDir: this.dataDir,
       logDir: qoderCnLogDir,
       pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,

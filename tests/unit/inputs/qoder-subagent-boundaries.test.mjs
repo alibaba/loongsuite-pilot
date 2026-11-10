@@ -75,9 +75,21 @@ describe('Qoder native delegation boundaries', () => {
     expect(qoderTaskNotification({ type: 'user', isMeta: true, origin: { kind: 'task-notification' }, message: { content } })).toEqual({ callId: 'call', status: 'completed', result: 'answer' });
   });
 
+  it('keeps IDE and CN sources outside the CLI delegation adapter', () => {
+    const links = new QoderSubagentLinks();
+    const checkpoint = { turnId: 'turn', traceContext: { traceId: 'a'.repeat(32) } };
+    const dispatch = model('dispatch', [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: 'task' } }], 'tool_use');
+    expect(links.register({ sessionId: session, agentId: 'qoder' }, checkpoint,
+      { ...dispatch, entrypoint: undefined })).toEqual([]);
+    expect(links.register({ sessionId: session, agentId: 'qoder-cn' }, checkpoint, dispatch)).toEqual([]);
+    expect(links.register({ sessionId: session, agentId: 'qoder' }, checkpoint, dispatch)).toHaveLength(1);
+    expect(links.incoming({ sessionId: session, agentId: 'qoder-cn', subagentId: 'child' },
+      user('task', 'delegate'))).toBeUndefined();
+  });
+
   it('records distinct outgoing work for reused call IDs without guessing ambiguous child ownership', () => {
     const links = new QoderSubagentLinks();
-    const source = { sessionId: session };
+    const source = { sessionId: session, agentId: 'qoder' };
     const traces = { traceId: 'a'.repeat(32) };
     const row = model('dispatch', [{ type: 'tool_use', id: 'same-call', name: 'Agent', input: { prompt: 'private synthetic work' } }], 'tool_use');
     const invocations = [];
@@ -102,7 +114,7 @@ describe('Qoder native delegation boundaries', () => {
         traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), at: Date.now(), resultEmitted: true, childComplete: true };
     }
     const links = new QoderSubagentLinks(saved);
-    const added = links.register({ sessionId: session }, { turnId: 'new-turn', traceContext: { traceId: 'c'.repeat(32) } },
+    const added = links.register({ sessionId: session, agentId: 'qoder' }, { turnId: 'new-turn', traceContext: { traceId: 'c'.repeat(32) } },
       model('dispatch', [{ type: 'tool_use', id: 'new-call', name: 'Agent', input: { prompt: 'new task' } }], 'tool_use'));
     expect(added).toHaveLength(1);
     expect(Object.keys(links.state)).toHaveLength(4096);

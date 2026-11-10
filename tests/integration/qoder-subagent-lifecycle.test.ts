@@ -4,7 +4,6 @@ import path from 'node:path';
 import os from 'node:os';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
-import { QoderCnTraceInput } from '../../src/inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { InputManager } from '../../src/core/input-manager.js';
 import { CorrelationStore } from '../../src/core/upstream-link/correlation-store.js';
@@ -48,21 +47,20 @@ const end = (id: string, second: number, tokens = 11) => [
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
-async function harness(agentId: 'qoder' | 'qoder-cn', upstream = false) {
+async function harness(agentId: 'qoder', upstream = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-pipeline-'));
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }));
   const parent = path.join(root, `${session}.jsonl`);
   const child = (id: string) => path.join(root, session, 'subagents', `agent-${id}.jsonl`);
   const events = new MockFlusher();
-  let input: QoderTraceInput | QoderCnTraceInput;
+  let input: QoderTraceInput;
   let manager: InputManager;
   let state: StateStore;
   const start = async () => {
     state = new StateStore(path.join(root, 'input-state.json')); await state.load();
     manager = new InputManager(); manager.setFlusher(events); manager.setMaskConfig({ mode: 'all', types: [] });
     if (upstream) manager.setTraceLinker(new TraceLinker(new CorrelationStore(path.join(root, 'acp-correlate')), { retries: 0 }));
-    const Ctor = agentId === 'qoder' ? QoderTraceInput : QoderCnTraceInput;
-    input = new Ctor({ stateStore: state, dataDir: root, logDir: path.join(root, 'history'), pollIntervalMs: 60_000,
+    input = new QoderTraceInput({ stateStore: state, dataDir: root, logDir: path.join(root, 'history'), pollIntervalMs: 60_000,
       resolveTraceContext: entries => manager.stampTraceContext(entries) });
     vi.spyOn(input as any, 'readCliIntercept').mockResolvedValue({ systemPrompt: null, tokens: [] });
     vi.spyOn(input as any, 'readCliSegments').mockResolvedValue([]);
@@ -96,7 +94,7 @@ async function spansFor(entries: AgentActivityEntry[]) {
   finally { await flusher.shutdown(); }
 }
 
-describe.each(['qoder', 'qoder-cn'] as const)('%s independent native child work', agentId => {
+describe.each(['qoder'] as const)('%s independent native child work', agentId => {
   it('joins parallel children to actual TOOL spans and preserves native sessions, usage, audit IDs and masking', async () => {
     const h = await harness(agentId);
     await h.write(null, [prompt('parent', 0), ...dispatch('call-a', 1, 'child-a'), ...dispatch('call-b', 2, 'child-b'), ...end('parent-end', 6, 17)]);
