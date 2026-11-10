@@ -76,6 +76,10 @@ Pending buffer count and `oldest_buffer_age_ms` remain visible in the `pilot_tra
 snapshots, under the existing buffer-count cap. A host killed before completion still requires separate
 abandoned-turn recovery; this observer does not provide durable crash replay.
 
+OpenClaw observes completion with `agent_end` and retains the `llm_output` collection boundary. It does
+not register `before_agent_finalize`: that answer-revision hook makes supporting hosts buffer replies
+until the turn ends. Restart the host after updating the plugin to remove existing listeners.
+
 Environment variables:
 
 | Variable | Description |
