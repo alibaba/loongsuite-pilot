@@ -64,6 +64,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pilot-sdk-home"
           HOME="$RUNNER_TEMP/pilot-sdk-home" USERPROFILE="$RUNNER_TEMP/pilot-sdk-home" \
             cargo test --locked --test sdk_dynamic -- --test-threads=1
+      - name: Complete runtime native CPU and RSS
+        run: cargo test --locked --test process_resources_native -- --test-threads=1
       - name: Compile and run the foreign C host on Windows
         if: runner.os == 'Windows'
         shell: pwsh

@@ -273,8 +273,16 @@ fn l1_wire_identity_dimensions_and_schema_do_not_leak_raw_input_totals() {
     #[cfg(target_arch = "aarch64")]
     assert!(row.os_detail.contains("arm64"));
     assert!(row.mem.parse::<u64>().unwrap() > 0);
-    for field in ["cpu", "mem", "mem_heap"] {
+    for field in ["cpu", "mem"] {
         assert!(value[field].is_string());
+    }
+    #[cfg(target_os = "linux")]
+    assert!(value["mem_heap"].is_string());
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(value.get("mem_heap").is_none());
+        assert_eq!(value["metric_json"]["mem_heap_available"], "false");
+        assert_eq!(value["metric_json"]["mem_available"], "true");
     }
     fields(
         &value,

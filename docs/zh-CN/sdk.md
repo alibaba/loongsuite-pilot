@@ -115,6 +115,8 @@ JSON 输入和事件视图都是 UTF-8 地址加字节长度，不要求 NUL。�
 
 监控独立于活动交付，复用现有 L1/L2 指标，并报告队列、来源和 SDK 告警。CPU/RSS 标注 `metrics_scope=host_process`；安装、更新器等不适用于嵌入模式的指标标为 not-applicable。监控状态可以合并，持久告警直到其实际批次 ACK 后才移除。
 
+完整版与 SDK 共用进程资源采样器。Mac/Windows 的完整版 L1 同样使用当前进程的实际 CPU/RSS，内存保持整数 MiB 字符串；CPU 尚无有效区间时省略数值并标记不可用，不再输出占位值。Linux 保留原有采样和字段口径。
+
 SDK 的自监控包括以下字段与口径：
 
 - `pilot.metrics.l1`：宿主进程 CPU/RSS/FD、实例身份、输入输出窗口，以及 SDK 数据目录的有界磁盘采样。Linux 沿用 `/proc`；Mac/Windows 使用已依赖的 sysinfo，仅刷新当前宿主 PID。`cpu_available`、`mem_available`、`open_fd_available` 说明可用性，CPU 首次采样尚无时间区间或采样失败时不伪造零值；不提供受管运行时的堆指标。目录采样沿用 30 秒首次延迟、10 分钟周期和已有资源告警阈值；未知大小不伪造为零。队列 `disk_bytes` 包含 SQLite、WAL 和 SHM 的物理文件大小，`pending_bytes` 仍是未 ACK 的 JSON 负载。

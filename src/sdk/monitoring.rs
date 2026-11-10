@@ -19,59 +19,6 @@ pub(super) struct Monitoring {
     runtime: Option<tokio::runtime::Runtime>,
     last_resource_check: Option<Instant>,
     scope: Arc<crate::utils::source_access::SourceScope>,
-    #[cfg(not(target_os = "linux"))]
-    process: SelfProcess,
-}
-
-/// Refresh only this process; never enumerate the host's process tree.
-#[cfg(any(not(target_os = "linux"), test))]
-struct SelfProcess {
-    system: sysinfo::System,
-    primed_at: Instant,
-}
-#[cfg(any(not(target_os = "linux"), test))]
-impl SelfProcess {
-    fn new() -> Self {
-        let mut value = Self {
-            system: sysinfo::System::new(),
-            primed_at: Instant::now(),
-        };
-        value.refresh();
-        value.primed_at = Instant::now();
-        value
-    }
-    fn refresh(&mut self) {
-        self.system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(std::process::id())]),
-            true,
-            sysinfo::ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory(),
-        );
-    }
-    fn apply(&mut self, l1: &mut Value) {
-        self.refresh();
-        // The first CPU observation has no interval; absence is not zero usage.
-        let sample = self
-            .system
-            .process(sysinfo::Pid::from_u32(std::process::id()));
-        let mem = sample.map(|p| p.memory()).filter(|m| *m > 0);
-        let cpu = sample.map(|p| p.cpu_usage()).filter(|v| {
-            v.is_finite() && self.primed_at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
-        });
-        for (key, value) in [
-            ("cpu", cpu.map(|v| v.to_string())),
-            ("mem", mem.map(|v| (v as f64 / 1_048_576.0).to_string())),
-        ] {
-            l1["metric_json"][format!("{key}_available")] = json!(value.is_some().to_string());
-            l1.as_object_mut().expect("L1 object").remove(key);
-            if let Some(value) = value {
-                l1[key] = json!(value);
-            }
-        }
-        l1.as_object_mut().expect("L1 object").remove("mem_heap");
-        l1["metric_json"]["process_resource_metrics_basis"] = json!("sysinfo_self_process");
-    }
 }
 
 struct RestoreScope(Option<Arc<crate::utils::source_access::SourceScope>>);
@@ -147,8 +94,6 @@ impl Monitoring {
             runtime: Some(runtime),
             last_resource_check: None,
             scope,
-            #[cfg(not(target_os = "linux"))]
-            process: SelfProcess::new(),
         })
     }
     pub fn enter_scope(&self) {
@@ -186,8 +131,6 @@ impl Monitoring {
             },
         );
         let mut l1 = serde_json::to_value(self.metrics.collect_l1(&flow)).expect("L1 metrics");
-        #[cfg(not(target_os = "linux"))]
-        self.process.apply(&mut l1);
         #[cfg(target_os = "linux")]
         {
             for (key, path) in [("cpu", "/proc/self/stat"), ("mem", "/proc/self/status")] {
@@ -312,28 +255,6 @@ impl Drop for Monitoring {
 mod tests {
     use super::super::policy::Delivery;
     use super::*;
-    #[test]
-    fn native_self_process_reports_real_memory_and_marks_cpu_warmup_unavailable() {
-        let mut process = SelfProcess::new();
-        // Deterministically exercise the no-interval state even on a busy runner.
-        process.primed_at = Instant::now() + Duration::from_secs(60);
-        let mut row = json!({"cpu":"0","mem":"1","mem_heap":"0","metric_json":{}});
-        process.apply(&mut row);
-        assert!(row["mem"].as_str().unwrap().parse::<f64>().unwrap() > 1.0);
-        assert_eq!(row["metric_json"]["mem_available"], "true");
-        assert_eq!(row["metric_json"]["cpu_available"], "false");
-        assert!(row.get("cpu").is_none() && row.get("mem_heap").is_none());
-        process.primed_at = Instant::now();
-        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL + Duration::from_millis(10));
-        process.apply(&mut row);
-        assert_eq!(row["metric_json"]["cpu_available"], "true");
-        assert!(row["cpu"]
-            .as_str()
-            .unwrap()
-            .parse::<f64>()
-            .unwrap()
-            .is_finite());
-    }
     #[test]
     fn sdk_monitoring_reuses_resource_alarms_disk_and_hook_fields_with_real_scope() {
         let root = tempfile::tempdir().unwrap();

@@ -135,6 +135,14 @@ pub struct MetricJson {
     pub disk_logs_bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_dir_sampled_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_available: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_available: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_heap_available: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_resource_metrics_basis: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,8 +155,11 @@ pub struct L1Metrics {
     pub run_id: String,
     pub user_id: String,
     pub pid: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub cpu: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub mem: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub mem_heap: String,
     pub start_time: String,
     pub capture_message_disabled_agents: String,
@@ -345,6 +356,10 @@ pub struct MetricsCollector {
     l1_cycle_count: u32,
     updater_consecutive_failures: u32,
     last_infra_health: Option<InfraHealthSnapshot>,
+    #[cfg(not(target_os = "linux"))]
+    process: super::self_process::SelfProcess,
+    #[cfg(not(target_os = "linux"))]
+    custom_cpu: bool,
 }
 
 pub struct MetricsCollectorOptions {
@@ -415,6 +430,10 @@ impl MetricsCollector {
             updater_liveness: opts.updater_liveness.unwrap_or_else(|| {
                 Arc::new(|pid_file| check_process_liveness(pid_file, UPDATER_PROCESS_PATTERNS))
             }),
+            #[cfg(not(target_os = "linux"))]
+            process: super::self_process::SelfProcess::new(),
+            #[cfg(not(target_os = "linux"))]
+            custom_cpu: opts.cpu_usage.is_some(),
             cpu_usage: opts.cpu_usage.unwrap_or_else(|| Arc::new(read_proc_cpu)),
             runtime_probe: opts.runtime_probe.unwrap_or_else(RuntimeProbe::system),
             agents_config: opts.agents_config,
@@ -455,8 +474,18 @@ impl MetricsCollector {
 
     pub fn collect_l1(&mut self, snapshot: &DataflowSnapshot) -> L1Metrics {
         let now = (self.now_ms)();
-        let cpu = self.calc_cpu_percent(now);
-        let (mem, heap) = read_mem_mb();
+        #[cfg(target_os = "linux")]
+        let (cpu, (mem, heap)) = (self.calc_cpu_percent(now), read_mem_mb());
+        #[cfg(not(target_os = "linux"))]
+        let (cpu, mem, heap) = (
+            if self.custom_cpu {
+                self.calc_cpu_percent(now)
+            } else {
+                0.0
+            },
+            0,
+            0,
+        );
         let egress = sum_flusher_egress(snapshot);
         let cumulative = InstanceFlow {
             in_events: snapshot.in_events_total,
@@ -490,7 +519,7 @@ impl MetricsCollector {
         };
         let agents = count_agents(snapshot);
         let health = self.collect_infra_health();
-        L1Metrics {
+        let row = L1Metrics {
             version: self.version.clone(),
             os_detail: os_detail(),
             hostname: host_name(),
@@ -524,6 +553,10 @@ impl MetricsCollector {
                 disk_data_bytes: None,
                 disk_logs_bytes: None,
                 disk_dir_sampled_at: None,
+                cpu_available: None,
+                mem_available: None,
+                mem_heap_available: None,
+                process_resource_metrics_basis: None,
             },
             init_type: self.init_type.clone(),
             rollback_available: health.rollback_available.to_string(),
@@ -534,7 +567,14 @@ impl MetricsCollector {
             runtime_bin_valid: health.runtime_bin_valid.to_string(),
             current_version_valid: health.current_version_valid.to_string(),
             time: now / 1000,
-        }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let row = {
+            let mut row = row;
+            self.process.apply(&mut row, self.custom_cpu);
+            row
+        };
+        row
     }
 
     pub fn collect_l2(&mut self, snapshot: &DataflowSnapshot) -> Option<L2Metrics> {
@@ -959,11 +999,15 @@ fn os_detail() -> String {
         "x86" => "ia32",
         other => other,
     };
+    #[cfg(target_os = "linux")]
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .unwrap_or_else(|_| "unknown".to_string());
+    #[cfg(not(target_os = "linux"))]
+    let release = sysinfo::System::kernel_version().unwrap_or_else(|| "unknown".to_string());
     format!("{kind}; {}; {arch}", release.trim())
 }
 
+#[cfg(target_os = "linux")]
 fn read_mem_mb() -> (i64, i64) {
     let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let rss = status_kb(&text, "VmRSS:") / 1024;
@@ -971,6 +1015,7 @@ fn read_mem_mb() -> (i64, i64) {
     (rss.max(1), heap.max(0))
 }
 
+#[cfg(target_os = "linux")]
 fn status_kb(text: &str, key: &str) -> i64 {
     text.lines()
         .find_map(|line| line.strip_prefix(key))
