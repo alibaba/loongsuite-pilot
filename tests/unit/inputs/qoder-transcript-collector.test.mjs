@@ -130,6 +130,31 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
     expect((await settle())).toEqual([]);
   });
 
+  it('uses the nearest terminal Hook attributes when Stop observes trailing CLI controls', async () => {
+    const exit = index => ({ type: 'user', uuid: 'native-cli-exit-' + index, entrypoint: 'cli', userType: 'external',
+      timestamp: new Date(base + index * 10_000 + 500).toISOString(), message: { role: 'user',
+        content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } });
+    const wakeWithTask = taskId => {
+      const previous = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+      process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = `multica.task.id=${taskId},multica.workspace.id=workspace-1`;
+      try { wake(); } finally {
+        if (previous === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+        else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previous;
+      }
+    };
+
+    write([...turn(0), { type: 'last-prompt' }, exit(0)]);
+    wakeWithTask('task-1');
+    append([...turn(1), { type: 'last-prompt' }, exit(1)]);
+    wakeWithTask('task-2');
+    const records = await settle();
+    const first = records.filter(record => record['multica.task.id'] === 'task-1');
+    const second = records.filter(record => record['multica.task.id'] === 'task-2');
+    expect(userTexts(first)).toEqual(['prompt 0']);
+    expect(userTexts(second)).toEqual(['prompt 1']);
+    expect(records.every(record => record['multica.workspace.id'] === 'workspace-1')).toBe(true);
+  });
+
   it('excludes local CLI controls from an active turn without dropping a later genuine command prompt', async () => {
     const controlText = '<command-message>exit</command-message>\n<command-name>/exit</command-name>';
     const control = { type: 'user', entrypoint: 'cli', timestamp: new Date(base + 250).toISOString(),

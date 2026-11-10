@@ -27,6 +27,7 @@ const MAX_TAIL_SCANS = 256;
 const MAX_DEFERRED_SOURCES = 1024;
 const LEGACY_LOCK_GRACE_MS = 1000;
 const LEGACY_LOCK_AGE_MS = 60_000;
+const TERMINAL_CONTEXT_EVENTS = new Set(['Stop', 'SessionEnd']);
 const DEFERRED_CONTENT_ERRORS = new Set([
   'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
   'bootstrap-record-byte-limit', 'invalid-json-line',
@@ -783,11 +784,17 @@ export class QoderTranscriptCollector {
   async build(source, contexts, checkpoint, value, endOffset, terminalSource) {
     if (this.stopped) throw new Error('stopped');
     if (!checkpoint.hasUser || !value.rows.length) return [];
-    const context = [...contexts].reverse().find(item => checkpoint.activeRequestSetId
+    const reverseContexts = [...contexts].reverse();
+    const context = reverseContexts.find(item => checkpoint.activeRequestSetId
       && item.requestSetId === checkpoint.activeRequestSetId)
-      ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
+      ?? reverseContexts.find(item => item.observedSize <= endOffset
       && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
+      // Qoder can invoke Stop only after appending last-prompt or a local /exit
+      // row. That Hook still owns the just-completed Turn even though its file
+      // watermark is beyond the semantic boundary. Contexts are size-ordered,
+      // so the first following terminal fact avoids borrowing a later Turn.
+      ?? contexts.find(item => item.observedSize >= endOffset && TERMINAL_CONTEXT_EVENTS.has(item.event))
       ?? { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       userIdentity: context.userIdentity ?? source.userIdentity,
