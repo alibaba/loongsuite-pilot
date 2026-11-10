@@ -162,11 +162,15 @@ export class DshLogInput extends BaseSessionInput {
 
     const inode = Number((stat as { ino?: number }).ino ?? 0);
     const persisted = this.stateStore.get(stateKey);
+    if (persisted.extra?.sourceBirthtimeMs !== stat.birthtimeMs) {
+      this.stateStore.update(stateKey, { extra: { sourceBirthtimeMs: stat.birthtimeMs } });
+    }
     const persistedInode = typeof persisted.extra?.inode === 'number'
       ? persisted.extra.inode
       : undefined;
     let offset = this.stateStore.getOffset(stateKey);
-    const replaced = persistedInode !== undefined && persistedInode !== inode;
+    const replaced = (persistedInode !== undefined && persistedInode !== inode)
+      || (persisted.extra?.sourceBirthtimeMs !== undefined && persisted.extra.sourceBirthtimeMs !== stat.birthtimeMs);
     const truncated = offset > 0 && stat.size < offset;
     if (replaced || truncated) {
       logger.info('dsh event file replaced or truncated, resetting state', {

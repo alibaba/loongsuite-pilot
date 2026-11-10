@@ -55,11 +55,16 @@ export abstract class BaseSessionInput extends BaseInput {
     const prevOffset = this.stateStore.getOffset(stateKey);
     const prevState = this.stateStore.get(stateKey);
     const prevInode = prevState.extra?.inode as number | undefined;
+    const previousBirthtime = prevState.extra?.sourceBirthtimeMs;
 
     // Detect file rotation via inode change
-    if (prevInode !== undefined && prevInode !== (stat as any).ino) {
+    if ((prevInode !== undefined && prevInode !== (stat as any).ino)
+      || (previousBirthtime !== undefined && previousBirthtime !== stat.birthtimeMs)) {
       this.stateStore.setOffset(stateKey, 0);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
+    }
+    if (previousBirthtime !== stat.birthtimeMs) {
+      this.stateStore.update(stateKey, { extra: { sourceBirthtimeMs: stat.birthtimeMs } });
     }
 
     let offset = this.stateStore.getOffset(stateKey);

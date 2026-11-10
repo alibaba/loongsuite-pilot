@@ -6,7 +6,7 @@ import { BaseInput, type InputOptions } from './base-input.js';
 import { getTodayDateString, ensureDir } from '../../utils/fs-utils.js';
 
 const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
-const RECENT_LOG_FILE_LIMIT = 3;
+const READ_BUDGET_BYTES = 8 * 1024 * 1024;
 
 type OffsetMap = Record<string, number>;
 
@@ -27,8 +27,8 @@ export interface HookInputOptions extends InputOptions {
  * uses the machine-local date). Around local date rollover, new records can
  * still be appended to the previous-day file from the collector's point of
  * view. Reading only `${prefix}-${today}.jsonl` would miss them, so this input
- * keeps a small rolling window of recent daily files active and tracks a
- * per-file offset map in `state.extra.hookLogOffsets`.
+ * drains retained daily files and stable segments with a per-file offset map
+ * in `state.extra.hookLogOffsets` and a shared per-cycle read budget.
  *
  * Subclass must implement:
  *   - transformRecord(): convert a parsed JSON record into an AgentActivityEntry
@@ -74,21 +74,35 @@ export abstract class BaseHookInput extends BaseInput {
     const persistedOffsets = this.getPersistedOffsetMap(state);
     const shouldPersistOffsets = !persistedOffsets;
     const offsets: OffsetMap = persistedOffsets ? { ...persistedOffsets } : await this.seedOffsetMap(fileNames, state, today);
-    const candidateFileNames = this.getCandidateFileNames(fileNames, state.lastFile, today);
+    const identities: Record<string, string> = { ...(state.extra?.hookLogIdentities as Record<string, string> ?? {}) };
+    // Drain every retained source, including offline backlog and late writes.
+    const candidateFileNames = fileNames;
+    let readBudget = READ_BUDGET_BYTES;
 
     for (const logFileName of candidateFileNames) {
       const logFile = path.join(this.logDir, logFileName);
-      const fileEntries = await this.collectFile(logFile, offsets[logFileName] ?? 0);
+      const stat = await fs.lstat(logFile).catch(() => null);
+      if (!stat?.isFile()) continue;
+      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      const replaced = identities[logFileName] !== undefined && identities[logFileName] !== identity;
+      const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
+      const startOffset = savedOffset > stat.size ? 0 : savedOffset;
+      const fileEntries = await this.collectFile(logFile, startOffset, readBudget);
+      identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
       entries.push(...fileEntries.entries);
+      readBudget -= Math.min(readBudget, Math.max(0, stat.size - startOffset));
+      if (readBudget <= 0) break;
     }
 
     // Prune offsets for files that no longer exist on disk so the persisted
     // map does not grow unbounded as daily files rotate away.
     const liveFileNames = new Set(fileNames);
     const prunedOffsets: OffsetMap = {};
+    const prunedIdentities: Record<string, string> = {};
     for (const [fileName, offset] of Object.entries(offsets)) {
       if (liveFileNames.has(fileName)) prunedOffsets[fileName] = offset;
+      if (liveFileNames.has(fileName) && identities[fileName]) prunedIdentities[fileName] = identities[fileName];
     }
 
     const newestFileName = candidateFileNames[candidateFileNames.length - 1];
@@ -96,7 +110,8 @@ export abstract class BaseHookInput extends BaseInput {
       shouldPersistOffsets ||
       state.lastFile !== newestFileName ||
       state.lastOffset !== (prunedOffsets[newestFileName] ?? 0) ||
-      this.isOffsetMapChanged(persistedOffsets, prunedOffsets)
+      this.isOffsetMapChanged(persistedOffsets, prunedOffsets) ||
+      JSON.stringify(state.extra?.hookLogIdentities) !== JSON.stringify(prunedIdentities)
     )) {
       this.setState({
         lastFile: newestFileName,
@@ -104,6 +119,9 @@ export abstract class BaseHookInput extends BaseInput {
         extra: {
           ...(state.extra ?? {}),
           [OFFSET_MAP_EXTRA_KEY]: prunedOffsets,
+          hookLogIdentities: prunedIdentities,
+          hookLogDir: path.resolve(this.logDir),
+          hookLogPrefix: this.logPrefix,
         },
       });
     }
@@ -133,6 +151,7 @@ export abstract class BaseHookInput extends BaseInput {
   private async collectFile(
     logFile: string,
     startOffset: number,
+    readBudget: number,
   ): Promise<{ entries: AgentActivityEntry[]; offset: number }> {
     const entries: AgentActivityEntry[] = [];
     const runtime = this.getInputRuntimeAccumulator();
@@ -160,13 +179,34 @@ export abstract class BaseHookInput extends BaseInput {
     const handle = await fs.open(logFile, 'r');
     let checkpointOffset = offset;
     try {
-      const buf = Buffer.alloc(stat.size - offset);
+      // A legacy multi-GB source must drain over bounded polls, not allocate
+      // its entire unread suffix during the upgrade that reclaims it.
+      const buf = Buffer.alloc(Math.min(stat.size - offset, readBudget));
       const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
       if (runtime && readStartedAt !== undefined) {
         runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
       }
-      const snapshot = buf.subarray(0, bytesRead);
+      let snapshot = buf.subarray(0, bytesRead);
+      // Preserve a single large record crossing the poll budget. Only extend
+      // to its first newline; never read a multi-GB backlog as one batch.
+      if (snapshot.lastIndexOf(0x0a) < 0 && bytesRead === buf.length) {
+        const parts = [snapshot];
+        let position = offset + bytesRead;
+        while (position < stat.size) {
+          const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position));
+          const startedAt = runtime?.now();
+          const read = await handle.read(chunk, 0, chunk.length, position);
+          if (runtime && startedAt !== undefined) runtime.observeRead(read.bytesRead, chunk.length, runtime.now() - startedAt);
+          if (!read.bytesRead) break;
+          const bytes = chunk.subarray(0, read.bytesRead);
+          const newline = bytes.indexOf(0x0a);
+          parts.push(newline < 0 ? bytes : bytes.subarray(0, newline + 1));
+          position += read.bytesRead;
+          if (newline >= 0) break;
+        }
+        snapshot = Buffer.concat(parts);
+      }
       // A hook/plugin process may still be appending the final JSONL record
       // after stat() returns. Parse and checkpoint only bytes ending in a
       // newline; otherwise a transient half-line would be rejected as invalid
@@ -252,28 +292,7 @@ export abstract class BaseHookInput extends BaseInput {
     const prefix = `${this.logPrefix}-`;
     if (!fileName.startsWith(prefix)) return false;
     const suffix = fileName.slice(prefix.length);
-    return /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(suffix);
-  }
-
-  private getCandidateFileNames(
-    fileNames: string[],
-    lastFile: string | undefined,
-    today: string,
-  ): string[] {
-    const todayFileName = `${this.logPrefix}-${today}.jsonl`;
-    const candidates = new Set<string>();
-    // Hook writers may inherit a different TZ than the collector, so keep a
-    // small rolling window active instead of trusting only today's filename.
-    for (const fileName of fileNames.slice(-RECENT_LOG_FILE_LIMIT)) {
-      candidates.add(fileName);
-    }
-    if (lastFile && fileNames.includes(lastFile)) {
-      candidates.add(lastFile);
-    }
-    if (fileNames.includes(todayFileName)) {
-      candidates.add(todayFileName);
-    }
-    return Array.from(candidates).sort();
+    return /^\d{4}-\d{2}-\d{2}(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.test(suffix);
   }
 
   private getPersistedOffsetMap(state: InputState): OffsetMap | null {
@@ -306,6 +325,7 @@ export abstract class BaseHookInput extends BaseInput {
     // Mark every existing file as already-consumed (offset = its current size)
     // so historical records are never re-ingested on first run / state loss.
     for (const fileName of fileNames) {
+      if (fileName.includes('.segment-')) { offsets[fileName] = 0; continue; }
       const logFile = path.join(this.logDir, fileName);
       try {
         offsets[fileName] = (await fs.stat(logFile)).size;

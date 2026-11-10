@@ -515,7 +515,13 @@ export class InputManager extends EventEmitter {
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
-      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) throw err;
+      if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
+        const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
+        this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',
+          `Output durability blocked for ${inputId}; source checkpoint retained: ${String(err)}`,
+          { input_name: inputId });
+        throw err;
+      }
     }
   }
 }

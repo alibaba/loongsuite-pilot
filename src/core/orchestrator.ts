@@ -392,7 +392,7 @@ export class Orchestrator extends EventEmitter {
     await this.agentDiscoveryService.start();
 
     // 9. Start log retention service
-    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention);
+    this.logRetentionService = new LogRetentionService(this.dataDir, this.config.retention, this.stateStore);
     this.logRetentionService.start();
 
     // 10. Start hook watchdog (periodically restores hooks overwritten by other tools)

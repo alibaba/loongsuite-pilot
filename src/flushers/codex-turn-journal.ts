@@ -4,8 +4,18 @@ import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../types/index.js';
+import { createLogger } from '../utils/logger.js';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
+export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
+const logger = createLogger('CodexTurnJournal');
+function pendingBudget(): number {
+  const raw = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
+  if (raw === undefined) return CODEX_PENDING_MAX_BYTES;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) throw new RangeError('LOONGSUITE_CODEX_PENDING_MAX_BYTES must be a positive safe integer');
+  return value;
+}
 
 export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
   return createHash('sha256').update(JSON.stringify([
@@ -27,14 +37,19 @@ export class CodexTurnJournal {
   private pending: Promise<void> = Promise.resolve();
   private readonly initialized = new Set<string>();
   private acknowledgements?: Promise<Map<string, number>>;
+  private usage?: { bytes: number; oldest: number };
 
   /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
   constructor(
     private readonly dir: string,
     private readonly acknowledgementLimit = MAX_ACKNOWLEDGED_TURNS,
+    private readonly maxPendingBytes = pendingBudget(),
   ) {
     if (!Number.isSafeInteger(acknowledgementLimit) || acknowledgementLimit < 1) {
       throw new RangeError('acknowledgementLimit must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(maxPendingBytes) || maxPendingBytes < 1) {
+      throw new RangeError('maxPendingBytes must be a positive safe integer');
     }
   }
 
@@ -50,16 +65,44 @@ export class CodexTurnJournal {
       }
       if (!groups.size) return;
       await this.ensureDir();
+      // Preflight the entire batch without retaining a second copy of every
+      // group's payload; a large recovery batch can contain many turns.
+      let addedBytes = 0;
+      for (const group of groups.values()) {
+        for (const entry of group) addedBytes += Buffer.byteLength(JSON.stringify(entry)) + 1;
+      }
+      const usage = await this.pendingUsage();
+      if (usage.bytes + addedBytes > this.maxPendingBytes) {
+        const error = new Error(`Codex pending journal disk budget exceeded (pending=${usage.bytes}, incoming=${addedBytes}, limit=${this.maxPendingBytes}); retaining journal and source checkpoints`);
+        error.name = 'CodexTurnJournalCapacityError';
+        logger.error(error.message);
+        throw error;
+      }
+      if (Date.now() - usage.oldest > 7 * 86400_000) {
+        logger.warn('Codex pending journal backlog exceeds seven days; retaining pending events', { bytes: usage.bytes });
+      }
       for (const [key, group] of groups) {
         const file = this.file(key);
         if (!this.initialized.has(key)) {
           // A crash may leave an incomplete final write; do not join a new JSON line to it.
           const length = await completeLength(file);
-          if (length !== undefined) await fs.truncate(file, length);
+          if (length !== undefined) {
+            usage.bytes -= (await fs.stat(file)).size - length;
+            await fs.truncate(file, length);
+          }
           this.initialized.add(key);
         }
-        await fs.appendFile(file, group.map(entry => JSON.stringify(entry)).join('\n') + '\n', { mode: 0o600 });
-        await fs.chmod(file, 0o600);
+        try {
+          const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+          await fs.appendFile(file, data, { mode: 0o600 });
+          usage.bytes += Buffer.byteLength(data);
+          await fs.chmod(file, 0o600);
+        } catch (error) {
+          // An interrupted append may have partially written its payload.
+          this.usage = undefined;
+          this.initialized.delete(key);
+          throw error;
+        }
       }
     });
   }
@@ -125,6 +168,7 @@ export class CodexTurnJournal {
 
   acknowledge(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
+      this.usage = undefined;
       const acknowledged = await this.loadAcknowledgements();
       const keys = [...new Set(entries.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
       if (!keys.length) return;
@@ -146,6 +190,7 @@ export class CodexTurnJournal {
 
   remove(entriesOrKey: AgentActivityEntry[] | string): Promise<void> {
     return this.enqueue(async () => {
+      this.usage = undefined;
       const keys = typeof entriesOrKey === 'string' ? [entriesOrKey]
         : [...new Set(entriesOrKey.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
       for (const key of keys) {
@@ -157,6 +202,18 @@ export class CodexTurnJournal {
   }
 
   private file(key: string): string { return path.join(this.dir, `codex-turn-${key}.jsonl`); }
+  private async pendingUsage(): Promise<{ bytes: number; oldest: number }> {
+    if (this.usage) return this.usage;
+    const usage = { bytes: 0, oldest: Date.now() };
+    for (const name of await fs.readdir(this.dir)) {
+      if (!/^codex-turn-[a-f0-9]{64}\.jsonl$/.test(name)) continue;
+      const stat = await fs.lstat(path.join(this.dir, name));
+      if (!stat.isFile()) continue;
+      usage.bytes += stat.size;
+      usage.oldest = Math.min(usage.oldest, stat.mtimeMs);
+    }
+    return this.usage = usage;
+  }
   private doneFile(key: string): string { return path.join(this.dir, `codex-done-${key}.json`); }
   private async ensureDir(): Promise<void> {
     await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -179,6 +236,9 @@ export class CodexTurnJournal {
         try { metadata = JSON.parse(raw); } catch { continue; }
         if (metadata?.version === 1 && metadata.key === match[1]) {
           acknowledged.set(match[1], (await fs.stat(fullPath)).mtimeMs);
+          // Recover a crash after publishing the ACK but before unlinking its
+          // payload, even when the ACK cache is below its eviction threshold.
+          await fs.unlink(this.file(match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
         }
       }
       await this.trimAcknowledgements(acknowledged);

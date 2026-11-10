@@ -44,6 +44,8 @@ MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
+RAW_SEGMENT_BYTES = 100 * 1024 * 1024
+_RAW_WRITE_LOCK = threading.Lock()
 MANAGED_MARKER_FILE = ".loongsuite-pilot-managed.json"
 INVOCATION_USER_ID_FIELD = "agent.pilot.invocation.user.id"
 
@@ -1385,27 +1387,78 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str) + "\n"
         for record in records
     ).encode("utf-8")
-    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("failed to append Hermes event records")
-            offset += written
-    finally:
-        os.close(descriptor)
+    # Keep source filenames/inodes stable for the collector's byte checkpoints.
+    with _RAW_WRITE_LOCK:
+        lock = Path(str(path) + ".lock")
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                descriptor = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.write(descriptor, str(os.getpid()).encode("ascii"))
+                except Exception:
+                    lock.unlink(missing_ok=True)
+                    raise
+                finally:
+                    os.close(descriptor)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - lock.stat().st_mtime > 120:
+                        owner = lock.read_text().strip()
+                        alive = False
+                        if owner.isdigit() and int(owner) > 0:
+                            try:
+                                os.kill(int(owner), 0)
+                                alive = True
+                            except ProcessLookupError:
+                                pass
+                            except PermissionError:
+                                alive = True
+                        if not alive:
+                            lock.unlink()
+                            continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() >= deadline:
+                    raise OSError("Hermes raw JSONL lock unavailable")
+                time.sleep(0.01)
+        try:
+            pointer = Path(str(path) + ".active")
+            target = path
+            if pointer.exists():
+                name = pointer.read_text()
+                if Path(name).name != name or not name.startswith(path.stem + ".segment-"):
+                    raise OSError("invalid Hermes raw JSONL pointer")
+                target = directory / name
+            if target.exists() and target.stat().st_size and target.stat().st_size + len(payload) > RAW_SEGMENT_BYTES:
+                sequence = int(target.stem.split(".segment-")[1].split("-")[0]) + 1 if ".segment-" in target.stem else 1
+                target = directory / ("%s.segment-%012d-%s.jsonl" % (path.stem, sequence, uuid.uuid4().hex))
+                descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(descriptor)
+                temporary = Path(str(pointer) + "." + uuid.uuid4().hex + ".tmp")
+                try:
+                    temporary.write_text(target.name)
+                    os.replace(str(temporary), str(pointer))
+                finally:
+                    temporary.unlink(missing_ok=True)
+            descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                offset = 0
+                while offset < len(payload):
+                    written = os.write(descriptor, payload[offset:])
+                    if written <= 0:
+                        raise OSError("failed to append Hermes event records")
+                    offset += written
+            finally:
+                os.close(descriptor)
+        finally:
+            lock.unlink(missing_ok=True)
 
 
 def _purge_old_logs() -> None:
-    directory = _data_dir() / "logs" / "hermes-agent"
-    try:
-        cutoff = time.time() - LOG_RETENTION_SECONDS
-        for candidate in directory.glob("hermes-agent-*.jsonl"):
-            if candidate.is_file() and candidate.stat().st_mtime < cutoff:
-                candidate.unlink(missing_ok=True)
-    except Exception as error:
-        _report_internal_error("log retention", error)
+    # Collector retention owns raw files: age alone cannot prove consumption.
+    pass
 
 
 def _handle_on_session_start(now_ns: int, payload: Dict[str, Any]) -> None:
