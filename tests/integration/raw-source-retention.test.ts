@@ -181,6 +181,23 @@ describe('raw source disk retention', () => {
     expect(await fs.readFile(file + '.lock', 'utf8')).toBe(String(process.pid));
   });
 
+  it('does not charge a cached incomplete tail against the budget for a later segment', async () => {
+    await fs.writeFile(file, '{"id":"' + 'x'.repeat(9 * 1024 * 1024));
+    seed();
+    const input = new Input({ logDir: dir, logPrefix: 'raw', stateStore: store });
+    const ids: string[] = [];
+    const deltas: Array<{ rawReadBytes: number }> = [];
+    input.on('entries', entries => ids.push(...entries.map((e: AgentActivityEntry) => e['event.id'])));
+    input.on('input-runtime-delta', delta => deltas.push(delta));
+    await input.start(); await input.stop();
+    expect(ids).toEqual([]);
+    const line = '{"id":"next-segment"}\n';
+    appendRawJsonl(file, line, 16);
+    await input.start(); await input.stop();
+    expect(ids).toEqual(['next-segment']);
+    expect(deltas[1].rawReadBytes).toBe(Buffer.byteLength(line));
+  });
+
   it('reclaims consumed closed source segments under pressure while retaining the active segment', async () => {
     const closed = append('1');
     const active = append('2');

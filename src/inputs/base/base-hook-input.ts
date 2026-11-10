@@ -1,3 +1,4 @@
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
@@ -9,6 +10,7 @@ const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
 const READ_BUDGET_BYTES = 8 * 1024 * 1024;
 
 type OffsetMap = Record<string, number>;
+type IncompleteTail = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> & { offset: number };
 
 export interface HookInputOptions extends InputOptions {
   /** Directory containing the JSONL hook log files. */
@@ -38,6 +40,7 @@ export abstract class BaseHookInput extends BaseInput {
 
   protected readonly logDir: string;
   protected readonly logPrefix: string;
+  private readonly incompleteTails = new Map<string, IncompleteTail>();
 
   /**
    * Cold-start replay protection. When true and the input has no prior state
@@ -69,7 +72,10 @@ export abstract class BaseHookInput extends BaseInput {
     const state = this.getState();
     const isColdStart = !state.lastFile;
     const fileNames = await this.listHookLogFiles();
-    if (fileNames.length === 0) return entries;
+    if (fileNames.length === 0) {
+      this.incompleteTails.clear();
+      return entries;
+    }
 
     const persistedOffsets = this.getPersistedOffsetMap(state);
     const shouldPersistOffsets = !persistedOffsets;
@@ -78,6 +84,10 @@ export abstract class BaseHookInput extends BaseInput {
     // Drain every retained source, including offline backlog and late writes.
     const candidateFileNames = fileNames;
     let readBudget = READ_BUDGET_BYTES;
+    const candidates = new Set(candidateFileNames.map(name => path.join(this.logDir, name)));
+    for (const file of this.incompleteTails.keys()) {
+      if (!candidates.has(file)) this.incompleteTails.delete(file);
+    }
 
     for (const logFileName of candidateFileNames) {
       const logFile = path.join(this.logDir, logFileName);
@@ -85,13 +95,14 @@ export abstract class BaseHookInput extends BaseInput {
       if (!stat?.isFile()) continue;
       const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
       const replaced = identities[logFileName] !== undefined && identities[logFileName] !== identity;
+      if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
       const fileEntries = await this.collectFile(logFile, startOffset, readBudget);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
       entries.push(...fileEntries.entries);
-      readBudget -= Math.min(readBudget, Math.max(0, stat.size - startOffset));
+      readBudget -= fileEntries.readBytes;
       if (readBudget <= 0) break;
     }
 
@@ -152,14 +163,15 @@ export abstract class BaseHookInput extends BaseInput {
     logFile: string,
     startOffset: number,
     readBudget: number,
-  ): Promise<{ entries: AgentActivityEntry[]; offset: number }> {
+  ): Promise<{ entries: AgentActivityEntry[]; offset: number; readBytes: number }> {
     const entries: AgentActivityEntry[] = [];
     const runtime = this.getInputRuntimeAccumulator();
     let stat;
     try {
       stat = await fs.stat(logFile);
     } catch {
-      return { entries, offset: startOffset };
+      this.incompleteTails.delete(logFile);
+      return { entries, offset: startOffset, readBytes: 0 };
     }
 
     let offset = startOffset;
@@ -173,17 +185,28 @@ export abstract class BaseHookInput extends BaseInput {
       });
       offset = 0;
     }
-    if (stat.size <= offset) return { entries, offset: stat.size };
-    runtime?.observeBacklog(stat.size - offset);
+    const tail = this.incompleteTails.get(logFile);
+    if (stat.size > offset) {
+      runtime?.observeBacklog(stat.size - offset);
+      if (tail?.offset === offset && tail.dev === stat.dev && tail.ino === stat.ino
+        && tail.size === stat.size && tail.mtimeMs === stat.mtimeMs
+        && tail.ctimeMs === stat.ctimeMs) {
+        return { entries, offset, readBytes: 0 };
+      }
+    }
+    this.incompleteTails.delete(logFile);
+    if (stat.size <= offset) return { entries, offset: stat.size, readBytes: 0 };
 
     const handle = await fs.open(logFile, 'r');
     let checkpointOffset = offset;
+    let totalReadBytes = 0;
     try {
       // A legacy multi-GB source must drain over bounded polls, not allocate
       // its entire unread suffix during the upgrade that reclaims it.
       const buf = Buffer.alloc(Math.min(stat.size - offset, readBudget));
       const readStartedAt = runtime?.now();
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
+      totalReadBytes += bytesRead;
       if (runtime && readStartedAt !== undefined) {
         runtime.observeRead(bytesRead, buf.length, runtime.now() - readStartedAt);
       }
@@ -197,6 +220,7 @@ export abstract class BaseHookInput extends BaseInput {
           const chunk = Buffer.alloc(Math.min(64 * 1024, stat.size - position));
           const startedAt = runtime?.now();
           const read = await handle.read(chunk, 0, chunk.length, position);
+          totalReadBytes += read.bytesRead;
           if (runtime && startedAt !== undefined) runtime.observeRead(read.bytesRead, chunk.length, runtime.now() - startedAt);
           if (!read.bytesRead) break;
           const bytes = chunk.subarray(0, read.bytesRead);
@@ -212,8 +236,14 @@ export abstract class BaseHookInput extends BaseInput {
       // newline; otherwise a transient half-line would be rejected as invalid
       // JSON and the persisted offset would skip its remaining bytes forever.
       const lastNewline = snapshot.lastIndexOf(0x0a);
+      // Budgeted reads may extend to finish one large record. Cache a tail
+      // only after the reads reached the observed EOF; retry short reads.
+      if (totalReadBytes === stat.size - offset && lastNewline + 1 < snapshot.length) {
+        const { dev, ino, size, mtimeMs, ctimeMs } = stat;
+        this.incompleteTails.set(logFile, { dev, ino, size, mtimeMs, ctimeMs, offset: offset + lastNewline + 1 });
+      }
       if (lastNewline < 0) {
-        return { entries, offset };
+        return { entries, offset, readBytes: totalReadBytes };
       }
       const completeLength = lastNewline + 1;
       checkpointOffset = offset + completeLength;
@@ -272,7 +302,7 @@ export abstract class BaseHookInput extends BaseInput {
       await handle.close();
     }
 
-    return { entries, offset: checkpointOffset };
+    return { entries, offset: checkpointOffset, readBytes: totalReadBytes };
   }
 
   private async listHookLogFiles(): Promise<string[]> {
