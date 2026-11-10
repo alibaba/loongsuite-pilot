@@ -52,7 +52,7 @@
   const NS = "http://www.w3.org/2000/svg";
   const LOADS = [{id:"idle",name:"空闲",rate:0},{id:"low",name:"低负载",rate:10},{id:"high",name:"高负载",rate:200}];
   const METRICS = [{id:"cpu_percent",name:"CPU",unit:"%",digits:2},{id:"rss_mib",name:"驻留内存",unit:"MiB",digits:1}];
-  const STATUS = {passed:"已通过",pending:"待测",failed:"未通过",preview:"临时数据"};
+  const STATUS = {passed:"已通过",pending:"待测试",failed:"未通过"};
   const byId = id => document.getElementById(id);
   const tip = byId("tooltip");
   let nodes = [], focused = null, closeTimer = null, usingPreview=false;
@@ -79,7 +79,6 @@
   }
   function prepare(payload) {
     if (!payload || payload.schema !== 1 || !Array.isArray(payload.nodes)) throw new Error("暂时无法读取这份历史记录。");
-    if(usingPreview) return payload.temporary_preview.rows.map(row=>({...row,kind:"preview",status:"preview"}));
     const ids = new Set(), versions = new Set(); let main = 0, dev = 0;
     const ordered = payload.nodes.slice();
     for (const node of ordered) {
@@ -99,9 +98,10 @@
       const left=semver(a.version), right=semver(b.version);
       return left[0]-right[0] || left[1]-right[1] || left[2]-right[2];
     });
-    return ordered;
+    const overrides=new Map((payload.temporary_preview?.rows || []).map(row=>[row.id,row]));
+    return ordered.map(node=>node.status!=="passed" && overrides.has(node.id)?{...node,_preview:true,workloads:overrides.get(node.id).workloads}:node);
   }
-  const label = node => node.kind === "preview" ? node.label : node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
+  const label = node => node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
   const number = (value,digits=2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN",{minimumFractionDigits:digits,maximumFractionDigits:digits}) : "—";
   const valueText = (value,metric) => number(value,metric.digits)+(metric.unit === "%" ? "%" : " MiB");
   const shortSha = value => typeof value === "string" && value.length ? value.slice(0,10) : "未记录";
@@ -112,7 +112,7 @@
   }
   function stats(node,load,metric) {
     const s = node.workloads?.[load]?.[metric.id];
-    if(usingPreview && typeof s==="number" && Number.isFinite(s) && s>=0 && (metric.id!=="rss_mib" || s>0)) return {median:s,min:s,max:s};
+    if(node._preview && typeof s==="number" && Number.isFinite(s) && s>=0 && (metric.id!=="rss_mib" || s>0)) return {median:s,min:s,max:s};
     if (!s || ![s.median,s.min,s.max].every(v => typeof v === "number" && Number.isFinite(v) && v >= 0) || s.min > s.median || s.median > s.max || (metric.id === "rss_mib" && s.min <= 0)) return null;
     return s;
   }
@@ -121,7 +121,7 @@
     return q?.passed === true && q.missing === 0 && q.duplicates === 0;
   }
   function usable(node,load,metric) {
-    if(usingPreview) return !!stats(node,load,metric);
+    if(node._preview) return !!stats(node,load,metric);
     const n = node.workloads?.[load]?.repeats;
     return node.status === "passed" && quality(node,load) && Number.isInteger(n) && n >= 3 && !!stats(node,load,metric);
   }
@@ -129,11 +129,12 @@
     const node=nodes[index], previous=nodes[index-1];
     const fail = reason => ({ok:false,reason,previous});
     if (!previous) return fail("首个节点，没有前值");
-    if(usingPreview) {
+    if(node._preview && previous._preview) {
       const before=stats(previous,load,metric)?.median, current=stats(node,load,metric)?.median;
       if(!(before>0) || !Number.isFinite(current)) return fail("前值不可用");
       return {ok:true,previous,before,current,delta:(current-before)/before*100};
     }
+    if(node._preview || previous._preview) return fail("前一节点待测试或数据尚不可比");
     const repeats=node.workloads?.[load]?.repeats, previousRepeats=previous.workloads?.[load]?.repeats;
     if ((Number.isInteger(repeats) && repeats < 3) || (Number.isInteger(previousRepeats) && previousRepeats < 3)) return fail("有效轮次尚未达到三轮");
     if (!usable(node,load,metric)) return fail("当前节点尚无通过验收的有效数据");
@@ -171,10 +172,10 @@
     focused={element,index,load,metric}; tip.replaceChildren();
     const node=nodes[index], s=stats(node,load.id,metric), n=node.workloads?.[load.id]?.repeats, c=comparison(index,load.id,metric);
     tip.append(text("div",label(node)+" · "+load.name+" · "+metric.name,"tip-title"));
-    if(!usingPreview) tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
+    if(!node._preview) tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
     tip.append(text("div",usable(node,load.id,metric)?valueText(s.median,metric):"暂无有效成绩","tip-value"));
     tip.append(text("div",c.ok ? "较 "+label(c.previous)+" "+deltaText(c.delta) : "不可比较 · "+c.reason,"tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
-    if(usingPreview) { tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip(); return; }
+    if(node._preview) { tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip(); return; }
     const list=text("dl","","tip-rows");
     row(list,"当前值",s?valueText(s.median,metric)+(usable(node,load.id,metric)?"":"（未作为有效成绩绘图）"):"未测量");
     row(list,"前节点",c.previous?label(c.previous):"无");
@@ -240,7 +241,7 @@
       const s=stats(node,load.id,metric), valid=usable(node,load.id,metric), at=x(index), c=comparison(index,load.id,metric), n=node.workloads?.[load.id]?.repeats;
       const group=svg("g",{tabindex:0,class:"point-target",role:"img","aria-label":label(node)+"，"+STATUS[node.status]+"，"+load.name+" "+metric.name+"，"+(valid?valueText(s.median,metric):"没有有效成绩")});
       if(valid) {
-        if(!usingPreview) {
+        if(!node._preview) {
           group.append(svg("line",{x1:at,y1:y(s.min),x2:at,y2:y(s.max),class:"whisker"}));
           for(const value of [s.min,s.max]) group.append(svg("line",{x1:at-4,y1:y(value),x2:at+4,y2:y(value),class:"whisker"}));
         }
@@ -252,7 +253,7 @@
       } else {
         // Missing/failed points live below the value axis, never at y=0.
         group.append(svg("circle",{cx:at,cy:bottom+15,r:12,class:"focus-ring"}),svg("circle",{cx:at,cy:bottom+15,r:4,class:"status-mark"+(node.status === "failed"?" failed-mark":"")}));
-        svgText(group,node.status === "failed"?"未通过":node.status === "passed"?"无有效数据":"待测",{x:at,y:bottom+35,"text-anchor":"middle",class:"status-text"});
+        svgText(group,node.status === "failed"?"未通过":node.status === "passed"?"无有效数据":"待测试",{x:at,y:bottom+35,"text-anchor":"middle",class:"status-text"});
       }
       svgText(plot,label(node),{x:at,y:237,"text-anchor":"middle",class:"version-label"+(node.kind !== "release"?" active-version":"")});
       group.addEventListener("pointerenter",() => showTip(group,index,load,metric));
@@ -276,7 +277,7 @@
   }
   function render(payload,source) {
     const preview=payload?.temporary_preview;
-    usingPreview=!!(preview?.schema===1 && preview.kind==="temporary_preview" && Array.isArray(preview.rows) && preview.rows.length===4 && !payload.nodes.some(node=>node.status==="passed" && node.method_id===payload.method?.id));
+    usingPreview=!!(preview?.schema===1 && preview.kind==="temporary_preview" && Array.isArray(preview.rows) && preview.rows.some(row=>payload.nodes.some(node=>node.id===row.id && node.status!=="passed")));
     nodes=prepare(payload); hideTip();
     byId("facts").style.display=usingPreview?"none":"";
     document.querySelector(".intro").style.display=usingPreview?"none":"";
@@ -298,6 +299,7 @@
       heading.append(text("h2",load.name),text("p",(payload.method?.loads?.[load.id]?.turns_per_second ?? load.rate)+" 轮/秒"));
       const charts=text("div","","charts"); METRICS.forEach(metric=>charts.append(drawChart(load,metric))); section.append(heading,charts); target.append(section);
     }
+    requestAnimationFrame(()=>document.querySelectorAll(".scroll").forEach(element=>{element.scrollLeft=element.scrollWidth;}));
     const method=payload.method;
     const memory=typeof method?.memory_limit === "number" ? number(method.memory_limit/1073741824,2)+" GiB" : String(method?.memory_limit ?? "未记录");
     const context=method?"窗口 "+String(method.window_seconds ?? "未记录")+" 秒 · "+String(method.session_count ?? "未记录")+" 个会话 · CPU 配额 "+String(method.cpu_limit ?? "未记录")+" · 内存配额 "+memory:"测试参数尚未设置";

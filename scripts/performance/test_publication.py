@@ -30,8 +30,8 @@ class PublicationTests(unittest.TestCase):
     def test_temporary_preview_is_preserved_without_becoming_a_ci_node(self):
         data = history()
         reference = {"schema": 1, "kind": "temporary_preview", "rows": [
-            {"id": str(index), "label": label, "workloads": {load: {"cpu_percent": 1, "rss_mib": 20} for load in publisher.LOADS}}
-            for index, label in enumerate(["JS 1.15.2", "上一版Rust", "上一版SDK", "dev"])]}
+            {"id": identity, "workloads": {load: {"cpu_percent": 1, "rss_mib": 20} for load in publisher.LOADS}}
+            for identity in ("v1.15.2", "dev")]}
         data["temporary_preview"] = copy.deepcopy(reference)
         publisher.merge(data, node("release", "1.16.0"))
         self.assertEqual(data["temporary_preview"], reference)

@@ -139,16 +139,15 @@ def validate_history(history):
 
 
 def validate_temporary_preview(value):
-    """Only four numeric rows; no private identities or formal CI status."""
+    """Only two numeric node overrides; no private identities or formal CI status."""
     if not isinstance(value, dict) or set(value) != {"schema", "kind", "rows"} or value.get("schema") != 1 or value.get("kind") != "temporary_preview":
         raise ValueError("invalid temporary preview envelope")
     rows = value["rows"]
-    labels = ["JS 1.15.2", "上一版Rust", "上一版SDK", "dev"]
-    if not isinstance(rows, list) or len(rows) != len(labels):
-        raise ValueError("temporary preview requires four numeric rows")
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise ValueError("temporary preview requires two numeric overrides")
     identities = set()
-    for row, label in zip(rows, labels):
-        if not isinstance(row, dict) or set(row) != {"id", "label", "workloads"} or row.get("label") != label or not isinstance(row.get("id"), str) or not re.fullmatch(r"[a-z0-9_-]{1,32}", row["id"]) or row["id"] in identities:
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"id", "workloads"} or row.get("id") not in ("v1.15.2", "dev") or row["id"] in identities:
             raise ValueError("invalid temporary preview row")
         identities.add(row["id"])
         if not isinstance(row["workloads"], dict) or set(row["workloads"]) != set(LOADS):

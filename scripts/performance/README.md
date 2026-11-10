@@ -104,10 +104,12 @@ artifacts. The write job uses trusted workflow code and validates compact data;
 candidate execution receives no write credentials. Fork/PR runs do not publish.
 No generated result is committed to the source PR or main branch.
 
-An optional `temporary_preview` in results history contains only four labelled
-numeric rows for the six charts. It is displayed until the first passed node
-for the current CI method exists. It never creates formal nodes or changes
-backfill selection, quality gates or compatibility boundaries.
+An optional `temporary_preview` in results history contains only numeric
+overrides for `v1.15.2` and `dev`. These values are projected onto the existing
+release/main/dev nodes without changing their stored status. Each override stops
+displaying once that same node has passed CI; other overrides remain independent.
+It never creates formal nodes or changes backfill selection, quality gates or
+compatibility boundaries. The charts initially scroll to the latest nodes.
 
 The single dev slot is bound by `history.json` on `sdk-performance-results`:
 `configuration.dev_branch` names one branch in `alibaba/loongsuite-pilot`.
