@@ -1761,6 +1761,20 @@ describe('QoderTraceInput multimodal', () => {
       expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
     });
 
+    it('reads imgUrl when fileType is image and name is absent', () => {
+      const extra = JSON.stringify({
+        context: [{ fileType: 'image', imgUrl: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads filePath when name is file and fileType is image', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'file', fileType: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
   });
 
   describe('enrichIdeMultimodal', () => {

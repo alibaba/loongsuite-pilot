@@ -112,14 +112,17 @@ export function parseAttachedImagePaths(raw: string | null | undefined): string[
       const record = item as Record<string, unknown>;
       if (record.name === 'file') {
         const selected = record.selectedItem;
-        if (!selected || typeof selected !== 'object') continue;
-        const identifier = (selected as Record<string, unknown>).identifier;
-        if (typeof identifier !== 'string') continue;
-        const trimmed = identifier.trim();
-        if (trimmed && mimeFromMediaPath(trimmed)) paths.push(trimmed);
-        continue;
+        if (selected && typeof selected === 'object') {
+          const identifier = (selected as Record<string, unknown>).identifier;
+          if (typeof identifier === 'string') {
+            const trimmed = identifier.trim();
+            if (trimmed && mimeFromMediaPath(trimmed)) paths.push(trimmed);
+          }
+        }
       }
-      if (record.name !== 'image' || hasAttachedImages) continue;
+      if (hasAttachedImages) continue;
+      const fileType = typeof record.fileType === 'string' ? record.fileType : '';
+      if (record.name !== 'image' && fileType !== 'image') continue;
       const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
       const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
       const candidate = imgUrl || filePath;
