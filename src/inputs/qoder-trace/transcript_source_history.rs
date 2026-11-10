@@ -1161,3 +1161,276 @@ async fn source_metadata_arc_survives_drop_stop_and_same_name_notice_generation(
         f.source.stop();
     }
 }
+// Parsed-notice reuse must preserve physical reads, generations, and scope checks.
+fn notice_sha_context(contexts: &[Arc<Value>], name: &str) -> Arc<Value> {
+    Arc::clone(
+        contexts
+            .iter()
+            .find(|v| text(&v["receipt"], "name") == name)
+            .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn source_notice_refresh_reuses_unchanged_arc_after_actual_read_and_charges_digest_slots() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, true));
+        let unknown = json!({"nested":[null,false,{"unicode":"云壳😀"}],"keep":"payload"});
+        f.wake("Stop", json!({"unknown_extension":unknown}));
+        let dir = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key);
+        let file = std::fs::read_dir(dir.join("events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let name = file.file_name().unwrap().to_str().unwrap().to_owned();
+        let first = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        let retained = notice_sha_context(&first, &name);
+        let before = serde_json::to_vec(&retained).unwrap();
+        f.wake(
+            "Stop",
+            json!({"unknown_extension":{"generation":"new notice"}}),
+        );
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let expected_file = file.clone();
+        let _guard = inject_metadata_read_fault(move |path| {
+            if path == expected_file {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let mut inner = f.source.inner.lock().await;
+        let second = inner.metadata_for(&dir).unwrap().1;
+        let current = notice_sha_context(&second, &name);
+        assert!(
+            reads.load(Ordering::SeqCst) > 0,
+            "refresh must still complete physical snapshot read"
+        );
+        assert!(
+            Arc::ptr_eq(&retained, &current),
+            "same SHA/generation reuses payload: {agent}"
+        );
+        assert_eq!(current["unknown_extension"], unknown);
+        assert_eq!(serde_json::to_vec(&retained).unwrap(), before);
+        let added = second
+            .iter()
+            .find(|value| value.get("receipt").is_some() && text(&value["receipt"], "name") != name)
+            .expect("new inventory notice was parsed");
+        assert_eq!(added["unknown_extension"]["generation"], "new notice");
+        assert!(!Arc::ptr_eq(added, &retained));
+        let metadata = inner.metadata.get(&dir).unwrap();
+        assert_eq!(metadata.contexts.len(), metadata.context_digests.len());
+        let digest_charge = metadata.context_digests.capacity()
+            * std::mem::size_of::<Option<[u8; 32]>>()
+            + std::mem::size_of::<Vec<Option<[u8; 32]>>>();
+        let refs = metadata
+            .contexts
+            .iter()
+            .map(Arc::as_ref)
+            .collect::<Vec<_>>();
+        let payload =
+            crate::utils::json_size::serialized_json_size(&(&*metadata.source, refs)).unwrap();
+        assert!(
+            metadata.bytes >= payload + digest_charge,
+            "digest capacity must be charged"
+        );
+        assert_eq!(
+            inner.metadata_bytes,
+            inner.metadata.values().map(|m| m.bytes).sum::<usize>()
+        );
+        assert!(inner.metadata_bytes <= MAX_METADATA_BYTES);
+    }
+}
+
+#[tokio::test]
+async fn source_notice_same_name_same_size_same_mtime_changed_payload_and_whitespace_reparse() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        f.write(&turn(0, false));
+        f.wake("Stop", json!({"unknown_extension":{"generation":"old"}}));
+        let dir = f
+            .root
+            .join("state/qoder-transcripts")
+            .join(agent)
+            .join("sources")
+            .join(&f.key);
+        let file = std::fs::read_dir(dir.join("events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let name = file.file_name().unwrap().to_str().unwrap().to_owned();
+        let first = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        let old = notice_sha_context(&first, &name);
+        let before = std::fs::read(&file).unwrap();
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let mut value: Value = serde_json::from_slice(&before).unwrap();
+        value["unknown_extension"]["generation"] = json!("new");
+        let changed = serde_json::to_vec(&value).unwrap();
+        assert_eq!(changed.len(), before.len());
+        std::fs::write(&file, &changed).unwrap();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            modified
+        );
+        // Force an inventory generation change independently of filesystem
+        // timestamp precision, so this actually exercises per-notice reuse.
+        f.wake("Stop", json!({}));
+        let second = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        let new = notice_sha_context(&second, &name);
+        assert_eq!(
+            old["receipt"]["version"], new["receipt"]["version"],
+            "observationId unchanged"
+        );
+        assert!(
+            !Arc::ptr_eq(&old, &new),
+            "same receipt generation cannot hide changed content SHA"
+        );
+        assert_eq!(new["unknown_extension"]["generation"], "new");
+        assert_eq!(old["unknown_extension"]["generation"], "old");
+        // Equal JSON but changed physical bytes is conservative: parse again.
+        std::fs::write(&file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        f.wake("Stop", json!({}));
+        let third = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        let whitespace = notice_sha_context(&third, &name);
+        assert_eq!(&*whitespace, &*new);
+        assert!(
+            !Arc::ptr_eq(&whitespace, &new),
+            "digest identity is not semantic JSON equality"
+        );
+        // A publication immediately after the read retains the snapshot just
+        // read, then must be observed at the next forced inventory refresh.
+        let mut late = value.clone();
+        late["unknown_extension"]["after_read"] = json!(true);
+        let late_bytes = serde_json::to_vec(&late).unwrap();
+        let expected_file = file.clone();
+        let mut replaced = false;
+        let fault = inject_metadata_read_fault(move |path| {
+            if path == expected_file && !replaced {
+                std::fs::write(path, &late_bytes).unwrap();
+                replaced = true;
+            }
+        });
+        f.wake("Stop", json!({}));
+        let during = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        assert_eq!(&*notice_sha_context(&during, &name), &*whitespace);
+        drop(fault);
+        f.wake("Stop", json!({}));
+        let after = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+        let published = notice_sha_context(&after, &name);
+        assert_eq!(published["unknown_extension"]["after_read"], true);
+        assert!(whitespace["unknown_extension"].get("after_read").is_none());
+        assert!(!Arc::ptr_eq(&published, &whitespace));
+    }
+}
+
+#[tokio::test]
+async fn source_notice_same_bytes_new_stat_generation_cannot_reuse_old_receipt() {
+    let mut f = Fixture::new("qoder").await;
+    f.write(&turn(0, false));
+    f.wake("Stop", json!({}));
+    let dir = f
+        .root
+        .join("state/qoder-transcripts/qoder/sources")
+        .join(&f.key);
+    let file = std::fs::read_dir(dir.join("events"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let name = file.file_name().unwrap().to_str().unwrap().to_owned();
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("observationId");
+    std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+    let first = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+    let old = notice_sha_context(&first, &name);
+    let bytes = std::fs::read(&file).unwrap();
+    let modified =
+        std::fs::metadata(&file).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    f.wake("Stop", json!({}));
+    let second = f.source.inner.lock().await.metadata_for(&dir).unwrap().1;
+    let new = notice_sha_context(&second, &name);
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    assert_ne!(old["receipt"]["version"], new["receipt"]["version"]);
+    assert!(
+        !Arc::ptr_eq(&old, &new),
+        "same SHA cannot reuse a different stat receipt generation"
+    );
+    #[cfg(unix)]
+    notice_sha_scope_guard_case().await;
+}
+
+#[cfg(unix)]
+async fn notice_sha_scope_guard_case() {
+    use crate::utils::source_access::{current, install, SourceScope};
+    struct Restore(Option<Arc<SourceScope>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            install(self.0.take());
+        }
+    }
+    let mut f = Fixture::new("qoder").await;
+    f.write(&turn(0, false));
+    f.wake("Stop", json!({}));
+    let dir = f
+        .root
+        .join("state/qoder-transcripts/qoder/sources")
+        .join(&f.key);
+    let file = std::fs::read_dir(dir.join("events"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    f.source.inner.lock().await.metadata_for(&dir).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("same.json");
+    std::fs::write(&target, std::fs::read(&file).unwrap()).unwrap();
+    f.wake("Stop", json!({}));
+    let expected = file.clone();
+    let _open_fault = scanner::inject_open_fault(move |path| {
+        if path == expected
+            && !std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        {
+            std::fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(&target, path).unwrap();
+        }
+    });
+    let mut inner = f.source.inner.lock().await;
+    let _restore = Restore(current());
+    install(Some(SourceScope::new(
+        vec![f.root.clone()],
+        1024,
+        1024 * 1024,
+    )));
+    assert!(
+        inner.metadata_for(&dir).is_err(),
+        "cached digest must not bypass authorized-root/reparse verification"
+    );
+}

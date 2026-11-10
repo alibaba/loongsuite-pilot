@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::ReadDir;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -163,6 +163,7 @@ struct Metadata {
     version: DirectoryVersion,
     source: Arc<Value>,
     contexts: Vec<Arc<Value>>,
+    context_digests: Vec<Option<[u8; 32]>>,
     bytes: usize,
 }
 struct Collector {
@@ -251,7 +252,7 @@ fn inject_metadata_read_fault(f: impl FnMut(&Path) + 'static) -> MetadataReadFau
     });
     MetadataReadFaultGuard
 }
-fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
+fn snapshot_bytes(path: &Path, limit: usize) -> anyhow::Result<(Vec<u8>, FileVersion)> {
     let mut f = scanner::open_regular(path)?;
     let version = scanner::version(&f)?;
     if version.size > limit as u64 {
@@ -262,6 +263,10 @@ fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
     if bytes.len() > limit {
         anyhow::bail!("Qoder metadata grew past limit")
     };
+    Ok((bytes, version))
+}
+fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
+    let (bytes, version) = snapshot_bytes(path, limit)?;
     let value = serde_json::from_slice(&bytes)?;
     #[cfg(test)]
     METADATA_READ_FAULT.with(|fault| {
@@ -525,7 +530,18 @@ impl Collector {
         } else {
             Arc::new(snapshot(&dir.join("source.json"), MAX_NOTICES)?.0)
         };
-        let mut contexts = vec![Arc::clone(&source)];
+        // Reuse only the already validated payload of the exact content
+        // identity and receipt generation. Every notice is still opened,
+        // scope-checked and read in full below; no filesystem hint skips IO.
+        let mut previous = HashMap::new();
+        if let Some(metadata) = self.metadata.get(dir) {
+            for (context, digest) in metadata.contexts.iter().zip(&metadata.context_digests) {
+                if let Some(digest) = digest {
+                    previous.insert(text(&context["receipt"], "name"), (context, digest));
+                }
+            }
+        }
+        let mut contexts = vec![(Arc::clone(&source), None)];
         for entry in crate::utils::source_access::read_dir(&events)?.take(MAX_CONTEXTS) {
             let entry = entry?;
             if !entry.file_type()?.is_file()
@@ -533,19 +549,49 @@ impl Collector {
             {
                 continue;
             }
-            let (mut v, s) = snapshot(&entry.path(), MAX_NOTICES)?;
-            if !valid_source(&v, &self.agent_id, text(&source, "key")) {
-                anyhow::bail!("invalid-context")
+            let filename = entry.file_name();
+            let name = filename.to_string_lossy();
+            let path = entry.path();
+            let (bytes, version) = snapshot_bytes(&path, MAX_NOTICES)?;
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let reused = previous.get(name.as_ref()).and_then(|(context, prior)| {
+                (digest == **prior
+                    && notice_version(context, &version) == text(&context["receipt"], "version"))
+                .then_some(*context)
+            });
+            let parsed = if reused.is_none() {
+                Some(serde_json::from_slice::<Value>(&bytes)?)
+            } else {
+                None
             };
-            v["receipt"] =
-                json!({"name":entry.file_name().to_string_lossy(),"version":notice_version(&v,&s)});
-            contexts.push(Arc::new(v));
+            #[cfg(test)]
+            METADATA_READ_FAULT.with(|fault| {
+                if let Some(hook) = fault.borrow_mut().as_mut() {
+                    hook(&path)
+                }
+            });
+            let context = if let Some(context) = reused {
+                if !valid_source(context, &self.agent_id, text(&source, "key")) {
+                    anyhow::bail!("invalid-context")
+                }
+                Arc::clone(context)
+            } else {
+                let mut value = parsed.expect("uncached snapshot was parsed");
+                if !valid_source(&value, &self.agent_id, text(&source, "key")) {
+                    anyhow::bail!("invalid-context")
+                }
+                value["receipt"] = json!({"name":name,"version":notice_version(&value,&version)});
+                Arc::new(value)
+            };
+            contexts.push((context, Some(digest)));
         }
+        drop(previous);
         contexts.sort_by(|a, b| {
-            number(a, "observedSize")
-                .cmp(&number(b, "observedSize"))
-                .then_with(|| number(a, "observedAt").cmp(&number(b, "observedAt")))
+            number(&a.0, "observedSize")
+                .cmp(&number(&b.0, "observedSize"))
+                .then_with(|| number(&a.0, "observedAt").cmp(&number(&b.0, "observedAt")))
         });
+        let (contexts, context_digests): (Vec<_>, Vec<_>) = contexts.into_iter().unzip();
         let inventory_bytes = version.inventory.as_ref().map_or(0, |names| {
             names
                 .iter()
@@ -559,9 +605,12 @@ impl Collector {
         let references = contexts.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let arc_overhead = (contexts.len() + 1) * 4 * std::mem::size_of::<usize>()
             + (contexts.capacity() + 1) * std::mem::size_of::<Arc<Value>>();
+        let digest_bytes = context_digests.capacity() * std::mem::size_of::<Option<[u8; 32]>>()
+            + std::mem::size_of::<Vec<Option<[u8; 32]>>>();
         let bytes = crate::utils::json_size::serialized_json_size(&(&*source, &references))?
             + inventory_bytes
-            + arc_overhead;
+            + arc_overhead
+            + digest_bytes;
         if let Some(prior) = self.metadata.shift_remove(dir) {
             self.metadata_bytes -= prior.bytes;
         }
@@ -577,6 +626,7 @@ impl Collector {
                     version,
                     source: Arc::clone(&source),
                     contexts: contexts.clone(),
+                    context_digests,
                     bytes,
                 },
             );
