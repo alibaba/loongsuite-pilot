@@ -10,6 +10,8 @@
 
 `TRACEPARENT` 环境变量是另一种首轮 session 关联方式，仅对调用 `recordUpstreamContextOnce` 写入 session 记录的 Hook 生效。OpenClaw / Hermes 的 Pilot 插件本身不直接读取该环境变量，设置变量不能代替逐轮关联文件。
 
+同一逐轮关联文件也可携带 `attributes` 业务字段，但由独立的 `requestAttributes.enabled` 开关控制；只有请求属性时可以省略 `traceparent`，无需开启上游 Trace 关联。详见[按请求添加自定义属性](request-attributes.md)。需要两种能力时，将上下文和属性写在同一条本轮记录中。
+
 已有有效父工具上下文的子代理保留原生 trace / parent 关系，不用子会话关联文件覆盖父工具链路。
 
 ```text

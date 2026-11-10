@@ -52,6 +52,7 @@ import {
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
 
 const AGENT_ID = 'grok-build';
@@ -64,6 +65,34 @@ const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
   ? { resourceAttributes: RESOURCE_ATTRIBUTES }
   : {};
+// The runtime can pass different values on each spawned Grok process without
+// needing its native session id in advance. Keep the scalar limits and marker
+// aligned with src/normalization/request-attributes.ts (Hooks ship as plain JS).
+const REQUEST_ATTRIBUTE_KEYS_FIELD = 'agent.pilot.request.attribute.keys';
+const SPAN_ATTRIBUTES = grokRequestAttributes();
+const SPAN_ATTRIBUTE_FIELDS = Object.keys(SPAN_ATTRIBUTES).length > 0
+  ? { ...SPAN_ATTRIBUTES, [REQUEST_ATTRIBUTE_KEYS_FIELD]: Object.keys(SPAN_ATTRIBUTES) }
+  : {};
+
+function grokRequestAttributes() {
+  const raw = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') > 8192) return {};
+  const attributes = parseSpanAttributesFromEnv(process.env, { agentId: AGENT_ID });
+  const entries = Object.entries(attributes);
+  if (entries.length > 64) return {};
+  const structural = new Set([
+    '__proto__', 'constructor', 'prototype', 'span_id', 'parent_span_id',
+    'resourceAttributes', 'attributes', 'timestamp',
+  ]);
+  const legacyPrefixes = ['session.', 'turn.', 'step.', 'input.', 'output.', 'tool.', 'response.', 'provider.'];
+  const safe = Object.fromEntries(entries.filter(([key]) =>
+    key.length <= 128
+    && !/[\u0000-\u001f\u007f]/.test(key)
+    && !structural.has(key)
+    && !legacyPrefixes.some(prefix => key.startsWith(prefix)),
+  ));
+  return Buffer.byteLength(JSON.stringify(safe), 'utf8') <= 8192 ? safe : {};
+}
 
 function deterministicHex(value, length) {
   const hex = crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, length);
@@ -471,6 +500,7 @@ function buildTurnRecords({
   systemPrompt,
   errorType,
   runtimeFallbackMs,
+  requestAttributeFields = {},
 }) {
   const records = [];
   let sequence = 0;
@@ -489,6 +519,7 @@ function buildTurnRecords({
     ...RESOURCE_BASE_FIELD_PATCH,
     'user.id': userId,
     ...(cwd ? { 'agent.grok-build.cwd': cwd } : {}),
+    ...requestAttributeFields,
     ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 
@@ -871,6 +902,11 @@ async function processHookLocked(trigger, event, sessionId) {
       systemPrompt,
       errorType: target.errorType,
       runtimeFallbackMs: fallbackMs,
+      // UPS/SessionEnd may repair an older cancelled/completed turn. The
+      // current process's business identity is evidence for its explicit
+      // prompt only; never retroactively tag a different recovered request.
+      requestAttributeFields: event.prompt_id && target.promptId === event.prompt_id
+        ? SPAN_ATTRIBUTE_FIELDS : {},
     }));
     markPromptExported(state, target.promptId);
     state.turn_count = (state.turn_count || 0) + 1;

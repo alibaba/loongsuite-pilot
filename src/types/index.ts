@@ -148,6 +148,8 @@ export interface AnalyticsConfig {
   dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  /** Per-request business attributes from native-session turn correlation files. */
+  requestAttributes?: { enabled: boolean };
   /** Global multimodal storage. */
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */

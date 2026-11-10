@@ -3,14 +3,26 @@ import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { contentHash } from '../../utils/content-hash.js';
 import { createLogger } from '../../utils/logger.js';
+import { sanitizeRequestAttributes, type RequestAttributes } from '../../normalization/request-attributes.js';
 
 const logger = createLogger('correlation-store');
+const MAX_ATTRIBUTE_FILE_BYTES = 32 * 1024 * 1024;
+const MAX_ATTRIBUTE_LINE_BYTES = 64 * 1024;
 
-interface TurnRecord {
+export interface TurnContext {
+  traceparent?: string;
+  attributes?: RequestAttributes;
+}
+
+interface TurnRecord extends TurnContext {
   type: 'turn';
   contentHash?: string;
   contentPrefix?: string;
-  traceparent: string;
+}
+
+interface StoreOptions {
+  attributesEnabled?: boolean;
+  traceEnabled?: boolean;
 }
 
 interface SessionRecord {
@@ -64,9 +76,12 @@ function safeName(value: string): string {
 export class CorrelationStore {
   private readonly dir: string;
   private readonly states = new Map<string, SessionState>();
+  private readonly identities = new WeakMap<TurnRecord, { index: string | number; record: object }>();
+  private readonly options: StoreOptions;
 
-  constructor(correlateDir: string) {
+  constructor(correlateDir: string, options: StoreOptions = {}) {
     this.dir = correlateDir;
+    this.options = options;
   }
 
   private sessionConsumedPath(sessionId: string): string {
@@ -110,8 +125,9 @@ export class CorrelationStore {
     // Include record identity so replacing a file does not make a new context
     // collide with an old claim at the same append-only position. No prompt
     // text or upstream credentials are copied into the marker or its name.
-    const digest = createHash('sha256').update(JSON.stringify(record)).digest('hex');
-    const marker = path.join(this.dir, `${safeName(sessionId)}.turn-context-${index}-${digest}.done`);
+    const identity = this.identities.get(record) ?? { index, record };
+    const digest = createHash('sha256').update(JSON.stringify(identity.record)).digest('hex');
+    const marker = path.join(this.dir, `${safeName(sessionId)}.turn-context-${identity.index}-${digest}.done`);
     const temporary = path.join(this.dir, `.turn-claim-${randomUUID()}.tmp`);
     try {
       // Publish a complete owner atomically. A collector crash between create
@@ -131,7 +147,12 @@ export class CorrelationStore {
       logger.warn('failed to persist turn context consumption', {
         sessionId, index, error: String(err),
       });
-      return { claimed: true, turnId }; // I/O failure must not block collection.
+      // Collection remains fail-open, but business attribution requires durable
+      // ownership: otherwise a restart could attach this user's values to the
+      // next request with the same prompt.
+      return this.options.attributesEnabled && record.attributes
+        ? { claimed: false }
+        : { claimed: true, turnId };
     } finally {
       try { fs.unlinkSync(temporary); } catch { /* absent or left for retention */ }
     }
@@ -155,23 +176,68 @@ export class CorrelationStore {
     const turns: TurnRecord[] = [];
     const sessions: SessionRecord[] = [];
     try {
-      const raw = fs.readFileSync(file, 'utf8');
-      for (const line of raw.split('\n')) {
+      let raw: string;
+      if (this.options.attributesEnabled) {
+        if (stat.size > MAX_ATTRIBUTE_FILE_BYTES) {
+          logger.warn('request attribute correlation file exceeds 32 MiB; new records skipped', { sessionId });
+          return existing ?? null;
+        }
+        const fd = fs.openSync(file, 'r');
+        try {
+          // Bounded even if another writer appends between stat and read.
+          const buffer = Buffer.alloc(Math.min(stat.size, MAX_ATTRIBUTE_FILE_BYTES) + 1);
+          let length = 0;
+          while (length < buffer.length) {
+            const n = fs.readSync(fd, buffer, length, buffer.length - length, length);
+            if (!n) break;
+            length += n;
+          }
+          if (length > MAX_ATTRIBUTE_FILE_BYTES) return existing ?? null;
+          raw = buffer.toString('utf8', 0, length);
+        } finally { fs.closeSync(fd); }
+      } else {
+        raw = fs.readFileSync(file, 'utf8');
+      }
+      let traceIndex = 0;
+      // A writer publishes a JSONL record with its final LF. An unfinished tail
+      // must not be claimed even when its prefix happens to be valid JSON.
+      const complete = this.options.attributesEnabled ? raw.slice(0, raw.lastIndexOf('\n') + 1) : raw;
+      for (const [lineIndex, line] of complete.split('\n').entries()) {
         if (!line.trim()) continue;
+        if (this.options.attributesEnabled && Buffer.byteLength(line, 'utf8') > MAX_ATTRIBUTE_LINE_BYTES) {
+          logger.warn('request attribute correlation line exceeds 64 KiB; new records skipped', { sessionId, lineIndex });
+          return existing ?? null;
+        }
         let rec: unknown;
         try {
           rec = JSON.parse(line);
         } catch {
           continue;
         }
+        if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue;
         const r = rec as Record<string, unknown>;
-        if (r.type === 'turn' && typeof r.traceparent === 'string') {
-          turns.push({
+        if (r.type === 'turn') {
+          const attributes = sanitizeRequestAttributes(r.attributes);
+          const hasTrace = typeof r.traceparent === 'string';
+          const hasAttributes = r.attributes !== null && typeof r.attributes === 'object'
+            && !Array.isArray(r.attributes);
+          if (!hasTrace && !hasAttributes) continue;
+          const legacyRecord = {
             type: 'turn',
             contentHash: typeof r.contentHash === 'string' ? r.contentHash : undefined,
             contentPrefix: typeof r.contentPrefix === 'string' ? r.contentPrefix : undefined,
-            traceparent: r.traceparent,
-          });
+            traceparent: hasTrace ? r.traceparent as string : undefined,
+          } as const;
+          // Empty attributes are an explicit request placeholder, keeping FIFO
+          // ownership aligned when a later request repeats the same input.
+          const record: TurnRecord = { ...legacyRecord, ...(hasAttributes ? { attributes } : {}) };
+          // Trace records retain the exact pre-extension index/digest, including
+          // when attributes are enabled later. Attribute-only records have a
+          // distinct namespace so toggles cannot resurrect an old trace claim.
+          this.identities.set(record, hasTrace
+            ? { index: traceIndex++, record: legacyRecord }
+            : { index: `attributes-${lineIndex}`, record: { ...legacyRecord, attributes } });
+          turns.push(record);
         } else if (r.type === 'session' && typeof r.traceparent === 'string') {
           sessions.push({ type: 'session', traceparent: r.traceparent });
         }
@@ -209,10 +275,27 @@ export class CorrelationStore {
    * UTF-8 algorithm before display truncation. Null if no match.
    */
   resolveTurn(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): string | null {
+    return this.resolveContext(sessionId, collectedText, turnId, collectedHash, false, true)?.traceparent ?? null;
+  }
+
+  resolveTurnContext(sessionId: string, collectedText: string, turnId?: string, collectedHash?: string): TurnContext | null {
+    return this.resolveContext(sessionId, collectedText, turnId, collectedHash,
+      this.options.attributesEnabled === true, this.options.traceEnabled !== false);
+  }
+
+  private resolveContext(sessionId: string, collectedText: string, turnId: string | undefined,
+    collectedHash: string | undefined, attributesEnabled: boolean, traceEnabled: boolean): TurnContext | null {
     const state = this.load(sessionId);
     if (!state || state.turns.length === 0) return null;
+    const project = (record: TurnRecord): TurnContext | null => {
+      const context: TurnContext = {
+        ...(traceEnabled && record.traceparent !== undefined ? { traceparent: record.traceparent } : {}),
+        ...(attributesEnabled && record.attributes ? { attributes: { ...record.attributes } } : {}),
+      };
+      return Object.keys(context).length ? context : null;
+    };
     const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
-    if (resolved !== undefined) return state.turns[resolved].traceparent;
+    if (resolved !== undefined && state.turns[resolved]) return project(state.turns[resolved]);
 
     // Exact path: advance the hash bucket cursor past already-consumed entries
     // (a bucket entry may have been consumed via the prefix fallback), then take
@@ -225,12 +308,14 @@ export class CorrelationStore {
       while (c < bucket.length) {
         const idx = bucket[c++];
         if (state.consumedTurns.has(idx)) continue;
+        const context = project(state.turns[idx]);
+        if (!context) continue;
         state.consumedTurns.add(idx);
         const claim = this.claimTurnContext(sessionId, idx, state.turns[idx], turnId);
         if (claim.turnId) state.resolvedTurns.set(claim.turnId, idx);
         if (!claim.claimed) continue;
         state.hashCursor.set(hash, c);
-        return state.turns[idx].traceparent;
+        return context;
       }
       state.hashCursor.set(hash, c);
     }
@@ -241,12 +326,14 @@ export class CorrelationStore {
     for (let i = 0; i < state.turns.length; i += 1) {
       if (state.consumedTurns.has(i)) continue;
       const t = state.turns[i];
+      const context = project(t);
+      if (!context) continue;
       if (t.contentPrefix !== undefined && t.contentPrefix.length > 0 && collectedText.startsWith(t.contentPrefix)) {
         state.consumedTurns.add(i);
         const claim = this.claimTurnContext(sessionId, i, t, turnId);
         if (claim.turnId) state.resolvedTurns.set(claim.turnId, i);
         if (!claim.claimed) continue;
-        return t.traceparent;
+        return context;
       }
     }
     return null;

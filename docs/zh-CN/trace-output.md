@@ -356,7 +356,7 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 
 ## 自定义 Span 属性
 
-有两类额外属性可以附加到 trace span 上：
+额外属性可以从以下来源附加到 trace span 上：
 
 **1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `workspace.path`（agent 运行的绝对工作目录 / 进程 cwd），以及由本地 git 仓库推断的 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`。`workspace.path` 与 git 无关、始终会带上；而 `git.*` 和 `workspace.current_root` 需要该目录是 git 仓库才会出现。这些字段**同时也会**出现在 event log（SLS / JSONL）中。
 
@@ -426,10 +426,12 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
 - 除上述两个标准身份 key 外，保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、grok-build、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。Grok 的逐次启动示例见[按请求添加自定义属性](request-attributes.md#cli每个任务启动一次-grok)；不要求开启 `requestAttributes.enabled`。
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
+
+**4. 公共逐轮关联属性。** 调用方可以开启 `requestAttributes.enabled`，在每轮发送前向 `acp-correlate/<原生sessionId>.jsonl` 追加带 `attributes` 的 `turn` 记录；没有属性的一轮也写 `attributes: {}` 占位。Pilot 在公共处理层按原生会话及本轮输入匹配，将属性附加到事件；`otlpTrace.spanAttributePassthroughPrefixes` 继续控制哪些字段进入 Span。该路径不要求新建 Agent 进程，也不要求上游 Trace 或 `upstreamLink.enabled`。独立会话可并发运行；同一会话须逐轮先写后发并串行执行，不能仅凭输入文本区分并发同文请求，也不能漏写中间轮次后预写未来同文记录。完整配置、SDK/RPC 写入示例和采集前提见[按请求添加自定义属性](request-attributes.md)。
 
 ## 验证 Trace 输出
 

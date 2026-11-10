@@ -138,6 +138,7 @@ loongsuite-pilot info
 | 写入本地 JSONL 日志 | [本地 JSONL 输出](docs/zh-CN/local-jsonl-output.md) |
 | 上报日志到 SLS | [SLS 输出](docs/zh-CN/sls-output.md) |
 | 上报 OTLP Trace | [Trace 输出](docs/zh-CN/trace-output.md) |
+| 每轮请求添加用户、客户或任务属性 | [按请求添加自定义属性](docs/zh-CN/request-attributes.md) |
 | 将 Trace 上下文和资源属性传给 Claude Code 调用的 CLI | [Claude Code 下游 CLI 上下文传播](docs/zh-CN/claude-code-downstream-trace-propagation.md) |
 | POST 到 HTTP 接口 | [HTTP 输出](docs/zh-CN/http-output.md) |
 | 输出前进行密钥脱敏 | [数据脱敏](docs/zh-CN/masking.md) |
@@ -161,6 +162,10 @@ loongsuite-pilot info
 - **环境变量**(agent 进程上的 `TRACEPARENT`):仅对调用 `recordUpstreamContextOnce` 写入 session 记录的受支持 Hook 生效，作用于会话首轮；OpenClaw / Hermes 插件本身不直接读取该变量。适用于有对应 Hook 支持、但调用方无法预先拿到 per-turn `sessionId` 的情况。
 
 逐轮关联的文件格式、接入示例、OpenClaw / Hermes 版本要求和验证方法见[逐轮 Trace 上下文关联接入](docs/zh-CN/upstream-trace-correlation.md)。
+
+需要按每次请求添加业务字段时，可开启独立的 `requestAttributes.enabled`，在同一逐轮关联文件中写入 `attributes`，再通过 `otlpTrace.spanAttributePassthroughPrefixes` 将指定字段透传到 Span。此方式支持无上游 Trace 的请求，不要求开启 `upstreamLink.enabled`；调用方仍需在发送前取得原生会话 ID 并写入本轮匹配记录。见[按请求添加自定义属性](docs/zh-CN/request-attributes.md)。
+
+每个任务启动独立 Grok 子进程时，也可直接在该子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`，无需提前取得原生会话 ID；此入口只需相应 Span 透传前缀，独立于上述两个开关。长驻多用户进程仍应逐轮传值。见[CLI 接入示例](docs/zh-CN/request-attributes.md#cli每个任务启动一次-grok)。
 
 对于 Claude Code，同时开启 `upstreamLink.enabled` 和 `propagateToTools` 后，Pilot 会把上下文传给主 agent 的 `Bash` 调用。`PreToolUse(Bash)` hook 会预留 TOOL span id，在 Bash 命令前注入 `TRACEPARENT`（存在有效值时也注入 `TRACESTATE`），Stop hook 构建 TOOL span 时再复用同一个 id。可选开启 `generateTraceWhenMissing`，使没有上游上下文的 turn 也生成并传播本地 Trace。用户还可在启动 Claude Code 时设置 `LOONGSUITE_PILOT_RESOURCE_ATTRIBUTES`，Pilot 会将其映射为下游 CLI 可读取的标准 `OTEL_RESOURCE_ATTRIBUTES`。建议把 `upstreamLink` 开关写入 `config.json`；环境变量只对继承它的进程生效，单独执行 `loongsuite-pilot restart` 不会修改已运行 Claude Code 的 hook 环境。下游 CLI 需要自行提取 Trace Context 并配置 trace exporter；Go 探针可直接按 OpenTelemetry 标准读取资源属性。该能力全程 fail-open，当前不覆盖 ACP-only 下游 Trace 传播、subagent、PowerShell、MCP 和非 Bash 工具。
 

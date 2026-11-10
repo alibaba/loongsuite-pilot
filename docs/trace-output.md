@@ -373,7 +373,7 @@ Pilot sets its converter's `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 
 
 ## Custom Span Attributes
 
-Two kinds of extra attributes can be attached to trace spans:
+Trace spans can receive extra attributes from these sources:
 
 **1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `workspace.path` (the absolute working directory / process cwd), plus `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root` inferred from the local git repository. `workspace.path` is present regardless of git; the `git.*` and `workspace.current_root` fields require the directory to be a git repository. These are also present in the event log (SLS / JSONL) output.
 
@@ -444,9 +444,11 @@ Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
 - Except for the two standard identity keys documented above, reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
 - Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
-- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, grok-build, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw. See the [per-task Grok example](request-attributes.md#cli-one-grok-process-per-task); this path does not require `requestAttributes.enabled`.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
 - Qwen Code CLI captures them from the current `Stop` hook and clears any saved values when a resumed invocation does not provide the variable, preventing stale attributes from leaking into a later turn.
+
+**4. Shared per-turn correlation attributes.** Enable `requestAttributes.enabled` and append a `turn` record with `attributes` to `acp-correlate/<native-session-id>.jsonl` before sending every prompt, using `attributes: {}` for turns without attributes. Pilot matches the native session and current input in its shared processing layer and adds the attributes to events. `otlpTrace.spanAttributePassthroughPrefixes` still selects fields copied to spans. This path needs neither a new agent process nor an upstream trace or `upstreamLink.enabled`. Independent sessions may run concurrently; serialize each session with write-before-send ordering. Text alone cannot distinguish concurrent identical requests, and omitting an intermediate turn before prewriting a future identical request can misattribute values. See [Per-request attributes](request-attributes.md) for configuration, SDK/RPC examples, and collection prerequisites.
 
 ## Verify Trace Output
 
