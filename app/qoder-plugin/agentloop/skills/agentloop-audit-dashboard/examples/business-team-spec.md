@@ -19,10 +19,10 @@ data:
 
 全盘公共口径：
 
-- 只统计在册员工，通过 `dept_user` 与事件表关联，具体 JOIN 和字段口径遵循 `schema.md`。
+- 只统计在册员工，通过 `dept_user` 与事件表关联，具体 JOIN 和字段口径遵循 [共享数据模型](../../agentloop-audit-query/references/schema.md)。
 - 不内置任何特定组织、事业部、外包、测试账号或团队范围过滤。
 - 仓库、代码域、特定组织标签等非公共字段不纳入本 spec。
-- Skill、Tool、Token、去重人数等公共计算口径遵循 `schema.md`。
+- Skill、Tool、Token、去重人数等公共计算口径遵循 [共享数据模型](../../agentloop-audit-query/references/schema.md)。
 - Section 行仅作为布局分隔，不需要显式标题、背景或边框；生成 `dashboardrow` 时 `showTitle`、`showBackground`、`showBorder` 均设置为 `false`。
 - 顶部过滤器区域不生成 Section 行，直接放置过滤器和使用提示。
 
