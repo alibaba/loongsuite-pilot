@@ -232,3 +232,49 @@ async fn actual_qoder_work_log_baseline_and_range_read_remain_on_opened_file_dur
         22,
     );
 }
+
+#[tokio::test]
+async fn main_555_sdk_log_does_not_consume_partial_final_record_and_idle_is_clean() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, input) = make_input(root.path()).await;
+    let path = root.path().join("logs/synthetic/main.log");
+    let key = format!("{}:{}", input.inner.id(), path.display());
+    let text = wave("split-record", 51);
+    let split = 31;
+    std::fs::write(&path, &text[..split]).unwrap();
+    assert!(input
+        .inner
+        .body
+        .collect(&input.inner.runtime)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.get_offset(&key), 0.0);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&text.as_bytes()[split..])
+        .unwrap();
+    assert_wave(
+        &input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap(),
+        "split-record",
+        51,
+    );
+    let revision = store.revision();
+    for _ in 0..2 {
+        assert!(input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    assert_eq!(store.revision(), revision);
+}

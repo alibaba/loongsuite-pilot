@@ -1907,3 +1907,224 @@ async fn hook_prunes_only_missing_daily_offsets_and_keeps_live_and_unrelated_sta
 mod shared_history_contracts {
     include!("shared_history_contracts.rs");
 }
+
+#[tokio::test]
+async fn hook_unchanged_large_incomplete_tail_skips_reads_but_keeps_backlog() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("test-hook-{}.jsonl", get_today_date_string()));
+    let partial = format!("{{\"file_path\":\"{}", "x".repeat(1024 * 1024));
+    std::fs::write(&path, &partial).unwrap();
+    let input = hook_input(
+        dir.path(),
+        Arc::new(StateStore::new(dir.path().join("state.json"))),
+        false,
+    );
+    input.runtime.reset_read_accumulator_for_test();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_bytes,
+        partial.len() as u64
+    );
+    for _ in 0..3 {
+        assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+        let delta = input.runtime.reset_read_accumulator_for_test();
+        assert_eq!(delta.raw_read_calls, 0);
+        assert_eq!(delta.raw_backlog_bytes_max, partial.len() as u64);
+    }
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"\"}\n")
+        .unwrap();
+    assert_eq!(input.body.collect(&input.runtime).await.unwrap().len(), 1);
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        1
+    );
+    assert_eq!(input.body.inner().calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn hook_incomplete_cache_invalidates_replacement_removal_and_offset_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("test-hook-{}.jsonl", get_today_date_string()));
+    let prefix = "{\"file_path\":\"/first\"}\n";
+    let partial = format!("{prefix}{{\"file_path\":\"unfinished");
+    std::fs::write(&path, &partial).unwrap();
+    let input = hook_input(
+        dir.path(),
+        Arc::new(StateStore::new(dir.path().join("state.json"))),
+        false,
+    );
+    input.runtime.reset_read_accumulator_for_test();
+    assert_eq!(input.body.collect(&input.runtime).await.unwrap().len(), 1);
+    input.runtime.reset_read_accumulator_for_test();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        0
+    );
+
+    // Same-size replacement must not inherit the old opened file's tail cache.
+    let replacement = dir.path().join("replacement.tmp");
+    std::fs::write(&replacement, &partial).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        1
+    );
+
+    // Rolling back only the durable offset must re-read the previously consumed record.
+    let name = path.file_name().unwrap().to_str().unwrap();
+    input
+        .runtime
+        .update_state(crate::checkpoints::InputStatePatch {
+            last_offset: Some(0.0),
+            extra: Some(json!({(OFFSET_MAP_EXTRA_KEY): {(name): 0}})),
+            ..Default::default()
+        });
+    assert_eq!(input.body.collect(&input.runtime).await.unwrap().len(), 1);
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        1
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    std::fs::write(&path, &partial).unwrap();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        1
+    );
+}
+
+#[test]
+fn hook_tail_cache_requires_complete_stable_eof_and_matching_offset() {
+    use super::hook::TailSignature;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial");
+    std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+    let meta = std::fs::metadata(&path).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let before = TailSignature::from_open(&file, 3).unwrap();
+    assert!(
+        before.completed_tail(&before, 12, 0).is_none(),
+        "short read cannot cache"
+    );
+    assert!(
+        before.completed_tail(&before, 13, 13).is_none(),
+        "complete records need no cache"
+    );
+    let tail = before.completed_tail(&before, 13, 5).unwrap();
+    assert_eq!(tail, TailSignature::from_open(&file, 8).unwrap());
+    assert_ne!(
+        tail,
+        TailSignature::from_open(&file, 3).unwrap(),
+        "rollback invalidates lookup"
+    );
+    assert!(before
+        .completed_tail(&TailSignature::new(&meta, 11, 13, 3), 13, 0)
+        .is_none());
+    std::fs::write(&path, b"abcdefghijklmnopq").unwrap();
+    let after = TailSignature::new(&std::fs::metadata(&path).unwrap(), 11, 12, 3);
+    assert!(
+        before.completed_tail(&after, 13, 0).is_none(),
+        "growth during read cannot cache"
+    );
+}
+
+#[tokio::test]
+async fn hook_static_tail_cache_survives_same_instance_stop_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("test-hook-{}.jsonl", get_today_date_string()));
+    std::fs::write(&path, "x".repeat(1024 * 1024)).unwrap();
+    let input = hook_input(
+        dir.path(),
+        Arc::new(StateStore::new(dir.path().join("state.json"))),
+        false,
+    );
+    let deltas = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&deltas);
+    input.on_runtime_delta(move |delta| observed.lock().unwrap().push(delta.clone()));
+    input.start().await.unwrap();
+    input.stop().await.unwrap();
+    assert_eq!(deltas.lock().unwrap().last().unwrap().raw_read_calls, 1);
+    deltas.lock().unwrap().clear();
+    input.start().await.unwrap();
+    input.stop().await.unwrap();
+    let deltas = deltas.lock().unwrap();
+    assert!(!deltas.is_empty());
+    assert!(deltas.iter().all(|delta| delta.raw_read_calls == 0));
+    assert!(deltas
+        .iter()
+        .any(|delta| delta.raw_backlog_bytes_max == 1024 * 1024));
+}
+
+#[tokio::test]
+async fn hook_same_size_in_place_rewrite_with_preserved_mtime_is_read_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("test-hook-{}.jsonl", get_today_date_string()));
+    let partial = "{\"file_path\":\"/old\"}   ";
+    let complete = "{\"file_path\":\"/new\"}\n  ";
+    assert_eq!(partial.len(), complete.len());
+    std::fs::write(&path, partial).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let input = hook_input(
+        dir.path(),
+        Arc::new(StateStore::new(dir.path().join("state.json"))),
+        false,
+    );
+    input.runtime.reset_read_accumulator_for_test();
+    assert!(input.body.collect(&input.runtime).await.unwrap().is_empty());
+    input.runtime.reset_read_accumulator_for_test();
+    std::fs::write(&path, complete).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+    assert_eq!(input.body.collect(&input.runtime).await.unwrap().len(), 1);
+    assert_eq!(
+        input
+            .runtime
+            .reset_read_accumulator_for_test()
+            .raw_read_calls,
+        1
+    );
+    assert_eq!(input.body.inner().calls.load(Ordering::SeqCst), 1);
+}

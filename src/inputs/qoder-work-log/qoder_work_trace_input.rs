@@ -248,38 +248,28 @@ impl QoderWorkLogTraceBody {
                 .get("dev")
                 .and_then(Value::as_u64)
                 .is_some_and(|v| v != identity.dev);
-        let offset = previous
+        let saved_offset = previous
             .last_offset()
             .filter(|v| v.is_finite() && *v >= 0.0)
             .unwrap_or(0.0) as u64;
-        let offset = if replaced || offset > identity.size {
-            0
-        } else {
-            offset
-        };
-        if identity.size <= offset {
-            return Ok(Vec::new());
+        let reset = replaced || saved_offset > identity.size;
+        let offset = if reset { 0 } else { saved_offset };
+        let skipping = !reset && extra["skippingLine"] == true;
+        let batch = super::bounded_line_tail::read_line_tail(
+            &mut file,
+            identity.size,
+            offset,
+            skipping,
+            rt,
+        )
+        .await?;
+        if batch.began_skip {
+            rt.warn(
+                "oversized Qoder Work SDK line skipped",
+                json!({"path":path,"offset":offset}).as_object(),
+            );
         }
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-        let length = (identity.size - offset).min(MAX_READ_BYTES) as usize;
-        let mut bytes = vec![0; length];
-        let mut filled = 0;
-        while filled < length {
-            let read = file.read(&mut bytes[filled..]).await?;
-            if read == 0 {
-                break;
-            }
-            filled += read;
-        }
-        bytes.truncate(filled);
-        let Some(newline) = bytes.iter().rposition(|b| *b == b'\n') else {
-            return Ok(Vec::new());
-        };
-        let events = String::from_utf8_lossy(&bytes[..newline])
-            .split('\n')
-            .filter_map(parse_sdk_log_line)
-            .collect();
-        let mut policy = if replaced {
+        let mut policy = if reset {
             Policy::default()
         } else {
             extra
@@ -288,6 +278,34 @@ impl QoderWorkLogTraceBody {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default()
         };
+        if batch.bytes.is_empty() {
+            if reset
+                || extra["inode"].as_u64() != Some(identity.ino)
+                || extra["dev"].as_u64() != Some(identity.dev)
+                || batch.offset != saved_offset
+                || batch.skipping_line != skipping
+            {
+                let model = if reset {
+                    Value::Null
+                } else {
+                    extra.get("modelPolicy").cloned().unwrap_or(Value::Null)
+                };
+                rt.state_store.update(
+                    &key,
+                    crate::checkpoints::InputStatePatch {
+                        last_offset: Some(batch.offset as f64),
+                        extra: Some(json!({"inode":identity.ino,"dev":identity.dev,
+                        "modelPolicy":model,"skippingLine":batch.skipping_line})),
+                        ..Default::default()
+                    },
+                );
+            }
+            return Ok(Vec::new());
+        }
+        let events = String::from_utf8_lossy(&batch.bytes)
+            .split('\n')
+            .filter_map(parse_sdk_log_line)
+            .collect();
         let completed = self
             .state
             .lock()
@@ -296,8 +314,8 @@ impl QoderWorkLogTraceBody {
         rt.state_store.update(
             &key,
             crate::checkpoints::InputStatePatch {
-                last_offset: Some((offset + newline as u64 + 1) as f64),
-                extra: Some(json!({"inode":identity.ino,"dev":identity.dev,"modelPolicy":policy})),
+                last_offset: Some(batch.offset as f64),
+                extra: Some(json!({"inode":identity.ino,"dev":identity.dev,"modelPolicy":policy,"skippingLine":batch.skipping_line})),
                 ..Default::default()
             },
         );

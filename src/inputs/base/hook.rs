@@ -10,6 +10,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::SystemTime;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub const OFFSET_MAP_EXTRA_KEY: &str = "hookLogOffsets";
 const RECENT_LOG_FILE_LIMIT: usize = 3;
@@ -41,11 +44,15 @@ pub trait HookBody: Send + Sync + 'static {
 
 pub struct HookAdapter<T: HookBody> {
     inner: T,
+    incomplete_tails: Mutex<BTreeMap<String, TailSignature>>,
 }
 
 impl<T: HookBody> HookAdapter<T> {
     pub fn new(inner: T) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            incomplete_tails: Mutex::new(BTreeMap::new()),
+        }
     }
 
     pub fn inner(&self) -> &T {
@@ -85,13 +92,14 @@ impl<T: HookBody> InputBody for HookAdapter<T> {
     }
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
-        collect_hook(&self.inner, rt).await
+        collect_hook(&self.inner, rt, &self.incomplete_tails).await
     }
 }
 
-pub async fn collect_hook<T: HookBody>(
+async fn collect_hook<T: HookBody>(
     body: &T,
     rt: &InputRuntime,
+    incomplete_tails: &Mutex<BTreeMap<String, TailSignature>>,
 ) -> anyhow::Result<Vec<AgentActivityEntry>> {
     let today = get_today_date_string();
     let mut entries = Vec::new();
@@ -102,6 +110,7 @@ pub async fn collect_hook<T: HookBody>(
         .unwrap_or(true);
     let file_names = list_hook_log_files(body.paths()).await;
     if file_names.is_empty() {
+        incomplete_tails.lock().unwrap().clear();
         return Ok(entries);
     }
     let persisted = persisted_offset_map(&state);
@@ -112,6 +121,12 @@ pub async fn collect_hook<T: HookBody>(
         seed_offset_map(body.paths(), &file_names, &state, &today).await
     };
     let candidates = candidate_file_names(body.paths(), &file_names, state.last_file(), &today);
+    incomplete_tails.lock().unwrap().retain(|path, _| {
+        Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| candidates.iter().any(|candidate| candidate == name))
+    });
     for log_file_name in &candidates {
         let log_file = Path::new(&body.paths().log_dir).join(log_file_name);
         let file_entries = collect_file(
@@ -119,6 +134,7 @@ pub async fn collect_hook<T: HookBody>(
             rt,
             log_file.to_string_lossy().as_ref(),
             offsets.get(log_file_name).copied().unwrap_or(0.0),
+            incomplete_tails,
         )
         .await?;
         offsets.insert(log_file_name.clone(), file_entries.offset);
@@ -194,22 +210,118 @@ struct FileEntries {
     offset: f64,
 }
 
+// File identity and nanosecond change times prevent same-size replacements or
+// rewrites from reusing an incomplete tail. The offset is part of the key so a
+// failed delivery/checkpoint rollback always causes another read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TailSignature {
+    offset: u64,
+    dev: u64,
+    ino: u64,
+    size: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    changed: Option<(i64, i64)>,
+}
+
+impl TailSignature {
+    pub(super) fn new(meta: &std::fs::Metadata, dev: u64, ino: u64, offset: u64) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            offset,
+            dev,
+            ino,
+            size: meta.len(),
+            modified: meta.modified().ok(),
+            created: meta.created().ok(),
+            #[cfg(unix)]
+            changed: Some((meta.ctime(), meta.ctime_nsec())),
+            #[cfg(not(unix))]
+            changed: None,
+        }
+    }
+
+    pub(super) fn from_open(file: &std::fs::File, offset: u64) -> std::io::Result<Self> {
+        let identity = crate::utils::file_identity::identity_from_open(file)?;
+        let signature = Self::new(&file.metadata()?, identity.dev, identity.ino, offset);
+        #[cfg(windows)]
+        let signature = {
+            let mut signature = signature;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+            };
+            let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle() as _,
+                    FileBasicInfo,
+                    (&mut info as *mut FILE_BASIC_INFO).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+            };
+            if ok != 0 {
+                signature.changed = Some((info.ChangeTime, 0));
+            }
+            signature
+        };
+        Ok(signature)
+    }
+
+    pub(super) fn completed_tail(
+        &self,
+        after: &Self,
+        bytes_read: usize,
+        consumed: usize,
+    ) -> Option<Self> {
+        if self.changed.is_none()
+            || self != after
+            || bytes_read as u64 != self.size.saturating_sub(self.offset)
+            || consumed >= bytes_read
+        {
+            return None;
+        }
+        let mut tail = self.clone();
+        tail.offset += consumed as u64;
+        Some(tail)
+    }
+}
+
 async fn collect_file<T: HookBody>(
     body: &T,
     rt: &InputRuntime,
     log_file: &str,
     start_offset: f64,
+    incomplete_tails: &Mutex<BTreeMap<String, TailSignature>>,
 ) -> anyhow::Result<FileEntries> {
     let mut entries = Vec::new();
-    let size = match tokio::fs::metadata(log_file).await {
-        Ok(meta) => meta.len(),
+    let path = log_file.to_owned();
+    let opened = tokio::task::spawn_blocking(move || {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        let signature = TailSignature::from_open(&file, start_offset as u64)?;
+        Ok::<_, std::io::Error>((file, signature))
+    })
+    .await
+    .map_err(std::io::Error::other)?;
+    let (file, mut signature) = match opened {
+        Ok(opened) => opened,
         Err(_) => {
+            incomplete_tails.lock().unwrap().remove(log_file);
             return Ok(FileEntries {
                 entries,
                 offset: start_offset,
             });
         }
     };
+    let size = signature.size;
     let mut offset = start_offset;
     if offset > 0.0 && (size as f64) < offset {
         rt.info(
@@ -224,17 +336,44 @@ async fn collect_file<T: HookBody>(
         offset = 0.0;
     }
     if (size as f64) <= offset {
+        incomplete_tails.lock().unwrap().remove(log_file);
         return Ok(FileEntries {
             entries,
             offset: size as f64,
         });
     }
+    signature.offset = offset as u64;
     let requested = size.saturating_sub(offset as u64);
     rt.with_accumulator(|acc| acc.observe_backlog(requested));
-    let read = jsonl::read_file_slice(log_file, offset as u64)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("hook log disappeared"))?;
+    {
+        let mut tails = incomplete_tails.lock().unwrap();
+        if tails.get(log_file) == Some(&signature) {
+            return Ok(FileEntries { entries, offset });
+        }
+        tails.remove(log_file);
+    }
     let started = InputRuntimeAccumulator::now();
+    let mut file = tokio::fs::File::from_std(file);
+    file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+    let mut bytes = vec![0_u8; requested as usize];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let count = file.read(&mut bytes[filled..]).await?;
+        if count == 0 {
+            break;
+        }
+        filled += count;
+    }
+    bytes.truncate(filled);
+    let after = TailSignature::from_open(&file.into_std().await, offset as u64)?;
+    let consumed = jsonl::last_newline(&bytes).map_or(0, |newline| newline + 1);
+    if let Some(tail) = signature.completed_tail(&after, bytes.len(), consumed) {
+        incomplete_tails
+            .lock()
+            .unwrap()
+            .insert(log_file.to_owned(), tail);
+    }
+    let read = jsonl::FileSlice { bytes, size };
     rt.with_accumulator(|acc| {
         acc.observe_read(
             read.bytes.len() as u64,
