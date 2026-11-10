@@ -726,8 +726,8 @@ impl Collector {
                 if contexts.is_empty() {
                     return Ok(());
                 }
-                let old = next.get(&key).cloned();
-                let mut cp = old.clone().unwrap_or(Value::Null);
+                let old = next.get(&key);
+                let mut cp = old.cloned().unwrap_or(Value::Null);
                 let saved = cp.get("receipts").and_then(Value::as_array);
                 let pending_stop = contexts.iter().any(|context| {
                     text(context, "event") == "Stop"

@@ -43,13 +43,13 @@ pub fn needs_cli_segment_fallback(entries: &[AgentActivityEntry]) -> bool {
         }
         let Some(step_id) = entries[group.matches[0]]
             .step_id
-            .clone()
+            .as_deref()
             .filter(|id| !id.is_empty())
         else {
             continue;
         };
         let Some(request) = entries.iter().find(|entry| {
-            is_name(entry, "llm.request") && entry.step_id.as_deref() == Some(step_id.as_str())
+            is_name(entry, "llm.request") && entry.step_id.as_deref() == Some(step_id)
         }) else {
             continue;
         };
@@ -372,7 +372,7 @@ fn response_groups(entries: &[AgentActivityEntry]) -> IndexMap<String, ResponseG
         let nanos = parse_nanos(&entry.time_unix_nano);
         let key = entry
             .response_id
-            .clone()
+            .as_deref()
             .filter(|id| !id.is_empty())
             .map(|id| format!("id:{id}"))
             .unwrap_or_else(|| format!("step:{}", entry.step_id.as_deref().unwrap_or("")));
@@ -466,17 +466,17 @@ fn apply_intercept_usage(entries: &mut [AgentActivityEntry], tokens: &[Intercept
     if tokens.is_empty() {
         return;
     }
-    let mut latest: HashMap<String, InterceptTokenData> = HashMap::new();
+    let mut latest: HashMap<&str, &InterceptTokenData> = HashMap::new();
     for token in tokens {
         if token.id.is_empty()
             || !(token.prompt_tokens > 0 || token.completion_tokens > 0 || token.total_tokens > 0)
         {
             continue;
         }
-        match latest.get(&token.id) {
+        match latest.get(token.id.as_str()) {
             Some(previous) if token.ts < previous.ts => {}
             _ => {
-                latest.insert(token.id.clone(), token.clone());
+                latest.insert(token.id.as_str(), token);
             }
         }
     }
@@ -485,8 +485,7 @@ fn apply_intercept_usage(entries: &mut [AgentActivityEntry], tokens: &[Intercept
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                is_name(entry, "llm.response")
-                    && entry.response_id.as_deref() == Some(response_id.as_str())
+                is_name(entry, "llm.response") && entry.response_id.as_deref() == Some(response_id)
             })
             .map(|(index, _)| index)
             .collect();
