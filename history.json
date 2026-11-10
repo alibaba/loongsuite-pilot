@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-10T09:17:03.474684Z",
+  "updated_at": "2026-11-10T09:22:31.273464Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -484,16 +484,43 @@
       "kind": "release",
       "version": "v1.15.2",
       "commit": "22f736ce4ebc2e17975e3eefaf13019c8ac8d31f",
-      "recorded_at": "2026-11-10T08:59:59Z",
-      "status": "pending",
+      "recorded_at": "2026-11-10T09:17:26.476190Z",
+      "status": "failed",
       "method_id": "github-full-pilot-qoder-native-v1",
-      "environment_id": "unknown",
-      "environment": {},
-      "run_url": "",
+      "environment_id": "befe15ae110d5baf6b32c132fd5371886046c709ccff35b74d9f48389cf52976",
+      "environment": {
+        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "runner_os": "Linux",
+        "runner_image": "ubuntu22/20261101.347.1",
+        "container_digest": "sha256:8700da48cc6592503feabf399d242414f932197c3b44f43970d2cbc5671e06b0",
+        "cgroup_version": "v2",
+        "kernel": "6.8.0-1070-azure",
+        "architecture": "x86_64",
+        "cpus": 4,
+        "node_version": "v22.23.4"
+      },
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42789057229",
       "workloads": {},
       "source": {
         "repository": "alibaba/loongsuite-pilot",
         "ref": "v1.15.2"
+      },
+      "provenance": {
+        "entry_sha256": "e857d2149d470f997b94645a0540c51045c1ecec3bc895de76dd1dfa48d55761",
+        "fixture_sha256": "55304f8b461341a0528497758654b55cac44bedadee20ff442eb70820c5fb72b",
+        "compiler": null,
+        "asset_sha256": "def57589327decc173bb9c47f1197001668942a7cf2ea586d13b99dac501aea8",
+        "release_url": "https://github.com/alibaba/loongsuite-pilot/releases/tag/v1.15.2",
+        "asset_id": 705147324,
+        "asset_name": "loongsuite-pilot.tar.gz",
+        "asset_size_bytes": 5137553,
+        "asset_url": "https://github.com/alibaba/loongsuite-pilot/releases/download/v1.15.2/loongsuite-pilot.tar.gz",
+        "checksum_source": "github_asset_digest"
+      },
+      "failure_category": "infrastructure",
+      "publication": {
+        "run_number": 7,
+        "run_id": "42789057229"
       }
     },
     {
