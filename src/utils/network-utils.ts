@@ -1,19 +1,27 @@
 import * as os from 'node:os';
 import { readInstalledVersion } from './fs-utils.js';
 
-export function resolveLocalIp(): string {
-  const interfaces = os.networkInterfaces();
+export function selectPrimaryIpv4(
+  interfaces: ReturnType<typeof os.networkInterfaces>,
+): { address: string; mac: string } {
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] ?? []) {
       if (!iface.internal && iface.family === 'IPv4') {
-        return iface.address;
+        const mac = iface.mac.trim().toLowerCase();
+        return { address: iface.address, mac: mac === '00:00:00:00:00:00' ? '' : mac };
       }
     }
   }
-  return '127.0.0.1';
+  return { address: '127.0.0.1', mac: '' };
 }
 
-export const LOCAL_IP = resolveLocalIp();
+export function resolveLocalIp(): string {
+  return selectPrimaryIpv4(os.networkInterfaces()).address;
+}
+
+const primaryIpv4 = selectPrimaryIpv4(os.networkInterfaces());
+export const LOCAL_IP = primaryIpv4.address;
+export const LOCAL_MAC = primaryIpv4.mac;
 
 export function buildUserAgent(dataDir: string): string {
   const version = readInstalledVersion(dataDir);

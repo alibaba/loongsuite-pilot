@@ -11,7 +11,8 @@ import type { AlarmManager } from '../metrics/alarm-manager.js';
 import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
-import { LOCAL_IP, buildUserAgent } from '../utils/network-utils.js';
+import { LOCAL_IP, LOCAL_MAC, buildUserAgent } from '../utils/network-utils.js';
+import { LOCAL_SN } from '../utils/host-asset.js';
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
@@ -340,7 +341,11 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
-    const tags: Record<string, string>[] = [{ __hostname__: HOSTNAME }];
+    const tags: Record<string, string>[] = [
+      { __hostname__: HOSTNAME },
+      ...(LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
+      ...(LOCAL_SN ? [{ __sn__: LOCAL_SN }] : []),
+    ];
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
     return tags;
@@ -354,7 +359,11 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
-    const tags: Record<string, string> = { __hostname__: HOSTNAME };
+    const tags: Record<string, string> = {
+      __hostname__: HOSTNAME,
+      ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+      ...(LOCAL_SN ? { __sn__: LOCAL_SN } : {}),
+    };
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
     return tags;
@@ -734,7 +743,11 @@ export class SlsFlusher extends BaseFlusher {
             {
               topic,
               source: LOCAL_IP,
-              tags: { __hostname__: HOSTNAME },
+              tags: {
+                __hostname__: HOSTNAME,
+                ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+                ...(LOCAL_SN ? { __sn__: LOCAL_SN } : {}),
+              },
               userAgent: this.userAgent,
             },
           );

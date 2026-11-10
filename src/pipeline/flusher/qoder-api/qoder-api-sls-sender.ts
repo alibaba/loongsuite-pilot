@@ -5,7 +5,8 @@ import {
   persistFailedLogs,
   type SlsTransportConfig,
 } from '../../../flushers/sls-transport.js';
-import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
+import { LOCAL_MAC, buildUserAgent } from '../../../utils/network-utils.js';
+import { LOCAL_SN } from '../../../utils/host-asset.js';
 import { createLogger } from '../../../utils/logger.js';
 import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
@@ -38,6 +39,8 @@ export class QoderApiSlsSender {
   private readonly failedLogDir: string;
   private readonly userAgent: string;
   private readonly hostname: string;
+  private readonly mac: string;
+  private readonly sn: string;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushing = false;
@@ -56,6 +59,8 @@ export class QoderApiSlsSender {
     this.failedLogDir = opts.failedLogDir;
     this.userAgent = buildUserAgent(opts.dataDir);
     this.hostname = os.hostname();
+    this.mac = LOCAL_MAC;
+    this.sn = LOCAL_SN;
   }
 
   start(): void {
@@ -104,6 +109,8 @@ export class QoderApiSlsSender {
               source: this.hostname,
               tags: {
                 __hostname__: this.hostname,
+                ...(this.mac ? { __mac__: this.mac } : {}),
+                ...(this.sn ? { __sn__: this.sn } : {}),
                 pipeline_type: 'qoder-api',
               },
               userAgent: this.userAgent,
