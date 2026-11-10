@@ -33,6 +33,19 @@ function append(rows) { fs.appendFileSync(transcript, rows.map(row => JSON.strin
 function wake(event = 'Stop', extra = {}) {
   expect(publishQoderWakeup({ session_id: 'session', transcript_path: transcript, hook_event_name: event, cwd: '/tmp/test', ...extra }, { dataDir, agentId })).toBe(true);
 }
+function exit(index) {
+  return { type: 'user', uuid: 'native-cli-exit-' + index, entrypoint: 'cli', userType: 'external',
+    timestamp: new Date(base + index * 10_000 + 500).toISOString(), message: { role: 'user',
+      content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } };
+}
+function wakeWithTask(taskId) {
+  const previous = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = `multica.task.id=${taskId},multica.workspace.id=workspace-1`;
+  try { wake(); } finally {
+    if (previous === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+    else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previous;
+  }
+}
 async function collect() {
   const batch = await collector.collect(state);
   state = batch.state;
@@ -131,18 +144,6 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
   });
 
   it('uses the nearest terminal Hook attributes when Stop observes trailing CLI controls', async () => {
-    const exit = index => ({ type: 'user', uuid: 'native-cli-exit-' + index, entrypoint: 'cli', userType: 'external',
-      timestamp: new Date(base + index * 10_000 + 500).toISOString(), message: { role: 'user',
-        content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } });
-    const wakeWithTask = taskId => {
-      const previous = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
-      process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = `multica.task.id=${taskId},multica.workspace.id=workspace-1`;
-      try { wake(); } finally {
-        if (previous === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
-        else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previous;
-      }
-    };
-
     write([...turn(0), { type: 'last-prompt' }, exit(0)]);
     wakeWithTask('task-1');
     append([...turn(1), { type: 'last-prompt' }, exit(1)]);
@@ -153,6 +154,25 @@ describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
     expect(userTexts(first)).toEqual(['prompt 0']);
     expect(userTexts(second)).toEqual(['prompt 1']);
     expect(records.every(record => record['multica.workspace.id'] === 'workspace-1')).toBe(true);
+  });
+
+  it.each([
+    ['trailing CLI controls', () => [...turn(1), { type: 'last-prompt' }, exit(1)]],
+    ['the next real prompt', () => turn(1, { terminal: false })],
+  ])('does not borrow a later Stop context when the earlier turn ends with %s', async (_name, firstTurn) => {
+    write(turn(0)); wake(); await settle();
+    append(firstTurn());
+    append([...turn(2), { type: 'last-prompt' }, exit(2)]);
+    wakeWithTask('task-2');
+
+    const records = await settle();
+    expect(userTexts(records)).toEqual(['prompt 1', 'prompt 2']);
+    const firstTurnId = records.find(record => userTexts([record]).includes('prompt 1'))['gen_ai.turn.id'];
+    const secondTurnId = records.find(record => userTexts([record]).includes('prompt 2'))['gen_ai.turn.id'];
+    expect(records.filter(record => record['gen_ai.turn.id'] === firstTurnId)
+      .every(record => record['multica.task.id'] === undefined)).toBe(true);
+    expect(records.filter(record => record['gen_ai.turn.id'] === secondTurnId)
+      .every(record => record['multica.task.id'] === 'task-2')).toBe(true);
   });
 
   it('excludes local CLI controls from an active turn without dropping a later genuine command prompt', async () => {
