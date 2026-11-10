@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
@@ -170,41 +171,38 @@ export class QoderWorkTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
-
-    if (offset > 0 && stat.size < offset) {
-      this.logger.info('file truncated, resetting offset', { file: logFile });
-      offset = 0;
+    const sameFile = state.lastFile === logFileName
+      && (state.extra?.hookInode === undefined || state.extra.hookInode === stat.ino);
+    const savedOffset = sameFile ? state.lastOffset ?? 0 : 0;
+    const reset = stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (stat.size <= offset) {
+      if (state.lastFile === logFileName && (reset || !sameFile || state.extra?.hookInode === undefined)) {
+        this.setState({ lastOffset: offset, extra: { ...state.extra,
+          hookInode: stat.ino, hookSkippingLine: sameFile && !reset && state.extra?.hookSkippingLine === true } });
+      }
+      return [];
     }
-    if (stat.size <= offset) return [];
 
-    const handle = await fs.open(logFile, 'r');
+    const batch = await readBoundedLineTail(logFile, stat, offset,
+      sameFile && !reset && state.extra?.hookSkippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work Hook line skipped', { file: logFile, offset });
+    if (batch.offset !== savedOffset || reset || !sameFile || state.extra?.hookInode === undefined) {
+      this.setState({ lastFile: logFileName, lastOffset: batch.offset,
+        extra: { hookInode: stat.ino, hookSkippingLine: batch.skippingLine } });
+    }
+
     const entries: AgentActivityEntry[] = [];
-    try {
-      const maxReadSize = 16 * 1024 * 1024;
-      const readSize = Math.min(stat.size - offset, maxReadSize);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      let text = buf.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
+    for (const line of batch.text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line) as AgentActivityEntry;
+        delete record.version;
+        if (record['event.name']) entries.push(record);
+      } catch {
+        this.logger.warn('invalid JSONL line');
       }
-      this.setState({ lastFile: logFileName, lastOffset: offset + consumedBytes });
-
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const record = JSON.parse(line) as AgentActivityEntry;
-          delete record.version;
-          if (record['event.name']) entries.push(record);
-        } catch {
-          this.logger.warn('invalid JSONL line');
-        }
-      }
-    } finally {
-      await handle.close();
     }
 
     return entries;
@@ -293,48 +291,34 @@ export class QoderWorkTraceInput extends BaseInput {
       return;
     }
 
-    const prevState = this.stateStore.get(fileStateKey);
-    const prevInode = (prevState.extra as { inode?: number } | undefined)?.inode;
-    const currentInode = (stat as unknown as { ino: number }).ino;
-
-    if (prevInode !== undefined && prevInode !== currentInode) {
-      this.stateStore.setOffset(fileStateKey, 0);
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
-    } else if (prevInode === undefined) {
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
+    const previous = this.stateStore.get(fileStateKey);
+    const savedOffset = previous.lastOffset ?? 0;
+    const reset = (previous.extra?.inode !== undefined && previous.extra.inode !== stat.ino)
+      || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (stat.size <= offset) {
+      if (reset || previous.extra?.inode === undefined) {
+        this.stateStore.update(fileStateKey, { lastOffset: offset, extra: { inode: stat.ino, skippingLine: false } });
+      }
+      return;
     }
 
-    let offset = this.stateStore.getOffset(fileStateKey);
-    if (offset > 0 && stat.size < offset) offset = 0; // truncated
-    if (stat.size <= offset) return;
-
-    const handle = await fs.open(filePath, 'r');
-    try {
-      const maxReadSize = 16 * 1024 * 1024;
-      const readSize = Math.min(stat.size - offset, maxReadSize);
-      const buf = Buffer.alloc(readSize);
-      await handle.read(buf, 0, readSize, offset);
-      let text = buf.toString('utf-8');
-
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNL = text.lastIndexOf('\n');
-        if (lastNL >= 0) { text = text.substring(0, lastNL); consumedBytes = Buffer.byteLength(text, 'utf-8') + 1; }
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work segment line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
+      this.stateStore.update(fileStateKey, { lastOffset: batch.offset,
+        extra: { inode: stat.ino, skippingLine: batch.skippingLine } });
+    }
+    for (const line of batch.text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line) as SegmentEvent;
+        this.handleSegmentEvent(sessionId, event);
+      } catch {
+        this.logger.warn('invalid segments JSONL line');
       }
-      this.stateStore.setOffset(fileStateKey, offset + consumedBytes);
-      this.stateStore.update(fileStateKey, { extra: { inode: currentInode } });
-
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line) as SegmentEvent;
-          this.handleSegmentEvent(sessionId, event);
-        } catch {
-          this.logger.warn('invalid segments JSONL line');
-        }
-      }
-    } finally {
-      await handle.close();
     }
   }
 
@@ -659,14 +643,13 @@ export class QoderWorkTraceInput extends BaseInput {
     const currentInode = (stat as unknown as { ino: number }).ino;
     const previous = this.stateStore.get(stateKey);
     const previousInode = (previous.extra as { inode?: number } | undefined)?.inode;
-    if (previousInode !== undefined && previousInode !== currentInode) {
-      this.stateStore.setOffset(stateKey, 0);
+    const replaced = previousInode !== undefined && previousInode !== currentInode;
+    const savedOffset = previous.lastOffset ?? 0;
+    const reset = replaced || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (reset && stat.size === 0) {
+      this.stateStore.update(stateKey, { lastOffset: 0, extra: { skippingLine: false } });
     }
-
-    let offset = previousInode !== undefined && previousInode !== currentInode
-      ? 0
-      : this.stateStore.getOffset(stateKey);
-    if (offset > 0 && stat.size < offset) offset = 0;
     if (stat.size <= offset) {
       if (previousInode !== currentInode) {
         this.stateStore.update(stateKey, { extra: { inode: currentInode } });
@@ -674,28 +657,16 @@ export class QoderWorkTraceInput extends BaseInput {
       return;
     }
 
-    const handle = await fs.open(filePath, 'r');
-    let text = '';
-    try {
-      const readSize = Math.min(stat.size - offset, 16 * 1024 * 1024);
-      const buffer = Buffer.alloc(readSize);
-      await handle.read(buffer, 0, readSize, offset);
-      text = buffer.toString('utf-8');
-      let consumedBytes = readSize;
-      if (readSize < stat.size - offset) {
-        const lastNewLine = text.lastIndexOf('\n');
-        if (lastNewLine >= 0) {
-          text = text.substring(0, lastNewLine);
-          consumedBytes = Buffer.byteLength(text, 'utf-8') + 1;
-        }
-      }
-      this.stateStore.setOffset(stateKey, offset + consumedBytes);
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
-    } finally {
-      await handle.close();
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return;
+    if (batch.beganSkip) this.logger.warn('oversized Qoder Work SDK line skipped', { file: filePath, offset });
+    if (batch.offset !== savedOffset || reset || previous.extra?.inode === undefined) {
+      this.stateStore.update(stateKey, { lastOffset: batch.offset,
+        extra: { inode: currentInode, skippingLine: batch.skippingLine } });
     }
 
-    for (const line of text.split('\n')) {
+    for (const line of batch.text.split('\n')) {
       if (!line.trim()) continue;
       const event = parseSdkLogLine(line);
       if (event) this.handleSdkTokenEvent(event);
