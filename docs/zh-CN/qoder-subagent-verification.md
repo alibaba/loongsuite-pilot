@@ -22,7 +22,9 @@ IDE 的 SQLite `chat_session` / `chat_record` 已提供 `parent_session_id`、`p
 
 已确认的结构为 `父 AGENT → 委派 TOOL → 子 AGENT → STEP → LLM/TOOL`。子虚拟 ENTRY 对转换透明；父工具使用预留的实际 Span ID，耗时到原生工具返回为止。子工作只汇总自己的模型用量。
 
-启用上游关联时，主输入先通过与 InputManager 共用的 TraceLinker 确认上下文，再登记委派。子工作继承这个已确认的 Trace，不消耗主 session 的额外关联记录。
+启用上游关联时，在确认首次原生委派或发布完整 turn 时，通过与 InputManager 共用的 TraceLinker 确认上下文。读取首条 prompt 不会提前固定上下文；发布前探测不缓存 miss，允许关联文件晚到。确认委派后，其上下文以 `agent.qoder.trace_context_locked=true` 固定并随 checkpoint 恢复，后来的文件关联不再将已发出的父子工作拆到其他 Trace。子工作继承该上下文，不消耗主 session 的额外关联记录。
+
+早发 invoke 与完整 turn 共用 requestSetId / 字节水位选择 Hook 上下文。同一原生 session 中排队的后续业务调用，不得覆盖先前委派的身份或自定义属性。Span ID 对重复/缺失的 step key 使用确定性出现序号，兼容同一步多次 LLM 与 response-only fallback；真实委派工具的预留 ID 保持不变。
 
 ## 日志语义
 
@@ -45,7 +47,7 @@ invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使
 
 使用现有 `qoderTranscripts` checkpoint 保存来源偏移、当前工作上下文和委派索引。重启后继续读取未结束 turn，已提交事件不重放；半行、临时读取失败和晚到子文件保留原状态。来源出现顺序不影响可靠关联。
 
-未找到父工具时最多等待 60 秒；未变化的待关联文件不会重复读取正文。到期后明确诊断并保留独立子执行，不猜父级，也不在导出后重发 Span 伪装成补挂。委派索引最多保留 4096 项、最长 7 天；容量不足时先回收子执行已结束且结果已交付的关系，全部仍未完成时报告 `subagent-link-capacity`，无法确认的关系按上述规则降级。扫描、单 turn 和正文缓存继续使用原 tailer 的容量限制。
+未找到父工具时，按原生父 transcript 的精确来源键安排优先扫描，并在每轮最多 8 个优先来源、队列最多 128 项的预算内重试；历史目录的普通轮转继续推进。60 秒降级窗口至少包含一次针对该父来源的扫描尝试，重启后也先尝试父来源；未变化的待关联文件不会重复读取正文。到期仍无法确认父级时保留独立子执行，诊断 `subagent-parent-unavailable-independent` 携带本 collector 实例的累计 `fallbackCount`，不猜父级，也不在导出后重发 Span 伪装成补挂。委派索引最多保留 4096 项、最长 7 天；容量不足时先回收子执行已结束且结果已交付的关系，全部仍未完成时报告 `subagent-link-capacity`。扫描、单 turn 和正文缓存继续使用原 tailer 的容量限制。
 
 输入与各输出保留现有的接收、重试与 checkpoint 契约。此改动不承诺跨输出端到端恰好一次，也不自动修复历史数据。
 

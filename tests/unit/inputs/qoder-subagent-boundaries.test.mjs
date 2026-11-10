@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { QoderTranscriptCollector } from '../../../assets/hooks/qoder/transcript-collector.mjs';
-import { publishQoderWakeup, qoderWakeupRoot } from '../../../assets/hooks/qoder/hook-wakeup.mjs';
+import { publishQoderWakeup, qoderWakeupRoot, qoderSourceKey } from '../../../assets/hooks/qoder/hook-wakeup.mjs';
 import { qoderTaskNotification, QoderSubagentLinks } from '../../../assets/hooks/qoder/subagent-links.mjs';
 
 const session = 'synthetic-session';
@@ -19,6 +19,23 @@ async function write(file, rows) { await fs.mkdir(path.dirname(file), { recursiv
 function wake(id, event) { return publishQoderWakeup({ session_id: session, transcript_path: parent,
   hook_event_name: event, cwd: root, ...(id ? { agent_id: id, agent_type: 'reader' } : {}) }, { dataDir: root, agentId: 'qoder' }); }
 async function collect() { const batch = await collector.collect(state); state = batch.state; return batch; }
+async function crowdedDiscovery() {
+  const historical = path.join(root, 'historical.jsonl'); await fs.writeFile(historical, '');
+  const names = [];
+  for (let i = 0; i < 420; i++) {
+    const sessionId = `history-${i}`; const key = qoderSourceKey(sessionId, historical);
+    const directory = path.join(qoderWakeupRoot(root, 'qoder'), key);
+    await fs.mkdir(path.join(directory, 'events'), { recursive: true });
+    await fs.writeFile(path.join(directory, 'source.json'), JSON.stringify({ schema: 1, key,
+      agentId: 'qoder', sessionId, transcriptPath: historical, observedSize: 0 }));
+    names.push(key);
+  }
+  return () => {
+    const queue = [qoderSourceKey(session, child), ...names, qoderSourceKey(session, parent)];
+    let index = 0;
+    collector.discovery = { async read() { const name = queue[index++]; return name ? { name, isDirectory: () => true } : null; }, async close() {} };
+  };
+}
 beforeEach(async () => {
   root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-boundary-')));
   parent = path.join(root, `${session}.jsonl`); child = path.join(root, session, 'subagents/agent-child.jsonl');
@@ -28,6 +45,49 @@ beforeEach(async () => {
 afterEach(async () => { collector.stop(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('Qoder native delegation boundaries', () => {
+  it('retries a pending invoke after its context arrives and a scan validation fails', async () => {
+    await fs.writeFile(parent, ''); wake(null, 'SubagentStart');
+    await write(parent, [user('parent'), model('dispatch', [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: 'task' } }], 'tool_use')]);
+    expect((await collect()).records).toEqual([]);
+    wake(null, 'PreToolUse');
+    const scan = collector.scanSource.bind(collector);
+    let fail = true;
+    collector.scanSource = async (...args) => {
+      const records = await scan(...args);
+      if (fail) { fail = false; throw new Error('transient-read-validation'); }
+      return records;
+    };
+    expect((await collect()).records).toEqual([]);
+    const accepted = (await collect()).records;
+    expect(accepted.filter(record => record['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(1);
+    expect((await collect()).records).toEqual([]);
+  });
+
+  it.each([false, true])('prioritizes an observed parent behind 420 historical sources (restart=%s)', async restart => {
+    await write(parent, [user('parent'), model('dispatch', [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: 'child task' } }], 'tool_use'),
+      { type: 'user', timestamp: new Date(epoch + 200).toISOString(), toolUseResult: { kind: 'agent-result', state: 'completed', agentId: 'child' },
+        message: { content: [{ type: 'tool_result', tool_use_id: 'delegate', content: 'done' }] } },
+      model('parent-end', [{ type: 'text', text: 'parent done' }]), ...end]);
+    await write(child, [user('child-input', 'delegate'), model('child-end', [{ type: 'text', text: 'child done' }]), ...end]);
+    wake('child', 'SubagentStop');
+    const resetDiscovery = await crowdedDiscovery(); resetDiscovery();
+    let visited = 0;
+    const metadataFor = collector.metadataFor.bind(collector);
+    collector.metadataFor = directory => { visited++; return metadataFor(directory); };
+    const records = [...(await collect()).records];
+    expect(visited).toBeLessThanOrEqual(72);
+    if (restart) {
+      collector.stop(); clock += 61_000;
+      collector = new QoderTranscriptCollector({ dataDir: root, agentId: 'qoder', now: () => clock, stableMs: 0, settleMs: 0 });
+      resetDiscovery();
+    }
+    for (let i = 0; i < 3; i++) { clock += 10_000; records.push(...(await collect()).records); }
+    const work = records.filter(row => row['agent.qoder.subagent_id'] === 'child');
+    expect(work.length).toBeGreaterThan(0);
+    expect(work.every(row => row['gen_ai.agent.parent.invocation.id'])).toBe(true);
+    expect(work.every(row => row['gen_ai.agent.parent.id'] === session)).toBe(true);
+  });
+
   it('discovers files before creation without copying the parent session into an invented child session', async () => {
     expect(wake('child', 'SubagentStart')).toBe(true);
     const directories = await fs.readdir(qoderWakeupRoot(root, 'qoder'));
@@ -55,6 +115,8 @@ describe('Qoder native delegation boundaries', () => {
   });
 
   it('bounds missing-parent waiting, retains child execution, and never invents a relation', async () => {
+    const warnings = [];
+    collector.warn = (_message, fields) => warnings.push(fields);
     await write(child, [user('work', 'absent-parent-call'), model('child-result', [{ type: 'text', text: 'child output' }]), ...end]);
     wake('child', 'SubagentStop');
     expect((await collect()).records).toEqual([]);
@@ -64,6 +126,7 @@ describe('Qoder native delegation boundaries', () => {
     for (let i = 0; i < 3; i++) records.push(...(await collect()).records);
     expect(records.some(row => row['event.name'] === 'llm.response')).toBe(true);
     expect(records.every(row => row['gen_ai.agent.parent.invocation.id'] === undefined)).toBe(true);
+    expect(warnings.find(fields => fields.reason === 'subagent-parent-unavailable-independent')?.fallbackCount).toBe(1);
     collector.stop(); collector = new QoderTranscriptCollector({ dataDir: root, agentId: 'qoder', now: () => clock });
     expect((await collect()).records).toEqual([]);
   });

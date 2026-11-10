@@ -70,18 +70,24 @@ export class QoderSubagentLinks {
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  register(source, checkpoint, row) {
-    const added = [];
+  calls(source, row) {
     // IDE and CN have separate source contracts. Only activate this adapter
     // for the international CLI protocol, including hosts of that runtime.
-    if (source.agentId !== 'qoder' || row?.entrypoint !== 'cli'
-      || row.type !== 'assistant' || !checkpoint.turnId || !checkpoint.traceContext) return added;
-    for (const block of blocks(row)) {
-      if (!['Agent', 'Task'].includes(block?.name) || !text(block.id)
-        || !block.input || typeof block.input !== 'object') continue;
+    if (source.agentId !== 'qoder' || row?.entrypoint !== 'cli' || row.type !== 'assistant') return [];
+    return blocks(row).filter(block => ['Agent', 'Task'].includes(block?.name) && text(block.id)
+      && block.input && typeof block.input === 'object');
+  }
+
+  register(source, checkpoint, row) {
+    const added = [];
+    if (!checkpoint.turnId || !checkpoint.traceContext) return added;
+    for (const block of this.calls(source, row)) {
       const id = qoderDigest(['qoder-delegation', source.sessionId,
         source.subagentId ?? source.sessionId, checkpoint.turnId, block.id]).slice(0, 32);
-      if (this.state[id]) continue;
+      if (this.state[id]) {
+        if (!this.state[id].invokeEmitted) added.push({ link: this.state[id], block });
+        continue;
+      }
       if (this.size >= MAX_DELEGATIONS) {
         const finished = Object.values(this.state).find(link => link.resultEmitted && link.childComplete);
         if (!finished) { this.warn(source.key, 'subagent-link-capacity'); continue; }
@@ -112,6 +118,18 @@ export class QoderSubagentLinks {
     return this.find(source.sessionId, prompt.parent_tool_use_id, text(prompt.parent_agent_id));
   }
 
+  hasPublishedWork(source, turnId) {
+    return Object.values(this.state).some(link => link.sessionId === source.sessionId
+      && link.agentId === (source.subagentId ?? source.sessionId) && link.turnId === turnId
+      && (link.invokeEmitted || link.childComplete));
+  }
+
+  hasPendingInvoke(source, turnId) {
+    return Object.values(this.state).some(link => link.sessionId === source.sessionId
+      && link.agentId === (source.subagentId ?? source.sessionId) && link.turnId === turnId
+      && !link.invokeEmitted);
+  }
+
   decorate(source, checkpoint, rows, records, complete = false) {
     const incoming = checkpoint.incoming;
     if (complete && incoming && this.state[incoming.id] && !this.state[incoming.id].childComplete) {
@@ -130,6 +148,7 @@ export class QoderSubagentLinks {
     }
     for (const record of records) {
       record.trace_id = checkpoint.traceContext.traceId;
+      if (checkpoint.traceContextLocked) record['agent.qoder.trace_context_locked'] = true;
       record['gen_ai.agent.id'] = source.subagentId ?? source.sessionId;
       if (source.subagentId) record['agent.qoder.subagent_id'] = source.subagentId;
       if (source.subagentName) record['gen_ai.agent.name'] = source.subagentName;

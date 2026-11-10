@@ -101,8 +101,14 @@ export function prepareQoderTurn(
   const stableId = (kind: string, key?: unknown) => createHash('sha256')
     .update(JSON.stringify(['qoder-span', first?.['gen_ai.session.id'], first?.['gen_ai.turn.id'],
       first?.['gen_ai.agent.id'], kind, key])).digest('hex').slice(0, 16);
+  const usedIds = new Set<string>();
   function reserved<T>(id: string, call: () => T): T {
-    idGenerator.reserve(id);
+    // Shared/fallback producers may omit step identity or emit several LLMs
+    // within one step. Keep every occurrence unique without changing replay IDs.
+    let unique = id;
+    for (let ordinal = 1; usedIds.has(unique); ordinal++) unique = stableId('occurrence', [id, ordinal]);
+    usedIds.add(unique);
+    idGenerator.reserve(unique);
     try { return call(); } finally { idGenerator.clear(); }
   }
   function attributes(inv: { passthroughAttributes?: Record<string, unknown> }, own: Record<string, unknown>) {

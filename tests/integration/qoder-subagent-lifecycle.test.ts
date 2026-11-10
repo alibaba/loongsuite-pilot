@@ -95,6 +95,79 @@ async function spansFor(entries: AgentActivityEntry[]) {
 }
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
+  it.each([false, true])('keeps already published delegation in one trace when correlation arrives later (restart=%s)', async restart => {
+    const h = await harness(agentId, true);
+    await h.write(null, [prompt('published-parent', 0), ...dispatch('published-call', 1, 'published-child')]);
+    await h.start(); await h.cycle();
+    const early = h.entries().find(entry => entry['event.name'] === 'gen_ai.agent.invoke')!;
+    expect(early).toBeDefined();
+    const originalTrace = early.trace_id;
+    if (restart) { await h.stop(); await h.start(); }
+    await fs.mkdir(path.join(h.root, 'acp-correlate'));
+    await fs.writeFile(path.join(h.root, 'acp-correlate', `${session}.jsonl`), jsonl([
+      { type: 'session', traceparent: `00-${'f'.repeat(32)}-${'e'.repeat(16)}-01` },
+    ]));
+    await h.write(null, end('published-parent-end', 4), true);
+    await h.write('published-child', [prompt('published-child-input', 1.1, 'published-call', 'published-child'), ...end('published-child-end', 3)]);
+    await h.cycle(); await h.stop();
+    expect(new Set(h.entries().map(entry => entry.trace_id))).toEqual(new Set([originalTrace]));
+    const spans = await spansFor(h.entries());
+    expect(spans.every(span => span.spanContext().traceId === originalTrace)).toBe(true);
+    const child = spans.find(span => span.attributes['gen_ai.agent.id'] === 'published-child'
+      && span.attributes['gen_ai.span.kind'] === 'AGENT')!;
+    expect(spans.some(span => span.spanContext().spanId === child.parentSpanId)).toBe(true);
+  });
+
+  it.each([false, true])('resolves upstream records arriving after the first prompt (restart=%s)', async restart => {
+    const h = await harness(agentId, true);
+    await h.write(null, [prompt('late-parent', 0)]);
+    await h.start(); await h.cycle();
+    expect(h.entries()).toEqual([]);
+    if (restart) { await h.stop(); await h.start(); }
+    const traceId = 'd'.repeat(32);
+    await fs.mkdir(path.join(h.root, 'acp-correlate'));
+    await fs.writeFile(path.join(h.root, 'acp-correlate', `${session}.jsonl`), jsonl([
+      { type: 'session', traceparent: `00-${traceId}-${'e'.repeat(16)}-01` },
+    ]));
+    await h.write(null, [...dispatch('late-call', 1, 'late-child'), ...end('late-parent-end', 4)], true);
+    await h.write('late-child', [prompt('late-child-input', 1.1, 'late-call', 'late-child'), ...end('late-child-end', 3)]);
+    await h.cycle(); await h.stop();
+    const entries = h.entries();
+    expect(entries.filter(entry => entry['gen_ai.agent.id'] === 'late-child').length).toBeGreaterThan(0);
+    expect(new Set(entries.map(entry => entry.trace_id))).toEqual(new Set([traceId]));
+    expect((await spansFor(entries)).every(span => span.spanContext().traceId === traceId)).toBe(true);
+  });
+
+  it('uses the owning hook context for an early invoke when two business sessions queue in one native session', async () => {
+    const h = await harness(agentId);
+    const previous = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+    const delegated = dispatch('identity-call', 1, 'identity-child');
+    try {
+      process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = 'gen_ai.session.id=business-first';
+      await fs.writeFile(h.parent, jsonl([prompt('identity-parent', 0), delegated[0],
+        { type: 'progress', timestamp: at(1.01), data: { hookEvent: 'SubagentStart' } }]));
+      expect(publishQoderWakeup({ session_id: session, transcript_path: h.parent,
+        hook_event_name: 'SubagentStart', agent_id: 'identity-child', cwd: h.root,
+      }, { dataDir: h.root, agentId })).toBe(true);
+      await h.write(null, [delegated[1], ...end('identity-parent-end', 3)], true);
+      await h.write('identity-child', [prompt('identity-child-input', 1.1, 'identity-call', 'identity-child'), ...end('identity-child-end', 2)]);
+      process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = 'gen_ai.session.id=business-second';
+      await h.write(null, [prompt('later-parent', 4), ...end('later-parent-end', 5)], true);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+      else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previous;
+    }
+    await h.start(); await h.cycle(); await h.stop();
+    const work = h.entries().filter(entry => entry['gen_ai.tool.call.id'] === 'identity-call');
+    for (const name of ['gen_ai.agent.invoke', 'tool.call', 'tool.result', 'gen_ai.agent.result']) {
+      const event = work.find(entry => entry['event.name'] === name)!;
+      expect(event).toBeDefined();
+      expect(event['gen_ai.session.id']).toBe('business-first');
+    }
+    expect(new Set(work.map(entry => entry['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(work.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(1);
+  });
+
   it('joins parallel children to actual TOOL spans and preserves native sessions, usage, audit IDs and masking', async () => {
     const h = await harness(agentId);
     await h.write(null, [prompt('parent', 0), ...dispatch('call-a', 1, 'child-a'), ...dispatch('call-b', 2, 'child-b'), ...end('parent-end', 6, 17)]);

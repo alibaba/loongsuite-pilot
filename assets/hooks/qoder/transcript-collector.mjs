@@ -43,6 +43,8 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)
 const noticeVersion = (value, stat) => typeof value.observationId === 'string' && value.observationId.length <= 128
   ? `id:${value.observationId}` : `stat:${digest([stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs])}`;
 const noticeName = name => /^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd|SubagentStart|SubagentStop)-[a-f0-9]{24}\.json$/.test(name);
+const MAX_PRIORITY_SOURCES = 128;
+const PRIORITY_SOURCES_PER_CYCLE = 8;
 
 async function openRegular(file) {
   // A file can become a FIFO between the path stat and open. O_NONBLOCK makes
@@ -132,6 +134,9 @@ export class QoderTranscriptCollector {
     this.promptInspectionSequence = 0;
     this.discovery = null;
     this.pendingSources = [];
+    this.prioritySources = new Map();
+    this.parentAttempts = new Map();
+    this.subagentParentFallbacks = 0;
     this.cleanupRotation = 0;
     this.stopped = false;
     this.inFlight = null;
@@ -149,15 +154,43 @@ export class QoderTranscriptCollector {
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
+    this.prioritySources.clear();
+    this.parentAttempts.clear();
     if (directory) void directory.close().catch(() => {});
   }
 
-  report(key, reason) {
+  report(key, reason, fields = {}) {
     const id = key + ':' + reason;
     if (this.now() - (this.warned.get(id) ?? -Infinity) < 60_000) return;
     if (this.warned.size >= MAX_WARNING_KEYS) this.warned.delete(this.warned.keys().next().value);
     this.warned.set(id, this.now());
-    this.warn('Qoder transcript collection deferred', { source: key, reason });
+    this.warn(reason === 'subagent-parent-unavailable-independent'
+      ? 'Qoder subagent parent unresolved; exporting independent work' : 'Qoder transcript collection deferred',
+    { source: key, reason, ...fields });
+  }
+
+  parentKey(source) {
+    return source.subagentId && typeof source.parentTranscriptPath === 'string'
+      && path.isAbsolute(source.parentTranscriptPath) && source.parentTranscriptPath !== source.transcriptPath
+      ? qoderSourceKey(source.sessionId, source.parentTranscriptPath) : undefined;
+  }
+
+  prioritizeParent(source) {
+    const parent = this.parentKey(source);
+    if (!parent) return;
+    for (const key of [parent, source.key]) {
+      if (this.prioritySources.has(key)) continue;
+      if (this.prioritySources.size >= MAX_PRIORITY_SOURCES) {
+        this.report(source.key, 'subagent-priority-capacity');
+        continue; // Preserve FIFO progress; later natural visits can retry.
+      }
+      this.prioritySources.set(key, { name: key });
+    }
+  }
+
+  parentAttempted(source) {
+    const key = this.parentKey(source);
+    return !key || this.parentAttempts.has(key);
   }
 
   collect(state = {}) {
@@ -220,7 +253,11 @@ export class QoderTranscriptCollector {
       const capacity = await smallJson(path.join(this.root, '..', 'capacity.json'));
       if (capacity.observedAt > this.now() - 60_000) this.report('wakeup', capacity.reason);
     } catch {}
-    const entries = await this.sources();
+    let entries = await this.sources();
+    const priority = [...this.prioritySources.values()].slice(0, PRIORITY_SOURCES_PER_CYCLE);
+    const priorityKeys = new Set(priority.map(entry => entry.name));
+    for (const key of priorityKeys) this.prioritySources.delete(key);
+    if (priority.length) entries = [...priority, ...entries.filter(entry => !priorityKeys.has(entry.name))];
     if (!entries.length) return { records, state: next, metrics: this.metrics, changed };
     // One unavailable owner must not consume every cycle's shared DB budget.
     // Choose fairly from this bounded discovery batch, even if that source's
@@ -238,6 +275,10 @@ export class QoderTranscriptCollector {
       if (this.stopped || this.remainingBytes <= 0 || records.length >= 4096) break;
       visited++;
       const key = entry.name;
+      if (priorityKeys.has(key)) {
+        if (this.parentAttempts.size >= MAX_PRIORITY_SOURCES) this.parentAttempts.delete(this.parentAttempts.keys().next().value);
+        this.parentAttempts.set(key, this.now());
+      }
       const directory = path.join(this.root, key);
       let source;
       let observedContexts;
@@ -254,8 +295,10 @@ export class QoderTranscriptCollector {
         if (!stat.isFile()) continue;
         version = fileVersion(stat);
         if (old?.parentPendingCall && old.parentPendingVersion === version
-          && this.now() - old.parentPendingSince < 60_000
-          && !this.links.find(source.sessionId, old.parentPendingCall, old.parentPendingAgent)) continue;
+          && !this.links.find(source.sessionId, old.parentPendingCall, old.parentPendingAgent)) {
+          this.prioritizeParent(source);
+          if (this.now() - old.parentPendingSince < 60_000 || !this.parentAttempted(source)) continue;
+        }
         const deferred = this.deferredSources.get(key);
         if (deferred?.version === version) {
           this.report(key, deferred.reason);
@@ -314,6 +357,7 @@ export class QoderTranscriptCollector {
         changed ||= JSON.stringify(old) !== JSON.stringify(checkpoint);
       } catch (error) {
         this.links = new QoderSubagentLinks(previousLinks, this.now(), (key, reason) => this.report(key, reason));
+        if (error.message === 'subagent-parent-pending') this.prioritizeParent(source);
         if (error.message === 'subagent-parent-pending' && beforeScan && !beforeScan.parentPendingSince) {
           next[key] = { ...beforeScan, parentPendingSince: this.now(),
             parentPendingCall: error.callId, parentPendingAgent: error.parentAgentId, parentPendingVersion: version };
@@ -804,15 +848,49 @@ export class QoderTranscriptCollector {
     return value;
   }
 
-  async build(source, contexts, checkpoint, value, endOffset, terminalSource) {
-    if (this.stopped) throw new Error('stopped');
-    if (!checkpoint.hasUser || !value.rows.length) return [];
-    const context = [...contexts].reverse().find(item => checkpoint.activeRequestSetId
+  contextFor(source, contexts, checkpoint, endOffset) {
+    return [...contexts].reverse().find(item => checkpoint.activeRequestSetId
       && item.requestSetId === checkpoint.activeRequestSetId)
       ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
       && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
       ?? { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
+  }
+
+  emitInvokes(source, contexts, checkpoint, value, records, endOffset, complete = false) {
+    if (!checkpoint.turnId || !checkpoint.traceContext) return;
+    const context = this.contextFor(source, contexts, checkpoint, endOffset);
+    // A Hook may observe progress written after the tool line. Finish this
+    // bounded scan before selecting its snapshot; never borrow a later turn's.
+    if (!complete && !Number.isFinite(context.observedSize)) return;
+    for (const row of value.rows) {
+      if (!Number.isFinite(Date.parse(row.timestamp))) continue;
+      for (const { link, block } of this.links.register(source, checkpoint, row)) {
+        const identity = context.userIdentity ?? source.userIdentity;
+        const record = {
+          'event.name': 'tool.call', 'gen_ai.agent.type': 'qoder-cli',
+          'gen_ai.provider.name': 'qoder', 'gen_ai.request.model': row.message?.model,
+          'gen_ai.session.id': source.sessionId, 'gen_ai.turn.id': checkpoint.turnId,
+          'gen_ai.tool.name': block.name, 'gen_ai.tool.call.id': block.id,
+          'gen_ai.tool.call.arguments': block.input,
+          time_unix_nano: String(BigInt(Date.parse(row.timestamp)) * 1_000_000n),
+          observed_time_unix_nano: String(BigInt(this.now()) * 1_000_000n),
+          'user.name': identity?.name ?? '', 'user.email': identity?.email ?? '',
+          ...(context.cwd ?? source.cwd ? { 'agent.qoder.cwd': context.cwd ?? source.cwd } : {}),
+          ...(context.resourceAttributes ? { resourceAttributes: context.resourceAttributes } : {}),
+          ...context.spanAttributes,
+        };
+        records.push(...this.links.decorate(source, checkpoint, [row], [record])
+          .filter(event => event['event.name'] === 'gen_ai.agent.invoke'));
+        this.links.update(this.links.state[link.id], { invokeEmitted: true });
+      }
+    }
+  }
+
+  async build(source, contexts, checkpoint, value, endOffset, terminalSource, earlyRecords) {
+    if (this.stopped) throw new Error('stopped');
+    if (!checkpoint.hasUser || !value.rows.length) return [];
+    const context = this.contextFor(source, contexts, checkpoint, endOffset);
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       userIdentity: context.userIdentity ?? source.userIdentity,
       resourceAttributes: context.resourceAttributes ?? {},
@@ -823,6 +901,7 @@ export class QoderTranscriptCollector {
     // or leak into the next model request when a turn is still being drained.
     const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
     await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
+    if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true);
     const turnId = checkpoint.turnId;
     const boundaries = buildLlmBoundaries([], content);
     const records = buildEventsFromBoundaries(boundaries, content, value.rows, turnId,
@@ -857,12 +936,17 @@ export class QoderTranscriptCollector {
     if (!prompt) return;
     checkpoint.turnId ??= qoderTurnId(this.agentId, source, checkpoint, prompt);
     if (/^[0-9a-f]{32}$/.test(checkpoint.traceContext?.traceId ?? '')
-      && !/^0+$/.test(checkpoint.traceContext.traceId)) return;
+      && !/^0+$/.test(checkpoint.traceContext.traceId)) {
+      // Also recognize work accepted by the pre-fix checkpoint format. Once
+      // a child/audit was published, changing the parent trace would detach it.
+      if (!checkpoint.traceContextLocked && this.links.hasPublishedWork(source, checkpoint.turnId)) checkpoint.traceContextLocked = true;
+      if (checkpoint.incoming || checkpoint.traceContext.parentSpanId || checkpoint.traceContextLocked) return;
+    }
     const incoming = this.links.incoming(source, prompt);
     // Parent and child directory observations can arrive in either order.
     // Keep the original cursor replayable until the parent call is indexed.
     if (source.subagentId && prompt.isDelegatedTask === true && prompt.parent_tool_use_id && !incoming
-      && (!checkpoint.parentPendingSince || this.now() - checkpoint.parentPendingSince < 60_000)) {
+      && (!checkpoint.parentPendingSince || this.now() - checkpoint.parentPendingSince < 60_000 || !this.parentAttempted(source))) {
       const error = new Error('subagent-parent-pending');
       error.callId = prompt.parent_tool_use_id;
       error.parentAgentId = typeof prompt.parent_agent_id === 'string' ? prompt.parent_agent_id : undefined;
@@ -880,7 +964,8 @@ export class QoderTranscriptCollector {
             : (prompt.message?.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('') }] }],
       };
       if (!source.subagentId) await this.resolveTraceContext?.([record]);
-      else if (prompt.isDelegatedTask) this.report(source.key, 'subagent-parent-unavailable-independent');
+      else if (prompt.isDelegatedTask) this.report(source.key, 'subagent-parent-unavailable-independent',
+        { fallbackCount: ++this.subagentParentFallbacks });
       checkpoint.traceContext = { traceId: record.trace_id, ...(record.parent_span_id ? { parentSpanId: record.parent_span_id } : {}) };
       delete checkpoint.incoming;
     }
@@ -901,6 +986,7 @@ export class QoderTranscriptCollector {
     delete checkpoint.activeRequestSetId;
     delete checkpoint.turnId;
     delete checkpoint.traceContext;
+    delete checkpoint.traceContextLocked;
     delete checkpoint.incoming;
     delete checkpoint.parentPendingSince;
     delete checkpoint.parentPendingCall;
@@ -971,7 +1057,15 @@ export class QoderTranscriptCollector {
     const stable = this.now() - checkpoint.stableAt >= this.stableMs;
     const ready = stable && checkpoint.terminal
       && this.now() - (checkpoint.terminalAt ?? checkpoint.stableAt) >= this.settleMs;
-    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready && !checkpoint.sealedBoundary) return records;
+    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready && !checkpoint.sealedBoundary) {
+      // The Hook snapshot can arrive after the native call was scanned. Retry
+      // its pending audit even when the transcript itself has not grown.
+      if (this.links.hasPendingInvoke(source, checkpoint.turnId)) {
+        const pending = await this.rowsFor(source, checkpoint);
+        if (pending) this.emitInvokes(source, contexts, checkpoint, pending, records, checkpoint.offset);
+      }
+      return records;
+    }
     let value = await this.rowsFor(source, checkpoint);
     if (!value) return records;
     let turns = 0;
@@ -984,7 +1078,7 @@ export class QoderTranscriptCollector {
       // Hook progress is a completion notification of a command, often late
       // (including third-party commands). Only a real user row owns a new Turn.
       if (prompt && checkpoint.hasUser) {
-        records.push(...await this.build(source, contexts, checkpoint, value, line.start, 'next-prompt'));
+        records.push(...await this.build(source, contexts, checkpoint, value, line.start, 'next-prompt', records));
         checkpoint.committedOffset = line.start;
         this.clearActive(checkpoint);
         value = { start: null, end: line.start, rows: [], bytes: 0 };
@@ -1006,29 +1100,10 @@ export class QoderTranscriptCollector {
           } else { value.rows.push(row); value.bytes += line.bytes; }
         }
         if (prompt) checkpoint.hasUser = true;
-        if (row) {
+        if (row && this.links.calls(source, row).length) {
           await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
-          for (const { link, block } of this.links.register(source, checkpoint, row)) {
-            if (!Number.isFinite(Date.parse(row.timestamp))) continue;
-            const context = contexts.at(-1) ?? source;
-            const record = {
-              'event.name': 'tool.call', 'gen_ai.agent.type': this.agentId === 'qoder-cn' ? 'qoder-cn'
-                : row.entrypoint === 'cli' ? 'qoder-cli' : 'qoder',
-              'gen_ai.provider.name': 'qoder', 'gen_ai.request.model': row.message?.model,
-              'gen_ai.session.id': source.sessionId, 'gen_ai.turn.id': checkpoint.turnId,
-              'gen_ai.tool.name': block.name, 'gen_ai.tool.call.id': block.id,
-              'gen_ai.tool.call.arguments': block.input,
-              time_unix_nano: String(BigInt(Date.parse(row.timestamp)) * 1_000_000n),
-              observed_time_unix_nano: String(BigInt(this.now()) * 1_000_000n),
-              'user.name': context.userIdentity?.name ?? '', 'user.email': context.userIdentity?.email ?? '',
-              ...(context.cwd ?? source.cwd ? { 'agent.qoder.cwd': context.cwd ?? source.cwd } : {}),
-              ...(context.resourceAttributes ? { resourceAttributes: context.resourceAttributes } : {}),
-              ...context.spanAttributes,
-            };
-            records.push(...this.links.decorate(source, checkpoint, [row], [record])
-              .filter(event => event['event.name'] === 'gen_ai.agent.invoke'));
-            link.invokeEmitted = true;
-          }
+          this.links.register(source, checkpoint, row);
+          checkpoint.traceContextLocked = true;
         }
         if (eventOf(row) === 'Stop' || (row && hasQoderCnTerminalMarker([], [row]))) {
           if (!checkpoint.terminal) checkpoint.terminalAt = this.now();
@@ -1038,7 +1113,7 @@ export class QoderTranscriptCollector {
       checkpoint.offset = line.end;
       value.end = line.end;
       if ((row?.type === 'last-prompt' || eventOf(row) === 'SessionEnd') && checkpoint.hasUser) {
-        records.push(...await this.build(source, contexts, checkpoint, value, line.end, row.type === 'last-prompt' ? 'last-prompt' : 'session-end'));
+        records.push(...await this.build(source, contexts, checkpoint, value, line.end, row.type === 'last-prompt' ? 'last-prompt' : 'session-end', records));
         checkpoint.committedOffset = line.end;
         this.clearActive(checkpoint);
         value = { start: null, end: line.end, rows: [], bytes: 0 };
@@ -1060,7 +1135,7 @@ export class QoderTranscriptCollector {
       checkpoint.terminalAt = this.now();
     }
     if (checkpoint.activeStart !== null && checkpoint.sealedBoundary && checkpoint.offset === stat.size) {
-      records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'next-prompt-backfill'));
+      records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'next-prompt-backfill', records));
       checkpoint.committedOffset = checkpoint.offset;
       this.clearActive(checkpoint);
       value = { start: null, end: checkpoint.offset, rows: [], bytes: 0 };
@@ -1072,12 +1147,13 @@ export class QoderTranscriptCollector {
         checkpoint.stableAt = this.now();
       } else if (this.now() - checkpoint.stableAt >= this.stableMs
         && this.now() - (checkpoint.terminalAt ?? checkpoint.stableAt) >= this.settleMs) {
-        records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'stable-terminal-eof'));
+        records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'stable-terminal-eof', records));
         checkpoint.committedOffset = checkpoint.offset;
         this.clearActive(checkpoint);
         value = { start: null, end: checkpoint.offset, rows: [], bytes: 0 };
       }
     }
+    if (checkpoint.activeStart !== null) this.emitInvokes(source, contexts, checkpoint, value, records, checkpoint.offset);
     this.remember(source.key, value);
     return records;
   }
