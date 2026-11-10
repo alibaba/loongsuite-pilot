@@ -668,7 +668,9 @@ export class QoderWorkTraceInput extends BaseInput {
       : this.stateStore.getOffset(stateKey);
     if (offset > 0 && stat.size < offset) offset = 0;
     if (stat.size <= offset) {
-      this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+      if (previousInode !== currentInode) {
+        this.stateStore.update(stateKey, { extra: { inode: currentInode } });
+      }
       return;
     }
 
