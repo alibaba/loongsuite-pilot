@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-10T08:27:19Z",
+  "updated_at": "2026-11-10T08:49:40Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -78,5 +78,86 @@
       "run_url": "",
       "workloads": {}
     }
-  ]
+  ],
+  "configuration": {
+    "dev_branch": "codex/cloudshell-sdk-20261107"
+  },
+  "temporary_preview": {
+    "schema": 1,
+    "kind": "temporary_preview",
+    "rows": [
+      {
+        "id": "js",
+        "label": "JS 1.15.2",
+        "workloads": {
+          "idle": {
+            "cpu_percent": 11.433094433489702,
+            "rss_mib": 121.01953125
+          },
+          "low": {
+            "cpu_percent": 17.6662831104608,
+            "rss_mib": 122.5546875
+          },
+          "high": {
+            "cpu_percent": 124.09717137871444,
+            "rss_mib": 139.01171875
+          }
+        }
+      },
+      {
+        "id": "previous-rust",
+        "label": "上一版Rust",
+        "workloads": {
+          "idle": {
+            "cpu_percent": 5.333221106717133,
+            "rss_mib": 43.88671875
+          },
+          "low": {
+            "cpu_percent": 12.599729273817003,
+            "rss_mib": 43.7265625
+          },
+          "high": {
+            "cpu_percent": 98.6645233311829,
+            "rss_mib": 138.546875
+          }
+        }
+      },
+      {
+        "id": "previous-sdk",
+        "label": "上一版SDK",
+        "workloads": {
+          "idle": {
+            "cpu_percent": 5.233219267295134,
+            "rss_mib": 43.015625
+          },
+          "low": {
+            "cpu_percent": 12.733064573992756,
+            "rss_mib": 44.92578125
+          },
+          "high": {
+            "cpu_percent": 82.43154096388837,
+            "rss_mib": 109.7578125
+          }
+        }
+      },
+      {
+        "id": "dev",
+        "label": "dev",
+        "workloads": {
+          "idle": {
+            "cpu_percent": 4.933228305560472,
+            "rss_mib": 40.29296875
+          },
+          "low": {
+            "cpu_percent": 11.033107278204932,
+            "rss_mib": 40.765625
+          },
+          "high": {
+            "cpu_percent": 73.53419956620422,
+            "rss_mib": 101.65234375
+          }
+        }
+      }
+    ]
+  }
 }

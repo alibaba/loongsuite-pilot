@@ -24,7 +24,7 @@
     <div class="topline"><div class="eyebrow">LOONGSUITE PILOT / PERFORMANCE</div><div class="repo" id="repository">公开版本持续验收</div></div>
     <h1>Pilot 性能历史</h1>
     <p class="intro">看清每个版本在空闲、低负载和高负载时用了多少 CPU 与内存。版本从旧到新排列，最后是持续更新的 main；有开发节点时再接 dev。</p>
-    <dl class="facts">
+    <dl class="facts" id="facts">
       <div class="fact"><dt>展示节点</dt><dd id="node-count">等待记录</dd></div>
       <div class="fact"><dt>最新节点</dt><dd id="latest-node">待测</dd></div>
       <div class="fact"><dt>测试方法</dt><dd id="method" class="small">尚未设置</dd></div>
@@ -45,17 +45,17 @@
   </footer>
 </main>
 <div id="tooltip" role="tooltip" hidden></div>
-<script type="application/json" id="pilot-performance-data">{"schema":1,"repository":"alibaba/loongsuite-pilot","updated_at":"2026-11-10T08:27:19Z","method":{"id":"github-full-pilot-qoder-native-v1","window_seconds":30,"session_count":64,"cpu_limit":2,"memory_limit":"1 GiB","poll_interval_ms":100,"rss_basis":"sum_of_owned_process_tree_rss_shared_pages_may_repeat","loads":{"idle":{"turns_per_second":0},"low":{"turns_per_second":10},"high":{"turns_per_second":200}}},"compatibility":{"excluded_at_or_before":null,"reason":"历史 release 尚未回填；确认原生采集协议不兼容后才停止更早版本。"},"nodes":[{"id":"v1.16.0","kind":"release","version":"v1.16.0","commit":"78fdb118981be947b9a85fa70ba0ac01fa8a74d1","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}},{"id":"main","kind":"main","version":"main","commit":"7cc3d7f3af03e95dff8a069d7b9b06903f227816","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}},{"id":"dev","kind":"dev","version":"dev","commit":"48b87b407e225b80702269679931da284d988e57","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}}]}</script>
+<script type="application/json" id="pilot-performance-data">{"schema":1,"repository":"alibaba/loongsuite-pilot","updated_at":"2026-11-10T08:49:40Z","method":{"id":"github-full-pilot-qoder-native-v1","window_seconds":30,"session_count":64,"cpu_limit":2,"memory_limit":"1 GiB","poll_interval_ms":100,"rss_basis":"sum_of_owned_process_tree_rss_shared_pages_may_repeat","loads":{"idle":{"turns_per_second":0},"low":{"turns_per_second":10},"high":{"turns_per_second":200}}},"compatibility":{"excluded_at_or_before":null,"reason":"历史 release 尚未回填；确认原生采集协议不兼容后才停止更早版本。"},"nodes":[{"id":"v1.16.0","kind":"release","version":"v1.16.0","commit":"78fdb118981be947b9a85fa70ba0ac01fa8a74d1","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}},{"id":"main","kind":"main","version":"main","commit":"7cc3d7f3af03e95dff8a069d7b9b06903f227816","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}},{"id":"dev","kind":"dev","version":"dev","commit":"48b87b407e225b80702269679931da284d988e57","recorded_at":"2026-11-10T08:27:19Z","status":"pending","method_id":"github-full-pilot-qoder-native-v1","environment_id":"unknown","environment":{"cpu_model":"待测","runner_os":"Linux","runner_image":"待测"},"run_url":"","workloads":{}}],"configuration":{"dev_branch":"codex/cloudshell-sdk-20261107"},"temporary_preview":{"schema":1,"kind":"temporary_preview","rows":[{"id":"js","label":"JS 1.15.2","workloads":{"idle":{"cpu_percent":11.433094433489702,"rss_mib":121.01953125},"low":{"cpu_percent":17.6662831104608,"rss_mib":122.5546875},"high":{"cpu_percent":124.09717137871444,"rss_mib":139.01171875}}},{"id":"previous-rust","label":"上一版Rust","workloads":{"idle":{"cpu_percent":5.333221106717133,"rss_mib":43.88671875},"low":{"cpu_percent":12.599729273817003,"rss_mib":43.7265625},"high":{"cpu_percent":98.6645233311829,"rss_mib":138.546875}}},{"id":"previous-sdk","label":"上一版SDK","workloads":{"idle":{"cpu_percent":5.233219267295134,"rss_mib":43.015625},"low":{"cpu_percent":12.733064573992756,"rss_mib":44.92578125},"high":{"cpu_percent":82.43154096388837,"rss_mib":109.7578125}}},{"id":"dev","label":"dev","workloads":{"idle":{"cpu_percent":4.933228305560472,"rss_mib":40.29296875},"low":{"cpu_percent":11.033107278204932,"rss_mib":40.765625},"high":{"cpu_percent":73.53419956620422,"rss_mib":101.65234375}}}]}}</script>
 <script>
 "use strict";
 (() => {
   const NS = "http://www.w3.org/2000/svg";
   const LOADS = [{id:"idle",name:"空闲",rate:0},{id:"low",name:"低负载",rate:10},{id:"high",name:"高负载",rate:200}];
   const METRICS = [{id:"cpu_percent",name:"CPU",unit:"%",digits:2},{id:"rss_mib",name:"驻留内存",unit:"MiB",digits:1}];
-  const STATUS = {passed:"已通过",pending:"待测",failed:"未通过"};
+  const STATUS = {passed:"已通过",pending:"待测",failed:"未通过",preview:"临时数据"};
   const byId = id => document.getElementById(id);
   const tip = byId("tooltip");
-  let nodes = [], focused = null, closeTimer = null;
+  let nodes = [], focused = null, closeTimer = null, usingPreview=false;
   function text(tag, value, className) {
     const el = document.createElement(tag);
     if (className) el.className = className;
@@ -79,6 +79,7 @@
   }
   function prepare(payload) {
     if (!payload || payload.schema !== 1 || !Array.isArray(payload.nodes)) throw new Error("暂时无法读取这份历史记录。");
+    if(usingPreview) return payload.temporary_preview.rows.map(row=>({...row,kind:"preview",status:"preview"}));
     const ids = new Set(), versions = new Set(); let main = 0, dev = 0;
     const ordered = payload.nodes.slice();
     for (const node of ordered) {
@@ -100,7 +101,7 @@
     });
     return ordered;
   }
-  const label = node => node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
+  const label = node => node.kind === "preview" ? node.label : node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
   const number = (value,digits=2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN",{minimumFractionDigits:digits,maximumFractionDigits:digits}) : "—";
   const valueText = (value,metric) => number(value,metric.digits)+(metric.unit === "%" ? "%" : " MiB");
   const shortSha = value => typeof value === "string" && value.length ? value.slice(0,10) : "未记录";
@@ -111,6 +112,7 @@
   }
   function stats(node,load,metric) {
     const s = node.workloads?.[load]?.[metric.id];
+    if(usingPreview && typeof s==="number" && Number.isFinite(s) && s>=0 && (metric.id!=="rss_mib" || s>0)) return {median:s,min:s,max:s};
     if (!s || ![s.median,s.min,s.max].every(v => typeof v === "number" && Number.isFinite(v) && v >= 0) || s.min > s.median || s.median > s.max || (metric.id === "rss_mib" && s.min <= 0)) return null;
     return s;
   }
@@ -119,6 +121,7 @@
     return q?.passed === true && q.missing === 0 && q.duplicates === 0;
   }
   function usable(node,load,metric) {
+    if(usingPreview) return !!stats(node,load,metric);
     const n = node.workloads?.[load]?.repeats;
     return node.status === "passed" && quality(node,load) && Number.isInteger(n) && n >= 3 && !!stats(node,load,metric);
   }
@@ -126,6 +129,11 @@
     const node=nodes[index], previous=nodes[index-1];
     const fail = reason => ({ok:false,reason,previous});
     if (!previous) return fail("首个节点，没有前值");
+    if(usingPreview) {
+      const before=stats(previous,load,metric)?.median, current=stats(node,load,metric)?.median;
+      if(!(before>0) || !Number.isFinite(current)) return fail("前值不可用");
+      return {ok:true,previous,before,current,delta:(current-before)/before*100};
+    }
     const repeats=node.workloads?.[load]?.repeats, previousRepeats=previous.workloads?.[load]?.repeats;
     if ((Number.isInteger(repeats) && repeats < 3) || (Number.isInteger(previousRepeats) && previousRepeats < 3)) return fail("有效轮次尚未达到三轮");
     if (!usable(node,load,metric)) return fail("当前节点尚无通过验收的有效数据");
@@ -163,9 +171,10 @@
     focused={element,index,load,metric}; tip.replaceChildren();
     const node=nodes[index], s=stats(node,load.id,metric), n=node.workloads?.[load.id]?.repeats, c=comparison(index,load.id,metric);
     tip.append(text("div",label(node)+" · "+load.name+" · "+metric.name,"tip-title"));
-    tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
+    if(!usingPreview) tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
     tip.append(text("div",usable(node,load.id,metric)?valueText(s.median,metric):"暂无有效成绩","tip-value"));
     tip.append(text("div",c.ok ? "较 "+label(c.previous)+" "+deltaText(c.delta) : "不可比较 · "+c.reason,"tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
+    if(usingPreview) { tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip(); return; }
     const list=text("dl","","tip-rows");
     row(list,"当前值",s?valueText(s.median,metric)+(usable(node,load.id,metric)?"":"（未作为有效成绩绘图）"):"未测量");
     row(list,"前节点",c.previous?label(c.previous):"无");
@@ -180,6 +189,7 @@
     row(list,"处理器",node.environment?.cpu_model || "未记录");
     row(list,"系统 / 镜像",[node.environment?.runner_os,node.environment?.runner_image].filter(Boolean).join(" / ") || "未记录");
     row(list,"cgroup 版本",node.environment?.cgroup_version || "未记录");
+    row(list,"源码分支",node.source ? node.source.repository+" · "+node.source.ref : "未记录");
     row(list,"内存口径",dataMethodRssBasis());
     tip.append(list);
     const link=safeRunUrl(node.run_url);
@@ -213,7 +223,7 @@
     nodes.forEach(node => { if(usable(node,load.id,metric)) max=Math.max(max,stats(node,load.id,metric).max); });
     const ceiling=niceCeiling(max>0?Math.min(max*1.13,Number.MAX_VALUE):metric.id === "cpu_percent"?100:64);
     const x=index=>left+step*(index+0.5), y=value=>bottom-value/ceiling*(bottom-top);
-    nodes.forEach((node,index) => { if(node.kind !== "release") plot.append(svg("rect",{x:x(index)-step*.44,y:top-12,width:step*.88,height:bottom-top+35,rx:7,fill:node.kind === "main"?"#eef4fb":"#f3f1fa"})); });
+    nodes.forEach((node,index) => { if(["main","dev"].includes(node.kind)) plot.append(svg("rect",{x:x(index)-step*.44,y:top-12,width:step*.88,height:bottom-top+35,rx:7,fill:node.kind === "main"?"#eef4fb":"#f3f1fa"})); });
     for(let i=0;i<=4;i++) {
       const value=ceiling*i/4, at=y(value);
       plot.append(svg("line",{x1:left,y1:at,x2:W-right,y2:at,class:"gridline"}));
@@ -230,8 +240,10 @@
       const s=stats(node,load.id,metric), valid=usable(node,load.id,metric), at=x(index), c=comparison(index,load.id,metric), n=node.workloads?.[load.id]?.repeats;
       const group=svg("g",{tabindex:0,class:"point-target",role:"img","aria-label":label(node)+"，"+STATUS[node.status]+"，"+load.name+" "+metric.name+"，"+(valid?valueText(s.median,metric):"没有有效成绩")});
       if(valid) {
-        group.append(svg("line",{x1:at,y1:y(s.min),x2:at,y2:y(s.max),class:"whisker"}));
-        for(const value of [s.min,s.max]) group.append(svg("line",{x1:at-4,y1:y(value),x2:at+4,y2:y(value),class:"whisker"}));
+        if(!usingPreview) {
+          group.append(svg("line",{x1:at,y1:y(s.min),x2:at,y2:y(s.max),class:"whisker"}));
+          for(const value of [s.min,s.max]) group.append(svg("line",{x1:at-4,y1:y(value),x2:at+4,y2:y(value),class:"whisker"}));
+        }
         group.append(svg("circle",{cx:at,cy:y(s.median),r:13,class:"focus-ring"}),svg("circle",{cx:at,cy:y(s.median),r:5,class:"point"+(n<3?" partial":"")}));
         const labels=svg("g",{class:"compact-label"});
         svgText(labels,valueText(s.median,metric),{x:at,y:Math.max(13,y(s.max)-10),"text-anchor":"middle",class:"value-label"});
@@ -260,17 +272,25 @@
       });
       targets.push(group); plot.append(group);
     });
-    scroll.append(plot); card.append(scroll,text("p","变化以紧邻前节点为参照；不可比较时显示 —。可横向滚动查看全部版本。","chart-note")); return card;
+    scroll.append(plot); card.append(scroll); if(!usingPreview) card.append(text("p","变化以紧邻前节点为参照；不可比较时显示 —。可横向滚动查看全部版本。","chart-note")); return card;
   }
   function render(payload,source) {
+    const preview=payload?.temporary_preview;
+    usingPreview=!!(preview?.schema===1 && preview.kind==="temporary_preview" && Array.isArray(preview.rows) && preview.rows.length===4 && !payload.nodes.some(node=>node.status==="passed" && node.method_id===payload.method?.id));
     nodes=prepare(payload); hideTip();
+    byId("facts").style.display=usingPreview?"none":"";
+    document.querySelector(".intro").style.display=usingPreview?"none":"";
+    document.querySelector(".foot").style.display=usingPreview?"none":"";
+    if(usingPreview) { byId("labels").checked=true; byId("charts").classList.remove("compact-hidden"); }
+    document.querySelectorAll(".foot>div").forEach(element=>element.style.display=usingPreview?"none":"");
+    document.querySelectorAll(".legend span").forEach((element,index)=>element.style.display=usingPreview && index>0?"none":"");
     byId("repository").textContent=payload.repository || "公开版本持续验收";
     byId("node-count").textContent=nodes.length?nodes.length+" 个节点":"等待记录";
     const latest=nodes[nodes.length-1]; byId("latest-node").textContent=latest?label(latest)+" · "+STATUS[latest.status]+" · "+shortSha(latest.commit):"待测";
     byId("method").textContent=payload.method?.id || "尚未设置";
     byId("updated").textContent=date(payload.updated_at);
     const compatibility=payload.compatibility;
-    if(compatibility?.excluded_at_or_before){byId("compatibility").textContent="兼容性边界："+compatibility.excluded_at_or_before+" 及更早版本已排除。"+(compatibility.reason || "");byId("compatibility").hidden=false;}
+    if(!usingPreview && compatibility?.excluded_at_or_before){byId("compatibility").textContent="兼容性边界："+compatibility.excluded_at_or_before+" 及更早版本已排除。"+(compatibility.reason || "");byId("compatibility").hidden=false;}
     else byId("compatibility").hidden=true;
     const target=byId("charts"); target.replaceChildren();
     for(const load of LOADS) {
@@ -281,7 +301,10 @@
     const method=payload.method;
     const memory=typeof method?.memory_limit === "number" ? number(method.memory_limit/1073741824,2)+" GiB" : String(method?.memory_limit ?? "未记录");
     const context=method?"窗口 "+String(method.window_seconds ?? "未记录")+" 秒 · "+String(method.session_count ?? "未记录")+" 个会话 · CPU 配额 "+String(method.cpu_limit ?? "未记录")+" · 内存配额 "+memory:"测试参数尚未设置";
-    byId("source-note").textContent=nodes.length?context+"。记录来源："+source+"。main/dev 更新原节点，发布版按版本号插入；未把候选提交额外算作版本。":"尚无测试记录；页面没有预填任何性能成绩。";
+    const bound=payload.configuration?.dev_branch;
+    const dev=nodes.find(node=>node.kind==="dev");
+    const binding=bound?" 当前指定 dev："+bound+"。"+(dev?.source?.ref && dev.source.ref!==bound?" 图中 dev 仍来自此前分支 "+dev.source.ref+"，不代表当前指定分支。":""):" 当前未指定 dev 发布分支。";
+    byId("source-note").textContent=usingPreview?"":(nodes.length?context+"。记录来源："+source+"。main/dev 更新原节点，发布版按版本号插入；未把候选提交额外算作版本。":"尚无测试记录；页面没有预填任何性能成绩。")+binding;
   }
   byId("labels").addEventListener("change",event=>byId("charts").classList.toggle("compact-hidden",!event.target.checked));
   byId("latest-button").addEventListener("click",()=>document.querySelectorAll(".scroll").forEach(el=>{el.scrollLeft=el.scrollWidth;}));
