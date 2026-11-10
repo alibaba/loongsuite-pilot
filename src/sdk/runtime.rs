@@ -433,6 +433,7 @@ fn run_agent(
             databases: paths,
             segments: source_path("segments"),
             intercept: source_path("intercept"),
+            intercept_index: Default::default(),
         });
         let input =
             Arc::new(QoderTraceInput::new_with_sources(
@@ -583,12 +584,28 @@ struct AuthorizedReaders {
     databases: Vec<String>,
     segments: Option<String>,
     intercept: Option<String>,
+    intercept_index: tokio::sync::Mutex<crate::inputs::qoder_trace::InterceptTokenIndex>,
 }
 #[async_trait]
 impl QoderTraceReaders for AuthorizedReaders {
     async fn read_cli_intercept(&self) -> crate::inputs::qoder_trace::InterceptData {
         match &self.intercept {
             Some(path) => crate::inputs::qoder_trace::read_intercept_file(path, None).await,
+            None => Default::default(),
+        }
+    }
+    async fn read_cli_intercept_for(
+        &self,
+        ids: &[String],
+    ) -> crate::inputs::qoder_trace::InterceptData {
+        match &self.intercept {
+            Some(path) => {
+                self.intercept_index
+                    .lock()
+                    .await
+                    .read_for_responses(path, None, ids)
+                    .await
+            }
             None => Default::default(),
         }
     }
@@ -619,5 +636,283 @@ impl QoderTraceReaders for AuthorizedReaders {
         String,
     > {
         Ok(Default::default())
+    }
+}
+
+#[cfg(test)]
+mod authorized_cache_binding_tests {
+    use super::*;
+    use crate::utils::source_access::{self, SourceScope};
+    use std::io::Write;
+
+    struct RestoreScope(Option<Arc<SourceScope>>);
+    impl Drop for RestoreScope {
+        fn drop(&mut self) {
+            source_access::install(self.0.take());
+        }
+    }
+
+    #[tokio::test]
+    async fn authorized_reader_cache_preserves_fields_late_usage_and_capabilities() {
+        let _restore = RestoreScope(source_access::current());
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let file = dir.join("intercept.jsonl");
+        let ts = chrono::Utc::now().timestamp_millis();
+        let row = |id: &str, input: i64, output: i64| json!({"type":"token","ts":ts,"id":id,"prompt_tokens":input,"completion_tokens":output,"cached_tokens":3,"reasoning_tokens":2,"total_tokens":input+output});
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"system_prompt","ts":ts,"content":"authorized prompt"}),
+                row("selected", 35, 11),
+                row("unrelated", 999, 999)
+            ),
+        )
+        .unwrap();
+        source_access::install(Some(SourceScope::new(vec![dir.clone()], 1, 1024 * 1024)));
+        let readers: Arc<dyn QoderTraceReaders> = Arc::new(AuthorizedReaders {
+            databases: Vec::new(),
+            segments: None,
+            intercept: Some(file.to_string_lossy().into_owned()),
+            intercept_index: Default::default(),
+        });
+        let ids = vec!["selected".to_owned()];
+        let first = readers.read_cli_intercept_for(&ids).await;
+        assert_eq!(
+            first.tokens.len(),
+            1,
+            "the old default trait path would expose unrelated usage"
+        );
+        assert_eq!(
+            (
+                first.tokens[0].prompt_tokens,
+                first.tokens[0].completion_tokens,
+                first.tokens[0].cached_tokens,
+                first.tokens[0].reasoning_tokens,
+                first.tokens[0].total_tokens
+            ),
+            (35, 11, 3, 2, 46)
+        );
+        assert_eq!(
+            first.system_prompt.as_ref().unwrap().content,
+            "authorized prompt"
+        );
+        assert_eq!(readers.read_cli_intercept_for(&ids).await, first);
+        source_access::install(Some(SourceScope::new(vec![dir.clone()], 1, 1)));
+        let denied = readers.read_cli_intercept_for(&ids).await;
+        assert!(
+            denied.tokens.is_empty() && denied.system_prompt.is_none(),
+            "warm cache must not bypass the actual whole-file read budget"
+        );
+        source_access::install(Some(SourceScope::new(vec![dir], 1, 1024 * 1024)));
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap(),
+            "{}",
+            row("selected", 40, 13)
+        )
+        .unwrap();
+        let late = readers.read_cli_intercept_for(&ids).await;
+        assert_eq!(
+            (
+                late.tokens[0].prompt_tokens,
+                late.tokens[0].completion_tokens,
+                late.tokens[0].total_tokens
+            ),
+            (40, 13, 53)
+        );
+        assert_eq!(readers.read_cli_intercept().await.tokens.len(), 3);
+        assert!(
+            file.is_file(),
+            "source ownership remains with the Agent/host"
+        );
+    }
+    #[tokio::test]
+    async fn actual_collect_requests_all_sessions_response_ids_once() {
+        // Reuse qoder_trace_collect_history's initialized Hook JSONL setup.
+        // The observing wrapper delegates the new method to the real authorized
+        // sidecar reader/index and forbids falling back to the old trait path.
+        struct ObservedReaders {
+            actual: AuthorizedReaders,
+            queries: Mutex<Vec<Vec<String>>>,
+        }
+        #[async_trait]
+        impl QoderTraceReaders for ObservedReaders {
+            async fn read_cli_intercept(&self) -> crate::inputs::qoder_trace::InterceptData {
+                panic!("collect must invoke read_cli_intercept_for, not the legacy method")
+            }
+            async fn read_cli_intercept_for(
+                &self,
+                ids: &[String],
+            ) -> crate::inputs::qoder_trace::InterceptData {
+                self.queries.lock().unwrap().push(ids.to_vec());
+                self.actual.read_cli_intercept_for(ids).await
+            }
+            async fn read_cli_segments(
+                &self,
+                _: &str,
+                _: &[String],
+            ) -> Vec<crate::inputs::qoder_trace::SegmentTokenData> {
+                panic!("complete primary usage and valid request/response times need no fallback")
+            }
+        }
+        let _restore = RestoreScope(source_access::current());
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let history = dir.join("history");
+        std::fs::create_dir_all(&history).unwrap();
+        let filename = format!("qoder-{}.jsonl", crate::utils::get_today_date_string());
+        let raw = |id: &str,
+                   session: &str,
+                   turn: &str,
+                   name: &str,
+                   response: Option<&str>,
+                   time: &str| {
+            let mut value = json!({"event.id":id,"event.name":name,"gen_ai.session.id":session,
+                    "gen_ai.turn.id":turn,"gen_ai.step.id":format!("{turn}:s1"),
+                    "gen_ai.agent.type":"qoder-cli","time_unix_nano":time});
+            if let Some(response) = response {
+                value["gen_ai.response.id"] = json!(response);
+            }
+            value
+        };
+        let records = [
+            raw(
+                "first-request",
+                "session-a",
+                "turn-a",
+                "llm.request",
+                None,
+                "1780000000000000000",
+            ),
+            raw(
+                "first-response",
+                "session-a",
+                "turn-a",
+                "llm.response",
+                Some("response-a"),
+                "1780000001000000000",
+            ),
+            raw(
+                "second-request",
+                "session-b",
+                "turn-b",
+                "llm.request",
+                None,
+                "1780000002000000000",
+            ),
+            raw(
+                "second-response",
+                "session-b",
+                "turn-b",
+                "llm.response",
+                Some("response-b-only"),
+                "1780000003000000000",
+            ),
+            raw(
+                "second-response-duplicate",
+                "session-b",
+                "turn-b",
+                "llm.response",
+                Some("response-b-only"),
+                "1780000003000000001",
+            ),
+        ];
+        std::fs::write(
+            history.join(&filename),
+            records
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let intercept = dir.join("intercept.jsonl");
+        let ts = chrono::Utc::now().timestamp_millis();
+        let usage = |id: &str, input: i64, output: i64| {
+            json!({"type":"token","ts":ts,"id":id,
+                "prompt_tokens":input,"completion_tokens":output,"cached_tokens":3,"total_tokens":input+output})
+        };
+        let sidecar = [
+            usage("response-a", 35, 11),
+            usage("response-b-only", 70, 9),
+            usage("unrelated", 999, 999),
+        ];
+        std::fs::write(
+            &intercept,
+            sidecar
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let store = Arc::new(StateStore::new(dir.join("state.json")));
+        store.set(
+            "qoder-trace",
+            crate::checkpoints::InputState::new()
+                .with_last_file(filename)
+                .with_last_offset(0.0)
+                .with_extra(json!({"hookHistoryInitialized":true})),
+        );
+        source_access::install(Some(SourceScope::new(vec![dir.clone()], 32, 1024 * 1024)));
+        let readers = Arc::new(ObservedReaders {
+            actual: AuthorizedReaders {
+                databases: Vec::new(),
+                segments: None,
+                intercept: Some(intercept.to_string_lossy().into_owned()),
+                intercept_index: Default::default(),
+            },
+            queries: Mutex::new(Vec::new()),
+        });
+        let input = QoderTraceInput::new_with_sources(QoderTraceOptions {
+                state_store: store, log_dir: Some(history.to_string_lossy().into_owned()),
+                poll_interval_ms: Some(60000), multimodal_enabled: false,
+                upload_mode: None, allowed_root_paths: Vec::new(),
+            }, dir.join("native-data"), readers.clone(), Arc::new(
+                crate::inputs::qoder_trace::prompt_ownership::NativeQoderPromptOwnershipResolver::with_paths(Vec::new())
+            ));
+        let entries = input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap();
+        assert_eq!(*readers.queries.lock().unwrap(), vec![vec!["response-a".to_owned(), "response-b-only".to_owned()]],
+                "one shared intercept snapshot must include IDs from both sessions and deduplicate repeated response IDs");
+        assert_eq!(entries.len(), records.len());
+        for (id, session, expected) in [
+            (
+                "first-response",
+                "session-a",
+                (Some(35), Some(11), Some(46)),
+            ),
+            (
+                "second-response",
+                "session-b",
+                (Some(70), Some(9), Some(79)),
+            ),
+            (
+                "second-response-duplicate",
+                "session-b",
+                (Some(0), Some(0), Some(0)),
+            ),
+        ] {
+            let entry = entries.iter().find(|entry| entry.event_id == id).unwrap();
+            assert_eq!(entry.session_id, session);
+            assert_eq!(
+                (entry.input_tokens, entry.output_tokens, entry.total_tokens),
+                expected
+            );
+        }
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.total_tokens)
+                .sum::<i64>(),
+            125,
+            "unrelated sidecar usage and duplicate responses must not inflate the batch"
+        );
     }
 }

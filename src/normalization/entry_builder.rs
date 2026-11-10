@@ -432,7 +432,29 @@ fn build_from_legacy(opts: &Map<String, Value>) -> AgentActivityEntry {
 }
 
 fn build_standard(opts: &Map<String, Value>) -> AgentActivityEntry {
-    let mut entry = opts.clone();
+    // These canonical JSON fields are unconditionally replaced from `opts`
+    // below. Keep their positions without cloning payloads that will be discarded.
+    // Aliases and unknown fields still require their original independent values.
+    let mut entry: Map<String, Value> = opts
+        .iter()
+        .map(|(key, value)| {
+            let value = if matches!(
+                key.as_str(),
+                "gen_ai.input.messages_delta"
+                    | "gen_ai.input.messages"
+                    | "gen_ai.output.messages"
+                    | "gen_ai.tool.call.arguments"
+                    | "gen_ai.tool.call.result"
+                    | "gen_ai.system_instructions"
+                    | "gen_ai.tool.definitions"
+            ) {
+                Value::Null
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
     let now_value = match opts.get("timestamp") {
         None | Some(Value::Null) => Value::Number(Number::from(current_time_millis())),
         Some(value) => value.clone(),
@@ -693,9 +715,15 @@ fn flatten_attributes(entry: &mut Map<String, Value>, opts: &Map<String, Value>)
 }
 
 fn normalize_message_fields(entry: &mut Map<String, Value>) {
-    let output = normalize_output_messages(entry.get("gen_ai.output.messages").cloned());
-    let delta = normalize_input_messages_delta(entry.get("gen_ai.input.messages_delta").cloned());
-    let input = normalize_input_messages(entry.get("gen_ai.input.messages").cloned());
+    let output =
+        normalize_output_messages(entry.get_mut("gen_ai.output.messages").map(std::mem::take));
+    let delta = normalize_input_messages_delta(
+        entry
+            .get_mut("gen_ai.input.messages_delta")
+            .map(std::mem::take),
+    );
+    let input =
+        normalize_input_messages(entry.get_mut("gen_ai.input.messages").map(std::mem::take));
     set_json_key(entry, "gen_ai.output.messages", output);
     set_json_key(entry, "gen_ai.input.messages_delta", delta);
     set_json_key(entry, "gen_ai.input.messages", input);
@@ -1678,6 +1706,143 @@ mod prepared_projection_tests {
                 .unwrap();
                 assert_eq!(serde_json::from_slice::<Value>(&actual).unwrap(), expected);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod owned_json_copy_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixed_options() -> Map<String, Value> {
+        serde_json::from_value(json!({
+            "time_unix_nano": "1794270000000000000",
+            "observed_time_unix_nano": "1794270000001000000",
+            "event.id": "fixed-event",
+            "event.name": "llm.response",
+            "user.id": "fixture-user",
+            "gen_ai.session.id": "fixture-session",
+            "gen_ai.agent.type": "qoder",
+            "gen_ai.provider.name": "qwen"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn owned_message_moves_preserve_outer_and_nested_json_byte_order() {
+        let raw = r#"{"pre":{"b":2,"a":18446744073709551615},"gen_ai.output.messages":[{"type":"text","content":"输出"}],"middle":"m","gen_ai.input.messages_delta":[{"role":"user","content":"请求","meta":{"z":1,"a":2}}],"gen_ai.input.messages":[{"role":"system","parts":[{"type":"text","content":"system"}],"opaque":true}],"post":3}"#;
+        let expected = r#"{"pre":{"b":2,"a":18446744073709551615},"gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":"输出"}]}],"middle":"m","gen_ai.input.messages_delta":[{"role":"user","meta":{"z":1,"a":2},"parts":[{"type":"text","content":"请求"}]}],"gen_ai.input.messages":[{"role":"system","parts":[{"type":"text","content":"system"}],"opaque":true}],"post":3}"#;
+        let mut entry: Map<String, Value> = serde_json::from_str(raw).unwrap();
+        normalize_message_fields(&mut entry);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), expected);
+    }
+
+    #[test]
+    fn null_message_removals_keep_the_original_swap_removal_order() {
+        let mut entry: Map<String, Value> = serde_json::from_str(
+            r#"{"pre":"first","gen_ai.input.messages":null,"middle":"middle","gen_ai.output.messages":null,"gen_ai.input.messages_delta":[],"post":"last"}"#,
+        )
+        .unwrap();
+        normalize_message_fields(&mut entry);
+        // Preserve serde_json's existing remove semantics; do not change to shift_remove.
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"pre":"first","gen_ai.input.messages_delta":[],"middle":"middle","post":"last"}"#
+        );
+    }
+
+    #[test]
+    fn canonical_json_replacements_preserve_priority_and_retained_aliases() {
+        let fields = [
+            ("gen_ai.input.messages_delta", "input.messages_delta"),
+            ("gen_ai.input.messages", "input.messages"),
+            ("gen_ai.output.messages", "output.messages"),
+            ("gen_ai.tool.call.arguments", "tool.arguments"),
+            ("gen_ai.tool.call.result", "tool.result.payload"),
+            ("gen_ai.system_instructions", "system_instructions"),
+            ("gen_ai.tool.definitions", "tool.definitions"),
+        ];
+        let legacy = json!({"legacy": [1, false, null]});
+        for (canonical, alias) in fields {
+            for value in [
+                json!({"canonical": [0, false, null]}),
+                json!([]),
+                json!(false),
+                json!(0),
+                Value::Null,
+            ] {
+                let mut options = fixed_options();
+                options.insert(
+                    "unknown.first".into(),
+                    serde_json::from_str(r#"{"z":2,"a":18446744073709551615}"#).unwrap(),
+                );
+                options.insert(alias.into(), legacy.clone());
+                options.insert(canonical.into(), value.clone());
+                options.insert("unknown.last".into(), json!([true, null]));
+                let input = Value::Object(options);
+                let original = serde_json::to_vec(&input).unwrap();
+                let entry = build_agent_activity_entry(&input);
+                let result = serde_json::to_value(&entry).unwrap();
+                let expected = if value.is_null() { &legacy } else { &value };
+                assert_eq!(
+                    result.get(canonical),
+                    Some(expected),
+                    "{canonical}: canonical non-null wins; null falls back"
+                );
+                assert_eq!(
+                    result.get(alias).is_some(),
+                    !is_legacy_alias(alias),
+                    "{alias}: only declared legacy aliases are removed"
+                );
+                if !is_legacy_alias(alias) {
+                    assert_eq!(result.get(alias), Some(&legacy));
+                }
+                let mut unknown_order = vec!["unknown.first"];
+                if !is_legacy_alias(alias) {
+                    unknown_order.push(alias);
+                }
+                unknown_order.push("unknown.last");
+                assert_eq!(
+                    entry.extra.keys().map(String::as_str).collect::<Vec<_>>(),
+                    unknown_order
+                );
+                assert_eq!(
+                    serde_json::to_string(&entry.extra["unknown.first"]).unwrap(),
+                    r#"{"z":2,"a":18446744073709551615}"#
+                );
+                assert_eq!(
+                    serde_json::to_vec(&input).unwrap(),
+                    original,
+                    "borrowed input must remain unchanged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_null_json_aliases_omit_canonical_keys_without_losing_unknown_values() {
+        for (canonical, alias) in [
+            ("gen_ai.input.messages_delta", "input.messages_delta"),
+            ("gen_ai.input.messages", "input.messages"),
+            ("gen_ai.output.messages", "output.messages"),
+            ("gen_ai.tool.call.arguments", "tool.arguments"),
+            ("gen_ai.tool.call.result", "tool.result.payload"),
+            ("gen_ai.system_instructions", "system_instructions"),
+            ("gen_ai.tool.definitions", "tool.definitions"),
+        ] {
+            let mut options = fixed_options();
+            options.insert(canonical.into(), Value::Null);
+            options.insert(alias.into(), Value::Null);
+            options.insert("unknown".into(), json!({"keep": true}));
+            let result =
+                serde_json::to_value(build_agent_activity_entry(&Value::Object(options))).unwrap();
+            assert!(
+                result.get(canonical).is_none(),
+                "{canonical}: don't leave placeholders in output"
+            );
+            assert_eq!(result.get(alias).is_some(), !is_legacy_alias(alias));
+            assert_eq!(result["unknown"], json!({"keep": true}));
         }
     }
 }

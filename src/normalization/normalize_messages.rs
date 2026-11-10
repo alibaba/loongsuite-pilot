@@ -9,52 +9,40 @@ pub fn normalize_output_messages(raw: Option<Value>) -> Option<Value> {
     if raw.is_null() {
         return None;
     }
-    let Value::Array(items) = &raw else {
+    let Value::Array(mut items) = raw else {
         return Some(raw);
     };
-    if items.is_empty() {
-        return Some(raw);
-    }
-    let Some(first) = items.first() else {
-        return Some(raw);
-    };
-    let Some(first_obj) = first.as_object() else {
-        return Some(raw);
+    let Some(first_obj) = items.first().and_then(Value::as_object) else {
+        return Some(Value::Array(items));
     };
 
     if first_obj.get("parts").is_some_and(Value::is_array) {
-        return Some(Value::Array(
-            items.iter().map(normalize_output_message_keys).collect(),
-        ));
+        for msg in &mut items {
+            normalize_output_message_keys(msg);
+        }
+        return Some(Value::Array(items));
     }
 
     if first_obj.get("type").and_then(Value::as_str).is_some() {
-        let parts: Vec<Value> = items
-            .iter()
-            .filter(|part| part.as_object().is_some())
-            .cloned()
-            .collect();
+        items.retain(Value::is_object);
         let mut message = Map::new();
         message.insert("role".to_string(), Value::String("assistant".to_string()));
-        message.insert("parts".to_string(), Value::Array(parts));
+        message.insert("parts".to_string(), Value::Array(items));
         return Some(Value::Array(vec![Value::Object(message)]));
     }
 
-    Some(raw)
+    Some(Value::Array(items))
 }
 
-fn normalize_output_message_keys(msg: &Value) -> Value {
-    let Some(obj) = msg.as_object() else {
-        return msg.clone();
+fn normalize_output_message_keys(msg: &mut Value) {
+    let Some(obj) = msg.as_object_mut() else {
+        return;
     };
     if obj.contains_key("finishReason") && !obj.contains_key("finish_reason") {
-        let mut rest = obj.clone();
-        if let Some(finish_reason) = rest.remove("finishReason") {
-            rest.insert("finish_reason".to_string(), finish_reason);
+        if let Some(finish_reason) = obj.remove("finishReason") {
+            obj.insert("finish_reason".to_string(), finish_reason);
         }
-        return Value::Object(rest);
     }
-    msg.clone()
 }
 
 /// Normalize `gen_ai.input.messages_delta` to `[{role, parts}]`.
@@ -72,39 +60,28 @@ fn normalize_input_messages_array(raw: Option<Value>) -> Option<Value> {
     if raw.is_null() {
         return None;
     }
-    let Value::Array(items) = &raw else {
+    let Value::Array(mut items) = raw else {
         return Some(raw);
     };
-    if items.is_empty() {
-        return Some(raw);
+    for msg in &mut items {
+        let Some(obj) = msg.as_object_mut() else {
+            continue;
+        };
+        if obj.get("parts").is_some_and(Value::is_array) {
+            continue;
+        }
+        if obj.get("role").and_then(Value::as_str).is_some()
+            && obj.get("content").and_then(Value::as_str).is_some()
+        {
+            if let Some(content) = obj.remove("content") {
+                let mut part = Map::new();
+                part.insert("type".to_string(), Value::String("text".to_string()));
+                part.insert("content".to_string(), content);
+                obj.insert("parts".to_string(), Value::Array(vec![Value::Object(part)]));
+            }
+        }
     }
-
-    Some(Value::Array(
-        items
-            .iter()
-            .map(|msg| {
-                let Some(obj) = msg.as_object() else {
-                    return msg.clone();
-                };
-                if obj.get("parts").is_some_and(Value::is_array) {
-                    return msg.clone();
-                }
-                if let (Some(_role), Some(content)) = (
-                    obj.get("role").and_then(Value::as_str),
-                    obj.get("content").and_then(Value::as_str),
-                ) {
-                    let mut rest = obj.clone();
-                    rest.remove("content");
-                    rest.insert(
-                        "parts".to_string(),
-                        serde_json::json!([{ "type": "text", "content": content }]),
-                    );
-                    return Value::Object(rest);
-                }
-                msg.clone()
-            })
-            .collect(),
-    ))
+    Some(Value::Array(items))
 }
 
 #[cfg(test)]
@@ -266,5 +243,115 @@ mod tests {
             "parts": [{ "type": "text", "content": "hello" }]
         }]);
         assert_eq!(normalize_input_messages(Some(input.clone())), Some(input));
+    }
+}
+
+#[cfg(test)]
+mod owned_message_normalizer_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn assert_bytes(actual: Option<Value>, expected: &str) {
+        assert_eq!(serde_json::to_string(&actual.unwrap()).unwrap(), expected);
+    }
+
+    #[test]
+    fn flat_input_preserves_swap_remove_order_and_unknown_fields() {
+        let raw = r#"[{"before":0,"role":"user","content":"中文🚀","opaque":{"z":2,"a":1},"parts":null,"last":18446744073709551615}]"#;
+        let expected = r#"[{"before":0,"role":"user","last":18446744073709551615,"opaque":{"z":2,"a":1},"parts":[{"type":"text","content":"中文🚀"}]}]"#;
+        assert_bytes(
+            normalize_input_messages(Some(serde_json::from_str(raw).unwrap())),
+            expected,
+        );
+        assert_bytes(
+            normalize_input_messages_delta(Some(serde_json::from_str(raw).unwrap())),
+            expected,
+        );
+    }
+
+    #[test]
+    fn canonical_input_keeps_content_and_all_original_bytes() {
+        let raw = r#"[{"role":"user","content":"kept","parts":[],"unknown":{"b":false,"a":null}},null,0,false,"text",[]]"#;
+        assert_bytes(
+            normalize_input_messages(Some(serde_json::from_str(raw).unwrap())),
+            raw,
+        );
+    }
+
+    #[test]
+    fn output_rename_preserves_swap_remove_and_only_snake_absence_triggers() {
+        let raw = r#"[{"role":"assistant","finishReason":null,"unknown":{"z":2,"a":1},"parts":[],"last":false},null,{"finishReason":"keep","parts":[],"finish_reason":null}]"#;
+        let expected = r#"[{"role":"assistant","last":false,"unknown":{"z":2,"a":1},"parts":[],"finish_reason":null},null,{"finishReason":"keep","parts":[],"finish_reason":null}]"#;
+        assert_bytes(
+            normalize_output_messages(Some(serde_json::from_str(raw).unwrap())),
+            expected,
+        );
+    }
+
+    #[test]
+    fn bare_parts_keep_unknown_objects_drop_scalars_and_keep_order() {
+        let raw = r#"[{"type":"reasoning","content":"think","z":1},null,0,false,[],"text",{"opaque":{"b":2,"a":1}},{"type":"text","content":"answer"}]"#;
+        let expected = r#"[{"role":"assistant","parts":[{"type":"reasoning","content":"think","z":1},{"opaque":{"b":2,"a":1}},{"type":"text","content":"answer"}]}]"#;
+        assert_bytes(
+            normalize_output_messages(Some(serde_json::from_str(raw).unwrap())),
+            expected,
+        );
+    }
+
+    #[test]
+    fn output_first_item_controls_path_and_parts_array_has_priority() {
+        let untouched = r#"[null,{"parts":[],"finishReason":"keep"}]"#;
+        assert_bytes(
+            normalize_output_messages(Some(serde_json::from_str(untouched).unwrap())),
+            untouched,
+        );
+        let raw =
+            r#"[{"type":"text","parts":[],"finishReason":"rename"},0,{"finishReason":false}]"#;
+        let expected =
+            r#"[{"type":"text","parts":[],"finish_reason":"rename"},0,{"finish_reason":false}]"#;
+        assert_bytes(
+            normalize_output_messages(Some(serde_json::from_str(raw).unwrap())),
+            expected,
+        );
+    }
+
+    #[test]
+    fn null_scalar_and_non_string_content_contracts_are_unchanged() {
+        let normalizers: [fn(Option<Value>) -> Option<Value>; 3] = [
+            normalize_input_messages,
+            normalize_input_messages_delta,
+            normalize_output_messages,
+        ];
+        for normalize in normalizers {
+            assert_eq!(normalize(None), None);
+            assert_eq!(normalize(Some(Value::Null)), None);
+            for value in [
+                json!(false),
+                json!(0),
+                json!(""),
+                json!({"z":1,"a":2}),
+                json!([]),
+            ] {
+                let expected = serde_json::to_vec(&value).unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&normalize(Some(value)).unwrap()).unwrap(),
+                    expected
+                );
+            }
+        }
+        for value in [
+            json!(false),
+            json!(0),
+            Value::Null,
+            json!([]),
+            json!({"unknown":true}),
+        ] {
+            let raw = json!([{"role":"user","content":value,"unknown":{"z":1,"a":2}}]);
+            let expected = serde_json::to_vec(&raw).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&normalize_input_messages(Some(raw)).unwrap()).unwrap(),
+                expected
+            );
+        }
     }
 }

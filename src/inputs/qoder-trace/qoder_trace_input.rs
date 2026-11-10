@@ -42,6 +42,11 @@ pub trait QoderTraceReaders: Send + Sync {
     async fn read_cli_intercept(&self) -> super::InterceptData {
         read_intercept_data(None, None).await
     }
+    /// Defaults preserve existing injected readers. Native readers use an
+    /// instance-owned index and return only usage needed by this batch.
+    async fn read_cli_intercept_for(&self, _response_ids: &[String]) -> super::InterceptData {
+        self.read_cli_intercept().await
+    }
     async fn read_cli_segments(
         &self,
         session: &str,
@@ -59,9 +64,24 @@ pub trait QoderTraceReaders: Send + Sync {
         Ok(super::read_attached_image_paths_for_request_ids(ids).await)
     }
 }
-struct NativeQoderTraceReaders;
+#[derive(Default)]
+struct NativeQoderTraceReaders {
+    intercept: tokio::sync::Mutex<super::intercept_token_reader::InterceptTokenIndex>,
+}
 #[async_trait]
-impl QoderTraceReaders for NativeQoderTraceReaders {}
+impl QoderTraceReaders for NativeQoderTraceReaders {
+    async fn read_cli_intercept_for(&self, response_ids: &[String]) -> super::InterceptData {
+        self.intercept
+            .lock()
+            .await
+            .read_for_responses(
+                &super::get_intercept_file("qodercli-intercept.jsonl"),
+                None,
+                response_ids,
+            )
+            .await
+    }
+}
 
 pub struct QoderTraceOptions {
     pub state_store: Arc<crate::checkpoints::StateStore>,
@@ -125,7 +145,7 @@ impl QoderTraceInput {
         Self::new_with_sources(
             opts,
             data_dir,
-            Arc::new(NativeQoderTraceReaders),
+            Arc::new(NativeQoderTraceReaders::default()),
             Arc::new(NativeQoderPromptOwnershipResolver::default()),
         )
     }
@@ -399,7 +419,16 @@ impl InputBody for QoderTraceBody {
             if variant == "qoder-cli" {
                 if let Some(session) = session {
                     if intercept.is_none() {
-                        intercept = Some(self.readers.read_cli_intercept().await);
+                        let mut response_ids = raw
+                            .iter()
+                            .filter(|entry| {
+                                entry.event_name == Some(crate::types::AgentEventName::LlmResponse)
+                            })
+                            .filter_map(|entry| entry.response_id.clone())
+                            .collect::<Vec<_>>();
+                        response_ids.sort_unstable();
+                        response_ids.dedup();
+                        intercept = Some(self.readers.read_cli_intercept_for(&response_ids).await);
                     }
                     let data = intercept.as_ref().unwrap();
                     let mut slice: Vec<AgentActivityEntry> =
@@ -769,4 +798,150 @@ fn extract_session(entries: &[AgentActivityEntry], indexes: &[usize]) -> Option<
         .iter()
         .map(|index| entries[*index].session_id.clone())
         .find(|id| !id.is_empty())
+}
+
+#[cfg(test)]
+mod native_cache_binding_tests {
+    use super::*;
+    use crate::types::AgentEventName;
+    use std::io::Write;
+
+    const CASE: &str = "inputs::qoder_trace::qoder_trace_input::native_cache_binding_tests::native_reader_cache_roundtrips_real_sidecar_fields";
+    const CHILD: &str = "PILOT_NATIVE_CACHE_BINDING_CHILD";
+
+    #[tokio::test]
+    async fn native_reader_cache_roundtrips_real_sidecar_fields() {
+        // Native uses the actual HOME sidecar. Isolate HOME in a child process;
+        // never mutate process-global environment in the parallel test harness.
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", CASE, "--nocapture"])
+                .env_clear()
+                .env(CHILD, "1")
+                .env("HOME", root.path())
+                .env("USERPROFILE", root.path())
+                .env("APPDATA", root.path().join("appdata"))
+                .env("LOCALAPPDATA", root.path().join("localappdata"))
+                .env("PATH", root.path().join("no-runtimes"))
+                .current_dir(root.path());
+            for key in ["SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            let out = crate::utils::candidate_process::output(
+                &mut command,
+                std::time::Duration::from_secs(30),
+                1024 * 1024,
+            )
+            .await
+            .unwrap();
+            assert!(
+                out.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let path = PathBuf::from(super::super::get_intercept_file("qodercli-intercept.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let ts = chrono::Utc::now().timestamp_millis();
+        let row = |id: &str, input: i64, output: i64| serde_json::json!({"type":"token","ts":ts,"id":id,"prompt_tokens":input,"completion_tokens":output,"cached_tokens":3,"reasoning_tokens":2,"total_tokens":input+output});
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({"type":"system_prompt","ts":ts,"content":"native prompt"}),
+                row("selected", 35, 11),
+                row("unrelated", 999, 999)
+            ),
+        )
+        .unwrap();
+        let readers: Arc<dyn QoderTraceReaders> = Arc::new(NativeQoderTraceReaders::default());
+        let ids = vec!["selected".to_owned()];
+        let first = readers.read_cli_intercept_for(&ids).await;
+        assert_eq!(
+            first.tokens.len(),
+            1,
+            "the default unfiltered trait method would return both IDs"
+        );
+        assert_eq!(first.tokens[0].id, "selected");
+        assert_eq!(
+            (
+                first.tokens[0].prompt_tokens,
+                first.tokens[0].completion_tokens,
+                first.tokens[0].cached_tokens,
+                first.tokens[0].reasoning_tokens,
+                first.tokens[0].total_tokens
+            ),
+            (35, 11, 3, 2, 46)
+        );
+        assert_eq!(
+            first.system_prompt.as_ref().unwrap().content,
+            "native prompt"
+        );
+        let mut entries = vec![
+            AgentActivityEntry {
+                event_name: Some(AgentEventName::LlmRequest),
+                step_id: Some("step".into()),
+                ..Default::default()
+            },
+            AgentActivityEntry {
+                event_name: Some(AgentEventName::LlmResponse),
+                response_id: Some("selected".into()),
+                ..Default::default()
+            },
+        ];
+        enrich_cli_primary(
+            &mut entries,
+            first.system_prompt.as_ref().map(|p| p.content.as_str()),
+            &first.tokens,
+        );
+        assert_eq!(
+            (
+                entries[1].input_tokens,
+                entries[1].output_tokens,
+                entries[1].total_tokens,
+                entries[1].cache_read_input_tokens
+            ),
+            (Some(35), Some(11), Some(46), Some(3))
+        );
+        assert!(entries[0].system_instructions.is_some());
+        assert_eq!(
+            readers.read_cli_intercept_for(&ids).await,
+            first,
+            "warm cache preserves fields"
+        );
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            row("selected", 40, 13)
+        )
+        .unwrap();
+        let late = readers.read_cli_intercept_for(&ids).await;
+        assert_eq!(
+            (
+                late.tokens[0].prompt_tokens,
+                late.tokens[0].completion_tokens
+            ),
+            (40, 13),
+            "same-ts later physical usage must replace the prior row"
+        );
+        assert!(readers
+            .read_cli_intercept_for(&["not-present".into()])
+            .await
+            .tokens
+            .is_empty());
+        assert_eq!(
+            readers.read_cli_intercept().await.tokens.len(),
+            3,
+            "old public reader contract remains unfiltered"
+        );
+    }
 }
