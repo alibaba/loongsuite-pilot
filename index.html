@@ -189,7 +189,7 @@
     head.append(text("span",latest && usable(latest,load.id,metric)?label(latest)+" · "+valueText(stats(latest,load.id,metric).median,metric):"最新节点待验收","last")); card.append(head);
     if (!nodes.length) { card.append(text("div","等待测试记录","empty")); return card; }
     const scroll=text("div","","scroll"); scroll.setAttribute("aria-label",load.name+" "+metric.name+"版本趋势，可横向滚动");
-    const W=Math.max(560,80+nodes.length*100), H=258, left=55, right=27, top=34, bottom=177, step=(W-left-right)/Math.max(nodes.length,1);
+    const W=Math.max(560,80+nodes.length*100), H=258, left=55, right=27, top=48, bottom=177, step=(W-left-right)/Math.max(nodes.length,1);
     const plot=svg("svg",{width:W,height:H,viewBox:`0 0 ${W} ${H}`,role:"group","aria-label":load.name+" "+metric.name+"，横轴为版本"});
     let max=0;
     nodes.forEach(node => { if(usable(node,load.id,metric)) max=Math.max(max,stats(node,load.id,metric).max); });
@@ -218,8 +218,8 @@
         }
         group.append(svg("circle",{cx:at,cy:y(s.median),r:13,class:"focus-ring"}),svg("circle",{cx:at,cy:y(s.median),r:5,class:"point"+(n<3?" partial":"")}));
         const labels=svg("g",{class:"compact-label"});
-        svgText(labels,valueText(s.median,metric),{x:at,y:Math.max(13,y(s.max)-10),"text-anchor":"middle",class:"value-label"});
-        svgText(labels,c.ok?deltaText(c.delta):"—",{x:at,y:Math.max(26,y(s.max)+3),"text-anchor":"middle",class:c.ok?(c.delta<0?"delta-down":c.delta>0?"delta-up":"delta-flat"):"delta-flat"});
+        svgText(labels,valueText(s.median,metric),{x:at,y:y(s.max)-32,"text-anchor":"middle",class:"value-label"});
+        svgText(labels,c.ok?deltaText(c.delta):"—",{x:at,y:y(s.max)-16,"text-anchor":"middle",class:c.ok?(c.delta<0?"delta-down":c.delta>0?"delta-up":"delta-flat"):"delta-flat"});
         group.append(labels);
       } else {
         // Missing/failed points live below the value axis, never at y=0.
