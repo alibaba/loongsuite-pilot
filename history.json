@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-10T09:58:21.600137Z",
+  "updated_at": "2026-11-10T10:06:56.055377Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -484,12 +484,12 @@
       "kind": "release",
       "version": "v1.15.2",
       "commit": "22f736ce4ebc2e17975e3eefaf13019c8ac8d31f",
-      "recorded_at": "2026-11-10T09:17:26.476190Z",
-      "status": "failed",
+      "recorded_at": "2026-11-10T10:01:30.471227Z",
+      "status": "passed",
       "method_id": "github-full-pilot-qoder-native-v1",
-      "environment_id": "befe15ae110d5baf6b32c132fd5371886046c709ccff35b74d9f48389cf52976",
+      "environment_id": "085462d3669f3b03c936fd3f5f1bb04d39efc53cf73f528283f0a7d47cb66d22",
       "environment": {
-        "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+        "cpu_model": "AMD EPYC 7763 64-Core Processor",
         "runner_os": "Linux",
         "runner_image": "ubuntu22/20261101.347.1",
         "container_digest": "sha256:8700da48cc6592503feabf399d242414f932197c3b44f43970d2cbc5671e06b0",
@@ -499,15 +499,81 @@
         "cpus": 4,
         "node_version": "v22.23.4"
       },
-      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42789057229",
-      "workloads": {},
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42795520299",
+      "workloads": {
+        "idle": {
+          "repeats": 3,
+          "p95_ms": null,
+          "cpu_percent": {
+            "median": 14.568392298707296,
+            "min": 14.520948476498837,
+            "max": 15.025163886184995
+          },
+          "rss_mib": {
+            "median": 122.28125,
+            "min": 117.15234375,
+            "max": 122.34765625
+          },
+          "quality": {
+            "passed": true,
+            "missing": 0,
+            "duplicates": 0
+          }
+        },
+        "low": {
+          "repeats": 3,
+          "p95_ms": {
+            "median": 249.680158,
+            "min": 241.610947,
+            "max": 267.658381
+          },
+          "cpu_percent": {
+            "median": 21.647473675496244,
+            "min": 21.390763276449288,
+            "max": 21.69299548604973
+          },
+          "rss_mib": {
+            "median": 125.7578125,
+            "min": 121.53125,
+            "max": 127.62890625
+          },
+          "quality": {
+            "passed": true,
+            "missing": 0,
+            "duplicates": 0
+          }
+        },
+        "high": {
+          "repeats": 3,
+          "p95_ms": {
+            "median": 3992.840381,
+            "min": 3757.194279,
+            "max": 4352.021112
+          },
+          "cpu_percent": {
+            "median": 122.42545078532194,
+            "min": 121.14041507852976,
+            "max": 122.78592532314391
+          },
+          "rss_mib": {
+            "median": 172.60546875,
+            "min": 171.6875,
+            "max": 181.65234375
+          },
+          "quality": {
+            "passed": true,
+            "missing": 0,
+            "duplicates": 0
+          }
+        }
+      },
       "source": {
         "repository": "alibaba/loongsuite-pilot",
         "ref": "v1.15.2"
       },
       "provenance": {
         "entry_sha256": "e857d2149d470f997b94645a0540c51045c1ecec3bc895de76dd1dfa48d55761",
-        "fixture_sha256": "55304f8b461341a0528497758654b55cac44bedadee20ff442eb70820c5fb72b",
+        "fixture_sha256": "ead957ff4c64e51c0f8c2f72c100e9b48558f71ff28ee4c848df6c83ce210636",
         "compiler": null,
         "asset_sha256": "def57589327decc173bb9c47f1197001668942a7cf2ea586d13b99dac501aea8",
         "release_url": "https://github.com/alibaba/loongsuite-pilot/releases/tag/v1.15.2",
@@ -517,10 +583,9 @@
         "asset_url": "https://github.com/alibaba/loongsuite-pilot/releases/download/v1.15.2/loongsuite-pilot.tar.gz",
         "checksum_source": "github_asset_digest"
       },
-      "failure_category": "infrastructure",
       "publication": {
-        "run_number": 7,
-        "run_id": "42789057229"
+        "run_number": 12,
+        "run_id": "42795520299"
       }
     },
     {
