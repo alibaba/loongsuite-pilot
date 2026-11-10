@@ -132,8 +132,8 @@ export class HookStrategy implements DeployStrategy {
 
   async needsDeploy(def: AgentDefinition, _record?: DeployedAgentRecord): Promise<boolean> {
     if (def.hook?.scope === 'system') {
-      const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
-      return !(await systemTomlHooksInstalled(def));
+      const { systemHooksInstalled } = await import('./system-hook-config.js');
+      return !(await systemHooksInstalled(def));
     }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
@@ -202,8 +202,8 @@ export class HookStrategy implements DeployStrategy {
 
     try {
       if (hookConfig.scope === 'system') {
-        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
-        await updateSystemTomlHooks(def, true);
+        const { updateSystemHooks } = await import('./system-hook-config.js');
+        await updateSystemHooks(def, true);
         return { success: true, agentId: def.id, deployMode: 'hook' };
       }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
@@ -369,8 +369,8 @@ export class HookStrategy implements DeployStrategy {
   async undeploy(def: AgentDefinition): Promise<boolean> {
     if (def.hook?.scope === 'system') {
       try {
-        const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
-        await updateSystemTomlHooks(def, false);
+        const { updateSystemHooks } = await import('./system-hook-config.js');
+        await updateSystemHooks(def, false);
         return true;
       } catch (error) {
         logger.error('System hook removal failed', { error: String(error) });

@@ -18,7 +18,7 @@ import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/
 import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
 import { readContainerIdentity } from '../utils/container-identity.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from '../deployment/system-hook-assets.js';
-import { supportsSystemTomlHooks } from '../deployment/system-toml-hooks.js';
+import { supportsSystemHooks } from '../deployment/system-hook-config.js';
 import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
@@ -807,7 +807,7 @@ export class Orchestrator extends EventEmitter {
   private buildGrokBuildInterceptTargets(): InterceptCheckTarget[] {
     const pilotDir = this.resolvePilotDir();
     return this.deploymentManager.getDefinitions()
-      .filter(def => supportsSystemTomlHooks(def.id) && def.hook
+      .filter(def => supportsSystemHooks(def.id) && def.hook
         && (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system'))
       .map(def => ({
         id: `hook:${def.id}`,

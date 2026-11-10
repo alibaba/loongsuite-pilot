@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import type { AgentDefinition, DeployedAgentRecord } from '../types/index.js';
+import { supportsSystemHooks } from './system-hook-config.js';
 
 function absolutePath(value: string | undefined): string | undefined {
   if (!value || value.trim().length === 0) return undefined;
@@ -34,7 +35,7 @@ export function lifecycleFieldsForDeploy(
   resolved?: Pick<DeployedAgentRecord, 'pluginInjectConfigPath'>,
 ): Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> {
   const fields: Pick<DeployedAgentRecord, 'hookSettingsPath' | 'hookScope' | 'pluginInjectConfigPath'> = {};
-  if ((def.id === 'grok-build' || def.id === 'codex') && def.hook?.settingsPath) {
+  if (supportsSystemHooks(def.id) && def.hook?.settingsPath) {
     const resolvedHook = path.resolve(def.hook.settingsPath);
     if (path.isAbsolute(resolvedHook)) fields.hookSettingsPath = resolvedHook;
     fields.hookScope = def.hook.scope ?? 'user';
