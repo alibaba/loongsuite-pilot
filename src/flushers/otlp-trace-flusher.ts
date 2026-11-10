@@ -140,8 +140,10 @@ interface TurnBuffer {
   // intentionally leaves other producers' update semantics unchanged.
   recordIndex: Map<string, number>;
   completed: boolean;
-  /** Realtime Hermes model/tool events can pause without ending the turn. */
-  waitsForHermesTurnEnd?: boolean;
+  /** All realtime producers can overlap turns in one session. */
+  isRealtimeHermes?: boolean;
+  /** Only a turn covered by the native observer may bypass idle flushing. */
+  hasHermesNativeRunObserver?: boolean;
   lastActivityMs: number;
   logicalBytes: number;
   unmeasuredRecords: number;
@@ -636,6 +638,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
   private warnedHermesIdleTimeout = false;
+  private warnedHermesLegacyIdleTimeout = false;
   private readonly convertLocks = new Map<string, Promise<void>>();
   private journalRestore?: Promise<void>;
   private codexFlushTail: Promise<void> = Promise.resolve();
@@ -852,7 +855,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
       if (agentType === 'hermes'
-        && buf.waitsForHermesTurnEnd) continue;
+        && buf.isRealtimeHermes) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
@@ -884,7 +887,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.sessionId = incomingSessionId;
     }
     if (agentType === 'hermes' && entry['agent.hermes.collection'] === 'realtime-v1') {
-      buf.waitsForHermesTurnEnd = true;
+      buf.isRealtimeHermes = true;
+      if (entry['agent.hermes.native_run_observer'] === true) {
+        buf.hasHermesNativeRunObserver = true;
+      }
     }
     const durable = !!this.codexJournal && isJournaledCodexEntry(entry);
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
@@ -2613,7 +2619,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
-        if (buf.waitsForHermesTurnEnd) {
+        if (buf.hasHermesNativeRunObserver) {
           // Idleness does not prove native completion. Sealing here puts the
           // key in flushedTurnKeys and discards later tools/model responses.
           // Retain this turn under the existing buffer cap and expose its age
@@ -2622,9 +2628,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
             this.warnedHermesIdleTimeout = true;
             logger.warn('Ignoring idle timeout for realtime Hermes turns; waiting for native completion', {
               turnIdleTimeoutMs: timeout,
+              pendingRecords: buf.records.length,
+              bufferAgeMs: Math.max(0, performance.now() - buf.openedAtMs),
             });
           }
           continue;
+        }
+        if (buf.isRealtimeHermes && !this.warnedHermesLegacyIdleTimeout) {
+          this.warnedHermesLegacyIdleTimeout = true;
+          logger.warn('Realtime Hermes turn lacks native completion capability; applying legacy idle timeout. Restart Hermes after updating the plugin', {
+            turnIdleTimeoutMs: timeout,
+          });
         }
         if (buf.agentType === 'codex' && this.codexJournal) {
           this.turnBuffers.delete(buf.key);

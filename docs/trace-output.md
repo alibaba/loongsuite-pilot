@@ -60,11 +60,21 @@ source, output, installed-runtime and cloud evidence.
 | `otlpTrace.serviceName` | Legacy trace-only service-name base. Pilot appends `-<agentType>`; top-level `serviceName` takes precedence and disables the suffix. |
 | `otlpTrace.resourceAttributes` | Extra OpenTelemetry resource attributes. |
 | `otlpTrace.debug` | Enables local debug output for trace conversion. |
-| `otlpTrace.turnIdleTimeoutMs` | Turn-level aggregation idle timeout; defaults to `0` (disabled). Realtime Hermes turns always wait for native completion, including when this timeout is configured; a warning is emitted once if an idle Hermes turn reaches it. Legacy producers retain idle flushing. |
+| `otlpTrace.turnIdleTimeoutMs` | Turn-level aggregation idle timeout; defaults to `0` (disabled). Hermes turns covered by the native completion observer wait for actual completion even when a timeout is configured. An aged buffer emits one diagnostic with its pending record count and age. Older or uncovered producers retain the configured idle fallback. |
 
 Hermes observes actual call completion, including early returns, failures and cancellation that bypass
 native completion hooks. Normal hooks and the call observer do not emit duplicate completion records;
-other active calls in the same session continue collecting. Restart Hermes after updating the plugin.
+other active calls in the same session continue collecting. Ownership follows session-id changes caused
+by compression within that native call. The private `agent.hermes.native_run_observer: true` field is
+emitted only for turns actually covered by the observer; `realtime-v1` alone does not advertise it.
+If the native entry is unavailable, the plugin diagnoses it once and retries lazily with a five-second
+backoff. Uncovered calls keep the previous idle behavior, which can truncate late data; updating only
+the collector does not fix an already-running old plugin. Restart Hermes after updating the plugin.
+
+Live turns have no forced age cutoff: a time-based flush would again discard later tool/model events.
+Pending buffer count and `oldest_buffer_age_ms` remain visible in the `pilot_trace_runtime` status
+snapshots, under the existing buffer-count cap. A host killed before completion still requires separate
+abandoned-turn recovery; this observer does not provide durable crash replay.
 
 Environment variables:
 

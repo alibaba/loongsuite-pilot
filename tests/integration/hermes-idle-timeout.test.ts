@@ -32,6 +32,7 @@ function record(name: string, index: number, extra: Record<string, unknown> = {}
     'event.name': name, 'event.id': `synthetic-${name}-${index}`,
     time_unix_nano: time(index * 100), trace_id: 'aa'.repeat(16),
     'gen_ai.agent.type': 'hermes', 'agent.hermes.collection': 'realtime-v1',
+    'agent.hermes.native_run_observer': true,
     'gen_ai.agent.name': 'synthetic-hermes', 'gen_ai.session.id': 'synthetic-session',
     'gen_ai.turn.id': 'synthetic-turn', 'gen_ai.step.id': `synthetic-turn:s${index}`,
     'gen_ai.provider.name': 'test', 'gen_ai.request.model': 'synthetic-model',
@@ -60,12 +61,12 @@ afterEach(async () => {
 
 describe('realtime Hermes idle timeout', () => {
   it('exports all 20 calls after a long gap, with one root pair and source token totals', async () => {
-    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setInterval', 'clearInterval'] });
     const { flusher, spans } = await createFlusher();
     await flusher.sendBatch([1, 2, 3].flatMap(api));
     await vi.advanceTimersByTimeAsync(180_000);
     expect(spans).toHaveLength(0);
-    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({ pending_buffers: 1, pending_records: 6 });
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({ pending_buffers: 1, pending_records: 6, oldest_buffer_age_ms: 180_000 });
     await flusher.sendBatch([
       ...Array.from({ length: 17 }, (_, i) => i + 4).flatMap(api),
       record('other', 20, { 'gen_ai.turn.end': true }),
@@ -122,9 +123,28 @@ describe('realtime Hermes idle timeout', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     const { flusher, spans } = await createFlusher();
     const records = api(1).map(entry => ({ ...entry, 'gen_ai.agent.type': agentType,
-      'agent.hermes.collection': undefined, 'gen_ai.response.finish_reasons': ['tool_calls'] }));
+      'agent.hermes.collection': undefined, 'agent.hermes.native_run_observer': undefined,
+      'gen_ai.response.finish_reasons': ['tool_calls'] }));
     await flusher.sendBatch(records);
     await vi.advanceTimersByTimeAsync(62_000);
     await vi.waitFor(() => expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(1));
+  });
+
+  it.each([undefined, false, 'true'])('retains idle fallback for realtime-v1 without a boolean capability (%s)', async capability => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const { flusher, spans } = await createFlusher();
+    await flusher.sendBatch(api(1).map(entry => ({ ...entry, 'agent.hermes.native_run_observer': capability })));
+    await vi.advanceTimersByTimeAsync(62_000);
+    await vi.waitFor(() => expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(1));
+    expect(flusher.getTraceRuntimeSnapshot()[0].pending_buffers).toBe(0);
+  });
+
+  it('does not preempt an older realtime producer merely because its capability is absent', async () => {
+    const { flusher, spans } = await createFlusher();
+    await flusher.sendBatch(api(1).map(entry => ({ ...entry, 'agent.hermes.native_run_observer': undefined })));
+    await flusher.sendBatch(api(2).map(entry => ({ ...entry, 'agent.hermes.native_run_observer': undefined,
+      'gen_ai.turn.id': 'overlapping-turn', 'gen_ai.step.id': 'overlapping-turn:s2' })));
+    expect(spans).toHaveLength(0);
+    expect(flusher.getTraceRuntimeSnapshot()[0]).toMatchObject({ pending_buffers: 2, pending_records: 4 });
   });
 });

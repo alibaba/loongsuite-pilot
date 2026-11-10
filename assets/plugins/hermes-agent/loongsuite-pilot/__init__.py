@@ -63,21 +63,37 @@ _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
 _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
+_NATIVE_RUN_OBSERVER_READY = False
+_NATIVE_RUN_OBSERVER_WARNED = False
+_NATIVE_RUN_RETRY_AFTER = 0.0
 
 
 def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
     scope = _NATIVE_RUN_SCOPE.get()
-    if scope is None or turn["session_id"] != scope["session_id"]:
+    if scope is None or scope["closed"]:
+        return
+    session_id = turn["session_id"]
+    # Compression can rotate this same native agent's session in place. Keep
+    # its observed aliases, without adopting a different agent's session.
+    if session_id not in scope["sessions"] and session_id != getattr(scope["agent"], "session_id", None):
         return
     owned = scope["turns"]
-    if len(owned) < MAX_ACTIVE_TURNS:
-        owned[turn["fallback_turn_id"]] = (state, turn)
+    key = turn["fallback_turn_id"]
+    if key not in owned and len(owned) >= MAX_ACTIVE_TURNS:
+        return
+    scope["sessions"].add(session_id)
+    owned[key] = (state, turn)
+    # Capability belongs to this covered invocation, not just this plugin
+    # version. Unwrapped calls and failed installation retain legacy fallback.
+    turn["native_run_observer"] = True
 
 
 def _finish_native_run(scope: Dict[str, Any], result: Any) -> None:
     # Hermes v2026.6.5 has error/interrupt returns before on_session_end.
     # The native call has actually returned here: no idle/finish-reason guess
     # and no adoption of another foreground/background invocation by session.
+    with _STATE_LOCK:
+        scope["closed"] = True
     payload = {}
     if isinstance(result, dict):
         if isinstance(result.get("messages"), list):
@@ -90,8 +106,8 @@ def _finish_native_run(scope: Dict[str, Any], result: Any) -> None:
                 _flush_turn(state, turn, payload)
 
 
-def _install_run_completion_observer() -> None:
-    global _NATIVE_RUN_SCOPE
+def _install_run_completion_observer() -> bool:
+    global _NATIVE_RUN_SCOPE, _NATIVE_RUN_OBSERVER_READY
     # Plugin discovery can happen inside model_tools while run_agent.AIAgent
     # is still undefined. v2026.6.5's class forwards to this native loop; wrap
     # that boundary so the very first invocation is covered after cold import.
@@ -102,18 +118,20 @@ def _install_run_completion_observer() -> None:
         owner = getattr(module, "AIAgent", None)
     original = getattr(owner, "run_conversation", None)
     if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
-        return
+        return False
     if hasattr(original, "_pilot_run_scope"):
         # Re-registration must not nest wrappers or strand an in-flight token.
         _NATIVE_RUN_SCOPE = original._pilot_run_scope
         original._pilot_run_finish = _finish_native_run
-        return
+        _NATIVE_RUN_OBSERVER_READY = True
+        return True
 
     @functools.wraps(original)
     def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
         context = observed._pilot_run_scope
         try:
-            scope = {"session_id": getattr(agent, "session_id", None), "turns": {}}
+            scope = {"agent": agent, "sessions": {getattr(agent, "session_id", None)},
+                     "turns": {}, "closed": False}
             token = context.set(scope)
         except Exception:
             return original(agent, *args, **kwargs)
@@ -130,13 +148,48 @@ def _install_run_completion_observer() -> None:
                 _report_internal_error("native run completion", error)
             finally:
                 try:
-                    context.reset(token)
+                    with _STATE_LOCK:
+                        scope["closed"] = True
+                        scope["agent"] = None
+                        scope["turns"].clear()
+                        scope["sessions"].clear()
                 except Exception as error:
-                    _report_internal_error("native run context restore", error)
+                    _report_internal_error("native run scope cleanup", error)
+                finally:
+                    try:
+                        context.reset(token)
+                    except Exception as error:
+                        _report_internal_error("native run context restore", error)
 
     observed._pilot_run_scope = _NATIVE_RUN_SCOPE
     observed._pilot_run_finish = _finish_native_run
     owner.run_conversation = observed
+    _NATIVE_RUN_OBSERVER_READY = True
+    return True
+
+
+def _try_install_run_completion_observer() -> None:
+    global _NATIVE_RUN_OBSERVER_READY, _NATIVE_RUN_OBSERVER_WARNED
+    error = RuntimeError("native entry unavailable")
+    _NATIVE_RUN_OBSERVER_READY = False
+    try:
+        if _install_run_completion_observer():
+            return
+    except Exception as failure:
+        error = failure
+    if not _NATIVE_RUN_OBSERVER_WARNED:
+        _NATIVE_RUN_OBSERVER_WARNED = True
+        _report_internal_error("native run observer unavailable; retaining legacy idle behavior", error)
+
+
+def _retry_run_completion_observer() -> None:
+    global _NATIVE_RUN_RETRY_AFTER
+    if _NATIVE_RUN_OBSERVER_READY or time.monotonic() < _NATIVE_RUN_RETRY_AFTER:
+        return
+    # Retry after cold discovery without repeatedly importing a broken host
+    # module on every event. The already-running unwrapped call stays unmarked.
+    _NATIVE_RUN_RETRY_AFTER = time.monotonic() + 5.0
+    _try_install_run_completion_observer()
 
 
 def _stream_api_for_agent(agent: Any) -> Optional[Dict[str, Any]]:
@@ -995,6 +1048,8 @@ def _common_fields(
         "gen_ai.agent.type": AGENT_TYPE,
         "agent.hermes.collection": "realtime-v1",
     }
+    if turn.get("native_run_observer") is True:
+        fields["agent.hermes.native_run_observer"] = True
     if turn.get("user_id_source") in ("invocation", "environment", "sender", "parent"):
         fields[INVOCATION_USER_ID_FIELD] = turn["user_id"]
     if turn.get("sender_id"):
@@ -1818,6 +1873,8 @@ _HANDLERS: Dict[str, Callable[[int, Dict[str, Any]], None]] = {
 def _safe_callback(hook_name: str) -> Callable[..., None]:
     def callback(**kwargs: Any) -> None:
         try:
+            if hook_name == "pre_llm_call":
+                _retry_run_completion_observer()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -1831,10 +1888,7 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
 def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
-    try:
-        _install_run_completion_observer()
-    except Exception as error:
-        _report_internal_error("native run observer installation", error)
+    _try_install_run_completion_observer()
     _purge_old_logs()
     for hook_name in HOOKS:
         try:
