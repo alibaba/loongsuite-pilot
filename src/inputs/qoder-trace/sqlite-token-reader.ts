@@ -31,11 +31,11 @@ export interface AttachedImageLookup {
 }
 
 /**
- * Batch-read user-attached image paths from chat_record.extra.
+ * Batch-read attached image paths, plus file identifiers, from chat_record.extra.
  * Keys are request_id. Also returns the user-message start clock when present.
  * DB paths are resolved the same way as token enrichment (not caller-supplied).
  * Fail-open: query errors are logged and skipped.
- * Only request_ids that appear in a row are recorded (`paths: []` if extra has no images).
+ * Only request_ids that appear in a row are recorded (`paths: []` if extra has no media).
  */
 export async function readAttachedImagePathsForRequestIds(
   requestIds: string[],
@@ -92,34 +92,31 @@ function parseGmtCreateMs(raw: number | string | null | undefined): number | und
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-function parseAttachedImagePaths(raw: string | null | undefined): string[] {
+export function parseAttachedImagePaths(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
     const extra = JSON.parse(raw) as Record<string, unknown>;
+    const paths: string[] = [];
 
-    const fromField: string[] = [];
     if (Array.isArray(extra.attachedImagePaths)) {
       for (const item of extra.attachedImagePaths) {
-        if (typeof item === 'string' && item.trim()) fromField.push(item.trim());
+        if (typeof item === 'string' && item.trim()) paths.push(item.trim());
       }
     }
-    if (fromField.length > 0) return [...new Set(fromField)];
 
-    // Fallback: context entries marked as image.
-    const fromContext: string[] = [];
     const context = Array.isArray(extra.context) ? extra.context : [];
     for (const item of context) {
       if (!item || typeof item !== 'object') continue;
       const record = item as Record<string, unknown>;
-      const name = typeof record.name === 'string' ? record.name : '';
-      const fileType = typeof record.fileType === 'string' ? record.fileType : '';
-      if (name !== 'image' && fileType !== 'image') continue;
-      const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
-      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
-      const candidate = imgUrl || filePath;
-      if (candidate) fromContext.push(candidate);
+      if (record.name !== 'file') continue;
+      const selected = record.selectedItem;
+      if (!selected || typeof selected !== 'object') continue;
+      const identifier = (selected as Record<string, unknown>).identifier;
+      if (typeof identifier !== 'string') continue;
+      const trimmed = identifier.trim();
+      if (trimmed) paths.push(trimmed);
     }
-    return [...new Set(fromContext)];
+    return [...new Set(paths)];
   } catch {
     return [];
   }

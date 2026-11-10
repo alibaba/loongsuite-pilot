@@ -85,6 +85,9 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       '@/Users/me/Documents/picture/pipeline.jpg 这个图是一样的？',
     )).toEqual(['/Users/me/Documents/picture/pipeline.jpg']);
     expect(extractInputImagePaths(
+      '@/Users/me/video/clip.mp4',
+    )).toEqual(['/Users/me/video/clip.mp4']);
+    expect(extractInputImagePaths(
       '[Image: source: docs/_assets/img/dashboard.png, original 2556x1656, displayed at 2000x1296]',
       cwd,
     )).toEqual([path.join(cwd, 'docs/_assets/img/dashboard.png')]);
@@ -101,22 +104,28 @@ describe('extractInputImagePaths / extractToolImagePaths', () => {
       '附件引用：',
       '- 文件：/tmp/a949604a.png',
       '- 文件：/tmp/55cc677b.jpg',
+      '- 文件：/tmp/whale.mp4',
       '- 文件：/tmp/notes.txt',
       '[Image: original 2516x1418, displayed at 2000x1127. Multiply coordinates by 1.26 to map to original image.]',
     ].join('\n');
     if (process.platform === 'win32') {
       expect(extractInputImagePaths(
-        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\notes.txt',
+        '文件：C:\\tmp\\a949604a.png\n文件:C:\\tmp\\55cc677b.jpg\n文件：C:\\tmp\\whale.mp4\n文件：C:\\tmp\\notes.txt',
       )).toEqual([
         path.win32.normalize('C:\\tmp\\a949604a.png'),
         path.win32.normalize('C:\\tmp\\55cc677b.jpg'),
+        path.win32.normalize('C:\\tmp\\whale.mp4'),
       ]);
       return;
     }
     expect(extractInputImagePaths(text)).toEqual([
       '/tmp/a949604a.png',
       '/tmp/55cc677b.jpg',
+      '/tmp/whale.mp4',
     ]);
+    expect(extractInputImagePaths(
+      '附件引用：\n- 文件：/Users/me/video/clip.mp4',
+    )).toEqual(['/Users/me/video/clip.mp4']);
     expect(extractInputImagePaths('文件: /tmp/clip.png')).toEqual(['/tmp/clip.png']);
   });
 

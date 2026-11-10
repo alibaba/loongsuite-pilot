@@ -137,7 +137,7 @@ Qoder IDE (`qoder`) converts on the `qoder-trace` path after IDE token enrichmen
 | `uploadMode` | Qoder IDE surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | SQLite `chat_record.extra.attachedImagePaths` (and image context entries); `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; Read image, ImageGen |
+| `input` | Read from SQLite; `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; cite a video file; Read image, ImageGen |
 | `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions); `tool.call` image `file_path` | Assistant replies that embed read/generated images; Read image by path |
 | `all` | All of the above | Attachments, tool read/generate, and output embeds |
 
@@ -153,7 +153,7 @@ Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
+| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image or video path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
 | `output` | `tool.call` image `file_path` | Path in the prompt then Read; find then Read |
 | `all` | User attachments, tool-result images, and tool-call image paths | Paste/`@` plus tool read/generate |
 

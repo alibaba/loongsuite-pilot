@@ -17,17 +17,17 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('QoderCliMultimodal');
 
-const IMAGE_EXT = 'png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff';
+const MEDIA_EXT = 'png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff|mp4|mov|m4v|3gp|3g2|webm|mkv|avi';
 const IMAGE_SOURCE_RE = new RegExp(
   `\\[Image:\\s*source:\\s*([^\\]]{1,${MAX_MULTIMODAL_PATH_CHARS}})\\]`,
   'gi',
 );
 const AT_IMAGE_RE = new RegExp(
-  `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+  `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${MEDIA_EXT}))\\b`,
   'gi',
 );
-const FILE_CITATION_IMAGE_RE = new RegExp(
-  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+const FILE_CITATION_RE = new RegExp(
+  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${MEDIA_EXT}))\\b`,
   'gi',
 );
 const READ_IMAGE_RE = new RegExp(`Read image:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
@@ -53,7 +53,7 @@ export interface EnrichCliMultimodalOptions {
 /**
  * CLI-only multimodal enrichment. Mutates entries in place.
  * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`,
- * `@path`, and `文件：<image path>`, then unique-resolve.
+ * `@path`, and `文件：<image or video path>`, then unique-resolve.
  * Tool result: Read/ImageGen. Tool call: Read `file_path` (output mode).
  * Assistant finals do not embed images. Fail-open.
  */
@@ -237,7 +237,7 @@ export function extractInputImagePaths(
     ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
-    ...matchAll(FILE_CITATION_IMAGE_RE, text),
+    ...matchAll(FILE_CITATION_RE, text),
   ], cwd);
 }
 

@@ -135,7 +135,7 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 | `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image）；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；Read 读图、ImageGen 生成图 |
+| `input` | 从 SQLite 读取；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；引用视频文件；Read 读图、ImageGen 生成图 |
 | `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名）；`tool.call` 中的图片 `file_path` | 助手回复中嵌入已读/生成图；按路径 Read 读图 |
 | `all` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
 
@@ -151,7 +151,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
+| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image 或 video path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
 | `output` | `tool.call` 中的图片 `file_path` | 文本里给路径后由 Read 读图；查找后再 Read |
 | `all` | 用户附件、工具结果图与工具调用路径 | 覆盖粘贴/`@` 与工具读图/生成 |
 

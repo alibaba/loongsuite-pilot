@@ -38,6 +38,7 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import {
+  parseAttachedImagePaths,
   readAttachedImagePathsForRequestIds,
   type AttachedImageLookup,
   type SqliteTokenData,
@@ -1699,6 +1700,47 @@ describe('QoderTraceInput multimodal', () => {
       expect(extractMarkdownImagePaths(listed.map((p, i) => `![n${i}](${p})`).join(' '))).toEqual(
         listed.slice(0, MAX_MULTIMODAL_PARTS),
       );
+    });
+  });
+
+  describe('parseAttachedImagePaths', () => {
+    const IMAGE = '/Users/me/Library/Application Support/Qoder/SharedClientCache/cache/images/s/pic.png';
+    const IMAGE_TEMP = '/var/folders/aicoding-image-cache/pic.png';
+    const VIDEO = '/Users/me/video/clip.mp4';
+
+    it('keeps attachedImagePaths and ignores the image temp identifier', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [{
+          name: 'image',
+          selectedItem: { identifier: IMAGE_TEMP, name: 'pic.png' },
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a video file selectedItem.identifier from the same extra', () => {
+      const extra = JSON.stringify({
+        context: [{
+          name: 'file',
+          selectedItem: { identifier: VIDEO, name: 'clip.mp4' },
+          parsedContextItems: [{ identifier: VIDEO, value: 'clip.mp4' }],
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([VIDEO]);
+    });
+
+    it('keeps every file identifier and ignores image context when attachedImagePaths is set', () => {
+      const notes = '/Users/me/notes.txt';
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [
+          { name: 'image', imgUrl: 'https://example/a.png', filePath: IMAGE_TEMP, selectedItem: { identifier: IMAGE_TEMP } },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+          { name: 'file', selectedItem: { identifier: notes } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO, notes]);
     });
   });
 
