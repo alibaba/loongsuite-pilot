@@ -4,6 +4,11 @@ use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn complete_runtime_writes_real_process_resources() {
+    // A minimal optimized writer may have less than two MiB of resident code.
+    // Touch and retain a known working set so RSS accuracy is tested directly.
+    const RESIDENT_BYTES: usize = 16 * 1024 * 1024;
+    let resident = vec![std::hint::black_box(1_u8); RESIDENT_BYTES];
+    std::hint::black_box(&resident);
     let root = tempfile::tempdir().unwrap();
     let mut options = MetricsWriterOptions::new(
         root.path().to_string_lossy(),
@@ -42,6 +47,10 @@ async fn complete_runtime_writes_real_process_resources() {
         "busy CPU must be observed: {row}"
     );
     assert!(memory > 1.0, "RSS must reflect the process: {row}");
+    assert!(
+        memory >= (RESIDENT_BYTES / 1_048_576) as f64,
+        "RSS must include the retained resident allocation: {row}"
+    );
     #[cfg(not(target_os = "linux"))]
     {
         assert_eq!(row["metric_json"]["cpu_available"], "true");
@@ -53,4 +62,5 @@ async fn complete_runtime_writes_real_process_resources() {
         assert!(row.get("mem_heap").is_none());
         assert!(!row["os_detail"].as_str().unwrap().contains("unknown"));
     }
+    std::hint::black_box(resident);
 }
