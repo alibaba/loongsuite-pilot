@@ -2,7 +2,7 @@ export {
   anyAgentMultimodalEnabled,
   isAgentMultimodalEnabled,
 } from './agent-gate.js';
-export { MultimodalProcessor } from './processor.js';
+export { MultimodalProcessor, convertPathsToUriParts } from './processor.js';
 export {
   asRecord,
   matchAll,

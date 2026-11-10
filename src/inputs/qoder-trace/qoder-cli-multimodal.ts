@@ -10,6 +10,7 @@ import {
   takeUniqueExtractedPaths,
   timeUnixNanoToMillis,
   MAX_MULTIMODAL_PATH_CHARS,
+  convertPathsToUriParts,
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
@@ -135,7 +136,7 @@ async function enrichToolResultImages(
   if (typeof raw !== 'string' || !raw) return 0;
   const paths = extractToolImagePaths(raw, cwdOf(entry));
   if (paths.length === 0) return 0;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
   if (uriParts.length === 0) return 0;
   entry['gen_ai.tool.call.result'] = [
     { type: 'text', content: raw },
@@ -155,7 +156,7 @@ async function enrichToolCallImages(
   if (Array.isArray(raw)) return 0;
   const paths = extractToolCallImagePaths(raw, cwdOf(entry));
   if (paths.length === 0) return 0;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
   if (uriParts.length === 0) return 0;
   const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
   entry['gen_ai.tool.call.arguments'] = [
@@ -174,7 +175,7 @@ async function appendUriPartsToMessagesDelta(
 ): Promise<number> {
   const messages = entry['gen_ai.input.messages_delta'];
   if (!Array.isArray(messages) || messages.length === 0) {
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats, logger);
     if (uriParts.length === 0) return 0;
     entry['gen_ai.input.messages_delta'] = [
       { role: 'user', parts: uriParts },
@@ -187,45 +188,10 @@ async function appendUriPartsToMessagesDelta(
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
   record.parts = parts;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats, logger);
   if (uriParts.length === 0) return 0;
   parts.push(...uriParts);
   return uriParts.length;
-}
-
-async function convertPathsToUriParts(
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<UriPart[]> {
-  const parts: UriPart[] = [];
-  for (const filePath of paths) {
-    const trimmed = filePath.trim();
-    let result;
-    try {
-      result = await pathToUri(trimmed, timeMs);
-    } catch (err) {
-      stats.skipped += 1;
-      logger.warn('qoder cli multimodal pathToUri threw; skipping image', {
-        error: String(err),
-        path: trimmed,
-      });
-      continue;
-    }
-    if (!result) {
-      stats.skipped += 1;
-      logger.warn('qoder cli multimodal path skipped', { path: trimmed });
-      continue;
-    }
-    parts.push({
-      type: 'uri',
-      mime_type: result.mime_type,
-      modality: result.modality,
-      uri: result.uri,
-    });
-  }
-  return parts;
 }
 
 export function extractInputImagePaths(

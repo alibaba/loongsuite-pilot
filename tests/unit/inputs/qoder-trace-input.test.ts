@@ -1730,18 +1730,37 @@ describe('QoderTraceInput multimodal', () => {
       expect(parseAttachedImagePaths(extra)).toEqual([VIDEO]);
     });
 
-    it('keeps every file identifier and ignores image context when attachedImagePaths is set', () => {
-      const notes = '/Users/me/notes.txt';
+    it('keeps media file identifiers and drops other suffixes when attachedImagePaths is set', () => {
       const extra = JSON.stringify({
         attachedImagePaths: [IMAGE],
         context: [
           { name: 'image', imgUrl: 'https://example/a.png', filePath: IMAGE_TEMP, selectedItem: { identifier: IMAGE_TEMP } },
           { name: 'file', selectedItem: { identifier: VIDEO } },
-          { name: 'file', selectedItem: { identifier: notes } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/notes.txt' } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/main.ts' } },
         ],
       });
-      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO, notes]);
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
     });
+
+    it('reads image filePath when attachedImagePaths is missing', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a local image imgUrl when attachedImagePaths is empty', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: ['  '],
+        context: [
+          { name: 'image', imgUrl: IMAGE },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
+    });
+
   });
 
   describe('enrichIdeMultimodal', () => {

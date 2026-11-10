@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { mimeFromMediaPath } from '../../multimodal/resolve.js';
 import { resolveHome } from '../../utils/fs-utils.js';
 import { queryReadonly, queryReadonlyPaged } from '../../utils/node-sqlite.js';
 import { createLogger } from '../../utils/logger.js';
@@ -103,18 +104,26 @@ export function parseAttachedImagePaths(raw: string | null | undefined): string[
         if (typeof item === 'string' && item.trim()) paths.push(item.trim());
       }
     }
+    const hasAttachedImages = paths.length > 0;
 
     const context = Array.isArray(extra.context) ? extra.context : [];
     for (const item of context) {
       if (!item || typeof item !== 'object') continue;
       const record = item as Record<string, unknown>;
-      if (record.name !== 'file') continue;
-      const selected = record.selectedItem;
-      if (!selected || typeof selected !== 'object') continue;
-      const identifier = (selected as Record<string, unknown>).identifier;
-      if (typeof identifier !== 'string') continue;
-      const trimmed = identifier.trim();
-      if (trimmed) paths.push(trimmed);
+      if (record.name === 'file') {
+        const selected = record.selectedItem;
+        if (!selected || typeof selected !== 'object') continue;
+        const identifier = (selected as Record<string, unknown>).identifier;
+        if (typeof identifier !== 'string') continue;
+        const trimmed = identifier.trim();
+        if (trimmed && mimeFromMediaPath(trimmed)) paths.push(trimmed);
+        continue;
+      }
+      if (record.name !== 'image' || hasAttachedImages) continue;
+      const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
+      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+      const candidate = imgUrl || filePath;
+      if (candidate) paths.push(candidate);
     }
     return [...new Set(paths)];
   } catch {
