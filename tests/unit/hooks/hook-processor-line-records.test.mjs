@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -288,7 +288,7 @@ describe('readTranscriptSnapshotLines / sliceTranscriptLines', () => {
 describe('Work transcript byte cursor', () => {
   const worker = `
     import fs from 'node:fs';
-    import { readTranscriptIncrement, updateLineRecord } from ${JSON.stringify(BASE_MODULE)};
+    import { readTranscriptBatches, updateLineRecord } from ${JSON.stringify(BASE_MODULE)};
     const file = process.env.TEST_TRANSCRIPT;
     const originalOpen = fs.openSync;
     const originalClose = fs.closeSync;
@@ -312,7 +312,10 @@ describe('Work transcript byte cursor', () => {
     if (process.env.TEST_LEGACY_COUNT !== undefined) {
       updateLineRecord('qoder-work', file, 'session', Number(process.env.TEST_LEGACY_COUNT));
     }
-    const batch = readTranscriptIncrement('qoder-work', file, 'session');
+    const batches = [...readTranscriptBatches('qoder-work', file, 'session', {
+      isPromptRow: row => row?.type === 'user', isReviewCopyRow: () => false,
+    })];
+    const batch = batches.at(-1) ?? null;
     if (batch) updateLineRecord('qoder-work', file, 'session', batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
     console.log(JSON.stringify({ bytes, batch }));
   `;
@@ -359,7 +362,7 @@ describe('Work transcript byte cursor', () => {
     expect(JSON.parse(await runWorker(worker, { TEST_TRANSCRIPT: file })).bytes).toBeLessThanOrEqual(128);
   });
 
-  it('recovers a newer bounded tail when an incremental backlog exceeds the read window', async () => {
+  it('advances over an oversized row and collects the next prompt with an incremental cursor', async () => {
     const file = path.join(dataDir, 'transcript.jsonl');
     fs.writeFileSync(file, '{"type":"user"}\n');
     const run = () => runWorker(worker, { TEST_TRANSCRIPT: file }).then(JSON.parse);
@@ -368,7 +371,7 @@ describe('Work transcript byte cursor', () => {
     const next = '{"type":"user","text":"latest"}';
     fs.appendFileSync(file, '\n' + next + '\n');
     const result = await run();
-    expect(result.batch).toMatchObject({ clipped: true, reason: 'oversized-backlog', lines: [next], endLine: 3 });
+    expect(result.batch).toMatchObject({ reason: 'incremental', parsed: [JSON.parse(next)], endLine: 3 });
     expect((await run()).batch).toBeNull();
   });
 
@@ -424,5 +427,102 @@ describe('Work transcript byte cursor', () => {
     fs.renameSync(replacement, file);
     expect((await run()).batch).toMatchObject({ lines: [newRow], endLine: 1, reason: 'truncated' });
     expect((await run()).batch).toBeNull();
+  });
+});
+
+describe.each([
+  ['qoder-work', 'qoderwork-hook-processor.mjs'],
+  ['qoder-work-cn', 'qoderwork-hook-processor.mjs'],
+  ['qwen-work-cn', 'qwen-work-cn-hook-processor.mjs'],
+])('%s oversized incremental transcript', (agentId, processor) => {
+  const sessionId = 'backlog-session';
+  const time = '2026-06-18T01:35:54.477Z';
+  const prompt = (id, text = id) => ({ type: 'user', uuid: id, promptId: id, sessionId, timestamp: time,
+    message: { role: 'user', content: [{ type: 'text', text }] } });
+  const response = (id, text = id) => ({ type: 'assistant', uuid: id, timestamp: time,
+    message: { id, role: 'assistant', model: 'fixture-model', content: [{ type: 'text', text }], stop_reason: 'end_turn' } });
+  const jsonl = (...rows) => rows.map(row => JSON.stringify(row) + '\n').join('');
+
+  function start() {
+    const file = path.join(dataDir, 'backlog.jsonl');
+    const history = path.join(dataDir, 'logs', agentId, 'history');
+    const run = () => {
+      const result = spawnSync(process.execPath, [
+        path.resolve(__dirname, '../../../assets/hooks', processor), '--agent-id', agentId,
+      ], {
+        input: JSON.stringify({ session_id: sessionId, transcript_path: file, cwd: dataDir }),
+        env: { ...process.env, NODE_ENV: 'production', LOONGSUITE_PILOT_DATA_DIR: dataDir },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      return fs.readdirSync(history).flatMap(name => fs.readFileSync(path.join(history, name), 'utf8')
+        .trim().split('\n').map(JSON.parse));
+    };
+
+    fs.writeFileSync(file, jsonl(prompt('initial'), response('initial-answer')));
+    const initialCount = run().length;
+    expect(initialCount).toBeGreaterThan(0);
+    return { file, collect: () => run().slice(initialCount) };
+  }
+
+  it('collects every pending turn even when a prompt is more than 32 MiB before its reply', () => {
+    const { file, collect } = start();
+    const metadata = jsonl({ type: 'session_meta', text: 'x'.repeat(256 * 1024) });
+    fs.appendFileSync(file, jsonl(prompt('early')) + metadata.repeat(160)
+      + jsonl(response('early-answer'), prompt('late'), response('late-answer')));
+
+    const rows = collect();
+    expect(rows.filter(row => row['event.name'] === 'llm.response').map(row => row['gen_ai.turn.id']))
+      .toEqual(['early', 'late']);
+    expect(rows.every(row => row['agent.transcript.cursor_reason'] === 'incremental'
+      && row['agent.transcript.content_truncated'] === undefined)).toBe(true);
+    expect(collect()).toEqual(rows);
+  });
+
+  it('retains the prompt and latest reply when the turn content exceeds 32 MiB', () => {
+    const { file, collect } = start();
+    fs.appendFileSync(file, jsonl(prompt('long')));
+    for (let i = 0; i < 33; i++) {
+      fs.appendFileSync(file, jsonl(response(`fragment-${i}`, 'x'.repeat(1024 * 1024))));
+    }
+    fs.appendFileSync(file, jsonl(response('last-reply')));
+
+    const rows = collect();
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every(row => row['gen_ai.turn.id'] === 'long'
+      && row['agent.transcript.content_truncated'] === true)).toBe(true);
+    expect(JSON.stringify(rows)).toContain('last-reply');
+    expect(collect()).toEqual(rows);
+  });
+
+  it('suppresses earlier backlog turns if a review-copy marker occurs at the end', () => {
+    const { file, collect } = start();
+    const metadata = jsonl({ type: 'session_meta', text: 'x'.repeat(256 * 1024) });
+    fs.appendFileSync(file, jsonl(prompt('copied'), response('copied-answer')) + metadata.repeat(160)
+      + jsonl(prompt('review', '[SYSTEM: This is an automated background review task]')));
+    expect(collect()).toEqual([]);
+    expect(collect()).toEqual([]);
+  });
+
+  it('commits earlier turns but keeps a final prompt pending until its partial reply completes', () => {
+    const { file, collect } = start();
+    const metadata = jsonl({ type: 'session_meta', text: 'x'.repeat(256 * 1024) });
+    const reply = jsonl(response('pending-answer'));
+    const tail = reply.length - 3;
+    fs.appendFileSync(file, jsonl(prompt('ready')) + metadata.repeat(160)
+      + jsonl(response('ready-answer'), prompt('pending')) + reply.slice(0, tail));
+
+    const earlier = collect();
+    expect(earlier.length).toBeGreaterThan(0);
+    expect(earlier.every(row => row['gen_ai.turn.id'] === 'ready')).toBe(true);
+    expect(collect()).toEqual(earlier);
+
+    fs.appendFileSync(file, reply.slice(tail));
+    const rows = collect();
+    expect(rows.filter(row => row['event.name'] === 'llm.response').map(row => row['gen_ai.turn.id']))
+      .toEqual(['ready', 'pending']);
+    expect(collect()).toEqual(rows);
   });
 });

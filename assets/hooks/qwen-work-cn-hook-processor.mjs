@@ -10,14 +10,13 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import {
-  appendRowsToHistory,
   HOOKS_DIR,
   loadHookRuntimeConfig,
   logDebug,
+  isWorkTranscriptContentRow,
   parseArgs,
+  processWorkTranscript,
   parseStdinPayload,
-  readTranscriptIncrement,
-  updateLineRecord,
 } from './shared/hook-processor-base.mjs';
 import {
   applyHookContentPolicy,
@@ -34,54 +33,29 @@ async function main() {
   const payload = await parseStdinPayload(agentId);
   if (!payload) return;
 
-  const batch = readTranscriptIncrement(agentId, payload.transcriptPath, payload.sessionId);
-  if (!batch) return;
-  const { lines } = batch;
-  if (!lines.length) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
-    return;
-  }
+  let runtimeConfig;
+  processWorkTranscript(agentId, logPrefix, payload.transcriptPath, payload.sessionId, { isPromptRow, isReviewCopyRow },
+    (parsed, rangeReason) => {
+      runtimeConfig ??= loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
+      return processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, { rangeReason });
+    });
+}
 
-  const parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip malformed transcript rows */ }
-  }
-  // A capped bootstrap can start inside an old turn. Only a prompt
-  // present in the retained window can anchor a recovered turn.
-  if (batch.clipped && !parsed.some(row => row && isPromptRow(row))) parsed.length = 0;
-  const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-  const rows = processTranscript(parsed, payload.sessionId, runtimeConfig, payload.cwd, {
-    rangeReason: batch.reason,
-  });
-  const serialized = rows.filter(Boolean).map(row => JSON.stringify(row));
-  if (appendRowsToHistory(agentId, logPrefix, serialized)) {
-    updateLineRecord(agentId, payload.transcriptPath, payload.sessionId, batch.endLine, batch.byteCursor, batch.reason !== 'incremental');
-    logDebug(agentId, `Mapped ${serialized.length} QwenWorkCN event(s)`);
-  }
+function isReviewCopyRow(row) {
+  return row?.type === 'user' && blocksOf(row).some(block =>
+    block?.type === 'text' && typeof block.text === 'string' && block.text.trimStart().startsWith(REVIEW_COPY_PREFIX));
 }
 
 function processTranscript(parsed, fallbackSessionId, runtimeConfig = {}, fallbackCwd, opts = {}) {
   // QwenWorkCN, like QoderWork, forks a copy of the original transcript and
   // appends an automated review task. The original session has already been
   // collected, so consuming the copy would duplicate every preceding turn.
-  const isReviewCopy = parsed.some(row => (
-    row?.type === 'user'
-    && blocksOf(row).some(block =>
-      block?.type === 'text'
-      && typeof block.text === 'string'
-      && block.text.trimStart().startsWith(REVIEW_COPY_PREFIX))
-  ));
-  if (isReviewCopy) {
+  if (parsed.some(isReviewCopyRow)) {
     logDebug('qwen-work-cn', `Skipping review-copy session ${fallbackSessionId || ''}`);
     return [];
   }
 
-  const contentRows = parsed.filter(row => {
-    if (!row || (row.type !== 'user' && row.type !== 'assistant')) return false;
-    if (row.isSidechain === true || row.isSidechain === 'true') return false;
-    if (row.isMeta === true || row.isMeta === 'true') return false;
-    return true;
-  });
+  const contentRows = parsed.filter(isWorkTranscriptContentRow);
   if (!contentRows.length) return [];
 
   const allTurns = splitIntoTurns(contentRows);
