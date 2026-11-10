@@ -403,6 +403,12 @@ worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的�
 
 只有通过以下全部适用门禁，Agent 集成才能标记为 ready。
 
+### 长 turn 的转换内存
+
+符合条件的已完成 turn 使用公共逐 step 转换，等待有界批次导出后释放已结束 Span；既有适配器保留原生 ID、父子关系、完整消息和逐调用／整轮 Token 汇总。不兼容的事件结构保留原批量路径及其内存风险；源事件、当前历史和单个巨大 Span 仍会随输入增长。
+
+`npm run perf:turn-stream` 在老生代上限 256 MiB 的独立 Node 进程中核对长 turn 内存、唯一 Span 和 Token 汇总。这是公共转换器回归，不替代原生客户端、collector 及后端验收。
+
 ### 字段质量
 
 - [输出事件 Schema](output-event-schema.md) 中的 Required 字段填充率必须为 100%；条件成立时，Conditionally Required 字段填充率必须为 100%。

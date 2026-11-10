@@ -31,8 +31,18 @@ export function convertCodexTurn(
   records: EventLogRecord[],
   options: Options & { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
 ) {
+  const prepared = prepareCodexTurn(records, options);
+  const result = convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler });
+  return { ...result, spanCount: result.spanCount - prepared.removedEntryCount };
+}
+
+/** Preserve native/deterministic IDs and delegated context for either executor. */
+export function prepareCodexTurn(
+  records: EventLogRecord[],
+  options: { handler: ExtendedTelemetryHandler; idGenerator: ReservedSpanIdGenerator },
+) {
   const first = records[0];
-  if (!first) return { traceIds: [], spanCount: 0, warnings: [] };
+  if (!first) return { records, handler: options.handler, removedEntryCount: 0 };
   const attachment = first['agent.codex.parent_span_id'];
   const traceId = first.trace_id;
   const delegated = first['agent.codex.delegated'] === true
@@ -121,6 +131,5 @@ export function convertCodexTurn(
     if (hasDelegatedWork && copy['event.name'] === 'other') delete copy.parent_span_id;
     return copy;
   });
-  const result = convertEventLogToTrace(local, { ...options, handler: wrapped });
-  return { ...result, spanCount: result.spanCount - entries };
+  return { records: local, handler: wrapped, get removedEntryCount() { return entries; } };
 }
