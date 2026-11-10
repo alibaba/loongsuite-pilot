@@ -84,7 +84,7 @@ shared installation; other detected Agents keep their home-local installation:
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | Existing `$PI_CODING_AGENT_DIR/settings.json` (`extensions`) | 0.73.1, 1.5.0 |
 | DSH | Existing `$DSH_HOME/cordis.patch.yml` (Pilot-owned block) | 0.2.1-rc.5 |
-| Claude Code | `/etc/claude-code/managed-settings.d/50-loongsuite-pilot.json` | Drop-in support requires 2.1.83+; native validation pending |
+| Claude Code | `/etc/claude-code/managed-settings.d/50-loongsuite-pilot.json` | 2.1.322; drop-in support requires 2.1.83+ |
 
 `--agents` remains an optional filter, including mixed lists such as
 `--agents grok-build,claude-code`. The first supported topology is multiple
@@ -105,6 +105,14 @@ or disable organizational restrictions. Hosted cloud sessions do not inherit a
 local machine's files. The installed wrapper binds the shared Pilot data root
 and Node pin without requiring new identities to inherit Pilot variables.
 See [Claude managed settings](https://code.claude.com/docs/en/managed-settings).
+
+Validated with the official Claude Code CLI in local Linux: one installation
+collected real conversations from three independent HOME directories, including
+an identity created after installation and a tool call. Missing collection
+dependencies did not prevent a reply; reinstall restored collection. Cleanup
+removed Pilot's policy key, and subsequent fresh identities could still reply.
+This validates local CLI file-based management, not remote policy or hosted-cloud
+activation.
 
 Pi reuses its existing configuration root (`PI_CODING_AGENT_DIR`, default
 `~/.pi/agent`). Later sessions using that root load the same extension, even

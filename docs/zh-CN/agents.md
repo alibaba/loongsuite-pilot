@@ -80,7 +80,7 @@ loongsuite-pilot hook status --json
 | Codex | `/etc/codex/config.toml` | 0.166.0 |
 | Pi | 现有 `$PI_CODING_AGENT_DIR/settings.json` 的 `extensions` | 0.73.1、1.5.0 |
 | DSH | 现有 `$DSH_HOME/cordis.patch.yml` 的 Pilot 标记块 | 0.2.1-rc.5 |
-| Claude Code | `/etc/claude-code/managed-settings.d/50-loongsuite-pilot.json` | drop-in 机制要求 2.1.83+；真实验收待补 |
+| Claude Code | `/etc/claude-code/managed-settings.d/50-loongsuite-pilot.json` | 2.1.322；drop-in 机制要求 2.1.83+ |
 
 `--agents` 仍可选填以限定范围，也支持 `--agents grok-build,claude-code` 这样的混合列表。
 首批支持同一 Linux UID 下多个身份 home；在 Agent 进程启动前初始化，后续新增身份无需
@@ -95,6 +95,11 @@ Claude Code 使用官方 managed-settings drop-in 目录。Pilot 管理一份独
 实际管理来源和 Hook 执行；Pilot 不调整策略优先级或关闭组织限制。本地文件不会自动
 进入厂商托管云会话。安装的 wrapper 从公共安装位置定位数据目录和 Node pin，新身份
 不需要继承 Pilot 环境变量。参见[官方管理配置](https://code.claude.com/docs/en/managed-settings)。
+
+已在本地 Linux 使用官方 Claude Code CLI 验证：安装一次后，三个独立 HOME 的真实
+对话均能采集，包含安装后新增身份和工具调用。采集依赖缺失时仍可正常回答，重新安装
+后恢复采集；清理移除 Pilot 策略键后，新身份仍可正常回答。此结论覆盖本地 CLI 的
+文件管理配置，不代表远程策略或厂商托管云环境已验收。
 
 Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
 这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立
