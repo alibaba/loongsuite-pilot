@@ -169,6 +169,7 @@ struct Collector {
     data_dir: PathBuf,
     agent_id: String,
     root: PathBuf,
+    cycle_runtime_user: Option<String>,
     discovery: Option<ReadDir>,
     pending: VecDeque<PathBuf>,
     cache: IndexMap<String, ActiveRows>,
@@ -194,7 +195,7 @@ struct Collector {
     #[cfg(test)]
     directory_inventory: bool,
     resolver: Arc<dyn QoderPromptOwnershipResolver>,
-    last: Option<(Value, bool, Result<TranscriptBatch, String>)>,
+    last: Option<(Value, bool, Result<Arc<TranscriptBatch>, String>)>,
     scan_bytes: usize,
     max_turn_bytes: usize,
     cache_limit: usize,
@@ -325,6 +326,7 @@ impl QoderTranscriptSource {
                 data_dir,
                 agent_id,
                 root,
+                cycle_runtime_user: None,
                 discovery: None,
                 pending: VecDeque::new(),
                 cache: IndexMap::new(),
@@ -375,6 +377,15 @@ impl QoderTranscriptSource {
         state: Option<&Value>,
         persisted: bool,
     ) -> anyhow::Result<TranscriptBatch> {
+        self.read_shared(state, persisted)
+            .await
+            .map(|batch| (*batch).clone())
+    }
+    pub(crate) async fn read_shared(
+        &self,
+        state: Option<&Value>,
+        persisted: bool,
+    ) -> anyhow::Result<Arc<TranscriptBatch>> {
         let state = state
             .filter(|s| s.is_object())
             .cloned()
@@ -423,6 +434,7 @@ impl QoderTranscriptSource {
         } else {
             result
         };
+        let result = result.map(Arc::new);
         c.last = Some((state, persisted, result.clone()));
         self.completed.fetch_add(1, Ordering::SeqCst);
         result.map_err(anyhow::Error::msg)
@@ -433,6 +445,7 @@ impl Collector {
         (self.clock)()
     }
     fn clear(&mut self) {
+        self.cycle_runtime_user = None;
         self.cache.clear();
         self.cache_size = 0;
         self.metadata.clear();
@@ -643,6 +656,7 @@ impl Collector {
         state: &Value,
         stopped: &AtomicBool,
     ) -> anyhow::Result<TranscriptBatch> {
+        self.cycle_runtime_user = None;
         let mut next = state.clone();
         let mut records = Vec::new();
         let mut budget = ScanBudget {
@@ -1194,7 +1208,11 @@ impl Collector {
             .get("userIdentity")
             .filter(|identity| !identity.is_null())
             .or_else(|| source.get("userIdentity"));
-        let runtime_user = resolve_collected_qoder_user_id(&self.data_dir);
+        let data_dir = &self.data_dir;
+        let runtime_user = self
+            .cycle_runtime_user
+            .get_or_insert_with(|| resolve_collected_qoder_user_id(data_dir))
+            .clone();
         let mut records = build_collected_transcript_turn(
             &filtered,
             CollectedTranscriptTurnContext {

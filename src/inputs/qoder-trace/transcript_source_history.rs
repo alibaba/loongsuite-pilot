@@ -691,3 +691,270 @@ async fn real_publisher_and_fixture_share_the_exact_canonical_checkpoint_key() {
 
 #[path = "transcript_source_windows_history.rs"]
 mod native_windows_generation_contracts;
+
+#[test]
+fn source_shared_batch_payload_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TranscriptBatch>();
+    assert_send_sync::<Arc<TranscriptBatch>>();
+}
+
+#[tokio::test]
+async fn source_shared_batch_concurrent_reads_share_the_actual_payload() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut rows = turn(0, true);
+        rows.push(json!({"type":"last-prompt"}));
+        f.write(&rows);
+        f.wake("Stop", json!({}));
+        let (a, b) = tokio::join!(
+            f.source.read_shared(None, true),
+            f.source.read_shared(None, true)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(Arc::ptr_eq(&a, &b), "{agent}");
+        assert_eq!(user_texts(&a.records), ["prompt 0"], "{agent}");
+        assert_eq!(a.state, b.state, "{agent}");
+        assert_eq!(a.metrics.bytes_read, b.metrics.bytes_read, "{agent}");
+        assert_eq!(
+            a.metrics.bytes_read,
+            a.metrics.reads.iter().map(|read| read.bytes).sum::<u64>(),
+            "{agent}"
+        );
+        assert_eq!(f.source.completed.load(Ordering::SeqCst), 1, "{agent}");
+        f.source.stop();
+    }
+}
+
+#[tokio::test]
+async fn source_shared_batch_survives_stop_and_start_without_mutation() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut rows = turn(0, true);
+        rows.push(json!({"type":"last-prompt"}));
+        f.write(&rows);
+        f.wake("Stop", json!({}));
+        let held = f.source.read_shared(None, true).await.unwrap();
+        assert!(!held.records.is_empty(), "{agent}");
+        let original_records = held.records.clone();
+        let original_state = held.state.clone();
+        let original_bytes = held.metrics.bytes_read;
+        let original_reads = held.metrics.reads.len();
+        f.source.stop();
+        assert!(f.source.inner.lock().await.last.is_none(), "{agent}");
+        assert_eq!(held.records, original_records, "{agent}");
+        assert_eq!(held.state, original_state, "{agent}");
+        let stopped = f.source.read_shared(None, true).await.unwrap();
+        assert!(stopped.records.is_empty(), "{agent}");
+        assert_eq!(stopped.metrics.bytes_read, 0, "{agent}");
+        assert!(!Arc::ptr_eq(&held, &stopped), "{agent}");
+        f.source.start();
+        let replay = f.source.read_shared(None, true).await.unwrap();
+        assert!(!Arc::ptr_eq(&held, &replay), "{agent}");
+        assert_eq!(
+            held.records
+                .iter()
+                .map(|row| &row["event.id"])
+                .collect::<Vec<_>>(),
+            replay
+                .records
+                .iter()
+                .map(|row| &row["event.id"])
+                .collect::<Vec<_>>(),
+            "{agent}"
+        );
+        assert_eq!(held.records, original_records, "{agent}");
+        assert_eq!(held.state, original_state, "{agent}");
+        assert_eq!(held.metrics.bytes_read, original_bytes, "{agent}");
+        assert_eq!(held.metrics.reads.len(), original_reads, "{agent}");
+        f.source.stop();
+    }
+}
+
+#[tokio::test]
+async fn source_shared_batch_public_read_retains_independent_owned_fields() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut rows = turn(0, true);
+        rows.push(json!({"type":"last-prompt"}));
+        f.write(&rows);
+        f.wake("Stop", json!({}));
+        let (owned, shared) =
+            tokio::join!(f.source.read(None, true), f.source.read_shared(None, true));
+        let (mut owned, shared) = (owned.unwrap(), shared.unwrap());
+        assert_eq!(f.source.completed.load(Ordering::SeqCst), 1, "{agent}");
+        assert!(!owned.records.is_empty(), "{agent}");
+        assert_eq!(owned.records, shared.records, "{agent}");
+        assert_eq!(owned.state, shared.state, "{agent}");
+        let records_before = shared.records.clone();
+        let state_before = shared.state.clone();
+        let bytes_before = shared.metrics.bytes_read;
+        let reads_before = shared.metrics.reads.len();
+        owned.records[0]["owned-only-marker"] = json!(true);
+        owned.state["owned-only-marker"] = json!(true);
+        owned.metrics.bytes_read = u64::MAX;
+        owned.metrics.reads.clear();
+        assert_eq!(shared.records, records_before, "{agent}");
+        assert_eq!(shared.state, state_before, "{agent}");
+        assert_eq!(shared.metrics.bytes_read, bytes_before, "{agent}");
+        assert_eq!(shared.metrics.reads.len(), reads_before, "{agent}");
+        let TranscriptBatch { records, state, .. } = owned;
+        assert_eq!(records[0]["owned-only-marker"], true, "{agent}");
+        assert_eq!(state["owned-only-marker"], true, "{agent}");
+        let collector = f.source.inner.lock().await;
+        let cached = collector.last.as_ref().unwrap().2.as_ref().unwrap();
+        assert!(Arc::ptr_eq(cached, &shared), "{agent}");
+        assert_eq!(cached.records, records_before, "{agent}");
+        drop(collector);
+        f.source.stop();
+    }
+}
+
+#[tokio::test]
+async fn source_shared_batch_sequential_same_cursor_is_not_a_memoized_read() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut rows = turn(0, false);
+        rows.push(json!({"type":"last-prompt"}));
+        f.write(&rows);
+        f.wake("Stop", json!({}));
+        let first = f.source.read_shared(None, true).await.unwrap();
+        let count_after_first = f.source.completed.load(Ordering::SeqCst);
+        let second = f.source.read_shared(None, true).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &second), "{agent}");
+        assert_eq!(
+            f.source.completed.load(Ordering::SeqCst),
+            count_after_first + 1,
+            "{agent}"
+        );
+        assert!(!second.records.is_empty(), "{agent}");
+        assert_eq!(
+            first
+                .records
+                .iter()
+                .map(|row| &row["event.id"])
+                .collect::<Vec<_>>(),
+            second
+                .records
+                .iter()
+                .map(|row| &row["event.id"])
+                .collect::<Vec<_>>(),
+            "{agent}"
+        );
+        f.source.stop();
+    }
+}
+
+#[tokio::test]
+async fn source_shared_batch_different_cursor_or_persistence_cannot_coalesce() {
+    for agent in ["qoder", "qoder-cn"] {
+        for only_state_differs in [true, false] {
+            let mut f = Fixture::new(agent).await;
+            let mut rows = turn(0, false);
+            rows.push(json!({"type":"last-prompt"}));
+            f.write(&rows);
+            f.wake("Stop", json!({}));
+            let unpersisted = json!({"unpersisted-marker": true});
+            let next_state = only_state_differs.then_some(&unpersisted);
+            let (first, second) = tokio::join!(
+                f.source.read_shared(None, !only_state_differs),
+                f.source.read_shared(next_state, false)
+            );
+            let (first, second) = (first.unwrap(), second.unwrap());
+            assert!(!Arc::ptr_eq(&first, &second), "{agent}");
+            assert!(!first.records.is_empty(), "{agent}");
+            if only_state_differs {
+                assert!(second.records.is_empty(), "{agent}");
+                assert_eq!(second.state, unpersisted, "{agent}");
+                assert!(!second.changed, "{agent}");
+                assert_eq!(second.metrics.bytes_read, 0, "{agent}");
+            } else {
+                assert!(!second.records.is_empty(), "{agent}");
+            }
+            assert_eq!(f.source.completed.load(Ordering::SeqCst), 2, "{agent}");
+            f.source.stop();
+        }
+    }
+}
+
+#[tokio::test]
+async fn source_cycle_identity_empty_actual_collect_and_clear_discard_old_cache() {
+    for agent in ["qoder", "qoder-cn"] {
+        let f = Fixture::new(agent).await;
+        let marker = "__pilot_identity_cache_must_not_survive_empty_collect__";
+        f.source.inner.lock().await.cycle_runtime_user = Some(marker.to_owned());
+        let empty = f.source.read_shared(None, true).await.unwrap();
+        assert!(empty.records.is_empty(), "{agent}");
+        assert!(
+            f.source.inner.lock().await.cycle_runtime_user.is_none(),
+            "empty actual collect must reset the old identity without resolving a new one: {agent}"
+        );
+        f.source.inner.lock().await.cycle_runtime_user = Some(marker.to_owned());
+        f.source.stop();
+        assert!(
+            f.source.inner.lock().await.cycle_runtime_user.is_none(),
+            "clear must discard the cached identity: {agent}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn source_cycle_identity_multi_turn_and_next_actual_collect_resolve_fresh_identity() {
+    for agent in ["qoder", "qoder-cn"] {
+        let mut f = Fixture::new(agent).await;
+        let mut first_rows = turn(0, false);
+        first_rows.push(json!({"type":"last-prompt"}));
+        f.write(&first_rows);
+        f.wake("Stop", json!({}));
+        assert!(!f.collect().await.records.is_empty(), "{agent}");
+
+        let mut next_rows = [turn(1, false), turn(2, true)].concat();
+        next_rows.push(json!({"type":"last-prompt"}));
+        f.append(&next_rows);
+        f.wake("Stop", json!({}));
+        f.source.inner.lock().await.cycle_runtime_user =
+            Some("__pilot_identity_cache_must_not_survive_multi_turn_collect__".to_owned());
+        let expected = resolve_collected_qoder_user_id(&f.root);
+        let batch = f.source.read_shared(Some(&f.state), true).await.unwrap();
+        assert_eq!(
+            user_texts(&batch.records),
+            ["prompt 1", "prompt 2"],
+            "{agent}"
+        );
+        assert!(
+            batch
+                .records
+                .iter()
+                .all(|record| record["user.id"].as_str() == Some(expected.as_str())),
+            "all emitted turns must use the existing resolver's identity: {agent}"
+        );
+        assert_eq!(
+            f.source.inner.lock().await.cycle_runtime_user.as_deref(),
+            Some(expected.as_str()),
+            "{agent}"
+        );
+        f.state = batch.state.clone();
+
+        let mut final_rows = turn(3, false);
+        final_rows.push(json!({"type":"last-prompt"}));
+        f.append(&final_rows);
+        f.wake("Stop", json!({}));
+        f.source.inner.lock().await.cycle_runtime_user =
+            Some("__pilot_identity_cache_must_not_survive_next_collect__".to_owned());
+        let next_expected = resolve_collected_qoder_user_id(&f.root);
+        let next = f.source.read_shared(Some(&f.state), true).await.unwrap();
+        assert_eq!(user_texts(&next.records), ["prompt 3"], "{agent}");
+        assert!(
+            next.records
+                .iter()
+                .all(|record| record["user.id"].as_str() == Some(next_expected.as_str())),
+            "the next actual collect must not reuse the injected old identity: {agent}"
+        );
+        assert_eq!(
+            f.source.inner.lock().await.cycle_runtime_user.as_deref(),
+            Some(next_expected.as_str()),
+            "{agent}"
+        );
+        f.source.stop();
+    }
+}

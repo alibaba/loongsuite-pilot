@@ -649,8 +649,8 @@ impl InputManager {
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
             counter.in_events += entries.len() as u64;
             for entry in &entries {
-                counter.in_bytes += serde_json::to_vec(entry)
-                    .map(|bytes| bytes.len() as u64)
+                counter.in_bytes += crate::utils::json_size::serialized_json_size(entry)
+                    .map(|bytes| bytes as u64)
                     .unwrap_or(0);
             }
             counter.last_poll_time = format_time(Local::now());

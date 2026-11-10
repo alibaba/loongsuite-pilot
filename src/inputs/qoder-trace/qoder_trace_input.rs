@@ -13,9 +13,9 @@ use super::prompt_ownership::{NativeQoderPromptOwnershipResolver, QoderPromptOwn
 use super::transcript_source::{QoderTranscriptSource, TranscriptBatch};
 use super::{
     collect_cli_expected_request_ids, enrich_cli_from_segments, enrich_cli_primary,
-    enrich_ide_turn, inject_trace_id, is_idea_db_path, needs_cli_segment_fallback,
-    read_intercept_data, read_segment_tokens_for_session, read_sqlite_tokens_for_session,
-    resolve_qoder_app_root, QODER_SEGMENTS_ROOT,
+    enrich_ide_turn, is_idea_db_path, needs_cli_segment_fallback, read_intercept_data,
+    read_segment_tokens_for_session, read_sqlite_tokens_for_session, resolve_qoder_app_root,
+    QODER_SEGMENTS_ROOT,
 };
 use crate::inputs::base::{
     build_canonical_hook_entry, create_hook_history_startup_checkpoint,
@@ -382,7 +382,7 @@ impl InputBody for QoderTraceBody {
         let extra = rt.state().extra();
         let native = self
             .transcript_source
-            .read(
+            .read_shared(
                 extra.as_ref().and_then(|e| e.get("qoderTranscripts")),
                 persisted,
             )
@@ -431,8 +431,13 @@ impl InputBody for QoderTraceBody {
                         intercept = Some(self.readers.read_cli_intercept_for(&response_ids).await);
                     }
                     let data = intercept.as_ref().unwrap();
-                    let mut slice: Vec<AgentActivityEntry> =
-                        indexes.iter().map(|index| raw[*index].clone()).collect();
+                    // Every index belongs to exactly one turn group. No await,
+                    // fallible operation, or return occurs until ownership is
+                    // restored to raw below; other tasks cannot observe it.
+                    let mut slice: Vec<AgentActivityEntry> = indexes
+                        .iter()
+                        .map(|index| std::mem::take(&mut raw[*index]))
+                        .collect();
                     enrich_cli_primary(
                         &mut slice,
                         data.system_prompt
@@ -440,10 +445,11 @@ impl InputBody for QoderTraceBody {
                             .map(|prompt| prompt.content.as_str()),
                         &data.tokens,
                     );
-                    for (pos, index) in indexes.iter().enumerate() {
-                        raw[*index] = slice[pos].clone();
+                    let needs_fallback = needs_cli_segment_fallback(&slice);
+                    for (index, entry) in indexes.iter().zip(slice) {
+                        raw[*index] = entry;
                     }
-                    if needs_cli_segment_fallback(&slice) {
+                    if needs_fallback {
                         cli_fallback
                             .entry(session)
                             .or_default()
@@ -603,11 +609,11 @@ impl InputBody for QoderTraceBody {
             entry.extra.remove("agent.qoder.attachments");
         }
         for indexes in group_by_turn(&raw).values() {
-            let mut slice: Vec<AgentActivityEntry> =
-                indexes.iter().map(|index| raw[*index].clone()).collect();
-            inject_trace_id(&mut slice);
-            for (pos, index) in indexes.iter().enumerate() {
-                raw[*index] = slice[pos].clone();
+            // Match inject_trace_id: one UUID per existing turn group, with
+            // only the small trace string cloned for each member.
+            let trace_id = hex::encode(uuid::Uuid::new_v4().as_bytes());
+            for &index in indexes {
+                raw[index].trace_id = Some(trace_id.clone());
             }
         }
         if !self.stopped.load(Ordering::SeqCst) {
