@@ -166,6 +166,8 @@ struct Metadata {
     context_digests: Vec<Option<[u8; 32]>>,
     bytes: usize,
 }
+type SharedTranscriptReadResult = Result<Arc<TranscriptBatch>, String>;
+
 struct Collector {
     data_dir: PathBuf,
     agent_id: String,
@@ -196,7 +198,8 @@ struct Collector {
     #[cfg(test)]
     directory_inventory: bool,
     resolver: Arc<dyn QoderPromptOwnershipResolver>,
-    last: Option<(Value, bool, Result<Arc<TranscriptBatch>, String>)>,
+    // None key reuses the exact input value owned by an unchanged result.
+    last: Option<(Option<Value>, bool, SharedTranscriptReadResult)>,
     scan_bytes: usize,
     max_turn_bytes: usize,
     cache_limit: usize,
@@ -391,15 +394,16 @@ impl QoderTranscriptSource {
         state: Option<&Value>,
         persisted: bool,
     ) -> anyhow::Result<Arc<TranscriptBatch>> {
-        let state = state
-            .filter(|s| s.is_object())
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let empty = json!({});
+        let state = state.filter(|s| s.is_object()).unwrap_or(&empty);
         let observed = self.completed.load(Ordering::SeqCst);
         let mut c = self.inner.lock().await;
         if observed != self.completed.load(Ordering::SeqCst) {
             if let Some((prior, was_persisted, result)) = &c.last {
-                if *prior == state && *was_persisted == persisted {
+                let prior = prior
+                    .as_ref()
+                    .or_else(|| result.as_ref().ok().map(|batch| &batch.state));
+                if prior == Some(state) && *was_persisted == persisted {
                     return result.clone().map_err(anyhow::Error::msg);
                 }
             }
@@ -409,22 +413,22 @@ impl QoderTranscriptSource {
             c.clear();
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
         } else if !persisted && state.as_object().is_some_and(|m| !m.is_empty()) {
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
         } else {
             if persisted {
-                c.acknowledge(&state, &self.stopped);
+                c.acknowledge(state, &self.stopped);
             }
-            c.collect_once(&state, &self.stopped)
+            c.collect_once(state, &self.stopped)
                 .await
                 .map_err(|e| e.to_string())
         };
@@ -432,7 +436,7 @@ impl QoderTranscriptSource {
             c.clear();
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
@@ -440,7 +444,16 @@ impl QoderTranscriptSource {
             result
         };
         let result = result.map(Arc::new);
-        c.last = Some((state, persisted, result.clone()));
+        // collect_once derives changed from full JSON equality; stopped and
+        // unsaved/reset branches explicitly return a clone of the input state.
+        // The unchanged result therefore already owns the exact cache key.
+        let prior = if result.as_ref().is_ok_and(|batch| !batch.changed) {
+            debug_assert!(result.as_ref().is_ok_and(|batch| batch.state == *state));
+            None
+        } else {
+            Some(state.clone())
+        };
+        c.last = Some((prior, persisted, result.clone()));
         self.completed.fetch_add(1, Ordering::SeqCst);
         result.map_err(anyhow::Error::msg)
     }

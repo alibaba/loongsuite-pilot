@@ -334,9 +334,7 @@ fn extra_field<'a>(state: &'a InputState, key: &str) -> Option<&'a JVal> {
         _ => None,
     }
 }
-fn track_input_revision(data: &mut StoreData, id: &str, previous: &InputState, next: &InputState) {
-    data.revision += 1;
-    data.input_revisions.insert(id.to_owned(), data.revision);
+fn changed_extra_keys(previous: &InputState, next: &InputState) -> Vec<String> {
     // Native checkpoints are owned JSON values, so content equality preserves
     // an unchanged durable field through unrelated shallow metadata patches.
     let keys = [previous, next]
@@ -349,14 +347,23 @@ fn track_input_revision(data: &mut StoreData, id: &str, previous: &InputState, n
             _ => Vec::new(),
         })
         .collect::<std::collections::HashSet<_>>();
-    for key in keys {
-        if extra_field(previous, &key) != extra_field(next, &key) {
-            data.extra_revisions
-                .entry(id.to_owned())
-                .or_default()
-                .insert(key, data.revision);
-        }
+    keys.into_iter()
+        .filter(|key| extra_field(previous, key) != extra_field(next, key))
+        .collect()
+}
+fn record_input_revision(data: &mut StoreData, id: &str, changed_keys: Vec<String>) {
+    data.revision += 1;
+    data.input_revisions.insert(id.to_owned(), data.revision);
+    for key in changed_keys {
+        data.extra_revisions
+            .entry(id.to_owned())
+            .or_default()
+            .insert(key, data.revision);
     }
+}
+fn track_input_revision(data: &mut StoreData, id: &str, previous: &InputState, next: &InputState) {
+    let changed_keys = changed_extra_keys(previous, next);
+    record_input_revision(data, id, changed_keys);
 }
 fn prune_persisted_revision_keys(data: &mut StoreData) {
     let StoreData {
@@ -596,10 +603,14 @@ impl StateStore {
     pub fn update(&self, input_id: &str, patch: InputStatePatch) {
         let mut data = self.mu.lock().unwrap();
         let mut state = data.states.get(input_id).cloned().unwrap_or_default();
-        let previous = state.clone();
         apply_patch(&mut state, patch);
+        // Keep the owned working copy for transactional mutation, but borrow
+        // the stored previous value while computing every extra-field delta.
+        let empty = InputState::new();
+        let previous = data.states.get(input_id).unwrap_or(&empty);
+        let changed_keys = changed_extra_keys(previous, &state);
         mark_collect_mutation(&mut data, Some(input_id));
-        track_input_revision(&mut data, input_id, &previous, &state);
+        record_input_revision(&mut data, input_id, changed_keys);
         data.states.insert(input_id.to_owned(), state);
     }
 
@@ -1384,6 +1395,65 @@ mod active_collect_scope_tests {
         drop(hold);
         assert!(other.save_failed());
         assert!(other.mu.lock().unwrap().active_collects.is_empty());
+    }
+    // Append inside state_store.rs tests or its existing state_store_qoder_533_tests
+    // child module (both have the necessary StateStore/InputState imports).
+    // Scratch only; test actual save/durability, not the changed-key helper layout.
+    #[tokio::test]
+    async fn source_update_tracks_every_extra_field_revision_and_pending_scalar_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = StateStore::new(root.path().join("state.json"));
+        let initial = serde_json::json!({
+            "a":{"nested":[null,false,"云壳😀"]},"b":1,"unknown":{"keep":true}
+        });
+        store.set(
+            "generic-input",
+            InputState::new()
+                .with_last_offset(7.0)
+                .with_extra(initial.clone()),
+        );
+        store.save().await.unwrap();
+        let held_previous = store.get("generic-input");
+        store.update(
+            "generic-input",
+            InputStatePatch {
+                last_offset: Some(8.0),
+                extra: Some(serde_json::json!({"b":2})),
+                ..Default::default()
+            },
+        );
+        assert!(!store.is_persisted("generic-input", None));
+        assert!(store.is_persisted("generic-input", Some("a")));
+        assert!(!store.is_persisted("generic-input", Some("b")));
+        assert!(store.is_persisted("generic-input", Some("unknown")));
+        assert_eq!(held_previous.extra(), Some(initial));
+        assert_eq!(held_previous.last_offset(), Some(7.0));
+        assert_eq!(
+            store.get("generic-input").extra().unwrap()["unknown"],
+            serde_json::json!({"keep":true})
+        );
+        store.save().await.unwrap();
+        store.update(
+            "generic-input",
+            InputStatePatch {
+                extra: Some(serde_json::Value::Null),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            store.get("generic-input").extra(),
+            Some(serde_json::Value::Null)
+        );
+        for field in ["a", "b", "unknown"] {
+            assert!(
+                !store.is_persisted("generic-input", Some(field)),
+                "every removed field needs its own pending durable revision: {field}"
+            );
+        }
+        store.save().await.unwrap();
+        for field in ["a", "b", "unknown"] {
+            assert!(store.is_persisted("generic-input", Some(field)));
+        }
     }
 }
 

@@ -634,11 +634,10 @@ fn save_native_state(rt: &InputRuntime, native: &TranscriptBatch) {
     if !native.changed {
         return;
     }
-    let mut extra = rt
-        .state()
-        .extra()
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let mut extra = match rt.state().extra() {
+        Some(Value::Object(extra)) => extra,
+        _ => Default::default(),
+    };
     extra.insert("qoderTranscripts".into(), native.state.clone());
     rt.set_state_fields(None, None, Some(Value::Object(extra)));
 }

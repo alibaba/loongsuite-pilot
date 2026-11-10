@@ -1434,3 +1434,50 @@ async fn notice_sha_scope_guard_case() {
         "cached digest must not bypass authorized-root/reparse verification"
     );
 }
+
+// Append inside existing transcript_source_history module; scratch, unexecuted.
+#[tokio::test]
+async fn source_shared_unchanged_reads_coalesce_by_full_value_and_keep_owned_independent_state() {
+    for agent in ["qoder", "qoder-cn"] {
+        let f = Fixture::new(agent).await;
+        let mut left = json!({"unknown":{"nested":[null,false,"云壳😀"]},"marker":1});
+        let right: Value = serde_json::from_slice(&serde_json::to_vec(&left).unwrap()).unwrap();
+        let original = left.clone();
+        // Nonempty unpersisted checkpoints must keep the original no-IO gate;
+        // distinct allocations with equal contents must still coalesce.
+        let (a, b) = tokio::join!(
+            f.source.read_shared(Some(&left), false),
+            f.source.read_shared(Some(&right), false)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "equal Values, not pointer identity: {agent}"
+        );
+        assert!(!a.changed && a.records.is_empty());
+        assert_eq!(a.state, original);
+        assert_eq!(a.metrics.bytes_read, 0);
+        left["unknown"]["nested"][1] = json!(true);
+        assert_eq!(
+            a.state, original,
+            "returned checkpoint must remain owned: {agent}"
+        );
+        let (c, d) = tokio::join!(
+            f.source.read_shared(Some(&left), false),
+            f.source.read_shared(Some(&right), false)
+        );
+        let (c, d) = (c.unwrap(), d.unwrap());
+        assert!(
+            !Arc::ptr_eq(&c, &d),
+            "unknown nested difference must not coalesce: {agent}"
+        );
+        assert_eq!(c.state, left);
+        assert_eq!(d.state, right);
+        assert_eq!(a.state, original);
+        f.source.stop();
+        assert_eq!(
+            a.state, original,
+            "clear/reset must not mutate a held batch: {agent}"
+        );
+    }
+}
