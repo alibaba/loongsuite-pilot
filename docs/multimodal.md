@@ -16,7 +16,7 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 
 | Item | Status |
 |------|--------|
-| Media types | **Images**, plus local `.mp4`, `.mov`, `.m4v`, `.3gp`, `.3g2`, `.webm`, `.mkv`, and `.avi`. Codex still handles inline images only. Audio is future work. |
+| Media types | **Images** and **video**. Audio is future work. |
 | Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, and **`qwen-work-cn`**. Other agents ignore `uploadMode` until their extractors land. |
 
 ### Detection
