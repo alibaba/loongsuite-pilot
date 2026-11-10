@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-10T08:49:40Z",
+  "updated_at": "2026-11-10T08:59:59Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -27,6 +27,465 @@
     "reason": "历史 release 尚未回填；确认原生采集协议不兼容后才停止更早版本。"
   },
   "nodes": [
+    {
+      "id": "v1.0.1",
+      "kind": "release",
+      "version": "v1.0.1",
+      "commit": "cab5274420ef8161c3157ad475146c3c34306273",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.0.1"
+      }
+    },
+    {
+      "id": "v1.1.0",
+      "kind": "release",
+      "version": "v1.1.0",
+      "commit": "428901d3710d87da18cebcb24b5757cf36c7414b",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.1.0"
+      }
+    },
+    {
+      "id": "v1.1.1",
+      "kind": "release",
+      "version": "v1.1.1",
+      "commit": "3cd14105adf60fa8f49dc208898ed11bbb5cf8dd",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.1.1"
+      }
+    },
+    {
+      "id": "v1.1.2",
+      "kind": "release",
+      "version": "v1.1.2",
+      "commit": "7037e13df7b2f0cdd6161f336aae40a8be8026e9",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.1.2"
+      }
+    },
+    {
+      "id": "v1.1.3",
+      "kind": "release",
+      "version": "v1.1.3",
+      "commit": "743b44531f307146c73b399bdeaa6075c557eb50",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.1.3"
+      }
+    },
+    {
+      "id": "v1.1.4",
+      "kind": "release",
+      "version": "v1.1.4",
+      "commit": "11dcd4171720cf31316373b4fdd2c3fd8cadadf0",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.1.4"
+      }
+    },
+    {
+      "id": "v1.2.0",
+      "kind": "release",
+      "version": "v1.2.0",
+      "commit": "971fda0787b2e6735983cb202212f22be523b4bf",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.2.0"
+      }
+    },
+    {
+      "id": "v1.3.0",
+      "kind": "release",
+      "version": "v1.3.0",
+      "commit": "0ce8ccc84b36c8616e8b2bf3a0ed78390e397456",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.3.0"
+      }
+    },
+    {
+      "id": "v1.4.0",
+      "kind": "release",
+      "version": "v1.4.0",
+      "commit": "290c09c39b171bb09d2bda2b0f59d64b53fdc8f1",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.4.0"
+      }
+    },
+    {
+      "id": "v1.4.1",
+      "kind": "release",
+      "version": "v1.4.1",
+      "commit": "da2bc6b6823725502bdcc0772cc44bf2f14b1459",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.4.1"
+      }
+    },
+    {
+      "id": "v1.5.0",
+      "kind": "release",
+      "version": "v1.5.0",
+      "commit": "05629f0d558648b135def50ae592beae1c702a6c",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.5.0"
+      }
+    },
+    {
+      "id": "v1.5.1",
+      "kind": "release",
+      "version": "v1.5.1",
+      "commit": "d613322ddcef233f6ddcd3e12d7321f57f689607",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.5.1"
+      }
+    },
+    {
+      "id": "v1.5.2",
+      "kind": "release",
+      "version": "v1.5.2",
+      "commit": "cb94ec43f0b14125d28d688452e71b8f794cd675",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.5.2"
+      }
+    },
+    {
+      "id": "v1.6.0",
+      "kind": "release",
+      "version": "v1.6.0",
+      "commit": "70de5027a8fe46b03efbb1f79cf0c1089c9ddd72",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.6.0"
+      }
+    },
+    {
+      "id": "v1.7.0",
+      "kind": "release",
+      "version": "v1.7.0",
+      "commit": "43acd47d78115e4113bf39f794232ab40bba6721",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.7.0"
+      }
+    },
+    {
+      "id": "v1.7.1",
+      "kind": "release",
+      "version": "v1.7.1",
+      "commit": "2155efb25eb5e6c1149ec91184f4928481cdfccc",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.7.1"
+      }
+    },
+    {
+      "id": "v1.8.0",
+      "kind": "release",
+      "version": "v1.8.0",
+      "commit": "280e3d516deb68a8029c5bcc15265f4351a9dc9c",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.8.0"
+      }
+    },
+    {
+      "id": "v1.8.1",
+      "kind": "release",
+      "version": "v1.8.1",
+      "commit": "00b9a9bccd7a4d1dd699daffd405409e4d5341ef",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.8.1"
+      }
+    },
+    {
+      "id": "v1.9.0",
+      "kind": "release",
+      "version": "v1.9.0",
+      "commit": "8f7749752e7e58b81ba5244677c5ed5d6155bca4",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.9.0"
+      }
+    },
+    {
+      "id": "v1.10.0",
+      "kind": "release",
+      "version": "v1.10.0",
+      "commit": "f9c8815df32b1c889749158e931436021a68ab4d",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.10.0"
+      }
+    },
+    {
+      "id": "v1.11.0",
+      "kind": "release",
+      "version": "v1.11.0",
+      "commit": "d6494495629b16cef90822a6b9e2eccf53d7b26d",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.11.0"
+      }
+    },
+    {
+      "id": "v1.12.0",
+      "kind": "release",
+      "version": "v1.12.0",
+      "commit": "38873cdb962eca4076dd587efba46b2d0948d3fc",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.12.0"
+      }
+    },
+    {
+      "id": "v1.13.0",
+      "kind": "release",
+      "version": "v1.13.0",
+      "commit": "c1ab8882393583b6b938f70a503e39a0d75817f1",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.13.0"
+      }
+    },
+    {
+      "id": "v1.14.0",
+      "kind": "release",
+      "version": "v1.14.0",
+      "commit": "1e491f3e0029dd72e7f40fc8a7477418f27193ad",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.14.0"
+      }
+    },
+    {
+      "id": "v1.15.0",
+      "kind": "release",
+      "version": "v1.15.0",
+      "commit": "0677077b3e141b85e3395f4e2efaa49a932991d8",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.15.0"
+      }
+    },
+    {
+      "id": "v1.15.1",
+      "kind": "release",
+      "version": "v1.15.1",
+      "commit": "df1110fc1478cb807d1970a66960d94e3d91335b",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.15.1"
+      }
+    },
+    {
+      "id": "v1.15.2",
+      "kind": "release",
+      "version": "v1.15.2",
+      "commit": "22f736ce4ebc2e17975e3eefaf13019c8ac8d31f",
+      "recorded_at": "2026-11-10T08:59:59Z",
+      "status": "pending",
+      "method_id": "github-full-pilot-qoder-native-v1",
+      "environment_id": "unknown",
+      "environment": {},
+      "run_url": "",
+      "workloads": {},
+      "source": {
+        "repository": "alibaba/loongsuite-pilot",
+        "ref": "v1.15.2"
+      }
+    },
     {
       "id": "v1.16.0",
       "kind": "release",
@@ -87,8 +546,7 @@
     "kind": "temporary_preview",
     "rows": [
       {
-        "id": "js",
-        "label": "JS 1.15.2",
+        "id": "v1.15.2",
         "workloads": {
           "idle": {
             "cpu_percent": 11.433094433489702,
@@ -105,44 +563,7 @@
         }
       },
       {
-        "id": "previous-rust",
-        "label": "上一版Rust",
-        "workloads": {
-          "idle": {
-            "cpu_percent": 5.333221106717133,
-            "rss_mib": 43.88671875
-          },
-          "low": {
-            "cpu_percent": 12.599729273817003,
-            "rss_mib": 43.7265625
-          },
-          "high": {
-            "cpu_percent": 98.6645233311829,
-            "rss_mib": 138.546875
-          }
-        }
-      },
-      {
-        "id": "previous-sdk",
-        "label": "上一版SDK",
-        "workloads": {
-          "idle": {
-            "cpu_percent": 5.233219267295134,
-            "rss_mib": 43.015625
-          },
-          "low": {
-            "cpu_percent": 12.733064573992756,
-            "rss_mib": 44.92578125
-          },
-          "high": {
-            "cpu_percent": 82.43154096388837,
-            "rss_mib": 109.7578125
-          }
-        }
-      },
-      {
         "id": "dev",
-        "label": "dev",
         "workloads": {
           "idle": {
             "cpu_percent": 4.933228305560472,
