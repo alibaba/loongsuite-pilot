@@ -1,0 +1,20 @@
+{
+  "id": "github-full-pilot-qoder-native-v1",
+  "window_seconds": 30,
+  "session_count": 64,
+  "cpu_limit": 2,
+  "memory_limit": "1GiB",
+  "loads": {
+    "idle": {"turns_per_second": 0},
+    "low": {"turns_per_second": 10},
+    "high": {"turns_per_second": 200}
+  },
+  "repeats": 3,
+  "poll_interval_ms": 100,
+  "resource_sample_ms": 100,
+  "rss_basis": "sum of owned process RSS; shared pages may be counted more than once",
+  "cpu_basis": "Docker cumulative container CPU; includes owned children, excludes producer",
+  "input": "raw native Qoder transcript, source/notice metadata and raw intercept tokens",
+  "output": "complete Pilot JSONL flusher",
+  "node_order": ["stable releases ascending", "mutable main", "optional mutable dev"]
+}

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Pilot · 性能历史</title>
+<style>
+:root{--ink:#172a35;--muted:#667783;--line:#dce5e9;--paper:#f3f6f7;--blue:#2466b0;--green:#217753;--orange:#a75520;--red:#a03f44;--soft:#eef4fb;--radius:16px}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button,input{font:inherit}button,a,input{accent-color:var(--blue)}button{cursor:pointer}a{color:var(--blue);text-decoration-thickness:1px;text-underline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #82b6ee;outline-offset:3px}
+.page{max-width:1560px;margin:auto;padding:38px 30px 42px}.eyebrow{font-size:11px;letter-spacing:.13em;font-weight:750;color:var(--blue)}h1{font-size:clamp(27px,4vw,40px);letter-spacing:-.035em;line-height:1.15;margin:11px 0 13px}h2,h3,p{margin:0}.intro{max-width:780px;color:var(--muted);font-size:15px}.topline{display:flex;align-items:center;justify-content:space-between;gap:16px}.repo{font-size:12px;word-break:break-word;color:var(--muted)}.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:27px 0 19px}.fact{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 16px;min-width:0}.fact dt{font-size:11px;color:var(--muted);margin-bottom:5px}.fact dd{margin:0;font-size:15px;font-weight:650;overflow-wrap:anywhere}.fact .small{font-size:12px;font-weight:500}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 21px}.tools{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.tools label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}button{border:1px solid #cbd8e1;border-radius:8px;background:#fff;padding:7px 11px;color:var(--ink);font-size:12px}.legend{display:flex;gap:15px;flex-wrap:wrap;color:var(--muted);font-size:11px}.legend span{display:inline-flex;gap:6px;align-items:center}.dot{width:7px;height:7px;display:inline-block;border-radius:50%;background:var(--blue)}.range{height:14px;border-left:2px solid #84a8ce;display:inline-block}.hollow{background:transparent;border:1.5px solid #81919e}.notice{border-left:3px solid #759abf;background:#e9f0f7;padding:11px 14px;margin:0 0 19px;border-radius:0 8px 8px 0;color:#36526a;font-size:12px}.notice[hidden]{display:none}.error{border-color:var(--red);background:#f8edef;color:#713c42}
+.load{margin-top:24px}.load-heading{display:flex;gap:12px;align-items:baseline;margin-bottom:9px}.load h2{font-size:16px;font-weight:750}.load-heading p{font-size:12px;color:var(--muted)}.charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.chart{min-width:0;background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.chart-head{padding:16px 18px 7px;display:flex;justify-content:space-between;gap:15px;align-items:baseline}.chart h3{font-size:13px;font-weight:700}.unit{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}.last{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.scroll{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}.scroll svg{display:block;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.empty{height:232px;display:flex;align-items:center;justify-content:center;color:#8b98a2;font-size:13px;margin:12px 18px 16px;border:1px dashed #dfe6eb;border-radius:10px;background:linear-gradient(180deg,#fafcfd,#fff)}.chart-note{color:var(--muted);font-size:10px;padding:0 18px 12px}.gridline{stroke:#e7edf1;stroke-width:1}.axis{fill:#7c8b96;font-size:10px}.version-label{fill:#516571;font-size:10px}.active-version{fill:var(--blue);font-weight:750}.series{stroke:var(--blue);stroke-width:2;fill:none}.whisker{stroke:#8daed0;stroke-width:2}.point{fill:var(--blue);stroke:#fff;stroke-width:2}.partial{fill:#fff;stroke:var(--blue);stroke-dasharray:2 2}.point-target{cursor:crosshair;outline:none}.point-target:focus .point,.point-target:hover .point{stroke:#123f75;stroke-width:3}.point-target:focus .status-mark,.point-target:hover .status-mark{stroke:var(--blue);stroke-width:2}.point-target:focus .focus-ring{stroke:#8cb6e1;stroke-width:2;fill:#2466b018}.focus-ring{fill:transparent;stroke:transparent}.status-mark{fill:#fff;stroke:#96a5b0;stroke-width:1.3}.status-text{fill:#8a98a1;font-size:9px}.failed-mark{stroke:#ad6166}.value-label{fill:#3e5669;font-size:10px}.delta-down{fill:var(--green)}.delta-up{fill:var(--orange)}.delta-flat{fill:#697b88}.compact-hidden .compact-label{display:none}
+.foot{border-top:1px solid var(--line);margin-top:29px;padding-top:17px;color:var(--muted);font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px 32px}.foot strong{color:#3b5261;font-weight:600}.foot p+p{margin-top:6px}.source-note{grid-column:1/-1;font-size:10px;overflow-wrap:anywhere}#tooltip{position:fixed;z-index:10;width:min(380px,calc(100vw - 24px));background:#fff;border:1px solid #cbd9e4;border-radius:12px;box-shadow:0 10px 40px #18354b29;padding:16px;color:var(--ink);font-size:12px;overflow-wrap:anywhere;max-height:calc(100vh - 24px);overflow-y:auto}#tooltip[hidden]{display:none}.tip-title{font-size:14px;font-weight:750;line-height:1.4}.tip-sub{color:var(--muted);font-size:11px;margin-top:3px}.tip-value{font-size:25px;font-weight:750;letter-spacing:-.035em;margin-top:9px;font-variant-numeric:tabular-nums}.tip-delta{font-size:12px;margin:2px 0 11px}.tip-delta.down{color:var(--green)}.tip-delta.up{color:var(--orange)}.tip-delta.muted{color:var(--muted)}.tip-rows{display:grid;grid-template-columns:84px 1fr;gap:5px 9px;margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}.tip-rows dt{color:var(--muted)}.tip-rows dd{margin:0;font-variant-numeric:tabular-nums}.tip-link{display:block;margin-top:12px;font-size:11px}.tip-hint{font-size:10px;color:var(--muted);margin-top:8px}.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(min-width:1100px){.chart-head{padding-top:18px}.load{margin-top:27px}}
+@media(max-width:800px){.page{padding:25px 16px 30px}.facts{grid-template-columns:repeat(2,minmax(0,1fr))}.charts{grid-template-columns:1fr}.topline{display:block}.repo{margin-top:9px}.toolbar{align-items:flex-start}.foot{grid-template-columns:1fr}.source-note{grid-column:auto}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+@media print{body{background:#fff}.page{padding:8px;max-width:none}.toolbar,#tooltip{display:none!important}.chart{break-inside:avoid}.scroll{overflow:visible}.scroll svg{max-width:100%;height:auto}.load{break-inside:avoid}.foot{font-size:10px}.facts{margin:14px 0}.chart-head{padding:10px}.chart-note{font-size:9px}}
+</style>
+</head>
+<body>
+<main class="page">
+  <header>
+    <div class="topline"><div class="eyebrow">LOONGSUITE PILOT / PERFORMANCE</div><div class="repo" id="repository">公开版本持续验收</div></div>
+    <h1>Pilot 性能历史</h1>
+    <p class="intro">看清每个版本在空闲、低负载和高负载时用了多少 CPU 与内存。版本从旧到新排列，最后是持续更新的 main；有开发节点时再接 dev。</p>
+    <dl class="facts">
+      <div class="fact"><dt>展示节点</dt><dd id="node-count">等待记录</dd></div>
+      <div class="fact"><dt>最新节点</dt><dd id="latest-node">待测</dd></div>
+      <div class="fact"><dt>测试方法</dt><dd id="method" class="small">尚未设置</dd></div>
+      <div class="fact"><dt>最后更新 · UTC</dt><dd id="updated" class="small">暂无记录</dd></div>
+    </dl>
+  </header>
+  <div class="notice" id="compatibility" hidden></div>
+  <div class="notice error" id="data-error" role="status" hidden></div>
+  <div class="toolbar">
+    <div class="legend"><span><i class="dot"></i>中位数</span><span><i class="range"></i>各轮最小—最大</span><span><i class="dot hollow"></i>待测或未通过，不按 0 计算</span></div>
+    <div class="tools"><label><input type="checkbox" id="labels">点上显示数值与变化</label><button type="button" id="latest-button">查看最新节点 →</button></div>
+  </div>
+  <div id="charts" class="compact-hidden" aria-live="polite"></div>
+  <footer class="foot">
+    <div><p><strong>读数方式</strong>　CPU 100% 表示用满一个核，200% 表示两个核。RSS 为容器内各进程 RSS 之和，单位 MiB，可能重复计入共享页；不可与旧单进程口径直接比较。</p><p>圆点是有效轮次的中位数，竖线是最小—最大范围；范围不是置信区间。</p></div>
+    <div><p><strong>变化百分比</strong>　只与紧邻前节点比较，要求方法和环境相同、质量通过、至少三轮且前值大于 0。绿色表示降低，橙色表示升高。</p><p>缺测、失败或不可比时保留空位，不连线、不填 0。鼠标停留或键盘聚焦可看详细记录。</p></div>
+    <p class="source-note" id="source-note">尚无测试记录；页面没有预填任何性能成绩。</p>
+  </footer>
+</main>
+<div id="tooltip" role="tooltip" hidden></div>
+<script type="application/json" id="pilot-performance-data">__PILOT_PERFORMANCE_DATA__</script>
+<script>
+"use strict";
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const LOADS = [{id:"idle",name:"空闲",rate:0},{id:"low",name:"低负载",rate:10},{id:"high",name:"高负载",rate:200}];
+  const METRICS = [{id:"cpu_percent",name:"CPU",unit:"%",digits:2},{id:"rss_mib",name:"驻留内存",unit:"MiB",digits:1}];
+  const STATUS = {passed:"已通过",pending:"待测",failed:"未通过"};
+  const byId = id => document.getElementById(id);
+  const tip = byId("tooltip");
+  let nodes = [], focused = null, closeTimer = null;
+  function text(tag, value, className) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    el.textContent = String(value);
+    return el;
+  }
+  function svg(tag, attrs = {}) {
+    const el = document.createElementNS(NS, tag);
+    Object.entries(attrs).forEach(([key,value]) => el.setAttribute(key,String(value)));
+    return el;
+  }
+  function svgText(parent, content, attrs) {
+    const el = svg("text", attrs); el.textContent = content; parent.append(el); return el;
+  }
+  function semver(version) {
+    const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(String(version));
+    if (!match) throw new Error("发布节点必须使用稳定版版本号；不能包含 pre 或候选版本。");
+    const parts = match.slice(1).map(Number);
+    if (!parts.every(Number.isSafeInteger)) throw new Error("版本号超出可读取范围。");
+    return parts;
+  }
+  function prepare(payload) {
+    if (!payload || payload.schema !== 1 || !Array.isArray(payload.nodes)) throw new Error("暂时无法读取这份历史记录。");
+    const ids = new Set(), versions = new Set(); let main = 0, dev = 0;
+    const ordered = payload.nodes.slice();
+    for (const node of ordered) {
+      if (!node || !["release","main","dev"].includes(node.kind) || !Object.hasOwn(STATUS,node.status) || typeof node.id !== "string" || ids.has(node.id)) throw new Error("记录包含重复节点或不支持的节点格式。");
+      ids.add(node.id);
+      if (node.kind === "release") {
+        const key = semver(node.version).join(".");
+        if (versions.has(key)) throw new Error("同一发布版本出现了重复节点。");
+        versions.add(key);
+      } else if (node.kind === "main") main++; else dev++;
+    }
+    if (main > 1 || dev > 1) throw new Error("main 与 dev 各只能保留一个持续更新的节点。");
+    const rank = kind => ({release:0,main:1,dev:2})[kind];
+    ordered.sort((a,b) => {
+      if (a.kind !== b.kind) return rank(a.kind)-rank(b.kind);
+      if (a.kind !== "release") return 0;
+      const left=semver(a.version), right=semver(b.version);
+      return left[0]-right[0] || left[1]-right[1] || left[2]-right[2];
+    });
+    return ordered;
+  }
+  const label = node => node.kind === "release" ? "v"+semver(node.version).join(".") : node.kind;
+  const number = (value,digits=2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN",{minimumFractionDigits:digits,maximumFractionDigits:digits}) : "—";
+  const valueText = (value,metric) => number(value,metric.digits)+(metric.unit === "%" ? "%" : " MiB");
+  const shortSha = value => typeof value === "string" && value.length ? value.slice(0,10) : "未记录";
+  function date(value) {
+    const d = new Date(value);
+    if (!value || !Number.isFinite(d.getTime())) return "未记录";
+    return d.toISOString().replace("T"," ").replace(/\.\d+Z$/," UTC");
+  }
+  function stats(node,load,metric) {
+    const s = node.workloads?.[load]?.[metric.id];
+    if (!s || ![s.median,s.min,s.max].every(v => typeof v === "number" && Number.isFinite(v) && v >= 0) || s.min > s.median || s.median > s.max || (metric.id === "rss_mib" && s.min <= 0)) return null;
+    return s;
+  }
+  function quality(node,load) {
+    const q = node.workloads?.[load]?.quality;
+    return q?.passed === true && q.missing === 0 && q.duplicates === 0;
+  }
+  function usable(node,load,metric) {
+    const n = node.workloads?.[load]?.repeats;
+    return node.status === "passed" && quality(node,load) && Number.isInteger(n) && n >= 3 && !!stats(node,load,metric);
+  }
+  function comparison(index,load,metric) {
+    const node=nodes[index], previous=nodes[index-1];
+    const fail = reason => ({ok:false,reason,previous});
+    if (!previous) return fail("首个节点，没有前值");
+    const repeats=node.workloads?.[load]?.repeats, previousRepeats=previous.workloads?.[load]?.repeats;
+    if ((Number.isInteger(repeats) && repeats < 3) || (Number.isInteger(previousRepeats) && previousRepeats < 3)) return fail("有效轮次尚未达到三轮");
+    if (!usable(node,load,metric)) return fail("当前节点尚无通过验收的有效数据");
+    if (!usable(previous,load,metric)) return fail("紧邻前节点缺测、未通过或质量未达标");
+    if (typeof node.method_id !== "string" || !node.method_id || typeof previous.method_id !== "string" || !previous.method_id || node.method_id !== previous.method_id) return fail("测试方法不同或未记录");
+    const knownEnvironment=id=>typeof id === "string" && id.length>0 && !["unknown","missing","unavailable","inconclusive"].includes(id.toLowerCase());
+    if (!knownEnvironment(node.environment_id) || !knownEnvironment(previous.environment_id) || node.environment_id !== previous.environment_id) return fail("测试环境不同或未记录");
+    const before=stats(previous,load,metric).median, current=stats(node,load,metric).median;
+    if (before === 0) return fail("前值为 0，无法计算变化百分比");
+    const delta=(current-before)/before*100;
+    if (!Number.isFinite(delta)) return fail("变化百分比超出可计算范围");
+    return {ok:true,previous,before,current,delta};
+  }
+  function deltaText(delta) {
+    if (Math.abs(delta)<0.05) return "0.0%";
+    return (delta>0?"+":"−")+number(Math.abs(delta),1)+"%";
+  }
+  function safeRunUrl(value) {
+    try { const url=new URL(value); return url.protocol === "https:" && url.hostname === "github.com" && url.pathname.includes("/actions/runs/") ? url.href : null; }
+    catch { return null; }
+  }
+  function row(list,key,value) { list.append(text("dt",key),text("dd",value)); }
+  function positionTip() {
+    if (tip.hidden || !focused) return;
+    const box=focused.element.getBoundingClientRect(), width=tip.offsetWidth, height=tip.offsetHeight;
+    const left=Math.max(12,Math.min(window.innerWidth-width-12,box.left+box.width/2-width/2));
+    let top=box.top-height-12;
+    if (top < 12) top=box.bottom+12;
+    top=Math.max(12,Math.min(top,window.innerHeight-height-12));
+    tip.style.left=left+"px"; tip.style.top=top+"px";
+  }
+  function showTip(element,index,load,metric) {
+    clearTimeout(closeTimer);
+    if(focused && focused.element !== element) focused.element.removeAttribute("aria-describedby");
+    focused={element,index,load,metric}; tip.replaceChildren();
+    const node=nodes[index], s=stats(node,load.id,metric), n=node.workloads?.[load.id]?.repeats, c=comparison(index,load.id,metric);
+    tip.append(text("div",label(node)+" · "+load.name+" · "+metric.name,"tip-title"));
+    tip.append(text("div",STATUS[node.status]+(node.version && node.kind !== "release" ? " · "+node.version : ""),"tip-sub"));
+    tip.append(text("div",usable(node,load.id,metric)?valueText(s.median,metric):"暂无有效成绩","tip-value"));
+    tip.append(text("div",c.ok ? "较 "+label(c.previous)+" "+deltaText(c.delta) : "不可比较 · "+c.reason,"tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
+    const list=text("dl","","tip-rows");
+    row(list,"当前值",s?valueText(s.median,metric)+(usable(node,load.id,metric)?"":"（未作为有效成绩绘图）"):"未测量");
+    row(list,"前节点",c.previous?label(c.previous):"无");
+    const prev=c.previous && stats(c.previous,load.id,metric);
+    row(list,"前值",prev?valueText(prev.median,metric):"未测量");
+    row(list,"有效轮次",Number.isInteger(n)?String(n)+" 轮":"未记录");
+    row(list,"各轮范围",s?valueText(s.min,metric)+" — "+valueText(s.max,metric):"未记录");
+    const q=node.workloads?.[load.id]?.quality;
+    row(list,"数据质量",q? (q.passed?"通过":"未通过")+"；缺失 "+String(q.missing ?? "未记录")+"，重复 "+String(q.duplicates ?? "未记录") : "未记录");
+    row(list,"日期",date(node.recorded_at)); row(list,"提交",node.commit || "未记录");
+    row(list,"方法",node.method_id || "未记录"); row(list,"环境",node.environment_id || "未记录");
+    row(list,"处理器",node.environment?.cpu_model || "未记录");
+    row(list,"系统 / 镜像",[node.environment?.runner_os,node.environment?.runner_image].filter(Boolean).join(" / ") || "未记录");
+    row(list,"cgroup 版本",node.environment?.cgroup_version || "未记录");
+    row(list,"内存口径",dataMethodRssBasis());
+    tip.append(list);
+    const link=safeRunUrl(node.run_url);
+    if (link) { const a=text("a","查看这次 GitHub 运行 ↗","tip-link"); a.href=link; a.target="_blank"; a.rel="noopener noreferrer"; a.tabIndex=-1; tip.append(a); }
+    tip.append(text("div","← → 切换节点 · Esc 关闭"+(link?" · Enter 打开运行记录":""),"tip-hint"));
+    tip.hidden=false; element.setAttribute("aria-describedby","tooltip"); positionTip();
+  }
+  function hideTip() { if(focused) focused.element.removeAttribute("aria-describedby"); focused=null; tip.hidden=true; }
+  function scheduleHide(element) {
+    clearTimeout(closeTimer); closeTimer=setTimeout(() => { if(document.activeElement !== element && !tip.matches(":hover")) hideTip(); },150);
+  }
+  function niceCeiling(value) {
+    if (!(value>0)) return 1;
+    const scale=10**Math.floor(Math.log10(value)), step=value/scale;
+    const result=(step<=1?1:step<=2?2:step<=5?5:10)*scale;
+    return Number.isFinite(result)?result:value;
+  }
+  function dataMethodRssBasis() {
+    return "容器内各进程 RSS 之和；共享页可能重复计入";
+  }
+  function drawChart(load,metric) {
+    const card=text("article","","chart"), head=text("div","","chart-head"), title=text("h3",metric.name);
+    title.append(text("span",metric.unit,"unit")); head.append(title);
+    const latest=nodes[nodes.length-1];
+    head.append(text("span",latest && usable(latest,load.id,metric)?label(latest)+" · "+valueText(stats(latest,load.id,metric).median,metric):"最新节点待验收","last")); card.append(head);
+    if (!nodes.length) { card.append(text("div","等待测试记录","empty")); return card; }
+    const scroll=text("div","","scroll"); scroll.setAttribute("aria-label",load.name+" "+metric.name+"版本趋势，可横向滚动");
+    const W=Math.max(560,80+nodes.length*100), H=258, left=55, right=27, top=34, bottom=177, step=(W-left-right)/Math.max(nodes.length,1);
+    const plot=svg("svg",{width:W,height:H,viewBox:`0 0 ${W} ${H}`,role:"group","aria-label":load.name+" "+metric.name+"，横轴为版本"});
+    let max=0;
+    nodes.forEach(node => { if(usable(node,load.id,metric)) max=Math.max(max,stats(node,load.id,metric).max); });
+    const ceiling=niceCeiling(max>0?Math.min(max*1.13,Number.MAX_VALUE):metric.id === "cpu_percent"?100:64);
+    const x=index=>left+step*(index+0.5), y=value=>bottom-value/ceiling*(bottom-top);
+    nodes.forEach((node,index) => { if(node.kind !== "release") plot.append(svg("rect",{x:x(index)-step*.44,y:top-12,width:step*.88,height:bottom-top+35,rx:7,fill:node.kind === "main"?"#eef4fb":"#f3f1fa"})); });
+    for(let i=0;i<=4;i++) {
+      const value=ceiling*i/4, at=y(value);
+      plot.append(svg("line",{x1:left,y1:at,x2:W-right,y2:at,class:"gridline"}));
+      svgText(plot,number(value,Number.isInteger(value)?0:Number.isInteger(value*10)?1:2),{x:left-10,y:at+3,"text-anchor":"end",class:"axis"});
+    }
+    let path="", connected=false;
+    nodes.forEach((node,index) => {
+      if(!usable(node,load.id,metric)){connected=false;return;}
+      path+=(connected?" L ":" M ")+x(index)+" "+y(stats(node,load.id,metric).median); connected=true;
+    });
+    if(path) plot.append(svg("path",{d:path,class:"series"}));
+    const targets=[];
+    nodes.forEach((node,index) => {
+      const s=stats(node,load.id,metric), valid=usable(node,load.id,metric), at=x(index), c=comparison(index,load.id,metric), n=node.workloads?.[load.id]?.repeats;
+      const group=svg("g",{tabindex:0,class:"point-target",role:"img","aria-label":label(node)+"，"+STATUS[node.status]+"，"+load.name+" "+metric.name+"，"+(valid?valueText(s.median,metric):"没有有效成绩")});
+      if(valid) {
+        group.append(svg("line",{x1:at,y1:y(s.min),x2:at,y2:y(s.max),class:"whisker"}));
+        for(const value of [s.min,s.max]) group.append(svg("line",{x1:at-4,y1:y(value),x2:at+4,y2:y(value),class:"whisker"}));
+        group.append(svg("circle",{cx:at,cy:y(s.median),r:13,class:"focus-ring"}),svg("circle",{cx:at,cy:y(s.median),r:5,class:"point"+(n<3?" partial":"")}));
+        const labels=svg("g",{class:"compact-label"});
+        svgText(labels,valueText(s.median,metric),{x:at,y:Math.max(13,y(s.max)-10),"text-anchor":"middle",class:"value-label"});
+        svgText(labels,c.ok?deltaText(c.delta):"—",{x:at,y:Math.max(26,y(s.max)+3),"text-anchor":"middle",class:c.ok?(c.delta<0?"delta-down":c.delta>0?"delta-up":"delta-flat"):"delta-flat"});
+        group.append(labels);
+      } else {
+        // Missing/failed points live below the value axis, never at y=0.
+        group.append(svg("circle",{cx:at,cy:bottom+15,r:12,class:"focus-ring"}),svg("circle",{cx:at,cy:bottom+15,r:4,class:"status-mark"+(node.status === "failed"?" failed-mark":"")}));
+        svgText(group,node.status === "failed"?"未通过":node.status === "passed"?"无有效数据":"待测",{x:at,y:bottom+35,"text-anchor":"middle",class:"status-text"});
+      }
+      svgText(plot,label(node),{x:at,y:237,"text-anchor":"middle",class:"version-label"+(node.kind !== "release"?" active-version":"")});
+      group.addEventListener("pointerenter",() => showTip(group,index,load,metric));
+      group.addEventListener("click",() => { group.focus(); showTip(group,index,load,metric); });
+      group.addEventListener("pointerleave",() => scheduleHide(group));
+      group.addEventListener("focus",() => { group.scrollIntoView({block:"nearest",inline:"nearest"}); showTip(group,index,load,metric); });
+      group.addEventListener("blur",() => scheduleHide(group));
+      group.addEventListener("keydown",event => {
+        let next=null;
+        if(event.key === "ArrowLeft") next=Math.max(0,index-1);
+        if(event.key === "ArrowRight") next=Math.min(nodes.length-1,index+1);
+        if(event.key === "Home") next=0;
+        if(event.key === "End") next=nodes.length-1;
+        if(next !== null){event.preventDefault();targets[next].focus();}
+        if(event.key === "Escape") hideTip();
+        if(event.key === "Enter"){const url=safeRunUrl(node.run_url);if(url){event.preventDefault();window.open(url,"_blank","noopener,noreferrer");}}
+      });
+      targets.push(group); plot.append(group);
+    });
+    scroll.append(plot); card.append(scroll,text("p","变化以紧邻前节点为参照；不可比较时显示 —。可横向滚动查看全部版本。","chart-note")); return card;
+  }
+  function render(payload,source) {
+    nodes=prepare(payload); hideTip();
+    byId("repository").textContent=payload.repository || "公开版本持续验收";
+    byId("node-count").textContent=nodes.length?nodes.length+" 个节点":"等待记录";
+    const latest=nodes[nodes.length-1]; byId("latest-node").textContent=latest?label(latest)+" · "+STATUS[latest.status]+" · "+shortSha(latest.commit):"待测";
+    byId("method").textContent=payload.method?.id || "尚未设置";
+    byId("updated").textContent=date(payload.updated_at);
+    const compatibility=payload.compatibility;
+    if(compatibility?.excluded_at_or_before){byId("compatibility").textContent="兼容性边界："+compatibility.excluded_at_or_before+" 及更早版本已排除。"+(compatibility.reason || "");byId("compatibility").hidden=false;}
+    else byId("compatibility").hidden=true;
+    const target=byId("charts"); target.replaceChildren();
+    for(const load of LOADS) {
+      const section=text("section","","load"), heading=text("div","","load-heading");
+      heading.append(text("h2",load.name),text("p",(payload.method?.loads?.[load.id]?.turns_per_second ?? load.rate)+" 轮/秒"));
+      const charts=text("div","","charts"); METRICS.forEach(metric=>charts.append(drawChart(load,metric))); section.append(heading,charts); target.append(section);
+    }
+    const method=payload.method;
+    const memory=typeof method?.memory_limit === "number" ? number(method.memory_limit/1073741824,2)+" GiB" : String(method?.memory_limit ?? "未记录");
+    const context=method?"窗口 "+String(method.window_seconds ?? "未记录")+" 秒 · "+String(method.session_count ?? "未记录")+" 个会话 · CPU 配额 "+String(method.cpu_limit ?? "未记录")+" · 内存配额 "+memory:"测试参数尚未设置";
+    byId("source-note").textContent=nodes.length?context+"。记录来源："+source+"。main/dev 更新原节点，发布版按版本号插入；未把候选提交额外算作版本。":"尚无测试记录；页面没有预填任何性能成绩。";
+  }
+  byId("labels").addEventListener("change",event=>byId("charts").classList.toggle("compact-hidden",!event.target.checked));
+  byId("latest-button").addEventListener("click",()=>document.querySelectorAll(".scroll").forEach(el=>{el.scrollLeft=el.scrollWidth;}));
+  tip.addEventListener("pointerenter",()=>clearTimeout(closeTimer));
+  tip.addEventListener("pointerleave",()=>{if(!focused || document.activeElement !== focused.element)hideTip();});
+  window.addEventListener("resize",positionTip);document.addEventListener("scroll",positionTip,true);
+  document.addEventListener("keydown",event=>{if(event.key === "Escape")hideTip();});
+  document.addEventListener("pointerdown",event=>{if(focused && !tip.contains(event.target) && !focused.element.contains(event.target))hideTip();});
+  async function start() {
+    const empty={schema:1,repository:"alibaba/loongsuite-pilot",updated_at:null,method:null,compatibility:null,nodes:[]};
+    let payload=null, source="随页面保存的记录";
+    const raw=byId("pilot-performance-data").textContent.trim();
+    try {
+      if(raw && !/^__[A-Z_]+__$/.test(raw)) payload=JSON.parse(raw);
+      if(!payload) {
+        const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),10000);
+        try { const response=await fetch("history.json",{cache:"no-store",signal:controller.signal}); if(!response.ok)throw new Error("history unavailable");payload=await response.json();source="历史记录文件"; }
+        catch { payload=empty; }
+        finally { clearTimeout(timer); }
+      }
+      render(payload,source);
+    } catch(error) {
+      render(empty,"无有效记录");byId("data-error").textContent="这份记录暂时无法展示。"+(error instanceof Error?error.message:"");byId("data-error").hidden=false;
+    }
+  }
+  start();
+})();
+</script>
+</body>
+</html>
