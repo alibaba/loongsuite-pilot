@@ -357,7 +357,12 @@ export class Orchestrator extends EventEmitter {
       ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
     ];
-    this.hookWatchdog = new HookWatchdog(this.config.hookWatchdog, hookWatchdogTargets, interceptTargets);
+    this.hookWatchdog = new HookWatchdog(
+      this.config.hookWatchdog,
+      hookWatchdogTargets,
+      interceptTargets,
+      { pilotDir, dataDir: this.dataDir },
+    );
 
     this.localWorkerActivationService = new LocalWorkerActivationService({
       dataDir: this.dataDir,

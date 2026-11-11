@@ -727,4 +727,120 @@ describe('HookWatchdog', () => {
       expect(repairFn).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('hook asset bytes', () => {
+    const scriptText = '#!/bin/sh\necho ok\n';
+    const processorText = 'export const x = 1;\n';
+
+    async function installAssets(): Promise<{ pilotDir: string; dataDir: string }> {
+      const pilotDir = path.join(tmpDir, 'pilot');
+      const dataDir = path.join(tmpDir, 'data');
+      const sourceRoot = path.join(pilotDir, 'assets', 'hooks', 'shared');
+      await fs.mkdir(sourceRoot, { recursive: true });
+      await fs.writeFile(
+        path.join(pilotDir, 'assets', 'hooks', 'claude-code-loongsuite-pilot-hook.sh'),
+        scriptText,
+        { mode: 0o755 },
+      );
+      await fs.writeFile(path.join(sourceRoot, 'decode-payload.mjs'), processorText);
+      return { pilotDir, dataDir };
+    }
+
+    it('restores a missing script from the install tree', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      const restored = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      expect(await fs.readFile(restored, 'utf8')).toBe(scriptText);
+      expect(await fs.readFile(path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs'), 'utf8')).toBe(processorText);
+    });
+
+    it('overwrites a modified processor and leaves package-extra files', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const processor = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
+      const extra = path.join(dataDir, 'hooks', 'user-note.txt');
+      await fs.mkdir(path.dirname(processor), { recursive: true });
+      await fs.writeFile(processor, 'export const x = 2;\n');
+      await fs.writeFile(extra, 'keep\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(processor, 'utf8')).toBe(processorText);
+      expect(await fs.readFile(extra, 'utf8')).toBe('keep\n');
+    });
+
+    it('restores the execute bit without calling settings repair', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const script = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(script), { recursive: true });
+      await fs.writeFile(script, scriptText, { mode: 0o644 });
+      await fs.mkdir(path.join(dataDir, 'hooks', 'shared'), { recursive: true });
+      await fs.writeFile(path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs'), processorText);
+
+      const repairFn = vi.fn(async () => true);
+      const target = makeClaudeTarget(tmpDir, { repairFn });
+      await writeSettings(target.settingsPath, buildHealthySettings(target));
+      const wd = new HookWatchdog(makeConfig(), [target], [], { pilotDir, dataDir });
+
+      const summary = await wd.runCheck();
+
+      expect(repairFn).not.toHaveBeenCalled();
+      expect(summary.repaired).toBe(0);
+      expect(summary.checked).toBe(1);
+      if (process.platform !== 'win32') {
+        expect((await fs.stat(script)).mode & 0o111).not.toBe(0);
+      }
+      expect(await fs.readFile(script, 'utf8')).toBe(scriptText);
+    });
+
+    it('leaves deployed hooks alone when the install tree is missing', async () => {
+      const dataDir = path.join(tmpDir, 'data');
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'local\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], {
+        pilotDir: path.join(tmpDir, 'missing-pilot'),
+        dataDir,
+      });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('local\n');
+    });
+
+    it('replaces a symlinked hook file without following it', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const outside = path.join(tmpDir, 'outside.mjs');
+      const link = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
+      await fs.writeFile(outside, 'outside\n');
+      await fs.mkdir(path.dirname(link), { recursive: true });
+      await fs.symlink(outside, link);
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(outside, 'utf8')).toBe('outside\n');
+      expect((await fs.lstat(link)).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(link, 'utf8')).toBe(processorText);
+    });
+
+    it('does not write through a symlinked parent directory', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const outsideDir = path.join(tmpDir, 'outside-dir');
+      await fs.mkdir(outsideDir, { recursive: true });
+      await fs.writeFile(path.join(outsideDir, 'decode-payload.mjs'), 'outside\n');
+      const shared = path.join(dataDir, 'hooks', 'shared');
+      await fs.mkdir(path.dirname(shared), { recursive: true });
+      await fs.symlink(outsideDir, shared);
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(path.join(outsideDir, 'decode-payload.mjs'), 'utf8')).toBe('outside\n');
+      expect((await fs.lstat(shared)).isSymbolicLink()).toBe(true);
+    });
+  });
 });
