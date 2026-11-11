@@ -58,6 +58,50 @@ Send simultaneous requests from two users through the actual application. Check 
 
 For memory ownership, map userId to `$.agent_attributes.attributes["memory.user_id"]`. Read an actual trajectory first to confirm that field exists, then test mapping, extraction, and recall. The default userId mapping does not automatically use it. **Trace attributes, trajectory attributes, and successful memory extraction/recall are separate acceptance checks.**
 
+## OpenClaw: per-turn values on a persistent Gateway
+
+Verified with **OpenClaw 2026.6.5 `agent` RPC**: changing values, empty attributes, concurrent independent sessions, and identical-input concurrent submissions to one session associate separately in the same Gateway process. `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` on that process is a startup default; it cannot switch business users per RPC.
+
+1. Update and activate Pilot's OpenClaw plugin, restarting the Gateway once to load it. Enable `requestAttributes.enabled` and `memory.` span passthrough below, and restart the Collector. The caller must write to the same data directory used by the Collector. A remote RPC client cannot replace this with arbitrary request parameters; a business adapter beside the Gateway can publish records.
+2. Use the real native `sessionId`. `sessionKey` routes sessions but does not replace the correlation-file session ID. This version accepts a caller-specified session ID in `agent`; verify collected IDs for new and resumed sessions.
+3. For this verified RPC, native `runId` equals caller `idempotencyKey`, which the modern Pilot plugin uses as `gen_ai.turn.id`. Use a unique key for each new logical request and publish its exact record **before** sending:
+
+```js
+import { randomUUID } from 'node:crypto';
+
+const runId = randomUUID();
+writeRequestAttributes({ dataDir, sessionId, turnId: runId,
+  attributes: { 'memory.user_id': tenantUserId, 'memory.request_id': requestId } });
+await gateway.request('agent', {
+  sessionId, sessionKey, message: prompt, idempotencyKey: runId,
+});
+```
+
+`writeRequestAttributes` is the caller-side example below; `gateway.request` is the application's existing OpenClaw client. Adding an `attributes` object directly to this RPC is unsupported and rejected by this version. Exact records handle identical input, reverse publication order, and concurrent submission without arrival-order guessing. The Gateway may still serialize execution within a session.
+
+This does not establish the same ID semantics for `chat.send`, HTTP compatibility endpoints, or older OpenClaw versions. Legacy Pilot adapters can generate different turn IDs. Confirm actual versions/events. When exact native IDs are unavailable before sending, use a known native session with serialized text matching.
+
+## Codex: CLI children and a persistent app-server
+
+Two entry points have been verified with **Codex 0.166.0**:
+
+- A separate CLI child per request: give each child its own `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`, as with Grok. No correlation file or linking switches are needed.
+- A persistent app-server: `thread/start` returns the native thread ID, which is Pilot's session ID. Before each new `turn/start`, publish a `contentHash` record using original user text. Enable `requestAttributes.enabled`, and write `attributes: {}` for unannotated turns.
+
+```js
+const { thread } = await codex.request('thread/start', existingThreadOptions);
+// For each new turn, write first; wait for turn/completed before the next one.
+writeRequestAttributes({ dataDir, sessionId: thread.id, prompt,
+  attributes: { 'memory.user_id': tenantUserId, 'memory.request_id': requestId } });
+await codex.request('turn/start', {
+  threadId: thread.id, input: [{ type: 'text', text: prompt }],
+});
+```
+
+Use a Pilot version containing the native user-provenance correlation fix. An app-server's first turn also writes environment context. Pilot derives the original user hash from native `content_item_metadata.provenance` or `user_message`, preserving full messages. Do not add environment context to the caller's hash or strip arbitrary XML to guess input.
+
+Different threads can run concurrently. **Calling `turn/start` during an active turn on the same thread can add input to that turn and return the same ID**, rather than create a second independent request. Steering cannot carry two independently attributed turn identities; do not prequeue a second FIFO record for it. Use separate threads or wait for completion. Native turn IDs are returned after `turn/start`, so arbitrary business request IDs cannot predeclare an exact match.
+
 ## User ownership and concurrency
 
 For memory extraction, derive `memory.user_id` from the application's authenticated identity. Use the same stable value across clients, qualified by tenant where needed, such as `tenant-001:user-007`. `memory.request_id` changes per request and is for diagnosis. Agent instance IDs, the container's root user, working directories, and native session IDs do not establish business-user identity.
@@ -187,7 +231,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-function writeRequestAttributes({ dataDir, sessionId, prompt, attributes }) {
+function writeRequestAttributes({ dataDir, sessionId, turnId, prompt, attributes }) {
   try {
     const dir = path.join(dataDir, 'acp-correlate');
     const name = path.basename(String(sessionId))
@@ -195,8 +239,10 @@ function writeRequestAttributes({ dataDir, sessionId, prompt, attributes }) {
     const record = {
       type: 'turn',
       sessionId,
-      contentHash: createHash('sha256').update(prompt, 'utf8')
-        .digest('hex').slice(0, 16),
+      ...(turnId ? { turnId } : {
+        contentHash: createHash('sha256').update(prompt, 'utf8')
+          .digest('hex').slice(0, 16),
+      }),
       attributes,
     };
     fs.mkdirSync(dir, { recursive: true });

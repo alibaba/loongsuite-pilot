@@ -58,6 +58,50 @@ const child = spawn(grokCommand, grokArgs, {
 
 用于记忆时，将 userId 映射设为 `$.agent_attributes.attributes["memory.user_id"]`。先读取真实轨迹，确认 `agent_attributes.attributes` 中也包含该字段，再测试映射、提取及召回。默认 userId 映射不会自动采用这个自定义字段；详细边界见后文。**字段进入 Trace、字段进入轨迹、记忆提取/召回成功是三项独立验收。**
 
+## OpenClaw：长驻 Gateway 逐轮注入
+
+已用 OpenClaw **2026.6.5 的 `agent` RPC** 验证：同一个 Gateway 进程中的多轮请求、空属性、并发独立 session，以及同 session 同文并发提交都可分别关联。Gateway 进程环境中的 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` 是启动时默认值，不能用它切换每次 RPC 的业务用户。
+
+1. 更新并激活 Pilot OpenClaw 插件，重启 Gateway 一次以加载新插件。启用下文的 `requestAttributes.enabled` 和 `memory.` Span 透传，重启 Collector。调用方必须能向 Collector 使用的同一数据目录写入记录；远程 RPC 客户端不能仅靠请求参数替代这一步，可由 Gateway 所在侧的业务适配层写入。
+2. 使用真正的原生 `sessionId`；`sessionKey` 是另一种路由标识，不能代替文件名中的 session ID。此版本允许调用方将已确定的 session ID 传入 `agent` RPC；新建或复用会话时需核对实际输出一致。
+3. 对此已验证的 RPC，原生 `runId` 等于调用方的 `idempotencyKey`，现代 Pilot 插件以它作为 `gen_ai.turn.id`。每个新逻辑请求使用唯一键，在调用 RPC **之前**写精确记录：
+
+```js
+import { randomUUID } from 'node:crypto';
+
+const runId = randomUUID();
+writeRequestAttributes({ dataDir, sessionId, turnId: runId,
+  attributes: { 'memory.user_id': tenantUserId, 'memory.request_id': requestId } });
+await gateway.request('agent', {
+  sessionId, sessionKey, message: prompt, idempotencyKey: runId,
+});
+```
+
+`writeRequestAttributes` 是下文供调用侧适配的文件写入示例，`gateway.request` 是客户已有的 OpenClaw 客户端。不能直接把 `attributes` 对象加到 `agent` RPC；该版本会因不支持的参数而拒绝请求。精确记录允许相同文本、记录逆序和并发提交，不依赖 Collector 按请求到达顺序猜测归属；Gateway 自己仍可能按 session 排队执行。
+
+此处没有验证 `chat.send`、HTTP 兼容接口或旧版 OpenClaw 的相同 ID 语义。早期 Pilot legacy 适配器可能生成不同 turn ID，不能照搬 `idempotencyKey` 规则。先核对实际版本和事件；无法事前取得准确 turn ID 时，使用已确认 session 的文本模式并串行完成本 session 的每轮。
+
+## Codex：CLI 子进程和长驻 app-server
+
+已用 Codex **0.166.0** 验证两种入口：
+
+- 每次请求创建独立 CLI 子进程：给每个子进程独立的 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`，与前述 Grok 入口一样，无需关联文件和两个关联开关。
+- 长驻 app-server：`thread/start` 返回原生 thread ID，它也是 Pilot 关联用的 session ID。在每个新 turn 的 `turn/start` 前，使用用户原始文本写入本 thread 的 `contentHash` 关联记录。开启 `requestAttributes.enabled`；没有属性的轮次也写 `attributes: {}`。
+
+```js
+const { thread } = await codex.request('thread/start', existingThreadOptions);
+// 后续每轮先写记录；同一个 thread 等 turn/completed 后才发起下一轮。
+writeRequestAttributes({ dataDir, sessionId: thread.id, prompt,
+  attributes: { 'memory.user_id': tenantUserId, 'memory.request_id': requestId } });
+await codex.request('turn/start', {
+  threadId: thread.id, input: [{ type: 'text', text: prompt }],
+});
+```
+
+需要包含 Codex 原生 user provenance 关联修复的 Pilot 版本：app-server 首轮还会写环境上下文，Pilot 根据原生 `content_item_metadata.provenance` 或 `user_message` 取得用户原文 hash，保留完整消息；不能把环境上下文拼入调用侧 hash，也不能靠删除任意 XML 字符串匹配。
+
+不同 thread 可以并发。**同 thread 的 active turn 上再次 `turn/start`，该版本可能将输入加入同一个 turn，返回相同 turn ID，而非创建第二个独立请求。**这种 steering 不能按两个独立 turn 各附一组身份；不要为它预先排入第二条文本 FIFO 记录。需要独立归属的任务使用不同 thread，或等待本 turn 完成。原生 turn ID 在 `turn/start` 后才返回，不能用任意业务请求编号事前冒充精确键。
+
 ## 用户归属与并发边界
 
 用于记忆提取时，`memory.user_id` 应来自业务平台已经认证的用户身份。同一用户跨终端使用同一稳定值；有多个租户时使用租户内不冲突的组合标识，例如 `tenant-001:user-007`。`memory.request_id` 每次请求变化，用于排查归属，不能代替稳定的用户标识。Agent 实例编号、容器的 root 用户、工作目录和原生 session ID 都不能直接当作业务用户。
@@ -198,7 +242,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-function writeRequestAttributes({ dataDir, sessionId, prompt, attributes }) {
+function writeRequestAttributes({ dataDir, sessionId, turnId, prompt, attributes }) {
   try {
     const dir = path.join(dataDir, 'acp-correlate');
     const name = path.basename(String(sessionId))
@@ -206,8 +250,10 @@ function writeRequestAttributes({ dataDir, sessionId, prompt, attributes }) {
     const record = {
       type: 'turn',
       sessionId,
-      contentHash: createHash('sha256').update(prompt, 'utf8')
-        .digest('hex').slice(0, 16),
+      ...(turnId ? { turnId } : {
+        contentHash: createHash('sha256').update(prompt, 'utf8')
+          .digest('hex').slice(0, 16),
+      }),
       attributes,
     };
     fs.mkdirSync(dir, { recursive: true });
