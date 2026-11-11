@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-11T02:19:42.203757Z",
+  "updated_at": "2026-11-11T02:33:13.600065Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -817,8 +817,8 @@
       "id": "dev",
       "kind": "dev",
       "version": "dev",
-      "commit": "70cbd1f76cbd8809ce3176bbcdbbac48291dcc66",
-      "recorded_at": "2026-11-11T02:14:31.796840Z",
+      "commit": "28d0ca845c99f5564f6b8fabee0d7ad1ea18155f",
+      "recorded_at": "2026-11-11T02:27:58.481620Z",
       "status": "passed",
       "method_id": "github-full-pilot-qoder-native-v1",
       "environment_id": "085462d3669f3b03c936fd3f5f1bb04d39efc53cf73f528283f0a7d47cb66d22",
@@ -833,20 +833,20 @@
         "cpus": 4,
         "node_version": "v22.23.4"
       },
-      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42944088934",
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42945667443",
       "workloads": {
         "idle": {
           "repeats": 3,
           "p95_ms": null,
           "cpu_percent": {
-            "median": 5.450656354918506,
-            "min": 5.437263877184539,
-            "max": 5.482116300004691
+            "median": 5.80171801334465,
+            "min": 5.780148471961101,
+            "max": 5.849070901859689
           },
           "rss_mib": {
-            "median": 41.7890625,
-            "min": 41.64453125,
-            "max": 42.53125
+            "median": 41.5546875,
+            "min": 41.48828125,
+            "max": 42.18359375
           },
           "quality": {
             "passed": true,
@@ -857,19 +857,19 @@
         "low": {
           "repeats": 3,
           "p95_ms": {
-            "median": 225.159616,
-            "min": 223.81231,
-            "max": 225.2666
+            "median": 218.084107,
+            "min": 214.502516,
+            "max": 221.755078
           },
           "cpu_percent": {
-            "median": 8.242552348807243,
-            "min": 8.163291449063156,
-            "max": 8.263946924750531
+            "median": 8.674448215504459,
+            "min": 8.569401968536512,
+            "max": 8.692274822007008
           },
           "rss_mib": {
-            "median": 41.69921875,
-            "min": 41.625,
-            "max": 42.3046875
+            "median": 42.8203125,
+            "min": 42.33984375,
+            "max": 43.421875
           },
           "quality": {
             "passed": true,
@@ -880,19 +880,19 @@
         "high": {
           "repeats": 3,
           "p95_ms": {
-            "median": 286.714364,
-            "min": 281.962638,
-            "max": 287.97438
+            "median": 284.418673,
+            "min": 283.455682,
+            "max": 286.41085
           },
           "cpu_percent": {
-            "median": 30.967344808459718,
-            "min": 30.88735246564209,
-            "max": 31.091013296733422
+            "median": 32.735548253987155,
+            "min": 32.03942378536488,
+            "max": 32.77018791090868
           },
           "rss_mib": {
-            "median": 56.6875,
-            "min": 55.2421875,
-            "max": 57.17578125
+            "median": 56.44921875,
+            "min": 54.7265625,
+            "max": 56.734375
           },
           "quality": {
             "passed": true,
@@ -907,13 +907,13 @@
       },
       "provenance": {
         "entry_sha256": "340af0b2b1a315089f7f60c393f006c78fde0610d6d3c5addecdc7171fa93961",
-        "library_sha256": "ab7a33939eaeae8c0c652d17b159236458015af00cbf1d97acbc351a77bf047b",
+        "library_sha256": "8a3b6bf82e6c9eff2f34c98d39271485a3d9abc248d522f51b847cba19a3879c",
         "fixture_sha256": "ead957ff4c64e51c0f8c2f72c100e9b48558f71ff28ee4c848df6c83ce210636",
         "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
       },
       "publication": {
-        "run_number": 19,
-        "run_id": "42944088934"
+        "run_number": 21,
+        "run_id": "42945667443"
       }
     }
   ],
