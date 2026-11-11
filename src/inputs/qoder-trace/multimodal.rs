@@ -1,6 +1,7 @@
-//! Native Qoder image surfaces. File reads/uploads remain behind the shared
-//! MultimodalProcessor; this layer only projects evidenced image references.
+//! Native Qoder media surfaces. File reads/uploads remain behind the shared
+//! MultimodalProcessor; this layer only projects evidenced media references.
 use super::{read_attached_image_paths_for_request_ids, AttachedImageLookup};
+use crate::multimodal::processor::convert_paths_to_uri_parts;
 use crate::multimodal::resolve::{
     as_record, match_all, resolve_image_path, take_unique_extracted_paths, time_unix_nano_to_millis,
 };
@@ -39,12 +40,12 @@ static MARKDOWN: LazyLock<Regex> = LazyLock::new(|| {
 static IMAGE_SOURCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\[Image:\s*source:\s*([^\]]{1,1024})]").unwrap());
 static AT_IMAGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)@([^\s@]{1,1024}\.(?:png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff))(?-u:\b)")
+    Regex::new(r"(?i)@([^\s@]{1,1024}\.(?:png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff|mp4|mov|m4v|3gp|3g2|webm|mkv|avi))(?-u:\b)")
         .unwrap()
 });
 static FILE_CITATION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)文件[:：]\s*([^\n\r]{1,1024}\.(?:png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff))(?-u:\b)",
+        r"(?i)文件[:：]\s*([^\n\r]{1,1024}\.(?:png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff|mp4|mov|m4v|3gp|3g2|webm|mkv|avi))(?-u:\b)",
     )
     .unwrap()
 });
@@ -265,30 +266,7 @@ async fn catch_future<T>(mut future: Pin<Box<dyn Future<Output = T> + Send>>) ->
     .await
 }
 async fn convert(paths: &[String], callback: &PathToUri, time: i64) -> Vec<Value> {
-    let mut parts = vec![];
-    let mut seen = std::collections::HashSet::new();
-    let mut attempted = 0;
-    for path in paths {
-        let path = path.trim();
-        if path.is_empty() || !seen.insert(path.to_owned()) {
-            continue;
-        }
-        if attempted >= MAX_MULTIMODAL_PARTS {
-            break;
-        }
-        attempted += 1;
-        let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            callback(path.to_owned(), time)
-        }));
-        let value = match work {
-            Ok(work) => catch_future(work).await.ok().and_then(Result::ok).flatten(),
-            Err(_) => None,
-        };
-        if let Some(result) = value {
-            parts.push(json!({"type":"uri","uri":result.uri,"mime_type":result.mime_type,"modality":"image"}));
-        }
-    }
-    parts
+    convert_paths_to_uri_parts(paths, callback.as_ref(), time).await
 }
 
 pub struct QoderMultimodal {

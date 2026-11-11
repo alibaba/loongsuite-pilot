@@ -517,3 +517,62 @@ async fn cli_l543_relative_read_result_resolves_agent_cwd() {
         "oss://test/rel-img"
     ));
 }
+
+#[test]
+fn main585_cli_at_and_file_citations_accept_video_and_deduplicate_mixed_media() {
+    let cwd = native("/Users/me/workspace", r"C:\Users\me\workspace");
+    let expected = joined(&cwd, "clip.mp4");
+    let picture = joined(&cwd, "picture.png");
+    assert_eq!(input("@clip.mp4", Some(&cwd)), vec![expected.clone()]);
+    assert_eq!(
+        input(
+            "文件：clip.mp4\n@clip.mp4\n文件: picture.png\n文件：notes.txt",
+            Some(&cwd)
+        ),
+        vec![expected, picture]
+    );
+}
+
+#[tokio::test]
+async fn main585_cli_video_uri_keeps_original_text_images_and_unknown_fields() {
+    let text = "@clip.mp4";
+    let original_parts = json!([
+        {"type":"text","content":text,"custom-text":true},
+        {"type":"uri","uri":"oss://test/existing-image","mime_type":"image/png","modality":"image","custom-image":7},
+        {"type":"vendor-part","payload":{"preserve":true}}
+    ]);
+    let mut entries = vec![e(json!({
+        "event.name":"llm.request","agent.qoder.cwd":"/work","custom-entry":{"preserve":true},
+        "gen_ai.input.messages_delta":[{"role":"user","custom-message":9,"parts":original_parts}]
+    }))];
+    let callback: PathToUri = Arc::new(|_, _| {
+        Box::pin(async {
+            Ok(Some(UriResult {
+                mime_type: "video/mp4".into(),
+                modality: Some("video".into()),
+                ..uri("video")
+            }))
+        })
+    });
+    enrich(&mut entries, Mode::Input, callback).await;
+    let output = v(&entries[0]);
+    assert_eq!(output["custom-entry"], json!({"preserve":true}));
+    assert_eq!(
+        output["gen_ai.input.messages_delta"][0]["custom-message"],
+        9
+    );
+    let parts = input_parts(&entries[0]);
+    assert_eq!(
+        &parts.as_array().unwrap()[..3],
+        original_parts.as_array().unwrap()
+    );
+    assert_eq!(
+        parts[3],
+        json!({"type":"uri","uri":"oss://test/video","mime_type":"video/mp4","modality":"video"})
+    );
+    assert!(output["gen_ai.input.multimodal_metadata_delta"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|part| part["modality"] == "video"));
+}

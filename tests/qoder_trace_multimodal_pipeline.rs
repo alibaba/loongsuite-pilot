@@ -633,3 +633,89 @@ async fn cli_source_l228_l279_l307_l543_real_carriers_processor_and_jsonl_preser
         json!([{"uri":read_uri,"mime_type":"image/png","modality":"image"}])
     );
 }
+
+#[tokio::test]
+async fn main585_cli_and_sqlite_ide_video_share_uploads_and_keep_images_and_original_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let image = root.path().join("picture.png");
+    let video = root.path().join("clip.mp4");
+    png(&image);
+    let video_bytes = b"\0\0\0\x10ftypisom\0\0\0\0";
+    std::fs::write(&video, video_bytes).unwrap();
+    let database = root.path().join("media.sqlite");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch("CREATE TABLE chat_record (request_id TEXT, extra TEXT); CREATE TABLE chat_message (request_id TEXT, role TEXT, gmt_create INTEGER);").unwrap();
+    connection
+        .execute(
+            "INSERT INTO chat_record VALUES (?1,?2)",
+            rusqlite::params!["req-video",json!({
+        "attachedImagePaths":[image],"context":[{"name":"file","selectedItem":{"identifier":video}}]
+    }).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO chat_message VALUES (?1,'user',?2)",
+            rusqlite::params!["req-video", 1779999995000i64],
+        )
+        .unwrap();
+    drop(connection);
+    let records = [
+        json!({"event.id":"cli-video","event.name":"llm.request","gen_ai.agent.type":"qoder-cli",
+            "gen_ai.session.id":"cli-session","gen_ai.turn.id":"cli-turn","time_unix_nano":"1780000000000000000",
+            "agent.qoder.cwd":root.path(),"multica.main585.sample":"cli-extension",
+            "gen_ai.input.messages_delta":[{"role":"user","custom-message":7,"parts":[
+                {"type":"text","content":"@clip.mp4\n文件：picture.png"},{"type":"vendor-part","payload":9}]}]}),
+        json!({"event.id":"ide-video-response","event.name":"llm.response","gen_ai.agent.type":"qoder",
+            "gen_ai.session.id":"ide-session","gen_ai.turn.id":"ide-turn","gen_ai.request.id":"req-video",
+            "time_unix_nano":"1780000000000000000","gen_ai.turn.start":true,"gen_ai.turn.end":true,
+            "agentcore.main585_sample":"ide-extension","gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":"ok"}]}]}),
+    ];
+    let pipeline = Pipeline::with_databases(
+        root.path(),
+        &records,
+        vec![database.to_string_lossy().into_owned()],
+    )
+    .await;
+    pipeline.input.start().await.unwrap();
+    let output = pipeline.settle().await;
+    let cli = output
+        .iter()
+        .find(|row| row["event.id"] == "cli-video")
+        .unwrap();
+    assert_eq!(cli["multica.main585.sample"], "cli-extension");
+    assert_eq!(cli["gen_ai.input.messages_delta"][0]["custom-message"], 7);
+    assert_eq!(
+        cli["gen_ai.input.messages_delta"][0]["parts"][1],
+        json!({"type":"vendor-part","payload":9})
+    );
+    let ide = output
+        .iter()
+        .find(|row| row["event.name"] == "llm.request" && row["gen_ai.agent.type"] == "qoder")
+        .unwrap();
+    for entry in [cli, ide] {
+        let metadata = entry["gen_ai.input.multimodal_metadata"]
+            .as_array()
+            .unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert!(metadata
+            .iter()
+            .any(|part| part["modality"] == "video" && part["mime_type"] == "video/mp4"));
+        assert!(metadata
+            .iter()
+            .any(|part| part["modality"] == "image" && part["mime_type"] == "image/png"));
+    }
+    let response = output
+        .iter()
+        .find(|row| row["event.id"] == "ide-video-response")
+        .unwrap();
+    assert_eq!(response["agentcore.main585_sample"], "ide-extension");
+    let uploads = pipeline.uploader.0.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    let upload = uploads
+        .iter()
+        .find(|item| item.content_type == "video/mp4")
+        .unwrap();
+    assert_eq!(upload.data.as_deref(), Some(video_bytes.as_slice()));
+    assert!(upload.target_path.ends_with(".mp4"));
+}

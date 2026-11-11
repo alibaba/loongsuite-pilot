@@ -1,8 +1,10 @@
-//! Convert blob bytes or a local image path into a storage URI and enqueue upload.
+//! Convert blob bytes or a local media path into a storage URI and enqueue upload.
 
 use std::collections::HashMap;
+use std::future::{poll_fn, Future};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -15,14 +17,14 @@ use crate::utils::create_logger;
 use super::http::log_meta;
 use super::resolve::{
     decode_blob_content, ext_from_mime, is_real_path_inside_roots, join_storage_uri,
-    lstat_regular_image_file, normalize_local_image_path, open_normalized_local_image_scoped,
-    yyyymmdd_from_unix_ms,
+    lstat_regular_file, modality_from_mime, normalize_local_media_path,
+    open_normalized_local_media_scoped, yyyymmdd_from_unix_ms,
 };
 use super::types::{
     BlobPart, BlobToUriParams, PathToUriOptions, StorageBaseResult, UploadItem, UploadOptions,
     Uploader, UriConvertMeta, UriResult, MAX_MULTIMODAL_BASE64_CHARS, MAX_MULTIMODAL_DATA_SIZE,
-    MAX_MULTIMODAL_PATH_INFLIGHT, MAX_MULTIMODAL_PENDING_BYTES, MAX_MULTIMODAL_PENDING_UPLOADS,
-    MULTIMODAL_SHUTDOWN_TIMEOUT_MS, PATH_TO_URI_DEADLINE_MS,
+    MAX_MULTIMODAL_PARTS, MAX_MULTIMODAL_PATH_INFLIGHT, MAX_MULTIMODAL_PENDING_BYTES,
+    MAX_MULTIMODAL_PENDING_UPLOADS, MULTIMODAL_SHUTDOWN_TIMEOUT_MS, PATH_TO_URI_DEADLINE_MS,
 };
 use super::uploader::lru_set::{LruMap, MULTIMODAL_LRU_LIMIT};
 
@@ -32,6 +34,67 @@ const DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS: u128 = 60_000;
 
 fn logger() -> crate::utils::BoundLogger {
     create_logger("MultimodalProcessor")
+}
+
+/// Convert at most ten distinct paths, counting failed attempts toward the cap.
+pub async fn convert_paths_to_uri_parts<F, Fut>(
+    paths: &[String],
+    callback: &F,
+    time: i64,
+) -> Vec<serde_json::Value>
+where
+    F: Fn(String, i64) -> Fut + Sync + ?Sized,
+    Fut: Future<Output = Result<Option<UriResult>, String>> + Send,
+{
+    let mut parts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        let path = path.trim();
+        if path.is_empty() || seen.contains(path) {
+            continue;
+        }
+        if seen.len() >= MAX_MULTIMODAL_PARTS {
+            break;
+        }
+        seen.insert(path.to_owned());
+        let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(path.to_owned(), time)
+        }));
+        let result = match work {
+            Ok(work) => {
+                let mut work = Box::pin(work);
+                poll_fn(move |cx| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        work.as_mut().poll(cx)
+                    })) {
+                        Ok(value) => value,
+                        Err(_) => Poll::Ready(Err("multimodal callback panicked".into())),
+                    }
+                })
+                .await
+            }
+            Err(_) => Err("multimodal callback panicked".into()),
+        };
+        match result {
+            Ok(Some(result)) => {
+                let mut part = json!({
+                    "type": "uri",
+                    "uri": result.uri,
+                    "mime_type": result.mime_type,
+                });
+                if let Some(modality) = result.modality {
+                    part["modality"] = json!(modality);
+                }
+                parts.push(part);
+            }
+            Ok(None) => {}
+            Err(error) => logger().warn(
+                "multimodal pathToUri failed; skipping path",
+                Some(&log_meta(&[("path", json!(path)), ("error", json!(error))])),
+            ),
+        }
+    }
+    parts
 }
 
 pub async fn with_deadline<T: Send>(
@@ -339,7 +402,7 @@ impl MultimodalProcessor {
         opts: &PathToUriOptions,
         signal: &Arc<AtomicBool>,
     ) -> Option<UriResult> {
-        let key = normalize_local_image_path(file_path)?;
+        let key = normalize_local_media_path(file_path)?;
         let roots: Vec<String> = opts
             .allowed_root_paths
             .clone()
@@ -362,7 +425,7 @@ impl MultimodalProcessor {
         if let Some(hook) = &self.before_stat {
             hook(&key).await;
         }
-        let stated = lstat_regular_image_file(&key, Some(signal)).await;
+        let stated = lstat_regular_file(&key, Some(signal)).await;
         let Some(stated) = stated else {
             if !signal.load(Ordering::SeqCst) {
                 logger().warn(
@@ -443,7 +506,7 @@ impl MultimodalProcessor {
         if let Some(hook) = &self.before_read {
             hook(key).await;
         }
-        let loaded = open_normalized_local_image_scoped(
+        let loaded = open_normalized_local_media_scoped(
             key,
             MAX_MULTIMODAL_DATA_SIZE,
             Some(roots),
@@ -472,11 +535,12 @@ impl MultimodalProcessor {
                 return cached.result;
             }
         }
+        let modality = modality_from_mime(&loaded.mime_type).map(str::to_owned);
         let result = self.bytes_to_uri(
             loaded.bytes,
             UriConvertMeta {
                 mime_type: Some(loaded.mime_type),
-                modality: Some("image".into()),
+                modality,
                 time_unix_ms: time_unix_ms.filter(|ms| ms.is_finite() && *ms > 0.0),
             },
         );

@@ -1,6 +1,7 @@
 //! Port of src/inputs/qwen-work-cn/qwen-work-cn-multimodal.ts.
 //! Only evidenced pasted-image and named tool fields are converted; failures keep text.
 use crate::inputs::qoder_trace::multimodal::PathToUri;
+use crate::multimodal::processor::convert_paths_to_uri_parts;
 use crate::multimodal::resolve::{
     as_record, match_all, resolve_image_path, take_unique_extracted_paths, time_unix_nano_to_millis,
 };
@@ -63,12 +64,18 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .flat_map(|item| string_value(Some(item)))
         .collect()
 }
-fn field_list(value: Option<&Value>, field: &str, image_only: bool) -> Vec<String> {
+fn field_list(value: Option<&Value>, field: &str, media_only: bool) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|item| !image_only || item.get("kind").and_then(Value::as_str) == Some("image"))
+        .filter(|item| {
+            !media_only
+                || matches!(
+                    item.get("kind").and_then(Value::as_str),
+                    Some("image" | "video")
+                )
+        })
         .flat_map(|item| string_value(item.get(field)))
         .collect()
 }
@@ -131,17 +138,7 @@ fn cwd(entry: &AgentActivityEntry) -> Option<String> {
         .map(str::to_owned)
 }
 async fn convert(paths: &[String], callback: &PathToUri, time: i64) -> Vec<Value> {
-    let mut parts = vec![];
-    for path in paths {
-        match callback(path.trim().to_owned(), time).await {
-            Ok(Some(result)) => parts.push(json!({"type":"uri","mime_type":result.mime_type,"modality":"image","uri":result.uri})),
-            Ok(None) => crate::utils::create_logger("QwenWorkCNMultimodal")
-                .warn("qwen-work-cn multimodal path skipped", Some(&json!({"path":path}).as_object().cloned().unwrap())),
-            Err(error) => crate::utils::create_logger("QwenWorkCNMultimodal")
-                .warn("qwen-work-cn multimodal pathToUri threw; skipping image", Some(&json!({"path":path,"error":error}).as_object().cloned().unwrap())),
-        }
-    }
-    parts
+    convert_paths_to_uri_parts(paths, callback.as_ref(), time).await
 }
 async fn rewrite(
     raw: &mut Value,
