@@ -55,7 +55,18 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
 | `otlpTrace.serviceName` | 兼容原有行为的 Trace 服务名基础值，Pilot 会追加 `-<agentType>`；顶层 `serviceName` 优先并关闭该后缀。 |
 | `otlpTrace.resourceAttributes` | 额外 OpenTelemetry resource attributes。 |
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
-| `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
+| `otlpTrace.turnIdleTimeoutMs` | turn 级 Trace 聚合空闲超时，默认 `0`（禁用）。被原生结束观察器覆盖的 Hermes 轮次等待实际调用结束，即使配置超时也不会提前关闭。缓冲超过阈值时输出一次诊断，包含待处理记录数和缓冲年龄。旧插件或未覆盖调用保留原有的已配置空闲兜底。 |
+
+Hermes 通过实际调用结束收口，包括跳过原生结束 hook 的提前返回、失败和取消路径。
+正常结束 hook 和调用结束观察不会重复发送结束记录；同一 session 的其他活动调用继续采集。
+调用归属跟随本次原生调用中的压缩 session id 轮换。只有实际被观察器覆盖的 turn 才会携带私有字段
+`agent.hermes.native_run_observer: true`，仅有 `realtime-v1` 不能证明具备该能力。
+原生入口暂不可用时，插件只诊断一次，并以五秒退避延迟重试。未覆盖调用保留旧空闲行为，仍可能截断迟到数据；
+只更新 collector 不会修好仍在运行的旧插件。更新插件后需重新启动 Hermes 宿主进程，使其加载新插件。
+
+活动 turn 不设置强制按时长结束的上限，以免再次丢弃后续工具和模型事件。
+在现有缓冲数量上限内，待处理缓冲数和 `oldest_buffer_age_ms` 可通过 `pilot_trace_runtime` 状态快照观察。
+宿主在结束前被强杀仍需单独的遗留 turn 恢复机制；本观察器不提供崩溃后的持久化重放。
 
 OpenClaw 使用 `agent_end` 观察结束，保留 `llm_output` 的采集边界，不注册可改写回答的
 `before_agent_finalize`。注册后者会让支持该能力的宿主缓冲回复直到轮末，影响首次可见回复时间。
