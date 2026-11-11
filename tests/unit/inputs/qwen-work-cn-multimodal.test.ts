@@ -482,4 +482,51 @@ describe('qwen-work-cn multimodal', () => {
     expect(roots.some(root => root.endsWith(`${path.sep}.qwenworkcn${path.sep}tmp`) || root.endsWith('/.qwenworkcn/tmp'))).toBe(true);
     expect(roots).toHaveLength(2);
   });
+
+  it('reads a generated mp4 from the completed task, present path, and video media_read', async () => {
+    const dir = makeTempDir();
+    const file = writePng(dir, 'valley.mp4', 'valley');
+    const completed = entry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'mcp__qw-builtin__qwenwork_media_task',
+      'gen_ai.tool.call.result': JSON.stringify({ status: 'completed', files: [file] }),
+    } as Partial<AgentActivityEntry>);
+    const presentCall = entry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'mcp__qw-builtin__qwenwork_file_present_files',
+      'gen_ai.tool.call.arguments': { files: [{ file_path: file }] },
+    } as Partial<AgentActivityEntry>);
+    const readResult = entry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'mcp__qw-builtin__qwenwork_media_read',
+      'gen_ai.tool.call.result': JSON.stringify({
+        data: { files: [{ source: file, kind: 'video' }, { source: file }] },
+      }),
+    } as Partial<AgentActivityEntry>);
+    const pending = entry({
+      'event.name': 'tool.result',
+      'gen_ai.tool.name': 'mcp__qw-builtin__qwenwork_video_generate',
+      'gen_ai.tool.call.result': JSON.stringify({ status: 'pending', task_id: 'media_1' }),
+    } as Partial<AgentActivityEntry>);
+    const bash = entry({
+      'event.name': 'tool.call',
+      'gen_ai.tool.name': 'mcp__qw-builtin__mcp_workspace_bash',
+      'gen_ai.tool.call.arguments': { command: `ls ${file}` },
+    } as Partial<AgentActivityEntry>);
+    const beforePending = JSON.stringify(pending);
+    const beforeBash = JSON.stringify(bash);
+
+    await enrichQwenWorkCNMultimodal(
+      [completed, presentCall, readResult, pending, bash],
+      { uploadMode: 'all', pathToUri: fakePathToUri },
+    );
+
+    expect(uriParts(completed['gen_ai.tool.call.result'])).toEqual([
+      { type: 'uri', uri: 'oss://test/valley', mime_type: 'video/mp4', modality: 'video' },
+    ]);
+    expect(uriParts(presentCall['gen_ai.tool.call.arguments'])).toHaveLength(1);
+    expect(uriParts(readResult['gen_ai.tool.call.result'])).toHaveLength(1);
+    expect(JSON.stringify(pending)).toBe(beforePending);
+    expect(JSON.stringify(bash)).toBe(beforeBash);
+  });
 });
