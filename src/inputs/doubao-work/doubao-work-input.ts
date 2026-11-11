@@ -411,16 +411,17 @@ export class DoubaoWorkInput extends BaseInput {
       pending.firstOutput ??= event;
       return;
     }
-    if (event.command) {
+    const actor = event.command ?? event.actor;
+    if (actor) {
       if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;
-      const box = state.sandboxes![event.command.sandboxId] ?? { actors: [], updatedMs: Date.now() };
-      if (!box.actors.includes(event.command.agentId)) {
+      const box = state.sandboxes![actor.sandboxId] ?? { actors: [], updatedMs: Date.now() };
+      if (!box.actors.includes(actor.agentId)) {
         if (box.actors.length >= 64) box.conflict = true;
-        else box.actors.push(event.command.agentId);
+        else box.actors.push(actor.agentId);
       }
       box.updatedMs = Date.now();
-      state.sandboxes![event.command.sandboxId] = box;
-      return;
+      state.sandboxes![actor.sandboxId] = box;
+      if (!event.tool) return;
     }
     if (event.tool) {
       if (BigInt(event.timeNano) < BigInt(state.sinceMs) * 1_000_000n) return;

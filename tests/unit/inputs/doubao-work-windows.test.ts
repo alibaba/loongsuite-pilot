@@ -12,6 +12,13 @@ const windowsLine = (event: string, elapsedMs: number) => doubaoLine(event, {}, 
   .replace(/(\.\d{3})\d{3}:(INFO|WARNING|ERROR):FRONTEND\(0\)/, '$1:$2:CONSOLE(0)');
 const windowsFrontend = (line: string) => line
   .replace(/(\.\d{3})\d{3}:(INFO|WARNING|ERROR):FRONTEND\(0\)/, '$1:$2:FRONTEND(0)');
+const dispatcherStart = (overrides: Record<string, unknown> = {}, elapsedMs = 100) => {
+  const header = windowsFrontend(doubaoToolLine({}, elapsedMs)).split('[neotix]')[0];
+  return `${header}[neotix] "Event: agent_sandbox_toolcall_exec ${JSON.stringify({
+    sandboxId: 'synthetic-sandbox', conversationId: 'synthetic-conversation', agentId: 'synthetic-turn',
+    toolCallID: 'synthetic-call', toolName: 'Read', status: 'start', isNewSse: true, delivery: 'dispatcher', ...overrides,
+  })}", source:  (0)\n`;
+};
 class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
 const temporary: string[] = [];
 afterEach(async () => {
@@ -46,6 +53,45 @@ describe('Doubao Windows client logs', () => {
       .toBe((BigInt(DOUBAO_EPOCH + 125) * 1_000_000n).toString());
     expect(parseDoubaoLogLine(start.replace('local-file-local-tools-sse-wiring.ts', 'unrelated.ts'), DOUBAO_FILE))
       .toBeUndefined();
+  });
+
+  it('reads the dispatcher executor start and its explicit actor binding without retaining payloads', () => {
+    const event = parseDoubaoLogLine(dispatcherStart({ arguments: 'PRIVATE_ARGUMENT', errorStack: 'PRIVATE_STACK' }).trimEnd(), DOUBAO_FILE);
+    expect(event).toMatchObject({ timeNano: String(BigInt(DOUBAO_EPOCH + 100) * 1_000_000n),
+      turnId: 'synthetic-turn', actor: { agentId: 'synthetic-turn', sandboxId: 'synthetic-sandbox' },
+      tool: { id: 'synthetic-call', name: 'Read', sandboxId: 'synthetic-sandbox', phase: 'received' } });
+    expect(JSON.stringify(event)).not.toContain('PRIVATE');
+    expect(parseDoubaoLogLine(dispatcherStart().trimEnd().replace('[neotix]', '[unrelated] [neotix]'), DOUBAO_FILE))
+      .toBeUndefined();
+  });
+
+  it.each([{ status: 'success' }, { status: 'error' }, { isNewSse: false }, { delivery: 'unknown' },
+    { agentId: 'invalid agent' }, { toolCallID: '' }, { sandboxId: null }])('rejects unconfirmed dispatcher starts %j', override => {
+    expect(parseDoubaoLogLine(dispatcherStart(override).trimEnd(), DOUBAO_FILE)).toBeUndefined();
+  });
+
+  it('pairs the dispatcher start with the existing settlement once and registers the source actor', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'doubao-dispatcher-')); temporary.push(root);
+    const logs = path.join(root, 'logs'); await mkdir(logs);
+    const file = path.join(logs, DOUBAO_FILE); await writeFile(file, '');
+    const stateStore = new StateStore(path.join(root, 'state.json'));
+    const input = new ProbeInput({ stateStore, logDir: logs, client: 'doubao',
+      sessionsRoot: path.join(root, 'native'), snapshotRoot: path.join(root, 'snapshots') });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1);
+    expect(await input.poll()).toEqual([]); clock.mockRestore();
+    const source = windowsFrontend(doubaoLine('on_message_sending_start', {}, 10))
+      + dispatcherStart() + dispatcherStart({}, 101)
+      + dispatcherStart({ status: 'success' }, 124)
+      + windowsFrontend(doubaoToolLine({ toolCallID: 'synthetic-call', phase: 'execution_settled', status: 'success' }, 125))
+      + windowsFrontend(doubaoLine('on_message_session_end'));
+    await appendFile(file, source);
+    const entries = await input.poll();
+    expect(entries.map(entry => entry['event.name'])).toEqual(['other', 'tool.call', 'tool.result', 'other']);
+    expect(entries.find(entry => entry['event.name'] === 'tool.result')?.['gen_ai.tool.call.duration']).toBe(25);
+    expect((stateStore.get('doubao-work').extra?.doubaoWork as any)?.sandboxes['synthetic-sandbox'].actors)
+      .toEqual(['synthetic-turn']);
+    await appendFile(file, source);
+    expect(await input.poll()).toEqual([]);
   });
 
   it.each(['12', '1234', '12345', '1234567', '123456789'])('rejects unsupported FRONTEND precision %s', digits => {
