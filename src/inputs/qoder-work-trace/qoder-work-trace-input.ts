@@ -7,6 +7,7 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -159,6 +160,8 @@ export class QoderWorkTraceInput extends BaseInput {
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
+    const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
+    if (migrated) this.setState({ extra: migrated });
     const today = getTodayDateString();
     const logFileName = `${this.logPrefix}-${today}.jsonl`;
     const logFile = path.join(this.logDir, logFileName);
@@ -171,14 +174,17 @@ export class QoderWorkTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    const sameFile = state.lastFile === logFileName
-      && (state.extra?.hookInode === undefined || state.extra.hookInode === stat.ino);
-    const savedOffset = sameFile ? state.lastOffset ?? 0 : 0;
+    const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+    const sameFile = state.lastFile === logFileName && identities?.[logFileName] === historyFileIdentity(stat);
+    const savedOffset = sameFile ? offsets?.[logFileName] ?? 0 : 0;
     const reset = stat.size < savedOffset;
     const offset = reset ? 0 : savedOffset;
+    const observed = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix, logFileName, stat, offset);
+    if (observed) this.setState({ extra: observed });
     if (stat.size <= offset) {
       if (state.lastFile === logFileName && (reset || !sameFile || state.extra?.hookInode === undefined)) {
-        this.setState({ lastOffset: offset, extra: { ...state.extra,
+        this.setState({ lastOffset: offset, extra: { ...this.getState().extra,
           hookInode: stat.ino, hookSkippingLine: sameFile && !reset && state.extra?.hookSkippingLine === true } });
       }
       return [];
@@ -187,6 +193,9 @@ export class QoderWorkTraceInput extends BaseInput {
     const batch = await readBoundedLineTail(logFile, stat, offset,
       sameFile && !reset && state.extra?.hookSkippingLine === true, this.getInputRuntimeAccumulator());
     if (!batch) return [];
+    const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
+      logFileName, stat, batch.offset, batch.beganSkip || batch.skippingLine);
+    if (progress) this.setState({ extra: progress });
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work Hook line skipped', { file: logFile, offset });
     if (batch.offset !== savedOffset || reset || !sameFile || state.extra?.hookInode === undefined) {
       this.setState({ lastFile: logFileName, lastOffset: batch.offset,

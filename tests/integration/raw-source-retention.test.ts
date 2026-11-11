@@ -13,6 +13,11 @@ import { DshLogInput } from '../../src/inputs/dsh-log/dsh-log-input.js';
 import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { QwenWorkCNTraceInput } from '../../src/inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
+import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { QoderCnTraceInput } from '../../src/inputs/qoder-cn-trace/qoder-cn-trace-input.js';
+import { QoderWorkTraceInput } from '../../src/inputs/qoder-work-trace/qoder-work-trace-input.js';
+import { QoderLegacyHookReader } from '../../src/inputs/qoder-trace/legacy-hook-reader.js';
+import { getTodayDateString } from '../../src/utils/fs-utils.js';
 import { spawn } from 'node:child_process';
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>();
@@ -55,6 +60,127 @@ describe('raw source disk retention', () => {
   }
   function seed() { store.set('raw-test', { lastFile: path.basename(file), extra: { hookLogOffsets: { [path.basename(file)]: 0 } } }); }
   const append = (id: string) => appendRawJsonl(file, JSON.stringify({ id }) + '\n', 16);
+
+  describe.each([
+    ['qoder', QoderTraceInput], ['qoder-cn', QoderCnTraceInput], ['qoder-work', QoderWorkTraceInput],
+  ] as const)('%s primary trace retention', (prefix, TraceInput) => {
+    async function setup(offset?: number, extra = {}) {
+      const logDir = path.join(root, 'logs', prefix, 'history');
+      await fs.mkdir(logDir, { recursive: true });
+      const name = `${prefix}-${oldDate()}.jsonl`;
+      const source = path.join(logDir, name);
+      await fs.writeFile(source, '{}\n');
+      await fs.utimes(source, oldTime(), oldTime());
+      const input = new TraceInput({ stateStore: store, logDir, dataDir: root,
+        sdkLogDir: path.join(root, 'sdk'), segmentsRoot: path.join(root, 'segments') });
+      if (offset !== undefined) store.set(input.id, { lastFile: name, lastOffset: offset,
+        extra: { preserved: 'native-state', ...extra } });
+      await store.save();
+      return { input, logDir, name, source };
+    }
+
+    it('migrates a consumed legacy daily file without a current-day file and reclaims it after restart', async () => {
+      const { input, name, source } = await setup(3);
+      await (input as unknown as { readHookJsonl(): Promise<AgentActivityEntry[]> }).readHookJsonl();
+      expect(store.isPersisted(input.id)).toBe(false);
+      expect(await new LogRetentionService(root, config, store).runCleanup()).toMatchObject({ deleted: 0 });
+      await input.start(); await input.stop();
+      expect(store.get(input.id).extra).toMatchObject({ preserved: 'native-state', hookLogOffsets: { [name]: 3 } });
+      const reloaded = new StateStore(path.join(root, 'logs', 'input-state.json'));
+      await reloaded.load();
+      expect(await new LogRetentionService(root, config, reloaded).runCleanup()).toMatchObject({ deleted: 1, errors: 0 });
+      await expect(fs.stat(source)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it.each(['unread', 'partial', 'quarantined', 'replaced'] as const)('preserves %s legacy sources', async mode => {
+      const { input, name, source } = await setup(mode === 'unread' ? undefined : mode === 'partial' ? 1 : 3,
+        mode === 'quarantined' ? { qoderLegacyQuarantine: [{ file: `${prefix}-${oldDate()}.jsonl` }] } : {});
+      await input.start(); await input.stop();
+      if (mode === 'replaced') {
+        await fs.rename(source, source + '.original');
+        await fs.writeFile(source, '{}\n');
+        await fs.utimes(source, oldTime(), oldTime());
+      }
+      expect(await new LogRetentionService(root, config, store).runCleanup()).toMatchObject({ deleted: 0 });
+      expect(await fs.readFile(source, 'utf8')).toBe('{}\n');
+      if (mode === 'unread') expect(store.get(input.id).extra?.hookLogOffsets ?? {}).not.toHaveProperty(name);
+    });
+
+    it('registers new progress, protects incomplete tails and waits for durable state', async () => {
+      const { input, logDir, source } = await setup();
+      await fs.unlink(source);
+      const name = `${prefix}-${getTodayDateString()}.jsonl`;
+      const current = path.join(logDir, name);
+      const row = JSON.stringify({ 'event.name': 'test', 'event.id': 'new', 'gen_ai.agent.type': prefix }) + '\n';
+      await fs.writeFile(current, row + '{');
+      store.set(input.id, { lastFile: name, lastOffset: 0 });
+      const reader = input as unknown as { readHookJsonl(): Promise<AgentActivityEntry[]> };
+      expect(await reader.readHookJsonl()).toHaveLength(1);
+      expect(store.get(input.id).extra?.hookLogOffsets).toMatchObject({ [name]: Buffer.byteLength(row) });
+      await store.save();
+      expect(store.isPersisted(input.id)).toBe(true);
+      await reader.readHookJsonl();
+      // An idle partial tail must not dirty the state or become an EOF ACK.
+      expect(store.isPersisted(input.id)).toBe(true);
+      await fs.appendFile(current, '}\n');
+      await reader.readHookJsonl();
+      expect(store.isPersisted(input.id)).toBe(false);
+      await fs.utimes(current, oldTime(), oldTime());
+      expect(await new LogRetentionService(root, { ...config, hookHistoryDays: 0 }, store).runCleanup()).toMatchObject({ deleted: 0 });
+      await input.stop();
+    });
+
+    it('keeps per-file ACKs across daily rollover and reclaims the older generation', async () => {
+      const { input, logDir, source } = await setup();
+      await fs.unlink(source);
+      const name = `${prefix}-${getTodayDateString()}.jsonl`;
+      const current = path.join(logDir, name);
+      const row = JSON.stringify({ 'event.name': 'test', 'gen_ai.agent.type': prefix }) + '\n';
+      await fs.writeFile(current, row);
+      store.set(input.id, { lastFile: name, lastOffset: 0 });
+      const reader = input as unknown as { readHookJsonl(): Promise<AgentActivityEntry[]> };
+      await reader.readHookJsonl();
+      await store.save();
+      const nextDate = Date.now() + 10 * 86400000;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(nextDate);
+        const nextName = `${prefix}-${getTodayDateString()}.jsonl`;
+        await fs.writeFile(path.join(logDir, nextName), row);
+        expect(await reader.readHookJsonl()).toHaveLength(1);
+        expect(store.get(input.id).extra?.hookLogOffsets).toMatchObject({ [name]: row.length, [nextName]: row.length });
+        await store.save();
+        expect(await new LogRetentionService(root, config, store).runCleanup()).toMatchObject({ deleted: 1 });
+        await expect(fs.stat(current)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await fs.readFile(path.join(logDir, nextName), 'utf8')).toBe(row);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('keeps quarantined evidence even when its complete oversized line reaches EOF', async () => {
+      const { input, logDir, source } = await setup();
+      await fs.unlink(source);
+      const name = `${prefix}-${getTodayDateString()}.jsonl`;
+      const current = path.join(logDir, name);
+      const row = prefix === 'qoder-work' ? 'x'.repeat(16 * 1024 * 1024) + '\n'
+        : JSON.stringify({ text: 'x'.repeat(128) }) + '\n';
+      await fs.writeFile(current, row);
+      store.set(input.id, { lastFile: name, lastOffset: 0 });
+      const reader = input as unknown as { legacyHookReader: QoderLegacyHookReader; readHookJsonl(): Promise<AgentActivityEntry[]> };
+      if (prefix !== 'qoder-work') reader.legacyHookReader = new QoderLegacyHookReader(1024, 16);
+      await reader.readHookJsonl();
+      await reader.readHookJsonl();
+      expect(store.get(input.id).extra).toMatchObject({ hookLogOffsets: { [name]: row.length },
+        hookLogRetentionBlocked: { [name]: true } });
+      await store.save();
+      const later = Date.now() + 10 * 86400000;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(later);
+        expect(await new LogRetentionService(root, config, store).runCleanup()).toMatchObject({ deleted: 0 });
+        expect(await fs.readFile(current, 'utf8')).toBe(row);
+      } finally { vi.useRealTimers(); }
+    });
+  });
 
   it('drains ordered stable segments and reclaims only durable closed segments across restart', async () => {
     const paths = [append('1'), append('2'), append('3')];

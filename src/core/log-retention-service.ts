@@ -233,6 +233,8 @@ export class LogRetentionService {
             if (!this.stateStore.isPersisted(id)) continue;
             const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
             const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+            const blocked = state.extra?.hookLogRetentionBlocked as Record<string, boolean> | undefined;
+            if (blocked?.[file]) continue;
             const stat = await safeLstat(fullPath);
             if (!stat?.isFile() || offsets?.[file] !== stat.size
               || identities?.[file] !== `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`) continue;
