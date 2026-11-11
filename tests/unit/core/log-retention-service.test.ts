@@ -110,7 +110,8 @@ describe('LogRetentionService', () => {
       expect((await service.runPressureCleanup()).deleted).toBe(1);
       expect(await fs.readdir(dir)).toEqual([path.basename(active)]);
       expect(await fs.readFile(old, 'utf8')).toBe('{}\n');
-      expect((await service.runCleanup()).deleted).toBe(1);
+      expect((await service.runCleanup()).deleted).toBe(0);
+      expect(await fs.readFile(old, 'utf8')).toBe('{}\n');
     });
 
     it('does not traverse a managed directory symlink during emergency cleanup', async () => {
@@ -149,7 +150,7 @@ describe('LogRetentionService', () => {
       } finally { release(); reclaimSpy.mockRestore(); }
     });
 
-    it('deletes files older than retention and keeps recent ones', async () => {
+    it('preserves old and recent input history without a consumption checkpoint', async () => {
       const logsDir = path.join(tmpDir, 'logs');
       const historyDir = path.join(logsDir, 'cursor-hook', 'history');
       await fs.mkdir(historyDir, { recursive: true });
@@ -165,13 +166,13 @@ describe('LogRetentionService', () => {
       const service = new LogRetentionService(tmpDir, makeConfig({ hookHistoryDays: 7 }));
       const result = await service.runCleanup();
 
-      expect(result.deleted).toBe(1);
+      expect(result.deleted).toBe(0);
       expect(result.errors).toBe(0);
 
       const remaining = await fs.readdir(historyDir);
       expect(remaining).toContain(path.basename(recentFile));
       expect(remaining).toContain(path.basename(todayFile));
-      expect(remaining).not.toContain(path.basename(oldFile));
+      expect(remaining).toContain(path.basename(oldFile));
     });
 
     it('cleans multiple categories with different retention', async () => {
@@ -522,7 +523,7 @@ describe('LogRetentionService', () => {
     });
 
     it('continues after individual file deletion errors', async () => {
-      const historyDir = path.join(tmpDir, 'logs', 'agent', 'history');
+      const historyDir = path.join(tmpDir, 'logs', 'agent', 'errors');
       await fs.mkdir(historyDir, { recursive: true });
 
       const old1 = path.join(historyDir, `a-${daysAgo(10)}.jsonl`);
@@ -533,7 +534,7 @@ describe('LogRetentionService', () => {
       // Make the directory read-only to cause unlink failures, then restore
       await fs.chmod(historyDir, 0o555);
 
-      const service = new LogRetentionService(tmpDir, makeConfig({ hookHistoryDays: 3 }));
+      const service = new LogRetentionService(tmpDir, makeConfig({ hookErrorDays: 3 }));
       const result = await service.runCleanup();
 
       // Both files should have been attempted — errors but no crash

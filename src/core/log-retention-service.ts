@@ -206,7 +206,7 @@ export class LogRetentionService {
       const dir = extra?.hookLogDir;
       const prefix = extra?.hookLogPrefix;
       if (typeof dir !== 'string' || typeof prefix !== 'string'
-        || path.dirname(dir) !== this.logsDir || !this.stateStore.isPersisted(id)) continue;
+        || !this.isWithinLogs(dir) || !this.stateStore.isPersisted(id)) continue;
       try {
         // Never traverse a substituted symlink, even if the checkpoint names it.
         if (await fs.realpath(dir) !== path.resolve(dir)) continue;
@@ -307,14 +307,16 @@ export class LogRetentionService {
             throw error;
           });
           // Session age does not prove closure; DSH can resume an old session.
-          let legacyProcessExited = false;
-          const pid = !active && family === 'hermes-agent'
-            ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(file))?.[1] : undefined;
+          let processExited = false;
+          // The process token belongs to the entire file family, including
+          // the final segment still named by a pointer after its owner exits.
+          const pid = family === 'hermes-agent'
+            ? /^hermes-agent-(\d+)-\d+-[a-f0-9]+\.jsonl$/.exec(path.basename(base))?.[1] : undefined;
           if (pid) {
             try { process.kill(Number(pid), 0); }
-            catch (error) { legacyProcessExited = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+            catch (error) { processExited = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
           }
-          if (!legacyProcessExited && !isPublishedSuccessor(path.basename(file), path.basename(base), active)) continue;
+          if (!processExited && !isPublishedSuccessor(path.basename(file), path.basename(base), active)) continue;
           await fs.unlink(file);
           deleted++;
           this.deletedBytes += current.size;
@@ -369,6 +371,12 @@ export class LogRetentionService {
     return { deleted, errors };
   }
 
+  private isWithinLogs(dir: string): boolean {
+    const relative = path.relative(path.resolve(this.logsDir), path.resolve(dir));
+    return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep)
+      && !path.isAbsolute(relative);
+  }
+
   private async cleanDirectory(
     dir: string,
     category: Category,
@@ -376,6 +384,14 @@ export class LogRetentionService {
   ): Promise<{ deleted: number; errors: number }> {
     let deleted = 0;
     let errors = 0;
+
+    // History is an input source, including before discovery has registered a
+    // cursor. Generic age cleanup cannot establish consumption or closure.
+    if (category === 'history' || this.stateStore?.keys().some(id => {
+      const sourceDir = this.stateStore!.get(id).extra?.hookLogDir;
+      return typeof sourceDir === 'string' && this.isWithinLogs(sourceDir)
+        && path.resolve(sourceDir) === path.resolve(dir);
+    })) return { deleted, errors };
 
     const files = await readdir(dir);
     if (category === 'output' || category === 'otlp-debug') {

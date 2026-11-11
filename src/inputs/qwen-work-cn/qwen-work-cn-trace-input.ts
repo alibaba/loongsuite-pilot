@@ -157,7 +157,20 @@ export class QwenWorkCNTraceInput extends BaseInput {
     const offsets = persistedOffsets
       ? { ...persistedOffsets }
       : await this.seedHookOffsets(fileNames, state.lastFile, state.lastOffset, today);
-    const candidates = await this.getHookCandidates(fileNames, offsets);
+    const identities: Record<string, string> = {};
+    const previousIdentities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    for (const fileName of fileNames) {
+      if (previousIdentities?.[fileName] !== undefined) identities[fileName] = previousIdentities[fileName];
+      const stat = await fs.lstat(path.join(this.logDir, fileName)).catch(error => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (!stat?.isFile()) continue;
+      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      if (previousIdentities?.[fileName] !== undefined && previousIdentities[fileName] !== identity) offsets[fileName] = 0;
+      identities[fileName] = identity;
+    }
+    const candidates = (await this.getHookCandidates(fileNames, offsets)).filter(file => identities[file] !== undefined);
     const entries: AgentActivityEntry[] = [];
 
     for (const fileName of candidates) {
@@ -178,6 +191,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
       || state.lastFile !== checkpointFile
       || state.lastOffset !== (prunedOffsets[checkpointFile] ?? 0)
       || !this.sameHookOffsets(persistedOffsets, prunedOffsets)
+      || JSON.stringify(previousIdentities) !== JSON.stringify(identities)
     )) {
       this.setState({
         lastFile: checkpointFile,
@@ -185,6 +199,9 @@ export class QwenWorkCNTraceInput extends BaseInput {
         extra: {
           ...(state.extra ?? {}),
           [HOOK_OFFSET_MAP_KEY]: prunedOffsets,
+          hookLogIdentities: identities,
+          hookLogDir: path.resolve(this.logDir),
+          hookLogPrefix: 'qwen-work-cn',
         },
       });
     }

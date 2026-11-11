@@ -11,6 +11,10 @@ const READ_BUDGET_BYTES = 8 * 1024 * 1024;
 
 type OffsetMap = Record<string, number>;
 type IncompleteTail = Pick<Stats, 'dev' | 'ino' | 'size' | 'mtimeMs' | 'ctimeMs'> & { offset: number };
+interface ColdStartReplay {
+  turnId: string;
+  files: Record<string, { size: number; identity: string }>;
+}
 
 export interface HookInputOptions extends InputOptions {
   /** Directory containing the JSONL hook log files. */
@@ -45,8 +49,9 @@ export abstract class BaseHookInput extends BaseInput {
   /**
    * Cold-start replay protection. When true and the input has no prior state
    * (`!lastFile`, e.g. after redeployment or state-store loss), only the last
-   * turn in the daily file is dispatched — the rest are assumed already-sent
-   * history from a previous daemon run.
+   * turn in the initial file snapshot is dispatched — the rest are assumed
+   * already-sent history. Persisted watermarks preserve this decision across
+   * bounded polls and restarts without suppressing newly appended records.
    *
    * Only safe for inputs whose hook JSONL is written by the daemon's own
    * subprocess (so no daemon ⇒ no records ⇒ cold start always means "restart
@@ -70,7 +75,6 @@ export abstract class BaseHookInput extends BaseInput {
     const today = getTodayDateString();
     const entries: AgentActivityEntry[] = [];
     const state = this.getState();
-    const isColdStart = !state.lastFile;
     const fileNames = await this.listHookLogFiles();
     if (fileNames.length === 0) {
       this.incompleteTails.clear();
@@ -84,12 +88,16 @@ export abstract class BaseHookInput extends BaseInput {
     // Drain every retained source, including offline backlog and late writes.
     const candidateFileNames = fileNames;
     let readBudget = READ_BUDGET_BYTES;
+    const replay = this.coldStartKeepLastTurnOnly
+      ? await this.prepareColdStartReplay(state, fileNames, bytes => { readBudget -= bytes; })
+      : undefined;
     const candidates = new Set(candidateFileNames.map(name => path.join(this.logDir, name)));
     for (const file of this.incompleteTails.keys()) {
       if (!candidates.has(file)) this.incompleteTails.delete(file);
     }
 
     for (const logFileName of candidateFileNames) {
+      if (readBudget <= 0) break;
       const logFile = path.join(this.logDir, logFileName);
       const stat = await fs.lstat(logFile).catch(() => null);
       if (!stat?.isFile()) continue;
@@ -98,7 +106,9 @@ export abstract class BaseHookInput extends BaseInput {
       if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
-      const fileEntries = await this.collectFile(logFile, startOffset, readBudget);
+      const initial = replay?.files[logFileName];
+      const fileEntries = await this.collectFile(logFile, startOffset, readBudget,
+        initial?.identity === identity ? { turnId: replay!.turnId, through: initial.size } : undefined);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
       entries.push(...fileEntries.entries);
@@ -115,6 +125,10 @@ export abstract class BaseHookInput extends BaseInput {
       if (liveFileNames.has(fileName)) prunedOffsets[fileName] = offset;
       if (liveFileNames.has(fileName) && identities[fileName]) prunedIdentities[fileName] = identities[fileName];
     }
+    const replayPending = replay && Object.entries(replay.files).some(([file, initial]) =>
+      liveFileNames.has(file) && (prunedOffsets[file] ?? 0) < initial.size
+      && (prunedIdentities[file] === undefined || prunedIdentities[file] === initial.identity));
+    const nextReplay = replayPending ? replay : null;
 
     const newestFileName = candidateFileNames[candidateFileNames.length - 1];
     if (newestFileName && (
@@ -122,7 +136,8 @@ export abstract class BaseHookInput extends BaseInput {
       state.lastFile !== newestFileName ||
       state.lastOffset !== (prunedOffsets[newestFileName] ?? 0) ||
       this.isOffsetMapChanged(persistedOffsets, prunedOffsets) ||
-      JSON.stringify(state.extra?.hookLogIdentities) !== JSON.stringify(prunedIdentities)
+      JSON.stringify(state.extra?.hookLogIdentities) !== JSON.stringify(prunedIdentities) ||
+      JSON.stringify(state.extra?.hookColdStartReplay ?? null) !== JSON.stringify(nextReplay)
     )) {
       this.setState({
         lastFile: newestFileName,
@@ -133,36 +148,93 @@ export abstract class BaseHookInput extends BaseInput {
           hookLogIdentities: prunedIdentities,
           hookLogDir: path.resolve(this.logDir),
           hookLogPrefix: this.logPrefix,
+          ...(this.coldStartKeepLastTurnOnly ? { hookColdStartReplay: nextReplay } : {}),
         },
       });
     }
 
-    // Cold-start replay protection: when state was wiped (e.g. redeployment or
-    // input-state.json lost during a crash), the daily file already contains
-    // records dispatched earlier today. Re-emitting them creates duplicate
-    // spans on SLS. On cold start keep only the last turn — offsets are already
-    // advanced to each file's end above, so subsequent reads resume from there.
-    // Opt-in via coldStartKeepLastTurnOnly (see field docs for the safety caveat).
-    if (this.coldStartKeepLastTurnOnly && isColdStart && entries.length > 0) {
-      const turnIds = new Set(entries.map(e => (e['gen_ai.turn.id'] as string) || 'unknown'));
-      if (turnIds.size > 1) {
-        const lastTurnId = (entries[entries.length - 1]['gen_ai.turn.id'] as string) || 'unknown';
-        this.logger.info('cold start detected, skipping historical turns', {
-          skipped: turnIds.size - 1,
-          totalTurns: turnIds.size,
-          keepTurnId: lastTurnId,
-        });
-        return entries.filter(e => ((e['gen_ai.turn.id'] as string) || 'unknown') === lastTurnId);
-      }
-    }
-
     return entries;
+  }
+
+  /** Persist only initial file watermarks and the last turn ID, never bodies.
+   * The same cold-start decision then survives bounded polls and restarts;
+   * records appended after these watermarks remain ordinary live input.
+   */
+  private async prepareColdStartReplay(
+    state: InputState, fileNames: string[], chargeRead: (bytes: number) => void,
+  ): Promise<ColdStartReplay | undefined> {
+    const previous = state.extra?.hookColdStartReplay as ColdStartReplay | null | undefined;
+    if (previous && typeof previous.turnId === 'string' && previous.files
+      && typeof previous.files === 'object' && !Array.isArray(previous.files)
+      && Object.values(previous.files).every(file => file && Number.isSafeInteger(file.size)
+        && file.size >= 0 && typeof file.identity === 'string')) return previous;
+    if (state.lastFile) return undefined;
+    const files: ColdStartReplay['files'] = {};
+    for (const file of fileNames) {
+      const stat = await fs.lstat(path.join(this.logDir, file)).catch(error => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (stat?.isFile()) files[file] = { size: stat.size, identity: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}` };
+    }
+    for (const file of Object.keys(files).reverse()) {
+      const turnId = await this.lastCompleteTurnId(path.join(this.logDir, file), files[file].size, chargeRead);
+      if (turnId !== undefined) return { turnId, files };
+    }
+    return { turnId: 'unknown', files };
+  }
+
+  /** Look back only to the last accepted complete record, not the full backlog. */
+  private async lastCompleteTurnId(file: string, end: number, chargeRead: (bytes: number) => void): Promise<string | undefined> {
+    const handle = await fs.open(file, 'r');
+    const runtime = this.getInputRuntimeAccumulator();
+    const turnOf = async (parts: Buffer[]): Promise<string | undefined> => {
+      const line = (parts.length === 1 ? parts[0] : Buffer.concat(parts.reverse())).toString('utf8');
+      if (!line.trim()) return undefined;
+      try {
+        const record: unknown = JSON.parse(line);
+        if (!record || typeof record !== 'object' || Array.isArray(record)
+          || !this.workspacePolicy.allows(record as Record<string, unknown>, this.agentType)) return undefined;
+        const entry = await this.transformRecord(record as Record<string, unknown>);
+        return entry ? (entry['gen_ai.turn.id'] as string) || 'unknown' : undefined;
+      } catch { return undefined; }
+    };
+    let complete = false;
+    let parts: Buffer[] = [];
+    try {
+      while (end > 0) {
+        const start = Math.max(0, end - 64 * 1024);
+        const buffer = Buffer.alloc(end - start);
+        const startedAt = runtime?.now();
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+        chargeRead(bytesRead);
+        if (runtime && startedAt !== undefined) runtime.observeRead(bytesRead, buffer.length, runtime.now() - startedAt);
+        if (bytesRead !== buffer.length) throw new Error('Hook cold-start source changed during lookback');
+        let cursor = bytesRead;
+        while (cursor > 0) {
+          const newline = buffer.lastIndexOf(0x0a, cursor - 1);
+          if (newline < 0) break;
+          parts.push(buffer.subarray(newline + 1, cursor));
+          if (complete) {
+            const turnId = await turnOf(parts);
+            if (turnId !== undefined) return turnId;
+          }
+          parts = [];
+          complete = true;
+          cursor = newline;
+        }
+        if (cursor > 0) parts.push(buffer.subarray(0, cursor));
+        end = start;
+      }
+      return complete ? await turnOf(parts) : undefined;
+    } finally { await handle.close(); }
   }
 
   private async collectFile(
     logFile: string,
     startOffset: number,
     readBudget: number,
+    coldStart?: { turnId: string; through: number },
   ): Promise<{ entries: AgentActivityEntry[]; offset: number; readBytes: number }> {
     const entries: AgentActivityEntry[] = [];
     const runtime = this.getInputRuntimeAccumulator();
@@ -256,6 +328,7 @@ export abstract class BaseHookInput extends BaseInput {
       let parseFailedRecords = 0;
       let maxRecordBytes = 0;
       let recordStartOffset = 0;
+      let lineEndOffset = offset;
 
       for (const line of lines) {
         let recordBytes = line.length + 1;
@@ -265,6 +338,7 @@ export abstract class BaseHookInput extends BaseInput {
           recordBytes = newline - recordStartOffset + 1;
           recordStartOffset = newline + 1;
         }
+        lineEndOffset += recordBytes;
         if (!line.trim()) continue;
         records++;
         maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
@@ -286,7 +360,8 @@ export abstract class BaseHookInput extends BaseInput {
         if (!this.workspacePolicy.allows(record, this.agentType)) continue;
         try {
           const entry = await this.transformRecord(record);
-          if (entry) entries.push(entry);
+          if (entry && (!coldStart || lineEndOffset > coldStart.through
+            || ((entry['gen_ai.turn.id'] as string) || 'unknown') === coldStart.turnId)) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err), line: line.slice(0, 200) });
         }

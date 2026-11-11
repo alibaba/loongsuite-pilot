@@ -11,6 +11,8 @@ import { appendRawJsonl } from '../../assets/hooks/shared/raw-jsonl-writer.mjs';
 import { withSyncFileLock } from '../../assets/hooks/shared/sync-file-lock.mjs';
 import { DshLogInput } from '../../src/inputs/dsh-log/dsh-log-input.js';
 import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
+import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
+import { QwenWorkCNTraceInput } from '../../src/inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { spawn } from 'node:child_process';
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>();
@@ -212,5 +214,106 @@ describe('raw source disk retention', () => {
     await store.save();
     expect(await new LogRetentionService(root, config, store).runPressureCleanup()).toMatchObject({ deleted: 1, errors: 0 });
     await expect(fs.stat(active)).resolves.toBeDefined();
+  });
+
+  it.each(['cursor', 'qwen-work-cn'])('protects nested %s history before registration and until its cursor is durable', async family => {
+    dir = path.join(root, 'logs', family, 'history');
+    await fs.mkdir(dir, { recursive: true });
+    file = path.join(dir, 'raw-' + oldDate() + '.jsonl');
+    await fs.writeFile(file, '{"id":"unread"}\n');
+    await fs.utimes(file, oldTime(), oldTime());
+    expect((await new LogRetentionService(root, config).runCleanup()).deleted).toBe(0);
+    const service = new LogRetentionService(root, config, store);
+    expect((await service.runCleanup()).deleted).toBe(0);
+    seed();
+    expect(await consume()).toEqual(['unread']);
+    const state = store.get('raw-test');
+    store.update('raw-test', { extra: { hookLogOffsets: { [path.basename(file)]: 0 } } });
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await store.save();
+    expect((await service.runCleanup()).deleted).toBe(0);
+    store.set('raw-test', state);
+    await store.save();
+    expect((await service.runCleanup()).deleted).toBe(1);
+  });
+
+  it.each([
+    { segmentBytes: 5 * 1024 * 1024, appendDuring: false },
+    { segmentBytes: 100 * 1024 * 1024, appendDuring: false },
+    { segmentBytes: 5 * 1024 * 1024, appendDuring: true },
+  ])('suppresses older Kiro turns across polls/restarts ($segmentBytes, live append=$appendDuring)', async ({ segmentBytes, appendDuring }) => {
+    const kiroDir = path.join(root, 'logs', 'kiro-cli');
+    const stamp = new Date();
+    const day = [stamp.getFullYear(), String(stamp.getMonth() + 1).padStart(2, '0'), String(stamp.getDate()).padStart(2, '0')].join('-');
+    const source = path.join(kiroDir, 'kiro-cli-' + day + '.jsonl');
+    for (const turn of ['old-1', 'old-2', 'old-3']) {
+      appendRawJsonl(source, JSON.stringify({ 'event.name': 'llm.request', 'event.id': turn,
+        'gen_ai.session.id': 'session', 'gen_ai.turn.id': turn, padding: 'x'.repeat(4 * 1024 * 1024) }) + '\n', segmentBytes);
+    }
+    const ids: string[] = [];
+    for (let poll = 0; poll < 6; poll++) {
+      const input = new KiroCliLogInput({ stateStore: store, logDir: kiroDir });
+      input.on('entries', entries => ids.push(...entries.map((entry: AgentActivityEntry) => entry['gen_ai.turn.id'] as string)));
+      await input.start(); await input.stop();
+      if (poll === 0) {
+        expect((await fs.stat(path.join(root, 'logs', 'input-state.json'))).size).toBeLessThan(16 * 1024);
+        if (appendDuring) appendRawJsonl(source, JSON.stringify({ 'event.name': 'llm.request', 'event.id': 'during',
+          'gen_ai.session.id': 'session', 'gen_ai.turn.id': 'during' }) + '\n', segmentBytes);
+      }
+      store = new StateStore(path.join(root, 'logs', 'input-state.json'));
+      await store.load();
+    }
+    expect(ids).toEqual(['old-3', ...(appendDuring ? ['during'] : [])]);
+    appendRawJsonl(source, JSON.stringify({ 'event.name': 'llm.request', 'event.id': 'new',
+      'gen_ai.session.id': 'session', 'gen_ai.turn.id': 'new' }) + '\n', segmentBytes);
+    const input = new KiroCliLogInput({ stateStore: store, logDir: kiroDir });
+    input.on('entries', entries => ids.push(...entries.map((entry: AgentActivityEntry) => entry['gen_ai.turn.id'] as string)));
+    await input.start(); await input.stop();
+    expect(ids).toEqual(['old-3', ...(appendDuring ? ['during'] : []), 'new']);
+  });
+
+  it('uses the primary Qwen Work trace cursor to reclaim nested consumed history', async () => {
+    const logDir = path.join(root, 'logs', 'qwen-work-cn', 'history');
+    await fs.mkdir(logDir, { recursive: true });
+    const name = 'qwen-work-cn-' + oldDate() + '.jsonl';
+    const source = path.join(logDir, name);
+    await fs.writeFile(source, '{"event.name":"llm.request","gen_ai.session.id":"s","gen_ai.turn.id":"t"}\n');
+    await fs.utimes(source, oldTime(), oldTime());
+    store.set('qwen-work-cn-trace', { lastFile: name, lastOffset: 0 });
+    const service = new LogRetentionService(root, config, store);
+    expect((await service.runCleanup()).deleted).toBe(0);
+    const input = new QwenWorkCNTraceInput({ stateStore: store, logDir, segmentsRoot: path.join(root, 'native-sessions') });
+    const turns: string[] = [];
+    input.on('entries', entries => turns.push(...entries.map((entry: AgentActivityEntry) => entry['gen_ai.turn.id'] as string)));
+    await input.start(); await input.stop();
+    expect(store.get('qwen-work-cn-trace').lastOffset).toBe((await fs.stat(source)).size);
+    await fs.rename(source, source + '.backup');
+    await fs.writeFile(source, '{"event.name":"llm.request","gen_ai.session.id":"s","gen_ai.turn.id":"u"}\n');
+    await fs.utimes(source, oldTime(), oldTime());
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await input.start(); await input.stop();
+    expect(turns).toEqual(['t', 'u']);
+    expect((await service.runCleanup()).deleted).toBe(1);
+  });
+
+  it('reclaims the last Hermes segment after its process exits, while protecting live or unread sources', async () => {
+    const sessionDir = path.join(root, 'logs', 'hermes-agent');
+    const source = path.join(sessionDir, 'hermes-agent-1234567-1000-abcdef12.jsonl');
+    const files = ['a', 'b'].map(id => appendRawJsonl(source, JSON.stringify({ id }) + '\n', 16));
+    for (const name of files) await fs.utimes(name, oldTime(), oldTime());
+    const input = new HermesLogInput({ stateStore: store, sessionDir });
+    await input.start(); await input.stop();
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const service = new LogRetentionService(root, config, store);
+    expect((await service.runCleanup()).deleted).toBe(1);
+    await expect(fs.stat(files[1])).resolves.toBeDefined();
+    kill.mockImplementation(() => { throw Object.assign(new Error('not allowed'), { code: 'EPERM' }); });
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await fs.appendFile(files[1], '{"id":"unread"}\n');
+    await fs.utimes(files[1], oldTime(), oldTime());
+    kill.mockImplementation(() => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); });
+    expect((await service.runCleanup()).deleted).toBe(0);
+    await input.start(); await input.stop();
+    expect((await service.runCleanup()).deleted).toBe(1);
   });
 });
