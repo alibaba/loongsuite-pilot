@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-11T07:46:46.449011Z",
+  "updated_at": "2026-11-11T07:54:12.933410Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -433,16 +433,30 @@
       "kind": "release",
       "version": "v1.14.0",
       "commit": "1e491f3e0029dd72e7f40fc8a7477418f27193ad",
-      "recorded_at": "2026-11-10T08:59:59Z",
-      "status": "pending",
+      "recorded_at": "2026-11-11T07:31:11.887528+00:00",
+      "status": "failed",
       "method_id": "github-full-pilot-qoder-native-v1",
-      "environment_id": "unknown",
+      "environment_id": "unavailable",
       "environment": {},
-      "run_url": "",
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42974928231",
       "workloads": {},
       "source": {
         "repository": "alibaba/loongsuite-pilot",
         "ref": "v1.14.0"
+      },
+      "provenance": {
+        "asset_sha256": "c739ab6054743a05737b48a0475023000ef21dc546d60601b691d06825ce7056",
+        "release_url": "https://github.com/alibaba/loongsuite-pilot/releases/tag/v1.14.0",
+        "asset_id": 658402703,
+        "asset_name": "loongsuite-pilot.tar.gz",
+        "asset_size_bytes": 4837245,
+        "asset_url": "https://github.com/alibaba/loongsuite-pilot/releases/download/v1.14.0/loongsuite-pilot.tar.gz",
+        "checksum_source": "github_asset_digest"
+      },
+      "failure_category": "infrastructure",
+      "publication": {
+        "run_number": 31,
+        "run_id": "42974928231"
       }
     },
     {
