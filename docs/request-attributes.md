@@ -32,6 +32,8 @@ Adapter turn IDs can also differ from host API IDs. Confirm actual events:
 
 This table describes matching protocol, not a claim that each framework exposes a caller-assigned turn-ID API.
 
+Also distinguish whether a **session ID** is available in advance. Pi 1.5.0 has been verified to create a session with `--session-id <UUID>`: generate a UUID, write that session's text association record, then launch Pi with the same UUID. Give concurrent users separate UUIDs. DSH 0.2.1-rc.5 CLI `--session-id` resumes an existing session; it does not inject a new session ID. Verified subsequent-turn association does not establish first-turn support. Production callers need SDK session creation before sending or a lifecycle integration; an unannotated business “warmup” request is not a substitute. Recheck native flags and lifecycle behavior for other versions.
+
 ## CLI: one Grok process per task
 
 When the application server starts a separate Grok process for each turn, it can set attributes on that child process without knowing the native session ID in advance. Pilot's Grok Hook copies inherited attributes onto events for the turn identified by that Hook's explicit `prompt_id`. For example:
