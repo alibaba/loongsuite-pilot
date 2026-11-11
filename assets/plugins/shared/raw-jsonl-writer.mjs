@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { withSyncFileLock } from './sync-file-lock.mjs';
+import { acquireRawSourceGate } from './raw-source-gate.mjs';
+const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
 export const RAW_SEGMENT_BYTES = 100 * 1024 * 1024;
 
@@ -15,7 +16,13 @@ export const RAW_SEGMENT_BYTES = 100 * 1024 * 1024;
 export function appendRawJsonl(file, text, maxBytes = RAW_SEGMENT_BYTES, options = {}) {
   if (!fs.existsSync(path.dirname(file))) fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const pointer = file + '.active';
-  const result = withSyncFileLock(file + '.lock', 15_000, 120_000, () => {
+  const deadline = performance.now() + 25;
+  let gate;
+  while (!(gate = acquireRawSourceGate(path.dirname(file)))) {
+    if (performance.now() >= deadline) throw new Error('Raw JSONL writer lock unavailable');
+    Atomics.wait(LOCK_WAIT, 0, 0, Math.min(5, Math.max(0, deadline - performance.now())));
+  }
+  try {
     let target = file;
     try {
       const name = fs.readFileSync(pointer, 'utf8');
@@ -72,7 +79,5 @@ export function appendRawJsonl(file, text, maxBytes = RAW_SEGMENT_BYTES, options
       }
     }
     return target;
-  }, true);
-  if (!result.acquired) throw new Error('Raw JSONL writer lock unavailable');
-  return result.value;
+  } finally { gate.release(); }
 }

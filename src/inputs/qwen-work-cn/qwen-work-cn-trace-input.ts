@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import * as path from 'node:path';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
@@ -166,8 +167,8 @@ export class QwenWorkCNTraceInput extends BaseInput {
         throw error;
       });
       if (!stat?.isFile()) continue;
-      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
-      if (previousIdentities?.[fileName] !== undefined && previousIdentities[fileName] !== identity) offsets[fileName] = 0;
+      const identity = fileIdentity(stat);
+      if (previousIdentities?.[fileName] !== undefined && !matchesFileIdentity(previousIdentities[fileName], stat)) offsets[fileName] = 0;
       identities[fileName] = identity;
     }
     const candidates = (await this.getHookCandidates(fileNames, offsets)).filter(file => identities[file] !== undefined);

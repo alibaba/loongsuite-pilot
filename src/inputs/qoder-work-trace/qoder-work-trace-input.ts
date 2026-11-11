@@ -7,7 +7,8 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
-import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention } from '../base/history-retention-checkpoint.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention, nextHistoryFile } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
@@ -159,11 +160,22 @@ export class QoderWorkTraceInput extends BaseInput {
 
   // ─── Hook JSONL reading ────────────────────────────────────────────────────
 
+  private historyCursor?: string;
+  private historyPendingFile?: string;
+
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
     const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
     if (migrated) this.setState({ extra: migrated });
-    const today = getTodayDateString();
-    const logFileName = `${this.logPrefix}-${today}.jsonl`;
+    const state = this.getState();
+    const file = await nextHistoryFile(state, this.logDir, this.logPrefix, this.historyCursor, this.historyPendingFile)
+      ?? (state.extra?.hookInode === undefined ? state.lastFile : undefined);
+    if (!file) return [];
+    this.historyCursor = file;
+    this.historyPendingFile = undefined;
+    return this.readHookFile(file);
+  }
+
+  private async readHookFile(logFileName: string): Promise<AgentActivityEntry[]> {
     const logFile = path.join(this.logDir, logFileName);
 
     let stat;
@@ -176,7 +188,9 @@ export class QoderWorkTraceInput extends BaseInput {
     const state = this.getState();
     const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
     const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
-    const sameFile = state.lastFile === logFileName && identities?.[logFileName] === historyFileIdentity(stat);
+    const sameFile = matchesFileIdentity(identities?.[logFileName], stat);
+    const skippingLines = state.extra?.hookLogSkippingLines as Record<string, boolean> | undefined;
+    const wasSkipping = skippingLines?.[logFileName] ?? (state.lastFile === logFileName && state.extra?.hookSkippingLine === true);
     const savedOffset = sameFile ? offsets?.[logFileName] ?? 0 : 0;
     const reset = stat.size < savedOffset;
     const offset = reset ? 0 : savedOffset;
@@ -185,21 +199,23 @@ export class QoderWorkTraceInput extends BaseInput {
     if (stat.size <= offset) {
       if (state.lastFile === logFileName && (reset || !sameFile || state.extra?.hookInode === undefined)) {
         this.setState({ lastOffset: offset, extra: { ...this.getState().extra,
-          hookInode: stat.ino, hookSkippingLine: sameFile && !reset && state.extra?.hookSkippingLine === true } });
+          hookInode: stat.ino, hookSkippingLine: sameFile && !reset && wasSkipping } });
       }
       return [];
     }
 
     const batch = await readBoundedLineTail(logFile, stat, offset,
-      sameFile && !reset && state.extra?.hookSkippingLine === true, this.getInputRuntimeAccumulator());
+      sameFile && !reset && wasSkipping, this.getInputRuntimeAccumulator());
     if (!batch) return [];
+    if (batch.skippingLine && batch.offset < stat.size) this.historyPendingFile = logFileName;
     const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
       logFileName, stat, batch.offset, batch.beganSkip || batch.skippingLine);
     if (progress) this.setState({ extra: progress });
     if (batch.beganSkip) this.logger.warn('oversized Qoder Work Hook line skipped', { file: logFile, offset });
     if (batch.offset !== savedOffset || reset || !sameFile || state.extra?.hookInode === undefined) {
       this.setState({ lastFile: logFileName, lastOffset: batch.offset,
-        extra: { hookInode: stat.ino, hookSkippingLine: batch.skippingLine } });
+        extra: { hookInode: stat.ino, hookSkippingLine: batch.skippingLine,
+          hookLogSkippingLines: { ...skippingLines, [logFileName]: batch.skippingLine } } });
     }
 
     const entries: AgentActivityEntry[] = [];

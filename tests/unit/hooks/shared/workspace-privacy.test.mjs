@@ -30,7 +30,7 @@ const publicRecord = { 'gen_ai.session.id': 'public-session', 'gen_ai.agent.type
 it('accepts UTF-8 BOM configuration written by Windows editors', () => {
   const history = configFixture('\uFEFF' + JSON.stringify({ privacy: { excludeWorkspaces: ['/private-project'] } }));
   writeJsonlRecords(history, 'qoder', [publicRecord]);
-  expect(fs.readdirSync(history)).toHaveLength(1);
+  expect(fs.readdirSync(history).filter(file => file.endsWith('.jsonl'))).toHaveLength(1);
 });
 
 it.each(['{"privacy":', ...[['relative'], [null], 'not-an-array'].map(excludeWorkspaces => JSON.stringify({ privacy: { excludeWorkspaces } }))])(

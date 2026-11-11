@@ -131,6 +131,40 @@ describe('InputManager', () => {
     } finally { accept(); await cleanupTempDir(root); }
   });
 
+  it('retries Codex journal quota without freezing other input checkpoints and resumes after capacity returns', async () => {
+    const root = await createTempDir('codex-quota-isolation-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('codex-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    store.setOffset(input.id + ':file', 1);
+    await store.save();
+    store.setOffset(input.id + ':file', 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    const send = vi.spyOn(flusher, 'sendBatch')
+      .mockImplementationOnce(async () => { attempted(); throw wrapped; })
+      .mockResolvedValue(undefined);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex' })]);
+    try {
+      await first;
+      store.setOffset('healthy', 10);
+      await store.save();
+      expect(store.saveFailed).toBe(false);
+      expect(store.isPersisted('healthy')).toBe(true);
+      expect(store.isPersisted(input.id + ':file')).toBe(false);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[input.id + ':file'].lastOffset).toBe(1);
+      await vi.waitFor(() => expect(manager.getInputCounters().get(input.id)?.outEvents).toBe(1), { timeout: 2500 });
+      await store.save();
+      expect(store.isPersisted(input.id + ':file')).toBe(true);
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally { await manager.stopAll(); await cleanupTempDir(root); }
+  });
+
   describe('registerInput and event dispatch (T030)', () => {
     it('counts raw input independently from normalized entry emission', () => {
       const input = new StubInput('raw-input');

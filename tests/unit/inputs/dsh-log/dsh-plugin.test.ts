@@ -14,7 +14,7 @@ async function installPlugin(pluginDir: string): Promise<string> {
     path.resolve('assets/plugins/shared/resource-context.mjs'),
     path.join(sharedDir, 'resource-context.mjs'),
   );
-  for (const file of ['raw-jsonl-writer.mjs', 'sync-file-lock.mjs']) {
+  for (const file of ['raw-jsonl-writer.mjs', 'raw-source-gate.mjs']) {
     await fs.copyFile(path.resolve('assets/plugins/shared', file), path.join(sharedDir, file));
   }
   return pluginPath;

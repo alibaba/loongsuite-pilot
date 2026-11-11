@@ -8,7 +8,7 @@ import { LogRetentionService, OUTPUT_RETENTION_MAX_TOTAL_BYTES, RAW_SOURCE_RETEN
 import { ClientType } from '../../src/types/index.js';
 import type { AgentActivityEntry, LogRetentionConfig } from '../../src/types/index.js';
 import { appendRawJsonl } from '../../assets/hooks/shared/raw-jsonl-writer.mjs';
-import { withSyncFileLock } from '../../assets/hooks/shared/sync-file-lock.mjs';
+import { acquireRawSourceGate } from '../../src/utils/raw-source-gate.js';
 import { DshLogInput } from '../../src/inputs/dsh-log/dsh-log-input.js';
 import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
 import { KiroCliLogInput } from '../../src/inputs/kiro-cli-log/kiro-cli-log-input.js';
@@ -95,7 +95,7 @@ describe('raw source disk retention', () => {
     it.each(['unread', 'partial', 'quarantined', 'replaced'] as const)('preserves %s legacy sources', async mode => {
       const { input, name, source } = await setup(mode === 'unread' ? undefined : mode === 'partial' ? 1 : 3,
         mode === 'quarantined' ? { qoderLegacyQuarantine: [{ file: `${prefix}-${oldDate()}.jsonl` }] } : {});
-      await input.start(); await input.stop();
+      if (mode !== 'unread' && mode !== 'partial') { await input.start(); await input.stop(); }
       if (mode === 'replaced') {
         await fs.rename(source, source + '.original');
         await fs.writeFile(source, '{}\n');
@@ -128,6 +128,34 @@ describe('raw source disk retention', () => {
       await fs.utimes(current, oldTime(), oldTime());
       expect(await new LogRetentionService(root, { ...config, hookHistoryDays: 0 }, store).runCleanup()).toMatchObject({ deleted: 0 });
       await input.stop();
+    });
+
+    it('drains offline days, resumes an old partial tail after restart and does not starve live data', async () => {
+      const { input, logDir, name, source } = await setup(0);
+      const row = (id: string) => JSON.stringify({ 'event.name': 'test', 'event.id': id, 'gen_ai.agent.type': prefix }) + '\n';
+      const partial = row('old-tail');
+      await fs.writeFile(source, row('old') + partial.slice(0, 12));
+      await fs.utimes(source, oldTime(), oldTime());
+      const middleDate = new Date(Date.now() - 5 * 86400000);
+      const stamp = [middleDate.getFullYear(), String(middleDate.getMonth() + 1).padStart(2, '0'), String(middleDate.getDate()).padStart(2, '0')].join('-');
+      const middle = path.join(logDir, `${prefix}-${stamp}.jsonl`);
+      const live = path.join(logDir, `${prefix}-${getTodayDateString()}.jsonl`);
+      await fs.writeFile(middle, row('offline'));
+      await fs.writeFile(live, row('live'));
+      const read = () => (input as unknown as { readHookJsonl(): Promise<AgentActivityEntry[]> }).readHookJsonl();
+      const ids: unknown[] = [];
+      for (let n = 0; n < 3; n++) ids.push(...(await read()).map(entry => entry['event.id']));
+      expect(ids).toEqual(['old', 'offline', 'live']);
+      await fs.appendFile(live, row('new-live'));
+      expect(await read()).toEqual([]); // old incomplete line
+      expect((await read()).map(entry => entry['event.id'])).toEqual(['new-live']);
+      await store.save();
+      expect(store.get(input.id).extra?.hookLogOffsets).toMatchObject({ [name]: row('old').length });
+      await fs.appendFile(source, partial.slice(12));
+      const next = new TraceInput({ stateStore: store, logDir, dataDir: root,
+        sdkLogDir: path.join(root, 'sdk'), segmentsRoot: path.join(root, 'segments') });
+      const tail = await (next as unknown as { readHookJsonl(): Promise<AgentActivityEntry[]> }).readHookJsonl();
+      expect(tail.map(entry => entry['event.id'])).toEqual(['old-tail']);
     });
 
     it('keeps per-file ACKs across daily rollover and reclaims the older generation', async () => {
@@ -205,9 +233,9 @@ describe('raw source disk retention', () => {
     const service = new LogRetentionService(root, config, store);
     expect((await service.runCleanup()).deleted).toBe(0);
     await store.save();
-    await fs.writeFile(file + '.lock', '');
-    expect((await service.runCleanup()).deleted).toBe(0);
-    await fs.unlink(file + '.lock');
+    const gate = acquireRawSourceGate(dir)!;
+    try { expect((await service.runCleanup()).deleted).toBe(0); }
+    finally { gate.release(); }
     expect((await service.runCleanup()).deleted).toBe(1);
     await expect(fs.stat(paths[0])).resolves.toBeDefined();
     await expect(fs.stat(paths[2])).resolves.toBeDefined();
@@ -300,13 +328,14 @@ describe('raw source disk retention', () => {
     expect(lines).toHaveLength(101);
   });
 
-  it('does not steal a live raw owner lock after its stale timeout', async () => {
-    await fs.writeFile(file + '.lock', String(process.pid));
-    await fs.utimes(file + '.lock', oldTime(), oldTime());
-    const action = vi.fn();
-    expect(withSyncFileLock(file + '.lock', 0, 1, action, true)).toEqual({ acquired: false });
-    expect(action).not.toHaveBeenCalled();
-    expect(await fs.readFile(file + '.lock', 'utf8')).toBe(String(process.pid));
+  it('does not steal a live raw OS lock even when its database looks old', async () => {
+    const gate = acquireRawSourceGate(dir)!;
+    try {
+      const file = path.join(dir, '.raw-source-gate.sqlite');
+      await fs.utimes(file, oldTime(), oldTime());
+      expect(acquireRawSourceGate(dir)).toBeNull();
+    } finally { gate.release(); }
+    acquireRawSourceGate(dir)!.release();
   });
 
   it('does not charge a cached incomplete tail against the budget for a later segment', async () => {

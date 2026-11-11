@@ -1,5 +1,6 @@
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, InputState } from '../../types/index.js';
@@ -101,14 +102,14 @@ export abstract class BaseHookInput extends BaseInput {
       const logFile = path.join(this.logDir, logFileName);
       const stat = await fs.lstat(logFile).catch(() => null);
       if (!stat?.isFile()) continue;
-      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
-      const replaced = identities[logFileName] !== undefined && identities[logFileName] !== identity;
+      const identity = fileIdentity(stat);
+      const replaced = identities[logFileName] !== undefined && !matchesFileIdentity(identities[logFileName], stat);
       if (replaced) this.incompleteTails.delete(logFile);
       const savedOffset = replaced ? 0 : offsets[logFileName] ?? 0;
       const startOffset = savedOffset > stat.size ? 0 : savedOffset;
       const initial = replay?.files[logFileName];
       const fileEntries = await this.collectFile(logFile, startOffset, readBudget,
-        initial?.identity === identity ? { turnId: replay!.turnId, through: initial.size } : undefined);
+        initial && matchesFileIdentity(initial.identity, stat) ? { turnId: replay!.turnId, through: initial.size } : undefined);
       identities[logFileName] = identity;
       offsets[logFileName] = fileEntries.offset;
       entries.push(...fileEntries.entries);
@@ -175,7 +176,7 @@ export abstract class BaseHookInput extends BaseInput {
         if (error.code === 'ENOENT') return null;
         throw error;
       });
-      if (stat?.isFile()) files[file] = { size: stat.size, identity: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}` };
+      if (stat?.isFile()) files[file] = { size: stat.size, identity: fileIdentity(stat) };
     }
     for (const file of Object.keys(files).reverse()) {
       const turnId = await this.lastCompleteTurnId(path.join(this.logDir, file), files[file].size, chargeRead);

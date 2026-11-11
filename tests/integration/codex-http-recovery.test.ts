@@ -125,7 +125,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       // No explicit flush/restart: the existing HTTP timer must finish the same
       // outstanding acceptance and release BaseInput's pending state save.
       await within(start, 3000);
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(1); }, { timeout: 3000 });
       expect(await f.checkpoint()).toBe(1);
       expect(accepted).toHaveLength(1);
       for (const entries of attempts) expect(entries).toEqual(attempts[0]);
@@ -164,7 +164,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
 
       await listen(server, port);
       await within(start, 3000);
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(1); }, { timeout: 3000 });
       expect(await f.checkpoint()).toBe(1);
       expect(accepted.flat().map(entry => entry['event.id'])).toEqual(['event-offline']);
       expect((await f.events()).map(entry => entry['event.id'])).toEqual(['event-offline']);
@@ -198,7 +198,7 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
     }
   });
 
-  it('can stop another input waiting on the shared checkpoint while Codex HTTP recovery remains pending', async () => {
+  it('keeps another input checkpointing while Codex HTTP recovery remains pending', async () => {
     let healthy = false;
     let requests = 0;
     const server = createServer((request, response) => {
@@ -230,20 +230,20 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       await vi.waitFor(() => expect(f.store.getOffset(other.id)).toBe(1));
       expect(otherStarted).toBe(true);
       expect(await f.checkpoint()).toBe(0);
-      expect(await f.checkpoint(other.id)).toBe(0);
+      expect(await f.checkpoint(other.id)).toBe(1);
 
-      // Stopping a different input must release its wait without cancelling the
-      // Codex output hold, advancing the disk cursor, or abandoning collect.
+      // Stopping the healthy input must not cancel Codex's output hold or
+      // advance the Codex cursor.
       await within(f.manager.stopInput(other.id));
       await within(otherStart);
       expect(other.running).toBe(false);
       expect(f.input.running).toBe(true);
       expect(await f.checkpoint()).toBe(0);
-      expect(await f.checkpoint(other.id)).toBe(0);
+      expect(await f.checkpoint(other.id)).toBe(1);
 
       healthy = true;
       await within(codexStart, 3000);
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(1); }, { timeout: 3000 });
       expect(await f.checkpoint()).toBe(1);
       expect(await f.checkpoint(other.id)).toBe(1);
     } finally {

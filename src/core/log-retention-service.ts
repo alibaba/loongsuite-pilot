@@ -1,4 +1,6 @@
 import * as fs from 'node:fs/promises';
+import { acquireRawSourceGate } from '../utils/raw-source-gate.js';
+import { fileIdentity, matchesFileIdentity } from '../utils/file-identity.js';
 import * as path from 'node:path';
 import type { LogRetentionConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
@@ -220,15 +222,11 @@ export class LogRetentionService {
           if ((pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
           const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
           const fullPath = path.join(dir, file);
-          // This is the writer's cross-process lock, not the collector-local
-          // promise lock used for output mirrors. A busy writer is skipped.
-          const lock = await fs.open(path.join(dir, base + '.lock'), 'wx').catch(error => {
-            if (error.code === 'EEXIST') return null;
-            throw error;
-          });
+          // The same OS transaction gate as Node/Python raw writers.
+          // No lockfile is unlinked; a busy writer is skipped.
+          const lock = acquireRawSourceGate(dir);
           if (!lock) continue;
           try {
-            await lock.writeFile(String(process.pid));
             const state = this.stateStore.get(id);
             if (!this.stateStore.isPersisted(id)) continue;
             const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
@@ -237,7 +235,7 @@ export class LogRetentionService {
             if (blocked?.[file]) continue;
             const stat = await safeLstat(fullPath);
             if (!stat?.isFile() || offsets?.[file] !== stat.size
-              || identities?.[file] !== `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`) continue;
+              || !matchesFileIdentity(identities?.[file], stat)) continue;
             const active = await fs.readFile(path.join(dir, base + '.active'), 'utf8').catch(error => {
               if (error.code === 'ENOENT') return undefined;
               throw error;
@@ -253,8 +251,11 @@ export class LogRetentionService {
             totalBytes -= stat.size;
             this.deletedBytes += stat.size;
           } finally {
-            await lock.close();
-            await fs.unlink(path.join(dir, base + '.lock'));
+            try { lock.release(); }
+            catch (error) {
+              errors++;
+              logger.warn('raw source retention gate release failed', { input: id, error: String(error) });
+            }
           }
         }
         if (totalBytes > RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) {
@@ -289,20 +290,19 @@ export class LogRetentionService {
           && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
         const key = input + ':' + file;
         const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
-        let lock: Awaited<ReturnType<typeof fs.open>> | null = null;
+        let lock: ReturnType<typeof acquireRawSourceGate> = null;
         try {
           if (await fs.realpath(dir) !== path.resolve(dir)) continue;
-          lock = await fs.open(base + '.lock', 'wx').catch(error => {
-            if (error.code === 'EEXIST') return null;
-            throw error;
-          });
+          lock = acquireRawSourceGate(dir);
           if (!lock) continue;
-          await lock.writeFile(String(process.pid));
           const current = await safeLstat(file);
           const state = this.stateStore.get(key);
           if (!current?.isFile() || !this.stateStore.isPersisted(key)
-            || current.ino !== observed.ino || current.birthtimeMs !== observed.birthtimeMs
-            || state.extra?.inode !== current.ino || state.extra?.sourceBirthtimeMs !== current.birthtimeMs
+            || fileIdentity(current) !== fileIdentity(observed)
+            || state.extra?.inode !== current.ino
+            || (state.extra?.sourceIdentity !== undefined
+              ? !matchesFileIdentity(state.extra.sourceIdentity, current)
+              : ((process.platform === 'darwin' || process.platform === 'win32') && state.extra?.sourceBirthtimeMs !== current.birthtimeMs))
             || state.lastOffset !== current.size) continue;
           const active = await fs.readFile(base + '.active', 'utf8').catch(error => {
             if (error.code === 'ENOENT') return undefined;
@@ -329,8 +329,7 @@ export class LogRetentionService {
         } finally {
           if (lock) {
             try {
-              await lock.close();
-              await fs.unlink(base + '.lock');
+              lock.release();
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 errors++;

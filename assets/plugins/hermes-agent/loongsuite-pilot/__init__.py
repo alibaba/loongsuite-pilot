@@ -1389,40 +1389,15 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
     ).encode("utf-8")
     # Keep source filenames/inodes stable for the collector's byte checkpoints.
     with _RAW_WRITE_LOCK:
-        lock = Path(str(path) + ".lock")
-        deadline = time.monotonic() + 15
-        while True:
-            try:
-                descriptor = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                try:
-                    os.write(descriptor, str(os.getpid()).encode("ascii"))
-                except Exception:
-                    lock.unlink(missing_ok=True)
-                    raise
-                finally:
-                    os.close(descriptor)
-                break
-            except FileExistsError:
-                try:
-                    if time.time() - lock.stat().st_mtime > 120:
-                        owner = lock.read_text().strip()
-                        alive = False
-                        if owner.isdigit() and int(owner) > 0:
-                            try:
-                                os.kill(int(owner), 0)
-                                alive = True
-                            except ProcessLookupError:
-                                pass
-                            except PermissionError:
-                                alive = True
-                        if not alive:
-                            lock.unlink()
-                            continue
-                except FileNotFoundError:
-                    continue
-                if time.monotonic() >= deadline:
-                    raise OSError("Hermes raw JSONL lock unavailable")
-                time.sleep(0.01)
+        # SQLite's OS lock is shared with the collector and released on crash.
+        # Never unlink this gate or use os.kill(pid, 0) on Windows.
+        import sqlite3
+        gate = sqlite3.connect(str(directory / ".raw-source-gate.sqlite"), timeout=0.025)
+        try:
+            gate.execute("BEGIN IMMEDIATE")
+        except Exception:
+            gate.close()
+            raise
         try:
             pointer = Path(str(path) + ".active")
             target = path
@@ -1453,7 +1428,10 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
             finally:
                 os.close(descriptor)
         finally:
-            lock.unlink(missing_ok=True)
+            try:
+                gate.rollback()
+            finally:
+                gate.close()
 
 
 def _purge_old_logs() -> None:

@@ -3,7 +3,29 @@ import type { Stats } from 'node:fs';
 import * as path from 'node:path';
 import type { InputState } from '../../types/index.js';
 
-export const historyFileIdentity = (stat: Stats): string => `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+export { fileIdentity as historyFileIdentity } from '../../utils/file-identity.js';
+import { fileIdentity as historyFileIdentity } from '../../utils/file-identity.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+
+/** One bounded file per poll; rotate incomplete tails so they cannot starve live data. */
+export async function nextHistoryFile(state: InputState, dir: string, prefix: string,
+  cursor?: string, pending?: string): Promise<string | undefined> {
+  const names = (await fs.readdir(dir)).filter(name => name.startsWith(prefix + '-')
+    && /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name.slice(prefix.length + 1))).sort();
+  const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+  const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+  const candidates: string[] = [];
+  for (const name of names) {
+    const stat = await fs.lstat(path.join(dir, name)).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!stat?.isFile()) continue;
+    if (!matchesFileIdentity(identities?.[name], stat) || offsets?.[name] !== stat.size) candidates.push(name);
+  }
+  return (pending && candidates.includes(pending) ? pending : undefined)
+    ?? candidates.find(name => !cursor || name > cursor) ?? candidates[0];
+}
 
 /** Publish ACKs only for the observed file generation; never infer unread files from age. */
 export function historyRetentionExtra(state: InputState, dir: string, prefix: string,
@@ -13,7 +35,7 @@ export function historyRetentionExtra(state: InputState, dir: string, prefix: st
   const identities = extra.hookLogIdentities as Record<string, string> | undefined;
   const blocks = extra.hookLogRetentionBlocked as Record<string, boolean> | undefined;
   const identity = historyFileIdentity(stat);
-  const retain = blocked || (identities?.[file] === identity && blocks?.[file] === true);
+  const retain = blocked || (matchesFileIdentity(identities?.[file], stat) && blocks?.[file] === true);
   if (extra.hookLogDir === path.resolve(dir) && extra.hookLogPrefix === prefix
     && offsets?.[file] === offset && identities?.[file] === identity
     && (blocks?.[file] === true) === retain) return null;

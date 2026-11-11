@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { fileIdentity, matchesFileIdentity } from '../../utils/file-identity.js';
 import type { FileHandle } from 'node:fs/promises';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
@@ -55,16 +56,18 @@ export abstract class BaseSessionInput extends BaseInput {
     const prevOffset = this.stateStore.getOffset(stateKey);
     const prevState = this.stateStore.get(stateKey);
     const prevInode = prevState.extra?.inode as number | undefined;
-    const previousBirthtime = prevState.extra?.sourceBirthtimeMs;
+    const previousIdentity = prevState.extra?.sourceIdentity;
 
     // Detect file rotation via inode change
     if ((prevInode !== undefined && prevInode !== (stat as any).ino)
-      || (previousBirthtime !== undefined && previousBirthtime !== stat.birthtimeMs)) {
+      || (previousIdentity !== undefined && !matchesFileIdentity(previousIdentity, stat))
+      || (previousIdentity === undefined && (process.platform === 'darwin' || process.platform === 'win32')
+        && prevState.extra?.sourceBirthtimeMs !== undefined && prevState.extra.sourceBirthtimeMs !== stat.birthtimeMs)) {
       this.stateStore.setOffset(stateKey, 0);
       this.stateStore.update(stateKey, { extra: { inode: (stat as any).ino } });
     }
-    if (previousBirthtime !== stat.birthtimeMs) {
-      this.stateStore.update(stateKey, { extra: { sourceBirthtimeMs: stat.birthtimeMs } });
+    if (previousIdentity !== fileIdentity(stat)) {
+      this.stateStore.update(stateKey, { extra: { sourceIdentity: fileIdentity(stat), sourceBirthtimeMs: stat.birthtimeMs } });
     }
 
     let offset = this.stateStore.getOffset(stateKey);

@@ -128,6 +128,7 @@ export class QoderLegacyHookReader {
       tail.ctime = stat.ctimeMs;
       return {
         stat,
+        scanPending: tail.position < stat.size,
         buffer: completed.length === 1 ? completed[0] : Buffer.concat(completed, total),
         nextOffset: tail.committed,
         quarantine,
