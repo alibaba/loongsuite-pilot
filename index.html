@@ -265,12 +265,11 @@
       svgText(axisPlot,number(value,Number.isInteger(value)?0:Number.isInteger(value*10)?1:2),{x:left-10,y:at+3,"text-anchor":"end",class:"axis"});
     }
     const pathFor = read => {
-      let path="", previousMethod=null;
+      let path="";
       nodes.forEach((node,index) => {
         const values = read(node);
         if (!values) return;
-        path += (previousMethod === node.method_id ? " L " : " M ") + x(index) + " " + y(values.median);
-        previousMethod = node.method_id;
+        path += (path ? " L " : " M ") + x(index) + " " + y(values.median);
       });
       return path;
     };
@@ -326,7 +325,7 @@
     if (!usingPreview) {
       const metricNote = peakPath ? "实线为平均值，虚线为峰值。变化按平均值计算。" : "";
       const historicalNote = nodes.some(node => node.method_id === QODER_FIXED_30S)
-        ? "旧版按原有 30 秒轮询和 45 秒排空测试。曲线和变化百分比限同一口径。" : "";
+        ? "旧版按原有 30 秒轮询和 45 秒排空测试。变化百分比限同一口径。" : "";
       card.append(text("p", metricNote + historicalNote + "变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。", "chart-note"));
     }
     return card;
@@ -350,7 +349,9 @@
     const previousMethod = method?.id === SUBJECT_METHODS.qoder[1] || method?.id === SUBJECT_METHODS.codex[1];
     const poll = workload?.poll_interval_ms ?? (previousMethod ? method.poll_interval_ms : null);
     if (Number.isFinite(poll) && poll > 0) {
-      details.push("轮询 " + (poll % 1000 === 0 ? poll / 1000 + " 秒" : poll + " ms"));
+      const historicalPoll = poll === 10000 && historyNodes.some(node => node.method_id === QODER_FIXED_30S);
+      details.push("轮询 " + (poll % 1000 === 0 ? poll / 1000 + " 秒" : poll + " ms")
+        + (historicalPoll ? "（v1.14.0 及之前为 30 秒）" : ""));
     }
     const heading = text("div","","load-heading");
     heading.append(text("h2",load.name));
