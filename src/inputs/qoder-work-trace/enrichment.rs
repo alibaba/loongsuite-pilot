@@ -5,10 +5,8 @@ use crate::types::{AgentActivityEntry, AgentEventName};
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
-const MAX_READ: u64 = 16 * 1024 * 1024;
 const TTL: i64 = 60 * 60 * 1000;
 const MATCH_NS: i128 = 5 * 60 * 1000 * 1_000_000;
 #[derive(Default, Clone)]
@@ -755,60 +753,55 @@ async fn read_named_lines(
     } else {
         None
     };
-    // A startup size-only baseline must not open or load a large historical file.
-    if old.is_none() {
-        match tokio::fs::metadata(path).await {
-            Ok(meta) if meta.len() <= offset => return Ok(Vec::new()),
+    // Open without reading the historical contents: even an idle legacy
+    // baseline needs an identity before a same-size or larger replacement.
+    let (mut file, id) =
+        match crate::inputs::qoder_work_log::open_log_file(&path.to_string_lossy()).await {
+            Ok(opened) => opened,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
-            _ => {}
-        }
+        };
+    let identity = format!("{}:{}:{}", id.dev, id.ino, id.birthtime_ms);
+    let changed = old.as_ref().is_some_and(|old| old != &identity)
+        || (old.is_none() && old_inode.is_some_and(|ino| ino != id.ino));
+    let reset = changed || offset > id.size;
+    let saved_extra = previous.extra().unwrap_or(Value::Null);
+    let skipping = same && !reset && saved_extra["skippingLine"] == true;
+    let batch = crate::inputs::qoder_work_log::bounded_line_tail::read_line_tail(
+        &mut file,
+        id.size,
+        if reset { 0 } else { offset },
+        skipping,
+        rt,
+    )
+    .await?;
+    if batch.began_skip {
+        rt.warn(
+            "oversized Qoder Work log line skipped",
+            json!({"path":path,"offset":offset}).as_object(),
+        );
     }
-    let path = path.to_owned();
-    let Some((identity, ino, next, bytes)) =
-        tokio::task::spawn_blocking(move || -> std::io::Result<_> {
-            let mut file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e),
-            };
-            let id = crate::utils::file_identity::identity_from_open(&file)?;
-            let identity = format!("{}:{}:{}", id.dev, id.ino, id.birthtime_ms);
-            let changed = old.as_ref().is_some_and(|old| old != &identity)
-                || (old.is_none() && old_inode.is_some_and(|ino| ino != id.ino));
-            let offset = if changed || offset > id.size {
-                0
-            } else {
-                offset
-            };
-            file.seek(SeekFrom::Start(offset))?;
-            let mut bytes = Vec::new();
-            (&mut file)
-                .take(id.size.saturating_sub(offset).min(MAX_READ))
-                .read_to_end(&mut bytes)?;
-            let committed = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
-            bytes.truncate(committed);
-            Ok(Some((identity, id.ino, offset + committed as u64, bytes)))
-        })
-        .await??
-    else {
-        return Ok(Vec::new());
-    };
-    let mut extra = previous
-        .extra()
-        .and_then(|e| e.as_object().cloned())
-        .unwrap_or_default();
-    extra.insert("inode".into(), json!(ino));
-    extra.insert("fileIdentity".into(), identity.into());
-    rt.state_store.set_offset(key, next as f64);
-    rt.state_store.update(
-        key,
-        crate::checkpoints::InputStatePatch {
-            last_file: name.map(str::to_owned),
-            extra: Some(Value::Object(extra)),
-            ..Default::default()
-        },
-    );
+    if reset
+        || old.as_deref() != Some(identity.as_str())
+        || old_inode != Some(id.ino)
+        || batch.offset != offset
+        || batch.skipping_line != skipping
+    {
+        let mut extra = saved_extra.as_object().cloned().unwrap_or_default();
+        extra.insert("inode".into(), json!(id.ino));
+        extra.insert("fileIdentity".into(), identity.into());
+        extra.insert("skippingLine".into(), batch.skipping_line.into());
+        rt.state_store.update(
+            key,
+            crate::checkpoints::InputStatePatch {
+                last_file: name.map(str::to_owned),
+                last_offset: Some(batch.offset as f64),
+                extra: Some(Value::Object(extra)),
+                ..Default::default()
+            },
+        );
+    }
+    let bytes = batch.bytes;
     Ok(String::from_utf8_lossy(&bytes)
         .lines()
         .filter(|l| !l.trim().is_empty())

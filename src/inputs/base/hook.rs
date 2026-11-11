@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub const OFFSET_MAP_EXTRA_KEY: &str = "hookLogOffsets";
 const RECENT_LOG_FILE_LIMIT: usize = 3;
@@ -89,7 +90,7 @@ impl<T: HookBody> InputBody for HookAdapter<T> {
     }
 }
 
-pub async fn collect_hook<T: HookBody>(
+async fn collect_hook<T: HookBody>(
     body: &T,
     rt: &InputRuntime,
 ) -> anyhow::Result<Vec<AgentActivityEntry>> {
@@ -201,14 +202,26 @@ async fn collect_file<T: HookBody>(
     start_offset: f64,
 ) -> anyhow::Result<FileEntries> {
     let mut entries = Vec::new();
-    let size = match tokio::fs::metadata(log_file).await {
-        Ok(meta) => meta.len(),
-        Err(_) => {
-            return Ok(FileEntries {
-                entries,
-                offset: start_offset,
-            });
+    let path = log_file.to_owned();
+    let opened = tokio::task::spawn_blocking(move || {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
         }
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        Ok::<_, std::io::Error>(metadata.is_file().then_some((file, metadata.len())))
+    })
+    .await
+    .map_err(std::io::Error::other)?;
+    let Ok(Some((file, size))) = opened else {
+        return Ok(FileEntries {
+            entries,
+            offset: start_offset,
+        });
     };
     let mut offset = start_offset;
     if offset > 0.0 && (size as f64) < offset {
@@ -231,23 +244,34 @@ async fn collect_file<T: HookBody>(
     }
     let requested = size.saturating_sub(offset as u64);
     rt.with_accumulator(|acc| acc.observe_backlog(requested));
-    let read = jsonl::read_file_slice(log_file, offset as u64)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("hook log disappeared"))?;
+    // An in-place rewrite can complete a line without changing file metadata.
+    // Read again from the committed offset on every poll.
     let started = InputRuntimeAccumulator::now();
+    let mut file = tokio::fs::File::from_std(file);
+    file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+    let mut bytes = vec![0_u8; requested as usize];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let count = file.read(&mut bytes[filled..]).await?;
+        if count == 0 {
+            break;
+        }
+        filled += count;
+    }
+    bytes.truncate(filled);
     rt.with_accumulator(|acc| {
         acc.observe_read(
-            read.bytes.len() as u64,
+            bytes.len() as u64,
             requested,
             InputRuntimeAccumulator::now() - started,
         );
     });
-    let Some(newline) = jsonl::last_newline(&read.bytes) else {
+    let Some(newline) = jsonl::last_newline(&bytes) else {
         return Ok(FileEntries { entries, offset });
     };
     let complete_len = newline + 1;
     let checkpoint = offset + complete_len as f64;
-    let complete = &read.bytes[..complete_len];
+    let complete = &bytes[..complete_len];
     let (text, ascii) = decode_complete(complete);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut records = 0_u64;

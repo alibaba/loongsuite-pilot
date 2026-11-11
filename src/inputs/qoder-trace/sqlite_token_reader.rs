@@ -248,7 +248,7 @@ pub fn resolve_all_qoder_db_paths() -> Vec<String> {
         .join("db")
         .join("local.db");
     let mut candidates = vec![Path::new(&root).join(&tail).to_string_lossy().into_owned()];
-    if let Ok(entries) = std::fs::read_dir(&root) {
+    if let Ok(entries) = crate::utils::source_access::read_dir(&root) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name == "SharedClientCache" {
@@ -349,28 +349,35 @@ fn parse_attached_image_paths(raw: Option<&str>) -> Vec<String> {
     let Ok(extra) = serde_json::from_str::<Value>(raw) else {
         return Vec::new();
     };
+    let mut paths = Vec::new();
     if let Some(items) = extra.get("attachedImagePaths").and_then(Value::as_array) {
-        let paths: Vec<String> = items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if !paths.is_empty() {
-            let mut unique = Vec::new();
-            for path in paths {
-                if !unique.contains(&path) {
-                    unique.push(path);
-                }
-            }
-            return unique;
-        }
+        paths.extend(
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned),
+        );
     }
-    let mut from_context = Vec::new();
+    let has_attached_images = !paths.is_empty();
     if let Some(context) = extra.get("context").and_then(Value::as_array) {
         for item in context {
             let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if name == "file" {
+                if let Some(identifier) = item
+                    .pointer("/selectedItem/identifier")
+                    .and_then(Value::as_str)
+                {
+                    let path = identifier.trim();
+                    if crate::multimodal::resolve::mime_from_media_path(path).is_some() {
+                        paths.push(path.to_owned());
+                    }
+                }
+            }
+            if has_attached_images {
+                continue;
+            }
             let file_type = item.get("fileType").and_then(Value::as_str).unwrap_or("");
             if name != "image" && file_type != "image" {
                 continue;
@@ -387,16 +394,71 @@ fn parse_attached_image_paths(raw: Option<&str>) -> Vec<String> {
                         .filter(|s| !s.is_empty())
                 });
             if let Some(candidate) = candidate {
-                let owned = candidate.to_owned();
-                if !from_context.contains(&owned) {
-                    from_context.push(owned);
-                }
+                paths.push(candidate.to_owned());
             }
         }
     }
-    from_context
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    paths
 }
 
 #[cfg(test)]
 #[path = "qoder_cn_reader_contract_tests.rs"]
 mod qoder_cn_migration_contract_tests;
+
+#[cfg(test)]
+mod media_attachment_tests {
+    use super::*;
+
+    #[test]
+    fn main585_attached_images_and_media_file_identifiers_keep_source_precedence() {
+        let image = "/cache/images/pic.png";
+        let temporary = "/tmp/image-cache/pic.png";
+        let video = "/video/clip.mp4";
+        let cases = [
+            (
+                json!({"attachedImagePaths":[image],"context":[{"name":"image","selectedItem":{"identifier":temporary}}]}),
+                vec![image],
+            ),
+            (
+                json!({"context":[{"name":"file","selectedItem":{"identifier":video},"parsedContextItems":[{"identifier":"/ignored.mp4"}]}]}),
+                vec![video],
+            ),
+            (
+                json!({"attachedImagePaths":[image,image],"context":[
+                    {"name":"image","imgUrl":"https://example/a.png","filePath":temporary},
+                    {"name":"file","selectedItem":{"identifier":video}},
+                    {"name":"file","selectedItem":{"identifier":"/notes.txt"}},
+                    {"name":"file","selectedItem":{"identifier":"/main.ts"}}
+                ]}),
+                vec![image, video],
+            ),
+            (
+                json!({"context":[{"name":"image","filePath":image}]}),
+                vec![image],
+            ),
+            (
+                json!({"attachedImagePaths":["  "],"context":[{"name":"image","imgUrl":image},{"name":"file","selectedItem":{"identifier":video}}]}),
+                vec![image, video],
+            ),
+            (
+                json!({"context":[{"fileType":"image","imgUrl":image}]}),
+                vec![image],
+            ),
+            (
+                json!({"context":[{"name":"file","fileType":"image","filePath":image}]}),
+                vec![image],
+            ),
+        ];
+        for (extra, expected) in cases {
+            assert_eq!(
+                parse_attached_image_paths(Some(&extra.to_string())),
+                expected
+            );
+        }
+        for raw in [None, Some(""), Some("{broken"), Some("null")] {
+            assert!(parse_attached_image_paths(raw).is_empty());
+        }
+    }
+}

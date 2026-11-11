@@ -67,6 +67,7 @@ pub struct PluginCheckTarget {
     pub bin_path: Option<String>,
     pub install_args: Vec<String>,
     pub repair_fn: Option<PluginAction>,
+    pub needs_repair: Option<PluginAction>,
     pub change_watch_path: Option<String>,
     pub needs_repair_on_change: Option<PluginAction>,
     pub enabled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -250,7 +251,15 @@ impl HookWatchdog {
                 None
             }
         };
-        let mut missing = find_missing_hooks(settings.as_ref(), target);
+        let mut missing = if let Some(needs_repair) = &target.needs_repair {
+            if needs_repair().await? {
+                target.expected_hooks.clone()
+            } else {
+                Vec::new()
+            }
+        } else {
+            find_missing_hooks(settings.as_ref(), target)
+        };
         let mut pending = None;
         if missing.is_empty() {
             if let (Some(path), Some(needs)) =
@@ -990,6 +999,7 @@ mod tests {
                     seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Box::pin(async { Ok(true) })
                 })),
+                needs_repair: None,
                 change_watch_path: None,
                 needs_repair_on_change: None,
                 enabled: None,

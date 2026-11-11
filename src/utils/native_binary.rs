@@ -31,7 +31,23 @@ pub fn validate_binary(path: &Path, target: &str) -> Result<BinaryInfo> {
         .with_context(|| format!("二进制格式或架构不匹配：{}，目标 {target}", path.display()))
 }
 
+/// Validate a target-native shared library without requiring an executable entry.
+pub fn validate_shared_library(path: &Path, target: &str) -> Result<BinaryInfo> {
+    let metadata = super::runtime_paths::runtime_metadata(path)?;
+    ensure!(metadata.is_file(), "SDK is not a regular file");
+    let mut file = File::open(path)?;
+    inspect_image(&mut file, metadata.len(), target, true)
+}
+
 fn inspect(input: &mut (impl Read + Seek), size: u64, target: &str) -> Result<BinaryInfo> {
+    inspect_image(input, size, target, false)
+}
+fn inspect_image(
+    input: &mut (impl Read + Seek),
+    size: u64,
+    target: &str,
+    shared: bool,
+) -> Result<BinaryInfo> {
     ensure!(
         super::runtime_paths::SUPPORTED_TARGETS.contains(&target),
         "不支持的目标平台"
@@ -39,12 +55,12 @@ fn inspect(input: &mut (impl Read + Seek), size: u64, target: &str) -> Result<Bi
     let arm = target.starts_with("aarch64-");
     let architecture = if arm { "aarch64" } else { "x86_64" };
     let (format, interpreter) = if target.contains("linux") {
-        ("elf64", elf(input, size, arm)?)
+        ("elf64", elf_image(input, size, arm, shared)?)
     } else if target.contains("apple") {
-        macho(input, size, arm)?;
+        macho_image(input, size, arm, shared)?;
         ("mach-o64", None)
     } else {
-        pe(input, size, arm)?;
+        pe_image(input, size, arm, shared)?;
         ("pe32+", None)
     };
     Ok(BinaryInfo {
@@ -84,7 +100,12 @@ fn u64le(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("固定长度字段"))
 }
 
-fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<Option<String>> {
+fn elf_image(
+    input: &mut (impl Read + Seek),
+    size: u64,
+    arm: bool,
+    shared: bool,
+) -> Result<Option<String>> {
     let header = read_at::<64>(input, size, 0)?;
     ensure!(
         &header[..7] == b"\x7fELF\x02\x01\x01",
@@ -99,7 +120,11 @@ fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<Option<St
         u16le(&header, 18) == if arm { 183 } else { 62 },
         "ELF CPU 架构不匹配"
     );
-    ensure!(u64le(&header, 24) != 0, "ELF 缺少可执行入口");
+    if shared {
+        ensure!(u16le(&header, 16) == 3, "SDK must be ET_DYN");
+    } else {
+        ensure!(u64le(&header, 24) != 0, "ELF 缺少可执行入口");
+    }
     ensure!(
         u16le(&header, 52) == 64 && u16le(&header, 54) == 56,
         "ELF 头长度无效"
@@ -151,7 +176,7 @@ fn elf(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<Option<St
     Ok(interpreter)
 }
 
-fn macho(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<()> {
+fn macho_image(input: &mut (impl Read + Seek), size: u64, arm: bool, shared: bool) -> Result<()> {
     let header = read_at::<32>(input, size, 0)?;
     ensure!(
         u32le(&header, 0) == 0xfeedfacf,
@@ -161,7 +186,10 @@ fn macho(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<()> {
         u32le(&header, 4) == if arm { 0x0100000c } else { 0x01000007 },
         "Mach-O CPU 架构不匹配"
     );
-    ensure!(u32le(&header, 12) == 2, "不是 Mach-O 可执行映像");
+    ensure!(
+        u32le(&header, 12) == if shared { 6 } else { 2 },
+        "Mach-O image type mismatch"
+    );
     let count = u32le(&header, 16);
     let length = u32le(&header, 20) as u64;
     ensure!(
@@ -203,13 +231,13 @@ fn macho(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<()> {
         offset += length;
     }
     ensure!(
-        offset == end && load && entry,
+        offset == end && load && (shared || entry),
         "Mach-O 缺少可执行 segment/入口或长度不一致"
     );
     Ok(())
 }
 
-fn pe(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<()> {
+fn pe_image(input: &mut (impl Read + Seek), size: u64, arm: bool, shared: bool) -> Result<()> {
     let dos = read_at::<64>(input, size, 0)?;
     ensure!(&dos[..2] == b"MZ", "缺少 DOS header");
     let offset = u32le(&dos, 60) as u64;
@@ -222,7 +250,7 @@ fn pe(input: &mut (impl Read + Seek), size: u64, arm: bool) -> Result<()> {
     );
     let flags = u16le(&coff, 22);
     ensure!(
-        flags & 0x0002 != 0 && flags & 0x2000 == 0,
+        flags & 0x0002 != 0 && (flags & 0x2000 != 0) == shared,
         "PE 不是可执行程序或为 DLL"
     );
     let count = u16le(&coff, 6) as u64;

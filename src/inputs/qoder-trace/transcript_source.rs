@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::ReadDir;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -124,7 +124,7 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
     let mut notice_versions = None;
     let inventory = if inspect_inventory {
         let mut entries = Vec::new();
-        for (index, entry) in std::fs::read_dir(path)?.enumerate() {
+        for (index, entry) in crate::utils::source_access::read_dir(path)?.enumerate() {
             if index >= MAX_CONTEXTS {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -161,14 +161,18 @@ fn directory_version(path: &Path, inspect_inventory: bool) -> std::io::Result<Di
 }
 struct Metadata {
     version: DirectoryVersion,
-    source: Value,
-    contexts: Vec<Value>,
+    source: Arc<Value>,
+    contexts: Vec<Arc<Value>>,
+    context_digests: Vec<Option<[u8; 32]>>,
     bytes: usize,
 }
+type SharedTranscriptReadResult = Result<Arc<TranscriptBatch>, String>;
+
 struct Collector {
     data_dir: PathBuf,
     agent_id: String,
     root: PathBuf,
+    cycle_runtime_user: Option<String>,
     discovery: Option<ReadDir>,
     pending: VecDeque<PathBuf>,
     cache: IndexMap<String, ActiveRows>,
@@ -194,7 +198,8 @@ struct Collector {
     #[cfg(test)]
     directory_inventory: bool,
     resolver: Arc<dyn QoderPromptOwnershipResolver>,
-    last: Option<(Value, bool, Result<TranscriptBatch, String>)>,
+    // None key reuses the exact input value owned by an unchanged result.
+    last: Option<(Option<Value>, bool, SharedTranscriptReadResult)>,
     scan_bytes: usize,
     max_turn_bytes: usize,
     cache_limit: usize,
@@ -250,7 +255,7 @@ fn inject_metadata_read_fault(f: impl FnMut(&Path) + 'static) -> MetadataReadFau
     });
     MetadataReadFaultGuard
 }
-fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
+fn snapshot_bytes(path: &Path, limit: usize) -> anyhow::Result<(Vec<u8>, FileVersion)> {
     let mut f = scanner::open_regular(path)?;
     let version = scanner::version(&f)?;
     if version.size > limit as u64 {
@@ -261,6 +266,10 @@ fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
     if bytes.len() > limit {
         anyhow::bail!("Qoder metadata grew past limit")
     };
+    Ok((bytes, version))
+}
+fn snapshot(path: &Path, limit: usize) -> anyhow::Result<(Value, FileVersion)> {
+    let (bytes, version) = snapshot_bytes(path, limit)?;
     let value = serde_json::from_slice(&bytes)?;
     #[cfg(test)]
     METADATA_READ_FAULT.with(|fault| {
@@ -325,6 +334,7 @@ impl QoderTranscriptSource {
                 data_dir,
                 agent_id,
                 root,
+                cycle_runtime_user: None,
                 discovery: None,
                 pending: VecDeque::new(),
                 cache: IndexMap::new(),
@@ -375,15 +385,25 @@ impl QoderTranscriptSource {
         state: Option<&Value>,
         persisted: bool,
     ) -> anyhow::Result<TranscriptBatch> {
-        let state = state
-            .filter(|s| s.is_object())
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        self.read_shared(state, persisted)
+            .await
+            .map(|batch| (*batch).clone())
+    }
+    pub(crate) async fn read_shared(
+        &self,
+        state: Option<&Value>,
+        persisted: bool,
+    ) -> anyhow::Result<Arc<TranscriptBatch>> {
+        let empty = json!({});
+        let state = state.filter(|s| s.is_object()).unwrap_or(&empty);
         let observed = self.completed.load(Ordering::SeqCst);
         let mut c = self.inner.lock().await;
         if observed != self.completed.load(Ordering::SeqCst) {
             if let Some((prior, was_persisted, result)) = &c.last {
-                if *prior == state && *was_persisted == persisted {
+                let prior = prior
+                    .as_ref()
+                    .or_else(|| result.as_ref().ok().map(|batch| &batch.state));
+                if prior == Some(state) && *was_persisted == persisted {
                     return result.clone().map_err(anyhow::Error::msg);
                 }
             }
@@ -393,22 +413,22 @@ impl QoderTranscriptSource {
             c.clear();
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
         } else if !persisted && state.as_object().is_some_and(|m| !m.is_empty()) {
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
         } else {
             if persisted {
-                c.acknowledge(&state, &self.stopped);
+                c.acknowledge(state, &self.stopped);
             }
-            c.collect_once(&state, &self.stopped)
+            c.collect_once(state, &self.stopped)
                 .await
                 .map_err(|e| e.to_string())
         };
@@ -416,14 +436,24 @@ impl QoderTranscriptSource {
             c.clear();
             Ok(TranscriptBatch {
                 records: Vec::new(),
-                state: state.clone(),
+                state: (*state).clone(),
                 changed: false,
                 metrics: TranscriptMetrics::default(),
             })
         } else {
             result
         };
-        c.last = Some((state, persisted, result.clone()));
+        let result = result.map(Arc::new);
+        // collect_once derives changed from full JSON equality; stopped and
+        // unsaved/reset branches explicitly return a clone of the input state.
+        // The unchanged result therefore already owns the exact cache key.
+        let prior = if result.as_ref().is_ok_and(|batch| !batch.changed) {
+            debug_assert!(result.as_ref().is_ok_and(|batch| batch.state == *state));
+            None
+        } else {
+            Some(state.clone())
+        };
+        c.last = Some((prior, persisted, result.clone()));
         self.completed.fetch_add(1, Ordering::SeqCst);
         result.map_err(anyhow::Error::msg)
     }
@@ -433,6 +463,7 @@ impl Collector {
         (self.clock)()
     }
     fn clear(&mut self) {
+        self.cycle_runtime_user = None;
         self.cache.clear();
         self.cache_size = 0;
         self.metadata.clear();
@@ -468,7 +499,7 @@ impl Collector {
             return Ok(());
         }
         if self.discovery.is_none() {
-            match std::fs::read_dir(&self.root) {
+            match crate::utils::source_access::read_dir(&self.root) {
                 Ok(d) => self.discovery = Some(d),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(e) => return Err(e.into()),
@@ -493,7 +524,7 @@ impl Collector {
         }
         Ok(())
     }
-    fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Value, Vec<Value>)> {
+    fn metadata_for(&mut self, dir: &Path) -> anyhow::Result<(Arc<Value>, Vec<Arc<Value>>)> {
         let events = dir.join("events");
         #[cfg(not(test))]
         let inspect_inventory = true;
@@ -504,35 +535,76 @@ impl Collector {
         // the existing bounded metadata budget; no transcript body is read here.
         if let Some(m) = self.metadata.get(dir) {
             if m.version == version {
-                return Ok((m.source.clone(), m.contexts.clone()));
+                return Ok((Arc::clone(&m.source), m.contexts.clone()));
             }
         }
         let source = if let Some(m) = self.metadata.get(dir) {
-            m.source.clone()
+            Arc::clone(&m.source)
         } else {
-            snapshot(&dir.join("source.json"), MAX_NOTICES)?.0
+            Arc::new(snapshot(&dir.join("source.json"), MAX_NOTICES)?.0)
         };
-        let mut contexts = vec![source.clone()];
-        for entry in std::fs::read_dir(&events)?.take(MAX_CONTEXTS) {
+        // Reuse only the already validated payload of the exact content
+        // identity and receipt generation. Every notice is still opened,
+        // scope-checked and read in full below; no filesystem hint skips IO.
+        let mut previous = HashMap::new();
+        if let Some(metadata) = self.metadata.get(dir) {
+            for (context, digest) in metadata.contexts.iter().zip(&metadata.context_digests) {
+                if let Some(digest) = digest {
+                    previous.insert(text(&context["receipt"], "name"), (context, digest));
+                }
+            }
+        }
+        let mut contexts = vec![(Arc::clone(&source), None)];
+        for entry in crate::utils::source_access::read_dir(&events)?.take(MAX_CONTEXTS) {
             let entry = entry?;
             if !entry.file_type()?.is_file()
                 || !entry.file_name().to_string_lossy().ends_with(".json")
             {
                 continue;
             }
-            let (mut v, s) = snapshot(&entry.path(), MAX_NOTICES)?;
-            if !valid_source(&v, &self.agent_id, text(&source, "key")) {
-                anyhow::bail!("invalid-context")
+            let filename = entry.file_name();
+            let name = filename.to_string_lossy();
+            let path = entry.path();
+            let (bytes, version) = snapshot_bytes(&path, MAX_NOTICES)?;
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let reused = previous.get(name.as_ref()).and_then(|(context, prior)| {
+                (digest == **prior
+                    && notice_version(context, &version) == text(&context["receipt"], "version"))
+                .then_some(*context)
+            });
+            let parsed = if reused.is_none() {
+                Some(serde_json::from_slice::<Value>(&bytes)?)
+            } else {
+                None
             };
-            v["receipt"] =
-                json!({"name":entry.file_name().to_string_lossy(),"version":notice_version(&v,&s)});
-            contexts.push(v);
+            #[cfg(test)]
+            METADATA_READ_FAULT.with(|fault| {
+                if let Some(hook) = fault.borrow_mut().as_mut() {
+                    hook(&path)
+                }
+            });
+            let context = if let Some(context) = reused {
+                if !valid_source(context, &self.agent_id, text(&source, "key")) {
+                    anyhow::bail!("invalid-context")
+                }
+                Arc::clone(context)
+            } else {
+                let mut value = parsed.expect("uncached snapshot was parsed");
+                if !valid_source(&value, &self.agent_id, text(&source, "key")) {
+                    anyhow::bail!("invalid-context")
+                }
+                value["receipt"] = json!({"name":name,"version":notice_version(&value,&version)});
+                Arc::new(value)
+            };
+            contexts.push((context, Some(digest)));
         }
+        drop(previous);
         contexts.sort_by(|a, b| {
-            number(a, "observedSize")
-                .cmp(&number(b, "observedSize"))
-                .then_with(|| number(a, "observedAt").cmp(&number(b, "observedAt")))
+            number(&a.0, "observedSize")
+                .cmp(&number(&b.0, "observedSize"))
+                .then_with(|| number(&a.0, "observedAt").cmp(&number(&b.0, "observedAt")))
         });
+        let (contexts, context_digests): (Vec<_>, Vec<_>) = contexts.into_iter().unzip();
         let inventory_bytes = version.inventory.as_ref().map_or(0, |names| {
             names
                 .iter()
@@ -543,7 +615,15 @@ impl Collector {
             versions.len() * std::mem::size_of::<FileVersion>()
                 + std::mem::size_of::<Vec<FileVersion>>()
         });
-        let bytes = serde_json::to_vec(&json!([source, contexts]))?.len() + inventory_bytes;
+        let references = contexts.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        let arc_overhead = (contexts.len() + 1) * 4 * std::mem::size_of::<usize>()
+            + (contexts.capacity() + 1) * std::mem::size_of::<Arc<Value>>();
+        let digest_bytes = context_digests.capacity() * std::mem::size_of::<Option<[u8; 32]>>()
+            + std::mem::size_of::<Vec<Option<[u8; 32]>>>();
+        let bytes = crate::utils::json_size::serialized_json_size(&(&*source, &references))?
+            + inventory_bytes
+            + arc_overhead
+            + digest_bytes;
         if let Some(prior) = self.metadata.shift_remove(dir) {
             self.metadata_bytes -= prior.bytes;
         }
@@ -557,8 +637,9 @@ impl Collector {
                 dir.to_owned(),
                 Metadata {
                     version,
-                    source: source.clone(),
+                    source: Arc::clone(&source),
                     contexts: contexts.clone(),
+                    context_digests,
                     bytes,
                 },
             );
@@ -642,6 +723,7 @@ impl Collector {
         state: &Value,
         stopped: &AtomicBool,
     ) -> anyhow::Result<TranscriptBatch> {
+        self.cycle_runtime_user = None;
         let mut next = state.clone();
         let mut records = Vec::new();
         let mut budget = ScanBudget {
@@ -707,8 +789,8 @@ impl Collector {
                 if contexts.is_empty() {
                     return Ok(());
                 }
-                let old = next.get(&key).cloned();
-                let mut cp = old.clone().unwrap_or(Value::Null);
+                let old = next.get(&key);
+                let mut cp = old.cloned().unwrap_or(Value::Null);
                 let saved = cp.get("receipts").and_then(Value::as_array);
                 let pending_stop = contexts.iter().any(|context| {
                     text(context, "event") == "Stop"
@@ -908,7 +990,7 @@ impl Collector {
     fn initialize(
         &self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         stat: &FileVersion,
         migrate: bool,
     ) -> anyhow::Result<Value> {
@@ -970,7 +1052,7 @@ impl Collector {
     fn find_bootstrap(
         &mut self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         cp: &mut Value,
         budget: &mut ScanBudget,
     ) -> anyhow::Result<bool> {
@@ -1128,20 +1210,12 @@ impl Collector {
             cp.as_object_mut().unwrap().remove(key);
         }
     }
-    fn build(
-        &mut self,
-        source: &Value,
-        contexts: &[Value],
-        cp: &mut Value,
-        value: &ActiveRows,
+    fn observed_turn_context<'a>(
+        contexts: &'a [Arc<Value>],
+        cp: &Value,
         end: u64,
-        terminal: &str,
-    ) -> Vec<Value> {
-        if !flag(cp, "hasUser") || value.rows.is_empty() {
-            return Vec::new();
-        }
-        let fallback = json!({"cwd":source["cwd"],"desktop":source["desktop"]});
-        let selected = contexts
+    ) -> Option<&'a Value> {
+        contexts
             .iter()
             .rev()
             .find(|c| {
@@ -1159,7 +1233,57 @@ impl Collector {
                                     .contains(&text(c, "event"))))
                 })
             })
-            .unwrap_or(&fallback);
+            .map(Arc::as_ref)
+    }
+
+    fn trailing_terminal_context<'a>(
+        contexts: &'a [Arc<Value>],
+        end: u64,
+        source_size: u64,
+        file: &mut std::fs::File,
+        budget: &mut ScanBudget,
+        stopped: &AtomicBool,
+    ) -> Option<&'a Value> {
+        const MAX_TRAILING_CONTROL_BYTES: u64 = 64 * 1024;
+        let terminal_events = ["Stop", "SessionEnd"];
+        let candidate = contexts.iter().find(|context| {
+            number(context, "observedSize") > end
+                && terminal_events.contains(&text(context, "event"))
+        })?;
+        let watermark = number(candidate, "observedSize");
+        let length = watermark - end;
+        if watermark > source_size
+            || length > MAX_TRAILING_CONTROL_BYTES
+            || length > budget.remaining.max(0) as u64
+        {
+            return None;
+        }
+        // Only control rows between last-prompt and a terminal notice prove
+        // that the notice still belongs to this turn.
+        let bytes = scanner::full_line(file, end, watermark, budget, stopped).ok()?;
+        let rows = bytes.strip_suffix(b"\n")?;
+        rows.split(|byte| *byte == b'\n')
+            .all(|line| {
+                serde_json::from_slice::<Value>(line).is_ok_and(|row| {
+                    qoder_is_control_user_row(&row) || terminal_events.contains(&event(&row))
+                })
+            })
+            .then_some(candidate.as_ref())
+    }
+
+    fn build(
+        &mut self,
+        source: &Value,
+        context: Option<&Value>,
+        cp: &mut Value,
+        value: &ActiveRows,
+        terminal: &str,
+    ) -> Vec<Value> {
+        if !flag(cp, "hasUser") || value.rows.is_empty() {
+            return Vec::new();
+        }
+        let fallback = json!({"cwd":source["cwd"],"desktop":source["desktop"]});
+        let selected = context.unwrap_or(&fallback);
         let first = value
             .rows
             .iter()
@@ -1183,17 +1307,28 @@ impl Collector {
             .get("resourceAttributes")
             .and_then(Value::as_object)
             .unwrap_or(&empty);
-        let filtered = value
-            .rows
-            .iter()
-            .filter(|r| !qoder_is_control_user_row(r))
-            .cloned()
-            .collect::<Vec<_>>();
+        let filtered: std::borrow::Cow<'_, [Value]> =
+            if value.rows.iter().any(qoder_is_control_user_row) {
+                std::borrow::Cow::Owned(
+                    value
+                        .rows
+                        .iter()
+                        .filter(|r| !qoder_is_control_user_row(r))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(&value.rows)
+            };
         let user_identity = selected
             .get("userIdentity")
             .filter(|identity| !identity.is_null())
             .or_else(|| source.get("userIdentity"));
-        let runtime_user = resolve_collected_qoder_user_id(&self.data_dir);
+        let data_dir = &self.data_dir;
+        let runtime_user = self
+            .cycle_runtime_user
+            .get_or_insert_with(|| resolve_collected_qoder_user_id(data_dir))
+            .clone();
         let mut records = build_collected_transcript_turn(
             &filtered,
             CollectedTranscriptTurnContext {
@@ -1381,7 +1516,7 @@ impl Collector {
     async fn scan_source(
         &mut self,
         source: &Value,
-        contexts: &[Value],
+        contexts: &[Arc<Value>],
         cp: &mut Value,
         stat: &FileVersion,
         budget: &mut ScanBudget,
@@ -1503,14 +1638,14 @@ impl Collector {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .or_else(|| self.tails.shift_remove(&file));
         let mut turns = 0;
-        let batch = scanner::scan_lines(
+        let batch = scanner::scan_lines_with_file(
             &file,
             number(cp, "offset")..stat.size,
             &options,
             prior,
             budget,
             stopped,
-            |line| {
+            |line, input, budget, source_size| {
                 if let Some(reason) = line.quarantine {
                     self.quarantine(source, cp, line.start, line.end, reason)
                 }
@@ -1523,10 +1658,9 @@ impl Collector {
                 if prompt && flag(cp, "hasUser") {
                     records.extend(self.build(
                         source,
-                        contexts,
+                        Self::observed_turn_context(contexts, cp, line.start),
                         cp,
                         &value,
-                        line.start,
                         "next-prompt",
                     ));
                     cp["committedOffset"] = json!(line.start);
@@ -1589,7 +1723,21 @@ impl Collector {
                     } else {
                         "session-end"
                     };
-                    records.extend(self.build(source, contexts, cp, &value, line.end, terminal));
+                    let context =
+                        Self::observed_turn_context(contexts, cp, line.end).or_else(|| {
+                            if terminal != "last-prompt" {
+                                return None;
+                            }
+                            Self::trailing_terminal_context(
+                                contexts,
+                                line.end,
+                                source_size,
+                                input,
+                                budget,
+                                stopped,
+                            )
+                        });
+                    records.extend(self.build(source, context, cp, &value, terminal));
                     cp["committedOffset"] = json!(line.end);
                     Self::clear_active(cp);
                     value = ActiveRows {
@@ -1657,10 +1805,9 @@ impl Collector {
             };
             records.extend(self.build(
                 source,
-                contexts,
+                Self::observed_turn_context(contexts, cp, number(cp, "offset")),
                 cp,
                 &value,
-                number(cp, "offset"),
                 terminal,
             ));
             cp["committedOffset"] = cp["offset"].clone();

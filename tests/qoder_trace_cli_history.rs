@@ -254,3 +254,54 @@ fn cli_l796() {
 fn cli_l835() {
     run(835);
 }
+
+#[test]
+fn borrowed_intercept_keeps_latest_tie_order_first_response_and_input_ownership() {
+    let mut first: AgentActivityEntry = serde_json::from_value(json!({
+        "event.id":"borrowed-first", "event.name":"llm.response",
+        "gen_ai.session.id":"session", "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+        "gen_ai.agent.type":"qoder-cli", "time_unix_nano":"1780000001000000000",
+        "gen_ai.response.id":"response-α"
+    }))
+    .unwrap();
+    first.input_tokens = Some(99);
+    let mut duplicate = first.clone();
+    duplicate.event_id = "borrowed-duplicate".into();
+    duplicate.cache_creation_input_tokens = Some(88);
+    let mut untouched = first.clone();
+    untouched.event_id = "borrowed-unmatched".into();
+    untouched.response_id = Some("unmatched".into());
+    let mut entries = vec![first, duplicate, untouched];
+    let tokens = intercepts(Some(&json!([
+        {"id":"response-α", "ts":100, "promptTokens":10, "completionTokens":1},
+        {"id":"response-α", "ts":200, "promptTokens":20, "completionTokens":2},
+        {"id":"response-α", "ts":200, "promptTokens":30, "completionTokens":3, "cachedTokens":7},
+        {"id":"response-α", "ts":150, "promptTokens":999, "completionTokens":999},
+        {"id":"response-α", "ts":900, "promptTokens":0, "completionTokens":0, "cachedTokens":999},
+        {"id":"response-α", "ts":1000, "promptTokens":-1, "completionTokens":-2, "totalTokens":-3},
+        {"id":"", "ts":2000, "promptTokens":9999}
+    ])));
+    let original_tokens = tokens.clone();
+    enrich_cli_primary(&mut entries, None, &tokens);
+    assert_eq!(tokens, original_tokens);
+    assert_eq!(
+        (
+            entries[0].input_tokens,
+            entries[0].output_tokens,
+            entries[0].total_tokens,
+            entries[0].cache_read_input_tokens
+        ),
+        (Some(30), Some(3), Some(33), Some(7))
+    );
+    assert_eq!(
+        (
+            entries[1].input_tokens,
+            entries[1].output_tokens,
+            entries[1].total_tokens,
+            entries[1].cache_read_input_tokens,
+            entries[1].cache_creation_input_tokens
+        ),
+        (Some(0), Some(0), Some(0), Some(0), Some(0))
+    );
+    assert_eq!(entries[2].input_tokens, Some(99));
+}

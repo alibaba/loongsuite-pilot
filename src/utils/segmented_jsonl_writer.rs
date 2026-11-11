@@ -101,16 +101,30 @@ pub async fn append_segmented_jsonl(
     max_file_bytes: u64,
     failed_data: bool,
 ) -> std::io::Result<()> {
-    let guard = file_lock(file).lock_owned().await;
-    let file = file.to_path_buf();
     let mut data = Vec::with_capacity(line.len().saturating_add(1));
     data.extend_from_slice(line.as_bytes());
     data.push(b'\n');
+    append_segmented_jsonl_batch(file, vec![data], max_file_bytes, failed_data).await
+}
+
+/// Append complete newline-terminated records with one cancellation-safe task.
+/// Rotation and the emergency limit are still checked at each record boundary.
+pub async fn append_segmented_jsonl_batch(
+    file: &Path,
+    records: Vec<Vec<u8>>,
+    max_file_bytes: u64,
+    failed_data: bool,
+) -> std::io::Result<()> {
+    let guard = file_lock(file).lock_owned().await;
+    let file = file.to_path_buf();
     // Keep the lock in the blocking task even if its async caller is cancelled.
     // One task performs the complete append instead of scheduling each file API.
     tokio::task::spawn_blocking(move || {
         let _guard = guard;
-        append_locked(&file, &data, max_file_bytes, failed_data)
+        for data in records {
+            append_locked(&file, &data, max_file_bytes, failed_data)?;
+        }
+        Ok(())
     })
     .await
     .map_err(|error| std::io::Error::other(format!("JSONL append task failed: {error}")))?
@@ -285,5 +299,35 @@ mod tests {
             .await
             .is_err());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "preserve");
+    }
+}
+
+#[cfg(test)]
+mod batch_history_tests {
+    use super::*;
+    #[tokio::test]
+    async fn batched_writes_keep_rotation_at_whole_record_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("qoder-2026-11-08.jsonl");
+        let rows=(0..128).map(|id|{
+            let mut b=serde_json::to_vec(&serde_json::json!({"id":id,"text":"完整记录","nested":{"integer":18446744073709551615u64}})).unwrap();b.push(b'\n');b
+        }).collect();
+        append_segmented_jsonl_batch(&file, rows, 256, false)
+            .await
+            .unwrap();
+        let mut ids = std::collections::BTreeSet::new();
+        for f in std::fs::read_dir(root.path()).unwrap() {
+            let path = f.unwrap().path();
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                let data = std::fs::read_to_string(path).unwrap();
+                assert!(data.len() <= 256);
+                for line in data.lines() {
+                    let row: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(row["nested"]["integer"].as_u64(), Some(u64::MAX));
+                    assert!(ids.insert(row["id"].as_u64().unwrap()));
+                }
+            }
+        }
+        assert_eq!(ids.len(), 128);
     }
 }

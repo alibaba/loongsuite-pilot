@@ -417,7 +417,7 @@ impl InputBody for QoderWorkLogBody {
             rt.state_store.update(
                 &state_key,
                 crate::checkpoints::InputStatePatch {
-                    extra: Some(json!({ "inode": identity.ino, "dev": identity.dev })),
+                    extra: Some(json!({ "inode": identity.ino, "dev": identity.dev, "skippingLine": false })),
                     ..crate::checkpoints::InputStatePatch::default()
                 },
             );
@@ -512,44 +512,42 @@ impl QoderWorkLogBody {
         let prev_dev = prev
             .extra()
             .and_then(|extra| extra.get("dev").and_then(Value::as_u64));
-        if (prev_inode.is_some() && prev_inode != Some(inode))
+        let saved_offset = prev.last_offset().unwrap_or(0.0).max(0.0) as u64;
+        let reset = (prev_inode.is_some() && prev_inode != Some(inode))
             || (prev_dev.is_some() && prev_dev != Some(identity.dev))
-            || rt.state_store.get_offset(&state_key) > identity.size as f64
+            || saved_offset > identity.size;
+        let offset = if reset { 0 } else { saved_offset };
+        if reset {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).policy = ModelPolicy::default();
+        }
+        let skipping = !reset && prev.extra().is_some_and(|v| v["skippingLine"] == true);
+        let batch = super::bounded_line_tail::read_line_tail(
+            &mut file,
+            identity.size,
+            offset,
+            skipping,
+            rt,
+        )
+        .await?;
+        if batch.began_skip {
+            rt.warn(
+                "oversized Qoder Work SDK line skipped",
+                json!({"path":file_path,"offset":offset}).as_object(),
+            );
+        }
+        if reset
+            || prev_inode != Some(inode)
+            || prev_dev != Some(identity.dev)
+            || batch.offset != saved_offset
+            || batch.skipping_line != skipping
         {
-            rt.state_store.set_offset(&state_key, 0.0);
+            rt.state_store.update(&state_key, crate::checkpoints::InputStatePatch {
+                last_offset: Some(batch.offset as f64),
+                extra: Some(json!({"inode":inode,"dev":identity.dev,"skippingLine":batch.skipping_line})),
+                ..Default::default()
+            });
         }
-        let offset = rt.state_store.get_offset(&state_key);
-        if (identity.size as f64) <= offset {
-            return Ok(Vec::new());
-        }
-        let read_size = (identity.size - offset as u64).min(16 * 1024 * 1024) as usize;
-        file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
-        let mut bytes = vec![0; read_size];
-        let mut filled = 0;
-        while filled < bytes.len() {
-            let read = file.read(&mut bytes[filled..]).await?;
-            if read == 0 {
-                break;
-            }
-            filled += read;
-        }
-        bytes.truncate(filled);
-        let mut consumed = bytes.len();
-        if (read_size as u64) < identity.size - offset as u64 {
-            if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
-                bytes.truncate(newline);
-                consumed = newline + 1;
-            }
-        }
-        rt.state_store
-            .set_offset(&state_key, offset + consumed as f64);
-        rt.state_store.update(
-            &state_key,
-            crate::checkpoints::InputStatePatch {
-                extra: Some(json!({ "inode": inode, "dev": identity.dev })),
-                ..crate::checkpoints::InputStatePatch::default()
-            },
-        );
+        let bytes = batch.bytes;
         let text = String::from_utf8_lossy(&bytes);
         let mut out = Vec::new();
         for line in text.split('\n') {
@@ -800,7 +798,7 @@ async fn find_last_result_boundary(file: &mut tokio::fs::File, size: u64) -> f64
     boundary as f64
 }
 
-pub(super) async fn open_log_file(
+pub(crate) async fn open_log_file(
     path: &str,
 ) -> std::io::Result<(
     tokio::fs::File,
@@ -808,7 +806,14 @@ pub(super) async fn open_log_file(
 )> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
         let identity = crate::utils::file_identity::identity_from_open(&file)?;
         Ok((tokio::fs::File::from_std(file), identity))
     })

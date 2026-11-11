@@ -81,6 +81,11 @@ pub fn attach_multimodal_metadata_for_entry(entry: &mut AgentActivityEntry) {
     );
 }
 
+/// URI summaries for a converted span's own (possibly cumulative) messages.
+pub(crate) fn multimodal_metadata_items_from_messages(messages: &[Value]) -> Value {
+    items_to_value(&metadata_items(&collect_uri_parts_from_messages(messages)))
+}
+
 fn metadata_items(parts: &[UriPart]) -> Vec<MultimodalMetadataItem> {
     let mut items = Vec::new();
     let mut seen = std::collections::HashSet::new();

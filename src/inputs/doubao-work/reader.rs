@@ -514,18 +514,33 @@ impl DoubaoWorkNativeReader {
         main: &str,
         budget: &mut DoubaoWorkBudget<'_>,
     ) -> Result<()> {
-        #[cfg(test)]
-        if let Some(kind) = self.next_stat_error.take() {
-            return Err(std::io::Error::new(kind, "injected temporary source stat failure").into());
+        let opened = async {
+            #[cfg(test)]
+            if let Some(kind) = self.next_stat_error.take() {
+                return Err(
+                    std::io::Error::new(kind, "injected temporary source stat failure").into(),
+                );
+            }
+            let path_stat = fs::symlink_metadata(file).await?;
+            if !path_stat.is_file()
+                || path_stat.file_type().is_symlink()
+                || !strictly_within(&fs::canonicalize(file).await?, allowed)
+            {
+                return Err(invalid("Unsafe native source"));
+            }
+            let handle = File::open(file).await?;
+            Ok((path_stat, handle))
         }
-        let path_stat = fs::symlink_metadata(file).await?;
-        if !path_stat.is_file()
-            || path_stat.file_type().is_symlink()
-            || !strictly_within(&fs::canonicalize(file).await?, allowed)
-        {
-            return Err(invalid("Unsafe native source"));
-        }
-        let mut handle = File::open(file).await?;
+        .await;
+        let (path_stat, mut handle) = opened.inspect_err(|error| {
+            // Observed absence or an unsafe path breaks source continuity even
+            // if the original inode later returns with identical timestamps.
+            if missing(error)
+                || matches!(error, DoubaoWorkError::Invalid(reason) if reason == "Unsafe native source")
+            {
+                self.evict(file);
+            }
+        })?;
         let stamp = stamp_of(&handle).await?;
         if !metadata_matches(&path_stat, &handle.metadata().await?) {
             return Err(deferred("source_changed"));
@@ -1340,13 +1355,14 @@ mod tests {
             let mut reader = DoubaoWorkNativeReader::new(options(temp.path()));
             drain(&mut reader, CID, 256 * 1024).await;
             let old = std::fs::metadata(&file).unwrap();
-            #[cfg(windows)]
-            let old_change = windows_change_stamp(&std::fs::File::open(&file).unwrap()).unwrap();
-            #[cfg(windows)]
+            let old_change = stamp_of(&File::open(&file).await.unwrap())
+                .await
+                .unwrap()
+                .changed;
             if mode == "same-size" {
-                // NTFS change-time observations can share a clock tick. Make
-                // this fixture's change witness distinct while restoring mtime
-                // exactly below; all content/reset assertions remain unchanged.
+                // Change-time observations can share a clock tick on Unix and
+                // Windows. Keep the fixture's witness distinct while restoring
+                // mtime exactly; content/reset assertions remain unchanged.
                 tokio::time::sleep(Duration::from_millis(32)).await;
             }
             if mode == "replacement" {
@@ -1369,9 +1385,11 @@ mod tests {
                     std::fs::metadata(&file).unwrap().modified().unwrap(),
                     old.modified().unwrap()
                 );
-                #[cfg(windows)]
                 assert_ne!(
-                    windows_change_stamp(&std::fs::File::open(&file).unwrap()).unwrap(),
+                    stamp_of(&File::open(&file).await.unwrap())
+                        .await
+                        .unwrap()
+                        .changed,
                     old_change,
                     "the restored-mtime fixture must expose a distinct change-time witness"
                 );
@@ -1725,6 +1743,8 @@ mod tests {
         .await;
         let mut reader = DoubaoWorkNativeReader::new(options(temp.path()));
         drain(&mut reader, CID, 256 * 1024).await;
+        assert!(reader.files.contains_key(&file));
+        assert!(reader.graphs.contains_key(CID));
         let saved = file.with_extension("saved");
         fs::rename(&file, &saved).await.unwrap();
         assert!(reader
@@ -1732,10 +1752,14 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(!reader.files.contains_key(&file));
+        assert!(!reader.graphs.contains_key(CID));
         std::os::unix::fs::symlink(&saved, &file).unwrap();
         assert!(
             matches!(reader.graph(CID,&mut full_budget()).await,Err(DoubaoWorkError::Invalid(s)) if s.contains("Unsafe"))
         );
+        assert!(!reader.files.contains_key(&file));
+        assert!(!reader.graphs.contains_key(CID));
         fs::remove_file(&file).await.unwrap();
         fs::rename(&saved, &file).await.unwrap();
         let before = reader.stats().body_read_bytes;
@@ -1747,6 +1771,23 @@ mod tests {
         let restored = reader.stats().body_read_bytes;
         assert_eq!(drain(&mut reader, CID, 256 * 1024).await.main, ACTOR);
         assert_eq!(reader.stats().body_read_bytes, restored);
+
+        // Reject the unsafe replacement directly while the source is cached.
+        fs::rename(&file, &saved).await.unwrap();
+        std::os::unix::fs::symlink(&saved, &file).unwrap();
+        assert!(
+            matches!(reader.graph(CID,&mut full_budget()).await,Err(DoubaoWorkError::Invalid(s)) if s.contains("Unsafe"))
+        );
+        assert!(!reader.files.contains_key(&file));
+        assert!(!reader.graphs.contains_key(CID));
+        fs::remove_file(&file).await.unwrap();
+        fs::rename(&saved, &file).await.unwrap();
+        let before = reader.stats().body_read_bytes;
+        assert_eq!(drain(&mut reader, CID, 256 * 1024).await.main, ACTOR);
+        assert_eq!(
+            reader.stats().body_read_bytes - before,
+            fs::metadata(&file).await.unwrap().len()
+        );
     }
     #[tokio::test]
     async fn oversized_snapshot_rejects_before_body_read() {
@@ -1950,7 +1991,7 @@ mod tests {
     #[tokio::test]
     async fn temporary_stat_failure_preserves_cached_content_and_recovery_needs_no_body_read() {
         let temp = tempfile::tempdir().unwrap();
-        save(
+        let file = save(
             temp.path(),
             CID,
             &[json!({"role":"assistant","content":"FINAL"})],
@@ -1965,6 +2006,8 @@ mod tests {
             error.as_io().unwrap().kind(),
             std::io::ErrorKind::PermissionDenied
         );
+        assert!(reader.files.contains_key(&file));
+        assert!(Arc::ptr_eq(&reader.graphs[CID].1, &graph));
         let restored = drain(&mut reader, CID, 256 * 1024).await;
         assert!(Arc::ptr_eq(&graph, &restored));
         assert_eq!(reader.stats().body_read_bytes, before.body_read_bytes);

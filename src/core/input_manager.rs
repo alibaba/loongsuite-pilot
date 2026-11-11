@@ -616,7 +616,9 @@ impl InputManager {
         if entries.is_empty() {
             return Ok(());
         }
-        enrich_canonical_entries_with_git(&mut entries).await;
+        if crate::utils::source_access::current().is_none() {
+            enrich_canonical_entries_with_git(&mut entries).await;
+        }
         self.apply_identity(&mut entries);
         let prepared = self.apply_mask(entries);
         self.dispatch_entries("interceptor", prepared).await
@@ -641,12 +643,14 @@ impl InputManager {
         if let Some(linker) = self.intercept_linker.lock().expect("intercept").clone() {
             linker.enrich(&mut entries);
         }
-        enrich_canonical_entries_with_git(&mut entries).await;
+        if crate::utils::source_access::current().is_none() {
+            enrich_canonical_entries_with_git(&mut entries).await;
+        }
         if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
             counter.in_events += entries.len() as u64;
             for entry in &entries {
-                counter.in_bytes += serde_json::to_vec(entry)
-                    .map(|bytes| bytes.len() as u64)
+                counter.in_bytes += crate::utils::json_size::serialized_json_size(entry)
+                    .map(|bytes| bytes as u64)
                     .unwrap_or(0);
             }
             counter.last_poll_time = format_time(Local::now());
@@ -747,15 +751,12 @@ impl InputManager {
         input_id: &str,
         entries: Vec<AgentActivityEntry>,
     ) -> Result<(), String> {
-        let bytes: Vec<f64> = entries
+        let encoded = entries
             .iter()
-            .map(|entry| {
-                serde_json::to_vec(entry)
-                    .map(|value| value.len() as f64)
-                    .unwrap_or(0.0)
-            })
-            .collect();
-        let batch_bytes = bytes.iter().sum::<f64>() as u64;
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let batch_bytes = encoded.iter().map(|row| row.len() as u64).sum();
         let flusher = self.flusher.lock().expect("flusher").clone();
         let Some(flusher) = flusher else {
             logger("InputManager").warn(
@@ -779,7 +780,7 @@ impl InputManager {
             return Ok(());
         };
         let entry_count = entries.len();
-        match flusher.send_batch(entries, Some(bytes)).await {
+        match flusher.send_prepared_batch(entries, encoded).await {
             Ok(()) => {
                 if let Some(counter) = self.counters.lock().expect("counters").get_mut(input_id) {
                     counter.out_events += entry_count as u64;

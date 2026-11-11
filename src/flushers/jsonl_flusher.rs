@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 
 use super::base_flusher::{BaseFlusher, FlushError};
-use crate::normalization::{project_log_entry, SerialiseLogEntryOptions};
+use crate::normalization::{project_encoded_log_entry, SerialiseLogEntryOptions};
 use crate::types::{AgentActivityEntry, JsonlFlusherConfig};
+use crate::utils::append_segmented_jsonl_batch;
 use crate::utils::{
     append_segmented_jsonl, ensure_dir, get_today_date_string, DEFAULT_JSONL_SEGMENT_BYTES,
 };
@@ -70,6 +71,10 @@ impl BaseFlusher for JsonlFlusher {
         "jsonl"
     }
 
+    fn uses_prepared_batch(&self) -> bool {
+        true
+    }
+
     async fn start(&self) -> Result<(), FlushError> {
         ensure_dir(&self.config.output_dir).await;
         Ok(())
@@ -80,19 +85,7 @@ impl BaseFlusher for JsonlFlusher {
         entry: AgentActivityEntry,
         _logical_bytes: Option<f64>,
     ) -> Result<(), FlushError> {
-        let path = self.resolve_file_path(&Self::agent_type_of(&entry));
-        let projected = project_log_entry(
-            &entry,
-            &SerialiseLogEntryOptions {
-                drop_agent_scoped_fields: true,
-            },
-        );
-        let line =
-            serde_json::to_string(&Value::Object(projected)).unwrap_or_else(|_| "{}".to_string());
-        let limit = self.max_file_bytes();
-        append_segmented_jsonl(Path::new(&path), &line, limit, false)
-            .await
-            .map_err(|error| FlushError::new(error.to_string()))
+        self.send_batch(vec![entry], None).await
     }
 
     async fn send_batch(
@@ -100,8 +93,52 @@ impl BaseFlusher for JsonlFlusher {
         entries: Vec<AgentActivityEntry>,
         _logical_bytes: Option<Vec<f64>>,
     ) -> Result<(), FlushError> {
-        for entry in entries {
-            self.send(entry, None).await?;
+        let encoded = entries
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| FlushError::new(error.to_string()))?;
+        self.send_prepared_batch(entries, encoded).await
+    }
+
+    async fn send_prepared_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+    ) -> Result<(), FlushError> {
+        if entries.len() != encoded.len() {
+            return Err(FlushError::new("prepared JSONL batch length mismatch"));
+        }
+        let mut path = String::new();
+        let mut records = Vec::new();
+        for (entry, bytes) in entries.iter().zip(encoded) {
+            let next = self.resolve_file_path(&Self::agent_type_of(entry));
+            if !records.is_empty() && path != next {
+                append_segmented_jsonl_batch(
+                    Path::new(&path),
+                    std::mem::take(&mut records),
+                    self.max_file_bytes(),
+                    false,
+                )
+                .await
+                .map_err(|error| FlushError::new(error.to_string()))?;
+            }
+            path = next;
+            let mut row = project_encoded_log_entry(
+                &bytes,
+                &entry.agent_type,
+                &SerialiseLogEntryOptions {
+                    drop_agent_scoped_fields: true,
+                },
+            )
+            .map_err(|error| FlushError::new(error.to_string()))?;
+            row.push(b'\n');
+            records.push(row);
+        }
+        if !records.is_empty() {
+            append_segmented_jsonl_batch(Path::new(&path), records, self.max_file_bytes(), false)
+                .await
+                .map_err(|error| FlushError::new(error.to_string()))?;
         }
         Ok(())
     }

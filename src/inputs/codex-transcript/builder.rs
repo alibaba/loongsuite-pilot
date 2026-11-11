@@ -320,9 +320,9 @@ fn context_from_messages(
         next.extend(delta.iter().cloned());
         next
     });
-    let retain = full_messages.as_ref().is_some_and(|messages| {
-        json_bytes(&Value::Array(messages.clone())) <= MAX_INPUT_MESSAGES_BYTES
-    });
+    let retain = full_messages
+        .as_ref()
+        .is_some_and(|messages| json_bytes(messages) <= MAX_INPUT_MESSAGES_BYTES);
     CodexTranscriptInputContext {
         hash: hash_input_messages(previous_hash, delta),
         delta: Some(delta.to_vec()),
@@ -620,44 +620,238 @@ fn hash_input_messages(previous_hash: &str, messages: &[JsonValue]) -> String {
     for message in messages {
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
-        hasher.update(stable_serialize(message).as_bytes());
+        hash_stable_value(&mut hasher, message);
         hash = hex::encode(hasher.finalize());
         hash.truncate(32);
     }
     hash
 }
 
-fn stable_serialize(value: &JsonValue) -> String {
+/// Stream the existing sorted-key JSON hash representation into SHA-256.
+/// No intermediate strings or copies of message bodies are retained.
+fn hash_stable_value(hasher: &mut Sha256, value: &JsonValue) {
     match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(flag) => {
-            if *flag {
-                "true".to_owned()
-            } else {
-                "false".to_owned()
-            }
-        }
-        Value::Number(number) => number.to_string(),
-        Value::String(text) => serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned()),
         Value::Array(items) => {
-            let parts = items.iter().map(stable_serialize).collect::<Vec<_>>();
-            format!("[{}]", parts.join(","))
+            hasher.update(b"[");
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    hasher.update(b",");
+                }
+                hash_stable_value(hasher, item);
+            }
+            hasher.update(b"]");
         }
         Value::Object(map) => {
-            let mut keys = map.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            let parts = keys
-                .into_iter()
-                .map(|key| {
-                    let rendered =
-                        serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".to_owned());
-                    format!(
-                        "{rendered}:{}",
-                        stable_serialize(map.get(&key).unwrap_or(&Value::Null))
-                    )
-                })
-                .collect::<Vec<_>>();
-            format!("{{{}}}", parts.join(","))
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            hasher.update(b"{");
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    hasher.update(b",");
+                }
+                serde_json::to_writer(HashWriter(&mut *hasher), key).expect("JSON string");
+                hasher.update(b":");
+                hash_stable_value(hasher, value);
+            }
+            hasher.update(b"}");
+        }
+        _ => {
+            serde_json::to_writer(HashWriter(hasher), value).expect("JSON scalar");
+        }
+    }
+}
+
+struct HashWriter<'a>(&'a mut Sha256);
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hash_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn streamed_hash_preserves_sorted_nested_keys_scalar_encoding_and_message_chain() {
+        let cases = [
+            (
+                json!({"z":[true,null,{"b":2,"a":1}],"a":"研发🚀"}),
+                r#"{"a":"研发🚀","z":[true,null,{"a":1,"b":2}]}"#,
+            ),
+            (
+                json!({"text":"quote\" slash\\ line\n tab\t"}),
+                r#"{"text":"quote\" slash\\ line\n tab\t"}"#,
+            ),
+            (json!([-1, 0, 0.5, 1e-20]), "[-1,0,0.5,1e-20]"),
+        ];
+        let mut expected_hash = "prior".to_owned();
+        let mut messages = Vec::new();
+        for (value, expected_bytes) in cases {
+            let mut digest = Sha256::new();
+            hash_stable_value(&mut digest, &value);
+            assert_eq!(
+                hex::encode(digest.finalize()),
+                hex::encode(Sha256::digest(expected_bytes.as_bytes()))
+            );
+            let mut digest = Sha256::new();
+            digest.update(expected_hash.as_bytes());
+            digest.update(expected_bytes.as_bytes());
+            expected_hash = hex::encode(digest.finalize());
+            expected_hash.truncate(32);
+            messages.push(value);
+            assert_eq!(hash_input_messages("prior", &messages), expected_hash);
+        }
+    }
+}
+
+// Append this module to src/inputs/codex-transcript/builder.rs.
+// The oracle is the unchanged 9dd98cca stable_serialize implementation, test-only.
+#[cfg(test)]
+mod cpu_optimization_hash_boundary_tests {
+    use super::*;
+
+    fn legacy_stable_serialize(value: &JsonValue) -> String {
+        match value {
+            Value::Null => "null".to_owned(),
+            Value::Bool(flag) => {
+                if *flag {
+                    "true".to_owned()
+                } else {
+                    "false".to_owned()
+                }
+            }
+            Value::Number(number) => number.to_string(),
+            Value::String(text) => {
+                serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
+            }
+            Value::Array(items) => {
+                let parts = items
+                    .iter()
+                    .map(legacy_stable_serialize)
+                    .collect::<Vec<_>>();
+                format!("[{}]", parts.join(","))
+            }
+            Value::Object(map) => {
+                let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                let parts = keys
+                    .into_iter()
+                    .map(|key| {
+                        let rendered =
+                            serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".to_owned());
+                        format!(
+                            "{rendered}:{}",
+                            legacy_stable_serialize(map.get(&key).unwrap_or(&Value::Null))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+    }
+
+    fn legacy_hash_chain(previous: &str, messages: &[JsonValue]) -> String {
+        let mut hash = previous.to_owned();
+        for message in messages {
+            let mut hasher = Sha256::new();
+            hasher.update(hash.as_bytes());
+            hasher.update(legacy_stable_serialize(message).as_bytes());
+            hash = hex::encode(hasher.finalize());
+            hash.truncate(32);
+        }
+        hash
+    }
+
+    #[test]
+    fn streamed_hash_matches_legacy_for_numeric_unicode_and_nested_boundaries() {
+        let mut cases = vec![
+            Value::Null,
+            json!(true),
+            json!(false),
+            json!([]),
+            json!({}),
+            json!([u64::MAX, i64::MIN, i64::MAX, 0]),
+            json!([
+                -0.0,
+                0.0,
+                1e-300,
+                -1e-300,
+                1e300,
+                -1e300,
+                f64::MIN_POSITIVE,
+                f64::MAX
+            ]),
+            json!("\0\u{1}\u{8}\u{b}\u{c}\u{1f}\t\n\r\"\\/研发🚀"),
+            json!({"z": {}, "a": [], "\u{10000}": 1, "\u{e000}": 2, "é": 3, "e\u{301}": 4}),
+            json!({"content": "研发🚀".repeat(8192)}),
+        ];
+        let mut nested = json!({"leaf": [u64::MAX, -0.0, "escaped\n研发"]});
+        for level in 0..64 {
+            nested = if level % 2 == 0 {
+                json!([nested, null])
+            } else {
+                json!({"z": nested, "a": []})
+            };
+        }
+        cases.push(nested);
+        let mut wide = Map::new();
+        for number in (0..128).rev() {
+            wide.insert(
+                format!("key_{number:03}"),
+                json!({"z": number, "a": "value"}),
+            );
+        }
+        cases.push(Value::Object(wide));
+
+        for value in &cases {
+            let mut actual = Sha256::new();
+            hash_stable_value(&mut actual, value);
+            assert_eq!(
+                hex::encode(actual.finalize()),
+                hex::encode(Sha256::digest(legacy_stable_serialize(value).as_bytes()))
+            );
+        }
+        for seed in ["".to_owned(), "prior".to_owned(), initial_input_hash()] {
+            for end in 0..=cases.len() {
+                assert_eq!(
+                    hash_input_messages(&seed, &cases[..end]),
+                    legacy_hash_chain(&seed, &cases[..end]),
+                    "chain seed={seed:?}, end={end}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_context_budget_is_unchanged_below_at_and_above_limit() {
+        let empty = Vec::new();
+        for target in [
+            MAX_INPUT_MESSAGES_BYTES - 1,
+            MAX_INPUT_MESSAGES_BYTES,
+            MAX_INPUT_MESSAGES_BYTES + 1,
+        ] {
+            // [""] contributes four ASCII JSON bytes; the payload itself needs no escaping.
+            let delta = vec![Value::String("x".repeat(target - 4))];
+            let old_bytes = serde_json::to_vec(&Value::Array(delta.clone()))
+                .unwrap()
+                .len();
+            assert_eq!(old_bytes, target);
+            assert_eq!(json_bytes(&delta), old_bytes);
+            let actual = context_from_messages("seed", Some(&empty), &delta);
+            assert_eq!(
+                actual.full_messages.is_some(),
+                old_bytes <= MAX_INPUT_MESSAGES_BYTES
+            );
+            assert_eq!(actual.delta.as_ref(), Some(&delta));
+            assert_eq!(actual.hash, legacy_hash_chain("seed", &delta));
+            if target <= MAX_INPUT_MESSAGES_BYTES {
+                assert_eq!(actual.full_messages.as_ref(), Some(&delta));
+            }
         }
     }
 }

@@ -34,6 +34,10 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 impl RuntimeLauncher {
+    pub(super) fn hook_path(&self) -> &Path {
+        &self.launcher_path
+    }
+
     pub(super) fn read(cache: &Path, data: &Path) -> Result<Option<Self>> {
         let path = cache.join("container-runtime.json");
         let Some(metadata) = ordinary(&path)? else {

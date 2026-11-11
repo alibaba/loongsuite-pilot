@@ -143,7 +143,17 @@ mod resource_history_tests {
     fn source_role_registry_and_six_platform_budget_are_explicit_and_bounded() {
         let root=tempfile::tempdir().unwrap();
         let registry=crate::deployment::runtime_data_assets::registry(root.path(),true);
-        assert_eq!(registry.len(),22);
+        let qoder_cli_paths = [
+            "hooks/qodercli-runtime-wrapper.sh",
+            "hooks/qodercli-token-intercept.mjs",
+        ];
+        let qoder_cli_roles = if cfg!(unix) { qoder_cli_paths.len() } else { 0 };
+        assert_eq!(registry.len(), 22 + qoder_cli_roles);
+        for relative in qoder_cli_paths {
+            let role = format!("runtime-resource:{relative}");
+            let target = root.path().join(relative);
+            assert_eq!(registry.get(&role), cfg!(unix).then_some(&target));
+        }
         let actual:std::collections::BTreeSet<_>=walkdir::WalkDir::new(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/skills"))
             .into_iter().map(Result::unwrap).filter(|entry|entry.file_type().is_file())
@@ -151,7 +161,9 @@ mod resource_history_tests {
                 .unwrap().to_str().unwrap().replace('\\',"/")).collect();
         let registered:std::collections::BTreeSet<_>=crate::deployment::runtime_data_assets::SKILLS.iter().map(|path|path.to_string()).collect();
         assert!(actual.is_subset(&registered),"new resources require an explicit append-only recovery role");
-        assert!(actual.len()+2+1+6<=MAX_TARGETS);
+        // Budget for the two plugin files, their marker, the Unix Qoder pair,
+        // and the six other activation targets on every supported platform.
+        assert!(actual.len() + 2 + 1 + qoder_cli_paths.len() + 6 <= MAX_TARGETS);
     }
 
     #[cfg(unix)]

@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# Launch a Qoder CLI with the token intercept scoped to this process only.
+# Launch Qoder CLI with its native usage export scoped to this process.
+# The separate Qoder CN flavor retains its existing preload bridge.
 #
 # Serves both product lines: LOONGSUITE_QODERCLI_FLAVOR selects which one, and
 # defaults to qodercli so an rc block written by an older install keeps working.
@@ -78,7 +79,12 @@ launch_qodercli() {
   exec "$QODERCLI_BIN" "$@"
 }
 
-# Missing hook assets must never prevent the CLI from starting.
+if [ "$QODERCLI_FLAVOR" = qodercli ]; then
+  export QODER_EXPOSE_TOKEN_USAGE="${QODER_EXPOSE_TOKEN_USAGE:-true}"
+  launch_qodercli "$@"
+fi
+
+# Missing Qoder CN assets must never prevent the CLI from starting.
 if [ ! -f "$INTERCEPT_SCRIPT" ]; then
   launch_qodercli "$@"
 fi

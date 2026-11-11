@@ -356,6 +356,30 @@ impl WorkspacePolicy {
             .collect()
     }
 
+    pub(crate) fn filter_entries_owned(
+        &mut self,
+        entries: Vec<AgentActivityEntry>,
+        agent_type: ClientType,
+    ) -> Vec<AgentActivityEntry> {
+        if self.roots.is_empty() {
+            return entries;
+        }
+        let maps: Vec<_> = entries
+            .iter()
+            .map(crate::normalization::entry_to_object)
+            .collect();
+        let agent = agent_type.as_str();
+        for record in &maps {
+            let _ = self.allows(record, agent);
+        }
+        entries
+            .into_iter()
+            .zip(maps)
+            .filter(|(_, record)| self.allows(record, agent))
+            .map(|(entry, _)| entry)
+            .collect()
+    }
+
     /// Side-effect pass used by trace inputs that ignore the filtered list.
     pub fn preflight_entries(&mut self, entries: &[AgentActivityEntry], agent_type: ClientType) {
         if self.roots.is_empty() {
@@ -370,5 +394,224 @@ impl WorkspacePolicy {
         }
         let map = crate::normalization::entry_to_object(entry);
         self.allows(&map, agent_type.as_str())
+    }
+}
+
+#[cfg(test)]
+mod owned_entry_filter_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn entry(id: &str, agent: &str, session: &str, workspace: Option<&Path>) -> AgentActivityEntry {
+        let mut nested = Map::new();
+        nested.insert(
+            "zeta-first".into(),
+            json!([null, true, 1.25, {"raw":"路径\r\n原文"}]),
+        );
+        nested.insert("alpha-second".into(), Value::Null);
+        let mut fields = json!({
+            "event.id": id,
+            "event.name": "llm.request",
+            "time_unix_nano": "1794294000000000000",
+            "gen_ai.agent.type": agent,
+            "gen_ai.session.id": session,
+            "gen_ai.input.messages_delta": [{
+                "role":"user", "parts":[{"type":"future-part","payload":{"array":[null,{},[]]}}]
+            }]
+        });
+        let object = fields.as_object_mut().unwrap();
+        object.insert("future.z-before-a".into(), Value::Object(nested));
+        object.insert(
+            "future.a-after-z".into(),
+            json!({"unknown":[{"keep":false},null]}),
+        );
+        object.insert(
+            "future.payload".into(),
+            Value::String("原始 payload\n".repeat(64)),
+        );
+        if let Some(workspace) = workspace {
+            object.insert("workspace.path".into(), json!(workspace));
+        }
+        serde_json::from_value(fields).unwrap()
+    }
+
+    fn bytes(entries: &[AgentActivityEntry]) -> Vec<u8> {
+        serde_json::to_vec(entries).unwrap()
+    }
+
+    fn ids(entries: &[AgentActivityEntry]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.event_id.as_str())
+            .collect()
+    }
+
+    fn late_exclusion_batch(excluded: &Path, allowed: &Path) -> Vec<AgentActivityEntry> {
+        vec![
+            entry("qoder-before-without-path", "qoder", "shared", None),
+            entry("codex-before", "codex", "shared", Some(allowed)),
+            entry("other-session", "qoder", "different", Some(allowed)),
+            entry("codex-after", "codex", "shared", None),
+            entry(
+                "qoder-before-with-allowed-path",
+                "qoder",
+                "shared",
+                Some(allowed),
+            ),
+            entry("late-excluded-notice", "qoder", "shared", Some(excluded)),
+        ]
+    }
+
+    fn assert_blocked_session_and_markers(
+        owned: &WorkspacePolicy,
+        borrowed: &WorkspacePolicy,
+        owned_state: &Path,
+        borrowed_state: &Path,
+    ) {
+        let blocked = sha256_hex("qoder\0shared");
+        let other_agent = sha256_hex("codex\0shared");
+        assert_eq!(owned.blocked, borrowed.blocked);
+        assert_eq!(owned.blocked, BTreeSet::from([blocked.clone()]));
+        assert_eq!(owned.fingerprint(), borrowed.fingerprint());
+        assert!(!owned.has_pending_markers());
+        assert!(!borrowed.has_pending_markers());
+        assert_ne!(owned_state, borrowed_state);
+        for state in [owned_state, borrowed_state] {
+            let directory = state.join(owned.fingerprint());
+            assert!(directory.join(&blocked).is_file());
+            assert!(!directory.join(&other_agent).exists());
+            assert_eq!(
+                fs::read(directory.join(&blocked)).unwrap(),
+                Vec::<u8>::new()
+            );
+            assert_eq!(fs::read_dir(directory).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn owned_empty_roots_preserve_original_vec_allocation_and_complete_entry_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let owned_state = root.path().join("owned-markers");
+        let borrowed_state = root.path().join("borrowed-markers");
+        let mut owned = WorkspacePolicy::new(Vec::new(), Some(owned_state.clone()));
+        let mut borrowed = WorkspacePolicy::new(Vec::new(), Some(borrowed_state.clone()));
+        let mut input = Vec::with_capacity(19);
+        input.extend([
+            entry("first", "qoder", "one", None),
+            entry("second", "codex", "two", None),
+        ]);
+        let original_bytes = bytes(&input);
+        let allocation = input.as_ptr();
+        let capacity = input.capacity();
+        let payload = input[0].extra["future.payload"].as_str().unwrap().as_ptr();
+        let expected = borrowed.filter_entries(&input, ClientType::Qoder);
+        let actual = owned.filter_entries_owned(input, ClientType::Qoder);
+
+        assert_eq!(
+            actual.as_ptr(),
+            allocation,
+            "disabled policy must return the owned Vec allocation"
+        );
+        assert_eq!(actual.capacity(), capacity);
+        assert_eq!(
+            actual[0].extra["future.payload"].as_str().unwrap().as_ptr(),
+            payload
+        );
+        assert_eq!(ids(&actual), ["first", "second"]);
+        assert_eq!(bytes(&actual), original_bytes);
+        assert_eq!(bytes(&actual), bytes(&expected));
+        assert_eq!(
+            actual[0].extra["future.z-before-a"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["zeta-first", "alpha-second"]
+        );
+        assert_eq!(owned.blocked, borrowed.blocked);
+        assert!(owned.blocked.is_empty());
+        assert!(!owned_state.exists());
+        assert!(!borrowed_state.exists());
+    }
+
+    #[test]
+    fn owned_late_exclusion_retroactively_blocks_only_owning_agent_session_and_survives_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let excluded = root.path().join("excluded");
+        let allowed = root.path().join("excluded-sibling");
+        fs::create_dir_all(&excluded).unwrap();
+        fs::create_dir_all(&allowed).unwrap();
+        let roots = vec![excluded.to_string_lossy().into_owned()];
+        let owned_state = root.path().join("owned-markers");
+        let borrowed_state = root.path().join("borrowed-markers");
+        let mut owned = WorkspacePolicy::new(roots.clone(), Some(owned_state.clone()));
+        let mut borrowed = WorkspacePolicy::new(roots.clone(), Some(borrowed_state.clone()));
+        let input = late_exclusion_batch(&excluded.join("nested"), &allowed);
+        let expected = borrowed.filter_entries(&input, ClientType::Qoder);
+        let actual = owned.filter_entries_owned(input, ClientType::Qoder);
+
+        assert_eq!(
+            ids(&actual),
+            ["codex-before", "other-session", "codex-after"]
+        );
+        assert_eq!(bytes(&actual), bytes(&expected));
+        assert_blocked_session_and_markers(&owned, &borrowed, &owned_state, &borrowed_state);
+        drop(owned);
+        drop(borrowed);
+
+        let mut owned = WorkspacePolicy::new(roots.clone(), Some(owned_state));
+        let mut borrowed = WorkspacePolicy::new(roots, Some(borrowed_state));
+        assert!(owned.blocked.is_empty());
+        assert!(borrowed.blocked.is_empty());
+        let restarted = vec![
+            entry(
+                "blocked-after-restart-without-path",
+                "qoder",
+                "shared",
+                None,
+            ),
+            entry("codex-after-restart", "codex", "shared", None),
+            entry("other-session-after-restart", "qoder", "different", None),
+        ];
+        let expected = borrowed.filter_entries(&restarted, ClientType::Qoder);
+        let actual = owned.filter_entries_owned(restarted, ClientType::Qoder);
+        assert_eq!(
+            ids(&actual),
+            ["codex-after-restart", "other-session-after-restart"]
+        );
+        assert_eq!(bytes(&actual), bytes(&expected));
+        assert_eq!(owned.blocked, borrowed.blocked);
+        assert!(
+            owned.blocked.is_empty(),
+            "rejection must be proven by the durable marker, not retained memory"
+        );
+        assert!(!owned.has_pending_markers());
+        assert!(!borrowed.has_pending_markers());
+    }
+
+    #[test]
+    fn owned_excluded_notice_first_matches_borrowed_oracle_and_keeps_reverse_survivor_order() {
+        let root = tempfile::tempdir().unwrap();
+        let excluded = root.path().join("excluded");
+        let allowed = root.path().join("excluded-sibling");
+        fs::create_dir_all(&excluded).unwrap();
+        fs::create_dir_all(&allowed).unwrap();
+        let roots = vec![excluded.to_string_lossy().into_owned()];
+        let owned_state = root.path().join("owned-reverse-markers");
+        let borrowed_state = root.path().join("borrowed-reverse-markers");
+        let mut owned = WorkspacePolicy::new(roots.clone(), Some(owned_state.clone()));
+        let mut borrowed = WorkspacePolicy::new(roots, Some(borrowed_state.clone()));
+        let mut input = late_exclusion_batch(&excluded.join("nested"), &allowed);
+        input.reverse();
+        assert_eq!(input[0].event_id, "late-excluded-notice");
+        let expected = borrowed.filter_entries(&input, ClientType::Qoder);
+        let actual = owned.filter_entries_owned(input, ClientType::Qoder);
+        assert_eq!(
+            ids(&actual),
+            ["codex-after", "other-session", "codex-before"]
+        );
+        assert_eq!(bytes(&actual), bytes(&expected));
+        assert_blocked_session_and_markers(&owned, &borrowed, &owned_state, &borrowed_state);
     }
 }

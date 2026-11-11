@@ -4,6 +4,7 @@
 //! the last complete JSONL record. One 25ms retry runs when an expected request
 //! id is missing from a retryable snapshot.
 
+use super::transcript_scanner::{version, FileVersion};
 use crate::utils::{create_logger, resolve_home};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -17,6 +18,8 @@ pub const QODER_CN_SEGMENTS_ROOT: &str = "~/.qoder-cn/logs/sessions";
 const EXPECTED_ID_RETRY_DELAY_MS: u64 = 25;
 const SESSION_IDLE_MS: i64 = 60_000;
 const SESSION_MAX_SIZE: usize = 50;
+const READ_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_RECORD_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SegmentTokenData {
@@ -32,11 +35,24 @@ pub struct SegmentTokenData {
     pub model: String,
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+struct FileCursor {
+    committed_offset: u64,
+    skipping_line: bool,
+    incomplete: Option<FileVersion>,
+}
+
 struct FileState {
     dev: u64,
     ino: u64,
-    committed_offset: u64,
+    cursor: FileCursor,
     events: Vec<SegmentEvent>,
+}
+
+impl FileState {
+    fn stamp(&self) -> (u64, u64, FileCursor) {
+        (self.dev, self.ino, self.cursor.clone())
+    }
 }
 
 struct SessionState {
@@ -121,46 +137,41 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
         state.last_access_ms = now;
         files
             .into_iter()
-            .map(|file| {
+            .filter_map(|file| {
                 let existing = state.files.get(&file.path);
-                let offset = match existing {
-                    Some(existing)
-                        if existing.dev == file.dev
-                            && existing.ino == file.ino
-                            && file.size >= existing.committed_offset =>
-                    {
-                        existing.committed_offset
-                    }
-                    _ => 0,
-                };
-                (file, offset)
+                let previous = existing.map(FileState::stamp);
+                let retained = existing.filter(|state| {
+                    state.dev == file.version.dev
+                        && state.ino == file.version.ino
+                        && file.version.size >= state.cursor.committed_offset
+                });
+                let reset = retained.is_none();
+                let cursor = retained
+                    .map(|state| state.cursor.clone())
+                    .unwrap_or_default();
+                if !reset
+                    && (file.version.size <= cursor.committed_offset
+                        || cursor.incomplete.as_ref() == Some(&file.version))
+                {
+                    return None;
+                }
+                Some((file, previous, cursor, reset))
             })
             .collect::<Vec<_>>()
     };
     let mut appended = Vec::new();
-    for (mut found, offset) in plan {
-        if found.size <= offset && offset > 0 {
-            continue;
-        }
+    for (mut file, previous, mut cursor, reset) in plan {
         #[cfg(test)]
         test_io::body_open();
-        let path = found.path.clone();
-        let dev = found.dev;
-        let ino = found.ino;
-        let mut scratch = FileState {
-            dev,
-            ino,
-            committed_offset: offset,
-            events: Vec::new(),
-        };
-        let read = read_appended(&mut found, &mut scratch).await;
+        let read = read_appended(&mut file, &mut cursor, session_id).await;
         stable_failure |= read.stable_failure;
         appended.push((
-            path,
-            dev,
-            ino,
-            scratch.committed_offset,
-            offset == 0,
+            file.path,
+            file.version.dev,
+            file.version.ino,
+            previous,
+            cursor,
+            reset,
             read.events,
         ));
     }
@@ -169,26 +180,27 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
         return (Vec::new(), retryable && !stable_failure);
     };
     let mut changed = false;
-    for (path, dev, ino, committed, reset, events) in appended {
+    for (path, dev, ino, previous, cursor, reset, events) in appended {
+        // Another call can collect this source while the file read is in flight.
+        // Only apply an append against the exact cursor from which it was read.
+        if state.files.get(&path).map(FileState::stamp) != previous {
+            continue;
+        }
         if reset {
             state.files.insert(
-                path.clone(),
+                path,
                 FileState {
                     dev,
                     ino,
-                    committed_offset: committed,
+                    cursor,
                     events,
                 },
             );
             changed = true;
-            continue;
-        }
-        if let Some(file_state) = state.files.get_mut(&path) {
-            if !events.is_empty() || file_state.committed_offset != committed {
-                changed = true;
-            }
+        } else if let Some(file_state) = state.files.get_mut(&path) {
+            changed |= !events.is_empty();
             file_state.events.extend(events);
-            file_state.committed_offset = committed;
+            file_state.cursor = cursor;
         }
     }
     let before = state.files.len();
@@ -209,9 +221,7 @@ async fn read_once(session_id: &str, segments_root: &str) -> (Vec<SegmentTokenDa
 struct FoundFile {
     opened: tokio::fs::File,
     path: String,
-    dev: u64,
-    ino: u64,
-    size: u64,
+    version: FileVersion,
 }
 type HashSetPaths = Vec<String>;
 
@@ -283,7 +293,7 @@ async fn find_files(session_id: &str, segments_root: &str) -> FileScan {
     let root_read = async {
         #[cfg(test)]
         test_io::root()?;
-        tokio::fs::read_dir(&root).await
+        crate::utils::source_access::read_dir_async(&root).await
     }
     .await;
     let mut cwd_dirs = match root_read {
@@ -314,7 +324,7 @@ async fn find_files(session_id: &str, segments_root: &str) -> FileScan {
         let directory_read = async {
             #[cfg(test)]
             test_io::directory()?;
-            tokio::fs::read_dir(&seg_dir).await
+            crate::utils::source_access::read_dir_async(&seg_dir).await
         }
         .await;
         let mut entries = match directory_read {
@@ -356,14 +366,12 @@ async fn open_segment_file(path: String) -> std::io::Result<FoundFile> {
         test_io::stat()?;
     }
     tokio::task::spawn_blocking(move || {
-        let opened = std::fs::File::open(&path)?;
-        let identity = crate::utils::file_identity::identity_from_open(&opened)?;
+        let opened = crate::utils::source_access::open(&path)?;
+        let version = version(&opened)?;
         Ok(FoundFile {
             path,
             opened: tokio::fs::File::from_std(opened),
-            dev: identity.dev,
-            ino: identity.ino,
-            size: identity.size,
+            version,
         })
     })
     .await
@@ -373,53 +381,99 @@ struct AppendedRead {
     events: Vec<SegmentEvent>,
     stable_failure: bool,
 }
-async fn read_appended(file: &mut FoundFile, state: &mut FileState) -> AppendedRead {
+async fn read_appended(
+    file: &mut FoundFile,
+    cursor: &mut FileCursor,
+    session_id: &str,
+) -> AppendedRead {
     let mut result = AppendedRead {
         events: Vec::new(),
         stable_failure: false,
     };
-    let start = state.committed_offset;
-    if start >= file.size {
+    let start = cursor.committed_offset;
+    cursor.incomplete = None;
+    if start >= file.version.size {
         return result;
     }
     if let Err(error) = file.opened.seek(std::io::SeekFrom::Start(start)).await {
         result.stable_failure = !is_transient(&error);
         return result;
     }
-    let Ok(length) = usize::try_from(file.size - start) else {
-        result.stable_failure = true;
-        return result;
-    };
-    let mut bytes = vec![0; length];
-    let mut filled = 0;
-    while filled < bytes.len() {
-        match read_chunk(&mut file.opened, &mut bytes[filled..]).await {
+    let mut chunk = vec![0; (file.version.size - start).min(READ_CHUNK_BYTES as u64) as usize];
+    let mut record = Vec::new();
+    let mut position = start;
+    while position < file.version.size {
+        let wanted = (file.version.size - position).min(chunk.len() as u64) as usize;
+        let bytes_read = match read_chunk(&mut file.opened, &mut chunk[..wanted]).await {
             Ok(0) => break,
-            Ok(read) => filled += read,
+            Ok(read) => read,
             Err(error) => {
                 result.stable_failure = !is_transient(&error);
                 break;
             }
-        }
-    }
-    bytes.truncate(filled);
-    let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return result;
-    };
-    let text = String::from_utf8_lossy(&bytes[..=newline]);
-    state.committed_offset = start + newline as u64 + 1;
-    for line in text.split('\n') {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(record) = serde_json::from_str::<Value>(line) {
-            if let Some(event) = to_event(&record) {
-                result.events.push(event);
+        };
+        let chunk_start = position;
+        position += bytes_read as u64;
+        let mut begin = 0;
+        while begin < bytes_read {
+            let newline = chunk[begin..bytes_read]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map(|offset| begin + offset);
+            let end = newline.unwrap_or(bytes_read);
+            let fragment = &chunk[begin..end];
+            if !cursor.skipping_line {
+                if fragment.len() > MAX_RECORD_BYTES - record.len() {
+                    cursor.skipping_line = true;
+                    record = Vec::new();
+                    create_logger("SegmentTokenReader").warn(
+                        "oversized segment JSONL record; skipping it",
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "filePath": file.path,
+                            "offset": cursor.committed_offset,
+                            "maxRecordBytes": MAX_RECORD_BYTES,
+                        })
+                        .as_object(),
+                    );
+                } else if newline.is_some() {
+                    if record.is_empty() {
+                        push_segment_event(fragment, &mut result.events);
+                    } else {
+                        record.extend_from_slice(fragment);
+                        push_segment_event(&record, &mut result.events);
+                    }
+                } else {
+                    record.extend_from_slice(fragment);
+                }
+            }
+            if let Some(newline) = newline {
+                record.clear();
+                cursor.skipping_line = false;
+                begin = newline + 1;
+                cursor.committed_offset = chunk_start + begin as u64;
+            } else {
+                if cursor.skipping_line {
+                    cursor.committed_offset = position;
+                }
+                break;
             }
         }
     }
+    if position == file.version.size && cursor.committed_offset < position {
+        cursor.incomplete = Some(file.version.clone());
+    }
     result
+}
+
+fn push_segment_event(line: &[u8], events: &mut Vec<SegmentEvent>) {
+    let text = String::from_utf8_lossy(line);
+    let Ok(record) = serde_json::from_str::<Value>(text.trim()) else {
+        return;
+    };
+    if let Some(event) = to_event(&record) {
+        events.push(event);
+    }
 }
 
 async fn read_chunk(file: &mut tokio::fs::File, bytes: &mut [u8]) -> std::io::Result<usize> {

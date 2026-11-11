@@ -1821,7 +1821,12 @@ mod tests {
         assert!(
             supervisor
                 .stop_if_present("fixture", dir.path().to_str().unwrap(), &options)
-                .await
+                .await,
+            "status={:?}, pid={:?}, signals={:?}, alive={:?}",
+            read_status(&paths.status).await,
+            read_pid_checked(&paths.pid).await,
+            ops.signals.lock().unwrap(),
+            ops.alive.lock().unwrap()
         );
         assert!(ops.alive.lock().unwrap().is_empty());
     }

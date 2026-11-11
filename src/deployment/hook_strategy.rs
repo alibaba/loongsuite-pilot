@@ -278,6 +278,7 @@ fn hook_commands_match(installed: &str, expected: &str) -> bool {
 fn windows_hook_spelling_aliases(definition: &HookDefinition, data: &Value) -> HookDefinition {
     let mut definition = definition.clone();
     let known: HashSet<_> = std::iter::once(&definition.hook_command)
+        .filter(|_| definition.exec_args.is_none())
         .chain(definition.replace_hook_commands.iter().flatten())
         .filter_map(|command| windows_hook_comparison_key(command))
         .collect();
@@ -315,6 +316,296 @@ fn windows_hook_spelling_aliases(definition: &HookDefinition, data: &Value) -> H
     }
     definition.replace_hook_commands = Some(aliases);
     definition
+}
+
+const QODER_VERIFIED_EXEC_VERSION: semver::Version = semver::Version::new(1, 1, 76);
+const QODER_EXEC_TIMEOUT: f64 = 4.0;
+
+fn qoder_supports_exec(executable: &Path) -> bool {
+    let Some(name) = executable.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    ["qodercli-", "qoder-"]
+        .into_iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .and_then(|version| semver::Version::parse(version).ok())
+        .is_some_and(|version| version >= QODER_VERIFIED_EXEC_VERSION)
+}
+
+fn qoder_installed_cli(home: &Path) -> Option<bool> {
+    use std::io::Read;
+    let directory = home.join("bin/qodercli");
+    let marker = directory.join("version.txt");
+    if matches!(
+        std::fs::symlink_metadata(&marker),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return None;
+    }
+    Some(
+        (|| {
+            let metadata = crate::utils::runtime_paths::runtime_metadata(&marker).ok()?;
+            if !metadata.is_file() || metadata.len() > 64 {
+                return None;
+            }
+            let mut version = String::new();
+            std::fs::File::open(&marker)
+                .ok()?
+                .take(65)
+                .read_to_string(&mut version)
+                .ok()?;
+            if version.len() > 64 {
+                return None;
+            }
+            let version = semver::Version::parse(version.trim()).ok()?;
+            let extension = if cfg!(windows) { ".exe" } else { "" };
+            let path = directory.join(format!("qodercli-{version}{extension}"));
+            let metadata = crate::utils::runtime_paths::runtime_metadata(&path).ok()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return None;
+                }
+            }
+            Some(metadata.is_file() && qoder_supports_exec(&path))
+        })()
+        .unwrap_or(false),
+    )
+}
+
+fn qoder_exec_supported(settings_path: &str) -> bool {
+    let settings = PathBuf::from(resolve_home(settings_path));
+    if let Some(supported) = settings.parent().and_then(qoder_installed_cli) {
+        return supported;
+    }
+    ["qodercli", "qoder"]
+        .into_iter()
+        .find_map(|command| which::which(command).ok())
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .is_some_and(|path| qoder_supports_exec(&path))
+}
+
+pub(super) fn pilot_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "loongsuite-pilot.exe"
+    } else {
+        "loongsuite-pilot"
+    }
+}
+
+pub(super) fn installed_qoder_hook_binary(
+    pilot: &Path,
+    data: &Path,
+    cache: &Path,
+) -> Option<PathBuf> {
+    use crate::utils::runtime_paths::resource_file;
+    let executable = resource_file(pilot, &format!("bin/{}", pilot_binary_name())).ok()?;
+    let sdk = if cfg!(windows) {
+        "bin/loongsuite_pilot.dll"
+    } else if cfg!(target_os = "macos") {
+        "bin/libloongsuite_pilot.dylib"
+    } else {
+        "bin/libloongsuite_pilot.so"
+    };
+    resource_file(pilot, sdk).ok()?;
+    let current = super::native_install::read_pointer(&cache.join("current")).ok()??;
+    if std::fs::canonicalize(cache.join("versions").join(current)).ok()?
+        != std::fs::canonicalize(pilot).ok()?
+        || !data.is_absolute()
+        || data.to_str().is_none()
+        || !matches!(
+            std::fs::symlink_metadata(cache.join("update-recovery.json")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    {
+        return None;
+    }
+    let binary = super::runtime_launcher::RuntimeLauncher::read(cache, data)
+        .ok()?
+        .map_or(executable, |runtime| runtime.hook_path().to_owned());
+    let metadata = crate::utils::runtime_paths::runtime_metadata(&binary).ok()?;
+    let path = binary.to_str()?;
+    (binary.is_absolute() && metadata.is_file() && !path.chars().any(char::is_control))
+        .then_some(binary)
+}
+
+fn hook_cache_dir(data: &Path) -> PathBuf {
+    std::env::var_os("LOONGSUITE_PILOT_CACHE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data.to_owned())
+}
+
+fn qoder_exec_args(legacy: &HookDefinition, data: &Path) -> Vec<String> {
+    let args: &[&str] = if legacy
+        .hook_json_path
+        .last()
+        .is_some_and(|event| event == "Stop")
+    {
+        &[
+            "hook-process",
+            "qoder",
+            "--wakeup-only",
+            "--agent-id",
+            "qoder",
+            "--log-prefix",
+            "qoder",
+        ]
+    } else {
+        &["interceptor", "hook", "--agent", "qoder-auto"]
+    };
+    args.iter()
+        .map(|arg| (*arg).to_owned())
+        .chain(["--data-dir".into(), data.to_string_lossy().into_owned()])
+        .collect()
+}
+
+fn qoder_exec_definition(legacy: &HookDefinition, binary: &Path, data: &Path) -> HookDefinition {
+    let mut definition = legacy.clone();
+    let command = std::mem::replace(
+        &mut definition.hook_command,
+        binary.to_string_lossy().into_owned(),
+    );
+    definition
+        .replace_hook_commands
+        .get_or_insert_with(Vec::new)
+        .push(command);
+    definition.exec_args = Some(qoder_exec_args(legacy, data));
+    definition.shell = None;
+    definition.timeout = Some(legacy.timeout.map_or(QODER_EXEC_TIMEOUT, |timeout| {
+        timeout.min(QODER_EXEC_TIMEOUT)
+    }));
+    definition
+}
+
+fn qoder_owned_exec_hooks(
+    settings: &Value,
+    legacy: &HookDefinition,
+    data: &Path,
+    binary_owned: impl Fn(&Path) -> bool,
+) -> Vec<HookDefinition> {
+    let Some(entries) = legacy
+        .hook_json_path
+        .iter()
+        .try_fold(settings, |value, key| value.get(key))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let args = serde_json::json!(qoder_exec_args(legacy, data));
+    let mut definitions = Vec::new();
+    for entry in entries {
+        for handler in std::iter::once(entry).chain(
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        ) {
+            let Some(command) = handler.get("command").and_then(Value::as_str) else {
+                continue;
+            };
+            let path = Path::new(command);
+            if handler.get("type").and_then(Value::as_str) == Some("command")
+                && handler.get("args") == Some(&args)
+                && path.is_absolute()
+                && binary_owned(path)
+            {
+                let mut definition = qoder_exec_definition(legacy, path, data);
+                definition.replace_hook_commands = None;
+                definitions.push(definition);
+            }
+        }
+    }
+    definitions
+}
+
+fn qoder_version_binary(path: &Path, cache: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(cache.join("versions")) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(version) = components
+        .next()
+        .and_then(|value| value.as_os_str().to_str())
+    else {
+        return false;
+    };
+    crate::utils::runtime_paths::safe_component(version)
+        && components
+            .next()
+            .is_some_and(|value| value.as_os_str() == "bin")
+        && components
+            .next()
+            .is_some_and(|value| value.as_os_str() == pilot_binary_name())
+        && components.next().is_none()
+}
+
+fn qoder_definition_supports_exec(def: &AgentDefinition, data: &Path) -> bool {
+    def.id == "qoder"
+        && def.hook.as_ref().is_some_and(|hook| {
+            hook.format.as_str() == "nested"
+                && hook.events == ["Stop"]
+                && Path::new(&hook.hook_command)
+                    == data.join("hooks/qoder-loongsuite-pilot-hook.sh")
+                && hook.interceptor.as_ref().is_some_and(|interceptor| {
+                    Path::new(&interceptor.hook_command) == data.join("hooks/interceptor-hook.sh")
+                        && interceptor.events == ["UserPromptSubmit", "PreToolUse", "PostToolUse"]
+                })
+                && qoder_exec_supported(&hook.settings_path)
+        })
+}
+
+pub(super) fn plan_qoder_exec_install(
+    raw: &str,
+    def: &AgentDefinition,
+    data: &Path,
+    binary: &Path,
+) -> Result<Option<String>, String> {
+    if !qoder_definition_supports_exec(def, data) {
+        return Ok(None);
+    }
+    let hook = def
+        .hook
+        .as_ref()
+        .ok_or("Missing Qoder hook configuration")?;
+    let mut document = SettingsDocument::from_snapshot(Some(raw), settings_syntax(hook))?;
+    let strategy = HookStrategy::new(HookManager::new(None, None));
+    for legacy in strategy.legacy_hook_definitions(def) {
+        if HookManager::is_hook_installed_in_settings(&document.data, &legacy) {
+            document.apply_hook(&qoder_exec_definition(&legacy, binary, data), false, false)?;
+        }
+    }
+    Ok(document.changed().then_some(document.raw))
+}
+
+/// A caller already holding the activation and settings locks can stage this
+/// edit with the version pointer. A previous Pilot cannot remove our argv
+/// registrations itself. Only replace exact commands issued by this version.
+pub(crate) fn plan_qoder_legacy_restore(
+    raw: &str,
+    def: &AgentDefinition,
+    data: &Path,
+    binary: &Path,
+) -> Result<Option<String>, String> {
+    let Some(hook) = def.hook.as_ref().filter(|_| def.id == "qoder") else {
+        return Ok(None);
+    };
+    let mut document = SettingsDocument::from_snapshot(Some(raw), settings_syntax(hook))?;
+    let strategy = HookStrategy::new(HookManager::new(None, None));
+    for legacy in strategy.legacy_hook_definitions(def) {
+        let direct = qoder_owned_exec_hooks(&document.data, &legacy, data, |path| path == binary);
+        if direct.is_empty() {
+            continue;
+        }
+        for definition in direct {
+            document.apply_hook(&definition, true, false)?;
+        }
+        document.apply_hook(&legacy, false, false)?;
+    }
+    Ok(document.changed().then_some(document.raw))
 }
 
 struct SettingsDocument {
@@ -604,12 +895,31 @@ impl HookStrategy {
         {
             return self.kiro_agent_needs_deploy(def).await;
         }
-        for hook_def in self
-            .build_interceptor_definitions(def)
-            .iter()
-            .chain(self.build_hook_definitions(def).iter())
-        {
-            if !self.hook_manager.is_hook_installed(hook_def).await {
+        let direct_binary = self.qoder_hook_binary(def);
+        let qoder_settings = if let Some(hook) = def.hook.as_ref().filter(|_| def.id == "qoder") {
+            let Ok(document) =
+                SettingsDocument::read(&resolve_home(&hook.settings_path), settings_syntax(hook))
+                    .await
+            else {
+                return true;
+            };
+            Some(document.data)
+        } else {
+            None
+        };
+        for legacy in self.legacy_hook_definitions(def) {
+            let desired = self.qoder_desired_hook(legacy.clone(), direct_binary.as_deref());
+            if let Some(settings) = &qoder_settings {
+                let installed = self.qoder_installed_exec_hooks(def, settings, &legacy);
+                if installed.len() > usize::from(direct_binary.is_some())
+                    || installed.iter().any(|definition| {
+                        Some(Path::new(&definition.hook_command)) != direct_binary.as_deref()
+                    })
+                    || !HookManager::is_hook_installed_in_settings(settings, &desired)
+                {
+                    return true;
+                }
+            } else if !self.hook_manager.is_hook_installed(&desired).await {
                 return true;
             }
         }
@@ -919,18 +1229,22 @@ impl HookStrategy {
                     self.apply_env_to_settings(&mut document, env)?;
                 }
             }
-            for definition in self
-                .build_interceptor_definitions(def)
-                .iter()
-                .chain(self.build_hook_definitions(def).iter())
-            {
+            let direct_binary = (!uninstall).then(|| self.qoder_hook_binary(def)).flatten();
+            let prune_empty = uninstall && self.preserve_runtime_assets;
+            for legacy in self.legacy_hook_definitions(def) {
+                let installed = self.qoder_installed_exec_hooks(def, &document.data, &legacy);
+                let multiple = installed.len() > 1;
+                for definition in installed {
+                    if multiple
+                        || Some(Path::new(&definition.hook_command)) != direct_binary.as_deref()
+                    {
+                        document.apply_hook(&definition, true, prune_empty)?;
+                    }
+                }
                 // Whole-product uninstall owns the removed handlers' empty
                 // containers; ordinary per-agent Hook edits retain their format.
-                document.apply_hook(
-                    definition,
-                    uninstall,
-                    uninstall && self.preserve_runtime_assets,
-                )?;
+                let desired = self.qoder_desired_hook(legacy, direct_binary.as_deref());
+                document.apply_hook(&desired, uninstall, prune_empty)?;
             }
         }
         if let Some(cfg) = &hook.trust_toml {
@@ -1271,6 +1585,7 @@ impl HookStrategy {
                         &def.id,
                     ),
                     matcher,
+                    exec_args: None,
                     history_dir: None,
                     replace_hook_commands: interceptor
                         .replace_hook_commands
@@ -1287,6 +1602,44 @@ impl HookStrategy {
                 }
             })
             .collect()
+    }
+
+    fn legacy_hook_definitions(&self, def: &AgentDefinition) -> Vec<HookDefinition> {
+        self.build_interceptor_definitions(def)
+            .into_iter()
+            .chain(self.build_hook_definitions(def))
+            .collect()
+    }
+
+    fn qoder_hook_binary(&self, def: &AgentDefinition) -> Option<PathBuf> {
+        let (pilot, data) = self.resource_roots.as_ref()?;
+        if !qoder_definition_supports_exec(def, data) {
+            return None;
+        }
+        installed_qoder_hook_binary(pilot, data, &hook_cache_dir(data))
+    }
+
+    fn qoder_installed_exec_hooks(
+        &self,
+        def: &AgentDefinition,
+        settings: &Value,
+        legacy: &HookDefinition,
+    ) -> Vec<HookDefinition> {
+        let Some((_, data)) = self.resource_roots.as_ref().filter(|_| def.id == "qoder") else {
+            return Vec::new();
+        };
+        let cache = hook_cache_dir(data);
+        let binary = super::runtime_launcher::hook_binary(data).ok();
+        qoder_owned_exec_hooks(settings, legacy, data, |path| {
+            binary.as_deref() == Some(path) || qoder_version_binary(path, &cache)
+        })
+    }
+
+    fn qoder_desired_hook(&self, legacy: HookDefinition, binary: Option<&Path>) -> HookDefinition {
+        match (self.resource_roots.as_ref(), binary) {
+            (Some((_, data)), Some(binary)) => qoder_exec_definition(&legacy, binary, data),
+            _ => legacy,
+        }
     }
 
     fn build_hook_definitions(&self, def: &AgentDefinition) -> Vec<HookDefinition> {
@@ -1353,6 +1706,7 @@ impl HookStrategy {
                 &def.id,
             ),
             matcher,
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: Some(replace),
             use_nested_format: Some(hook_config.format.as_str() == "nested"),
@@ -1620,6 +1974,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verified_qoder_exec_range_keeps_older_and_unknown_cli_on_legacy_hooks() {
+        for name in [
+            "qodercli-1.0.33",
+            "qodercli-1.1.75",
+            "qodercli",
+            "qoder-wrapper",
+        ] {
+            assert!(!qoder_supports_exec(Path::new(name)));
+        }
+        for name in ["qodercli-1.1.76", "qodercli-1.1.76.exe", "qoder-1.2.0"] {
+            assert!(qoder_supports_exec(Path::new(name)));
+        }
+    }
+
+    #[test]
+    fn qoder_managed_version_requires_matching_executable() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin/qodercli");
+        std::fs::create_dir_all(&bin).unwrap();
+        assert_eq!(qoder_installed_cli(home.path()), None);
+        std::fs::write(bin.join("version.txt"), "1.1.76\n").unwrap();
+        assert_eq!(qoder_installed_cli(home.path()), Some(false));
+        let executable = bin.join(if cfg!(windows) {
+            "qodercli-1.1.76.exe"
+        } else {
+            "qodercli-1.1.76"
+        });
+        std::fs::write(&executable, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(qoder_installed_cli(home.path()), Some(true));
+        std::fs::write(bin.join("version.txt"), "../unexpected").unwrap();
+        assert_eq!(qoder_installed_cli(home.path()), Some(false));
+    }
+
+    #[test]
     fn windows_hook_paths_preserve_unicode_spaces_and_arguments() {
         for script in [
             "C:/Users/中文 🚀/hooks/cursor.ps1",
@@ -1685,6 +2078,7 @@ mod tests {
             hook_json_path: vec!["hooks".into(), "stop".into()],
             hook_command: command.into(),
             matcher: None,
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: None,
@@ -1725,6 +2119,7 @@ mod tests {
                 hook_json_path: vec!["hooks".into(), "stop".into()],
                 hook_command: command.into(),
                 matcher: None,
+                exec_args: None,
                 history_dir: None,
                 replace_hook_commands: Some(vec![command.into()]),
                 use_nested_format: Some(nested),

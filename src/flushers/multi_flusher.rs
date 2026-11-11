@@ -34,6 +34,54 @@ impl BaseFlusher for MultiFlusher {
         "multi"
     }
 
+    fn uses_prepared_batch(&self) -> bool {
+        self.flushers
+            .iter()
+            .any(|flusher| flusher.uses_prepared_batch())
+    }
+
+    async fn send_prepared_batch(
+        &self,
+        entries: Vec<AgentActivityEntry>,
+        encoded: Vec<Vec<u8>>,
+    ) -> Result<(), FlushError> {
+        let lengths: Vec<f64> = encoded.iter().map(|row| row.len() as f64).collect();
+        let Some(owner) = self
+            .flushers
+            .iter()
+            .rposition(|flusher| flusher.uses_prepared_batch())
+        else {
+            return self.send_batch(entries, Some(lengths)).await;
+        };
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, flusher) in self.flushers.iter().enumerate() {
+            if index == owner {
+                continue;
+            }
+            let flusher = Arc::clone(flusher);
+            let entries = entries.clone();
+            if flusher.uses_prepared_batch() {
+                let encoded = encoded.clone();
+                tasks.spawn(async move {
+                    let name = flusher.name().to_owned();
+                    (name, flusher.send_prepared_batch(entries, encoded).await)
+                });
+            } else {
+                let lengths = lengths.clone();
+                tasks.spawn(async move {
+                    let name = flusher.name().to_owned();
+                    (name, flusher.send_batch(entries, Some(lengths)).await)
+                });
+            }
+        }
+        let flusher = Arc::clone(&self.flushers[owner]);
+        tasks.spawn(async move {
+            let name = flusher.name().to_owned();
+            (name, flusher.send_prepared_batch(entries, encoded).await)
+        });
+        finish_batch_tasks(tasks).await
+    }
+
     async fn send(
         &self,
         entry: AgentActivityEntry,
@@ -102,26 +150,7 @@ impl BaseFlusher for MultiFlusher {
                 (name, flusher.send_batch(entries, logical_bytes).await)
             });
         }
-        let logger = create_logger("MultiFlusher");
-        let mut durable_failure = None;
-        while let Some(joined) = set.join_next().await {
-            if let Ok((name, Err(error))) = joined {
-                logger.error(
-                    "flusher sendBatch failed",
-                    Some(&meta(&[
-                        ("flusher", Value::String(name)),
-                        ("error", Value::String(error.to_string())),
-                    ])),
-                );
-                if error.preserves_checkpoint() && durable_failure.is_none() {
-                    durable_failure = Some(error);
-                }
-            }
-        }
-        if let Some(error) = durable_failure {
-            return Err(error);
-        }
-        Ok(())
+        finish_batch_tasks(set).await
     }
 
     async fn flush(&self) -> Result<(), FlushError> {
@@ -162,6 +191,28 @@ impl BaseFlusher for MultiFlusher {
         while set.join_next().await.is_some() {}
         Ok(())
     }
+}
+
+async fn finish_batch_tasks(
+    mut tasks: tokio::task::JoinSet<(String, Result<(), FlushError>)>,
+) -> Result<(), FlushError> {
+    let logger = create_logger("MultiFlusher");
+    let mut durable_failure = None;
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok((name, Err(error))) = joined {
+            logger.error(
+                "flusher sendBatch failed",
+                Some(&meta(&[
+                    ("flusher", Value::String(name)),
+                    ("error", Value::String(error.to_string())),
+                ])),
+            );
+            if error.preserves_checkpoint() && durable_failure.is_none() {
+                durable_failure = Some(error);
+            }
+        }
+    }
+    durable_failure.map_or(Ok(()), Err)
 }
 
 fn meta(pairs: &[(&str, Value)]) -> Map<String, Value> {

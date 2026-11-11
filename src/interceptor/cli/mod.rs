@@ -5,12 +5,15 @@ mod hook;
 mod qoder_surface;
 
 use crate::interceptor::access_log::{write_interceptor_access_log, AccessLogLimits};
-use crate::interceptor::paths::{default_pilot_data_dir, interceptor_runtime_path};
+use crate::interceptor::paths::{
+    default_pilot_data_dir, interceptor_access_log_path, interceptor_runtime_path,
+};
 use crate::utils::{create_logger, read_installed_version};
 use daemon_client::DaemonClient;
-use hook::run_hook;
+use hook::{run_hook, AccessLogWriter};
 use serde_json::Value;
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 pub use daemon_client::{parse_single_json, DaemonClientError, HookClient};
 pub use hook::{emit_verdict, HookCliDeps};
@@ -30,18 +33,19 @@ pub async fn run_cli(args: &[String]) -> i32 {
         }
         Some("status") => run_status().await,
         Some("hook") => {
+            let Ok(data_dir) = hook_data_dir(&args[1..]) else {
+                return 0;
+            };
             let mut deps = HookCliDeps {
                 read_stdin: Box::new(read_stdin_sync),
                 write_stdout: Box::new(|text| {
                     let _ = io::stdout().write_all(text.as_bytes());
                 }),
                 log: Box::new(move |message, extra| logger.warn(message, extra)),
-                runtime_path: None,
+                runtime_path: hook_runtime_path(data_dir),
                 resolve_surface: None,
                 create_client: None,
-                write_access_log: Some(Box::new(|entry| {
-                    write_interceptor_access_log(entry, None, AccessLogLimits::default());
-                })),
+                write_access_log: Some(hook_access_log(data_dir)),
             };
             run_hook(&args[1..], &mut deps).await
         }
@@ -104,4 +108,52 @@ fn read_stdin_sync() -> Result<String, ()> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf).map_err(|_| ())?;
     Ok(buf)
+}
+
+/// Reuse the installed Hook protocol and identity checks without letting a
+/// worker write Agent stdout. The native host owns its hard deadline.
+pub async fn run_hook_captured(args: &[String], stdin: String) -> (i32, String) {
+    let Ok(data_dir) = hook_data_dir(args) else {
+        return (0, String::new());
+    };
+    let logger = create_logger("InterceptorCli");
+    let output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured = output.clone();
+    let mut deps = HookCliDeps {
+        read_stdin: Box::new(move || Ok(stdin.clone())),
+        write_stdout: Box::new(move |text| captured.lock().unwrap().push_str(&text)),
+        log: Box::new(move |message, extra| logger.warn(message, extra)),
+        runtime_path: hook_runtime_path(data_dir),
+        resolve_surface: None,
+        create_client: None,
+        write_access_log: Some(hook_access_log(data_dir)),
+    };
+    let code = run_hook(args, &mut deps).await;
+    let text = output.lock().unwrap().clone();
+    (code, text)
+}
+
+fn hook_data_dir(args: &[String]) -> Result<Option<&str>, ()> {
+    let Some(index) = args.iter().position(|arg| arg == "--data-dir") else {
+        return Ok(None);
+    };
+    args.get(index + 1)
+        .filter(|path| Path::new(path).is_absolute())
+        .map(|path| Some(path.as_str()))
+        .ok_or(())
+}
+
+fn hook_runtime_path(data_dir: Option<&str>) -> Option<String> {
+    data_dir.map(|path| {
+        interceptor_runtime_path(Some(path))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+fn hook_access_log(data_dir: Option<&str>) -> AccessLogWriter {
+    let path = data_dir.map(|dir| interceptor_access_log_path(Some(dir)));
+    Box::new(move |entry| {
+        write_interceptor_access_log(entry, path.as_deref(), AccessLogLimits::default());
+    })
 }

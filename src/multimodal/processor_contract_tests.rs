@@ -40,6 +40,74 @@ fn options(root: &Path) -> PathToUriOptions {
         deadline_ms: Some(1000),
     }
 }
+
+#[tokio::test]
+async fn main585_video_uses_existing_safe_reader_and_exact_upload_content_type() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("clip.mp4");
+    let bytes = b"\0\0\0\x10ftypisom\0\0\0\0";
+    std::fs::write(&file, bytes).unwrap();
+    let recorder = Arc::new(Recorder::default());
+    let processor = processor(&recorder);
+    let result = processor
+        .path_to_uri(
+            file.to_str().unwrap(),
+            Some(1_700_000_000_000.0),
+            options(root.path()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.mime_type, "video/mp4");
+    assert_eq!(result.modality.as_deref(), Some("video"));
+    assert!(result.uri.ends_with(".mp4"));
+    let denied = tempfile::tempdir().unwrap();
+    assert!(processor
+        .path_to_uri(
+            file.to_str().unwrap(),
+            Some(1_700_000_000_000.0),
+            options(denied.path())
+        )
+        .await
+        .is_none());
+    processor.shutdown(1000).await;
+    let uploads = recorder.items.lock().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].content_type, "video/mp4");
+    assert_eq!(uploads[0].data.as_deref(), Some(bytes.as_slice()));
+}
+
+#[tokio::test]
+async fn main585_shared_conversion_caps_attempts_and_keeps_later_paths_after_callback_failures() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let callback = move |path: String, _time| {
+        recorded.lock().unwrap().push(path.clone());
+        assert_ne!(path, "0.mp4", "synchronous callback failure");
+        async move {
+            assert_ne!(path, "1.mp4", "asynchronous callback failure");
+            if path == "2.mp4" {
+                return Err("ordinary callback failure".into());
+            }
+            Ok((path == "3.mp4").then(|| UriResult {
+                uri: "oss://test/clip.mp4".into(),
+                mime_type: "video/mp4".into(),
+                modality: Some("video".into()),
+                size: 16,
+                sha256: "test".into(),
+            }))
+        }
+    };
+    let mut paths = vec![" ".to_owned(), "0.mp4".to_owned(), " 0.mp4 ".to_owned()];
+    paths.extend((1..MAX_MULTIMODAL_PARTS + 4).map(|n| format!("{n}.mp4")));
+    let parts = convert_paths_to_uri_parts(&paths, &callback, 0).await;
+    assert_eq!(calls.lock().unwrap().len(), MAX_MULTIMODAL_PARTS);
+    assert_eq!(
+        parts,
+        vec![
+            json!({"type":"uri","uri":"oss://test/clip.mp4","mime_type":"video/mp4","modality":"video"})
+        ]
+    );
+}
 fn before_first_read(
     processor: &mut Arc<MultimodalProcessor>,
 ) -> (

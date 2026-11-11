@@ -33,6 +33,13 @@ pub(crate) const SKILLS: &[&str] = &[
     "loongsuite-pilot-ops/references/wukong-diagnostics.md",
 ];
 
+const QODER_CLI_WRAPPER: &str = "hooks/qodercli-runtime-wrapper.sh";
+const QODER_CLI_PRELOAD: &str = "hooks/qodercli-token-intercept.mjs";
+
+fn qoder_cli_asset(relative: &str) -> bool {
+    cfg!(unix) && matches!(relative, QODER_CLI_WRAPPER | QODER_CLI_PRELOAD)
+}
+
 fn key(relative: &str) -> String {
     format!("{}{relative}", binding::RESOURCE_PREFIX)
 }
@@ -53,6 +60,11 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
     ] {
         paths.insert(key(relative), data.join(relative));
     }
+    if cfg!(unix) {
+        for relative in [QODER_CLI_WRAPPER, QODER_CLI_PRELOAD] {
+            paths.insert(key(relative), data.join(relative));
+        }
+    }
     if marker {
         paths.insert(
             binding::DSH_MARKER.into(),
@@ -65,6 +77,7 @@ pub(crate) fn registry(data: &Path, marker: bool) -> BTreeMap<String, PathBuf> {
 fn source_relative(path: &str) -> Option<&str> {
     path.strip_prefix("assets/").filter(|relative| {
         relative.starts_with("skills/")
+            || qoder_cli_asset(relative)
             || matches!(
                 *relative,
                 "plugins/dsh/plugin.mjs" | "plugins/shared/resource-context.mjs"
@@ -194,11 +207,19 @@ struct File {
     path: PathBuf,
     bytes: Vec<u8>,
     original: Option<Vec<u8>>,
+    executable_repair: bool,
+}
+
+impl File {
+    fn needs_write(&self) -> bool {
+        self.executable_repair || self.original.as_ref() != Some(&self.bytes)
+    }
 }
 
 pub(crate) struct RuntimeDataAssets {
     files: Vec<File>,
     pub retained_skills: Vec<String>,
+    retained_qoder_cli_assets: Vec<String>,
     marker: bool,
 }
 
@@ -264,19 +285,27 @@ impl RuntimeDataAssets {
             return Ok(Self {
                 files: Vec::new(),
                 retained_skills: Vec::new(),
+                retained_qoder_cli_assets: Vec::new(),
                 marker: false,
             });
         }
         let trusted = trusted_hashes(pilot, cache, manifest)?;
         let mut files = Vec::new();
         let mut retained_skills = Vec::new();
+        let mut retained_qoder_cli_assets = Vec::new();
         for (role, relative, source, bytes) in inputs {
-            let optional = relative.starts_with("skills/");
+            let qoder_cli = qoder_cli_asset(&relative);
+            let optional = relative.starts_with("skills/") || qoder_cli;
+            let retained = if qoder_cli {
+                &mut retained_qoder_cli_assets
+            } else {
+                &mut retained_skills
+            };
             let target = plain_target(data, &relative);
             let (path, original) = match target {
                 Ok(target) => target,
                 Err(_) if optional => {
-                    retained_skills.push(relative);
+                    retained.push(relative);
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -289,12 +318,21 @@ impl RuntimeDataAssets {
             });
             if !owned {
                 if optional {
-                    retained_skills.push(relative);
+                    retained.push(relative);
                     continue;
                 }
                 anyhow::bail!("必需运行资源含未知或用户修改的文件，拒绝覆盖：{relative}");
             }
-            if original.as_ref() != Some(&bytes) {
+            #[cfg(unix)]
+            let executable_repair = {
+                use std::os::unix::fs::PermissionsExt;
+                relative == QODER_CLI_WRAPPER
+                    && std::fs::metadata(&path)
+                        .is_ok_and(|meta| meta.permissions().mode() & 0o100 == 0)
+            };
+            #[cfg(not(unix))]
+            let executable_repair = false;
+            if original.as_ref() != Some(&bytes) || executable_repair {
                 let writable = binding::writable_parent(&path).and_then(|()| {
                     if original.is_some() {
                         ensure!(
@@ -306,7 +344,7 @@ impl RuntimeDataAssets {
                 });
                 if let Err(error) = writable {
                     if optional {
-                        retained_skills.push(relative);
+                        retained.push(relative);
                         continue;
                     }
                     return Err(error);
@@ -317,6 +355,7 @@ impl RuntimeDataAssets {
                 path,
                 bytes,
                 original,
+                executable_repair,
             });
         }
         // Each runtime module is one atomic file. Shared dependencies are installed first.
@@ -332,6 +371,7 @@ impl RuntimeDataAssets {
         Ok(Self {
             files,
             retained_skills,
+            retained_qoder_cli_assets,
             marker: dsh,
         })
     }
@@ -350,9 +390,7 @@ impl RuntimeDataAssets {
     }
 
     pub fn ready(&self) -> bool {
-        self.files
-            .iter()
-            .all(|file| file.original.as_ref() == Some(&file.bytes))
+        self.files.iter().all(|file| !file.needs_write())
     }
 
     pub fn install(
@@ -371,14 +409,26 @@ impl RuntimeDataAssets {
             );
         }
         for file in &self.files {
-            if file.original.as_ref() != Some(&file.bytes) {
-                transaction.write_preserving_mode(&file.key, &file.bytes, 0o644)?;
+            if file.needs_write() {
+                if file.key == key(QODER_CLI_WRAPPER) {
+                    transaction.write(&file.key, &file.bytes, 0o755)?;
+                } else {
+                    transaction.write_preserving_mode(&file.key, &file.bytes, 0o644)?;
+                }
             }
         }
         Ok(())
     }
 
     pub fn report(&self) {
+        if !self.retained_qoder_cli_assets.is_empty() {
+            eprintln!(
+                "[runtime-resources] {}",
+                serde_json::json!({
+                    "preservedQoderCliAssets": self.retained_qoder_cli_assets
+                })
+            );
+        }
         if !self.retained_skills.is_empty() {
             eprintln!(
                 "[runtime-resources] {}",

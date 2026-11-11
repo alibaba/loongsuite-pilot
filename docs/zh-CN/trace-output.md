@@ -57,6 +57,10 @@ checkpoint 等待持久接收，退出不导出半轮。确认记录保留最近
 | `otlpTrace.debug` | 开启 Trace 转换 debug 本地输出。 |
 | `otlpTrace.turnIdleTimeoutMs` | 可选的 turn 级 Trace 聚合空闲超时。 |
 
+OpenClaw 使用 `agent_end` 观察结束，保留 `llm_output` 的采集边界，不注册可改写回答的
+`before_agent_finalize`。注册后者会让支持该能力的宿主缓冲回复直到轮末，影响首次可见回复时间。
+更新该插件后也需重新启动宿主进程，已有监听器不会因磁盘文件更新而自动消失。
+
 环境变量：
 
 | 环境变量 | 说明 |

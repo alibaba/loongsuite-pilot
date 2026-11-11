@@ -176,7 +176,7 @@ impl<'a> CodexTranscriptEngine<'a> {
             self.remember_incomplete_tail(path, tail);
             return Ok(false);
         }
-        let mut file = tokio::fs::File::open(path).await?;
+        let mut file = crate::utils::source_access::open_async(path).await?;
         if scan::opened_file_version(&file).await? != current {
             return Ok(true);
         }
@@ -213,9 +213,9 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
         let mut position = tail.end_offset;
         let mut last = anchor;
-        let search_end = current
-            .size
-            .min(position.saturating_add(MAX_SCAN_BYTES_PER_FILE_CYCLE));
+        let search_end = current.size.min(position.saturating_add(
+            crate::utils::source_access::read_limit(MAX_SCAN_BYTES_PER_FILE_CYCLE as usize) as i64,
+        ));
         while position < search_end {
             let bytes = read(
                 &mut file,
@@ -702,7 +702,9 @@ impl<'a> CodexTranscriptEngine<'a> {
 
         while checkpoint.scan_offset < stat.size
             && processed_terminals < MAX_TERMINALS_PER_FILE_CYCLE
-            && scanned_bytes < MAX_SCAN_BYTES_PER_FILE_CYCLE
+            && scanned_bytes
+                < (crate::utils::source_access::read_limit(MAX_SCAN_BYTES_PER_FILE_CYCLE as usize)
+                    as i64)
         {
             if !self
                 .incomplete_tail_ready(rt, file_path, checkpoint.scan_offset)
@@ -711,9 +713,13 @@ impl<'a> CodexTranscriptEngine<'a> {
                 break;
             }
             let scan_start = checkpoint.scan_offset;
-            let scan_end = stat
-                .size
-                .min(scan_start + (MAX_SCAN_BYTES_PER_FILE_CYCLE - scanned_bytes));
+            let scan_end = stat.size.min(
+                scan_start
+                    + ((crate::utils::source_access::read_limit(
+                        MAX_SCAN_BYTES_PER_FILE_CYCLE as usize,
+                    ) as i64)
+                        - scanned_bytes),
+            );
             let mut scanned_boundary = ScannedBoundary::default();
             let mut scan = scan_json_lines(file_path, scan_start, scan_end, Some(rt), |line| {
                 process_scanned_line(
@@ -1911,7 +1917,7 @@ fn persisted_input_context(
     range: Option<&super::super::types::CodexTranscriptSourceRange>,
 ) -> CodexTranscriptInputContext {
     let delta = context.delta.clone().unwrap_or_default();
-    let bytes = json_bytes(&Value::Array(delta.clone()));
+    let bytes = json_bytes(&delta);
     if bytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || range.is_none() {
         CodexTranscriptInputContext {
             hash: context.hash.clone(),
@@ -2613,7 +2619,11 @@ impl<'a> CodexTranscriptEngine<'a> {
         }
         let baseline_end = checkpoint.scan_offset;
         let search_offset = scan::bounded_search_offset(bootstrap.search_offset, baseline_end);
-        let scan_end = baseline_end.min(search_offset + MAX_SCAN_BYTES_PER_FILE_CYCLE);
+        let scan_end = baseline_end.min(
+            search_offset
+                + (crate::utils::source_access::read_limit(MAX_SCAN_BYTES_PER_FILE_CYCLE as usize)
+                    as i64),
+        );
         let mut candidate = bootstrap.tail_candidate.clone();
         let mut scan = scan_json_lines(file_path, search_offset, scan_end, Some(rt), |line| {
             apply_tail_line(&mut candidate, &line);
@@ -2760,7 +2770,9 @@ impl<'a> CodexTranscriptEngine<'a> {
     ) -> Option<WakeupMarker> {
         let path = Path::new(&self.body.wakeup_dir)
             .join(format!("{}.json", safe_wakeup_session_part(session_id)));
-        let raw = tokio::fs::read_to_string(&path).await.ok()?;
+        let raw = crate::utils::source_access::read_to_string(&path)
+            .await
+            .ok()?;
         let parsed: Value = serde_json::from_str(&raw).ok()?;
         let record = as_record(&parsed)?;
         if string_value(record.get("session_id")) != Some(session_id) {
@@ -2808,7 +2820,9 @@ impl<'a> CodexTranscriptEngine<'a> {
     ) -> Option<Map<String, Value>> {
         let marker = Path::new(&self.body.wakeup_dir)
             .join(format!("{}.json", safe_wakeup_session_part(session_id)));
-        let raw = tokio::fs::read_to_string(&marker).await.ok()?;
+        let raw = crate::utils::source_access::read_to_string(&marker)
+            .await
+            .ok()?;
         let parsed = match serde_json::from_str::<Value>(&raw) {
             Ok(value) => value,
             Err(_) => {
@@ -2855,7 +2869,9 @@ impl<'a> CodexTranscriptEngine<'a> {
     ) -> Option<HashMap<String, String>> {
         let marker = Path::new(&self.body.span_context_dir)
             .join(span_context_marker_name(session_id, turn_id));
-        let raw = tokio::fs::read_to_string(&marker).await.ok()?;
+        let raw = crate::utils::source_access::read_to_string(&marker)
+            .await
+            .ok()?;
         let parsed = serde_json::from_str::<Value>(&raw).ok()?;
         let record = as_record(&parsed)?;
         if string_value(record.get("session_id")) != Some(session_id)
@@ -2911,10 +2927,11 @@ impl<'a> CodexTranscriptEngine<'a> {
         if !due {
             return;
         }
-        let mut entries = match tokio::fs::read_dir(&self.body.span_context_dir).await {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
+        let mut entries =
+            match crate::utils::source_access::read_dir_async(&self.body.span_context_dir).await {
+                Ok(entries) => entries,
+                Err(_) => return,
+            };
         let mut names = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -2933,10 +2950,11 @@ impl<'a> CodexTranscriptEngine<'a> {
     }
 
     async fn discover_dynamic_session_dirs(&self, canonical_default: &str) -> Vec<String> {
-        let mut entries = match tokio::fs::read_dir(&self.body.wakeup_dir).await {
-            Ok(entries) => entries,
-            Err(_) => return Vec::new(),
-        };
+        let mut entries =
+            match crate::utils::source_access::read_dir_async(&self.body.wakeup_dir).await {
+                Ok(entries) => entries,
+                Err(_) => return Vec::new(),
+            };
         let mut names = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -3041,7 +3059,7 @@ impl<'a> CodexTranscriptEngine<'a> {
 }
 
 async fn marker_expired(path: &Path, now: i64, ttl: i64) -> bool {
-    if let Ok(raw) = tokio::fs::read_to_string(path).await {
+    if let Ok(raw) = crate::utils::source_access::read_to_string(path).await {
         if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
             if let Some(record) = as_record(&parsed) {
                 if let Some(received) =
@@ -3851,3 +3869,52 @@ impl CodexTranscriptEngine<'_> {
 #[cfg(test)]
 #[path = "engine_history.rs"]
 mod history_contracts;
+
+// Append this module to src/inputs/codex-transcript/input/engine.rs.
+#[cfg(test)]
+mod cpu_optimization_checkpoint_budget_tests {
+    use super::*;
+
+    #[test]
+    fn persisted_context_keeps_legacy_threshold_and_missing_range_behavior() {
+        let source_range = super::super::super::types::CodexTranscriptSourceRange {
+            start_offset: 10,
+            end_offset: 20,
+        };
+        for target in [
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES - 1,
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES,
+            MAX_PERSISTED_INPUT_CONTEXT_BYTES + 1,
+        ] {
+            let delta = vec![Value::String("x".repeat(target - 4))];
+            let old_bytes = serde_json::to_vec(&Value::Array(delta.clone()))
+                .unwrap()
+                .len();
+            assert_eq!(old_bytes, target);
+            assert_eq!(json_bytes(&delta), old_bytes);
+            let context = CodexTranscriptInputContext {
+                hash: "original-hash".into(),
+                delta: Some(delta.clone()),
+                full_messages: Some(vec![json!({"role":"system", "content":"preserved"})]),
+                delta_range: None,
+            };
+            let actual = persisted_input_context(&context, Some(&source_range));
+            assert_eq!(actual.hash, context.hash);
+            assert_eq!(actual.full_messages, context.full_messages);
+            if old_bytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES {
+                assert_eq!(actual.delta.as_ref(), Some(&delta));
+                assert!(actual.delta_range.is_none());
+            } else {
+                assert!(actual.delta.is_none());
+                assert_eq!(actual.delta_range.as_ref(), Some(&source_range));
+            }
+            // With no recoverable source range, the old implementation keeps the
+            // actual delta even above the size cap. Preserve that recovery contract.
+            let without_range = persisted_input_context(&context, None);
+            assert_eq!(without_range.delta.as_ref(), Some(&delta));
+            assert!(without_range.delta_range.is_none());
+            assert_eq!(without_range.hash, context.hash);
+            assert_eq!(without_range.full_messages, context.full_messages);
+        }
+    }
+}

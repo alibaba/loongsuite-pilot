@@ -1,0 +1,126 @@
+name: SDK native acceptance
+
+on:
+  pull_request:
+    branches: [dev/v2.0.0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: SDK (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu}
+          - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu}
+          - {os: macos-15-intel, target: x86_64-apple-darwin, ui: x64}
+          - {os: macos-15, target: aarch64-apple-darwin, ui: arm64}
+          - {os: windows-2022, target: x86_64-pc-windows-msvc}
+          - {os: windows-11-arm, target: aarch64-pc-windows-msvc}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1-${{ matrix.target }}
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-dependencies
+      - name: Install pinned compiler
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=13.0' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: pilot-sdk-native-v1
+          key: ${{ matrix.target }}
+          cache-on-failure: true
+      - name: Build real library and native host
+        run: cargo build --locked --lib --bin loongsuite-pilot
+      # Keep ordinary builds together before dev-dependency test features
+      # change the library graph and would otherwise rebuild it a third time.
+      - name: Build package tools
+        run: cargo build --locked -p xtask
+      - name: Foreign ABI, replay, independent hooks, hard deadline and unload
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          mkdir -p "$RUNNER_TEMP/pilot-sdk-home"
+          HOME="$RUNNER_TEMP/pilot-sdk-home" USERPROFILE="$RUNNER_TEMP/pilot-sdk-home" \
+            cargo test --locked --test sdk_dynamic -- --test-threads=1
+      - name: Complete runtime native CPU and RSS
+        run: cargo test --locked --test process_resources_native -- --test-threads=1
+      - name: Compile and run the foreign C host on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio was not found' }
+          $arch = if ($env:TARGET.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
+          $command = Join-Path $env:RUNNER_TEMP 'pilot-sdk-c-host.cmd'
+          @"
+          @echo off
+          call "$vs\Common7\Tools\VsDevCmd.bat" -arch=$arch -host_arch=$arch
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c11 /W4 /WX examples\pilot_sdk_host.c target\debug\loongsuite_pilot.dll.lib /Fe:"$env:RUNNER_TEMP\pilot-sdk-c-host.exe" /Fo:"$env:RUNNER_TEMP\pilot-sdk-c-host.obj"
+          "@ | Set-Content -Encoding ascii $command
+          & cmd.exe /d /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'Foreign C host compilation failed' }
+          $init = @{ data_dir = (Join-Path $env:RUNNER_TEMP 'pilot-sdk-c-state'); resource_dir = $env:GITHUB_WORKSPACE }
+          $policy = @{ agents = @(); hcd = @{agent_configs = @{}} }
+          $initPath = Join-Path $env:RUNNER_TEMP 'pilot-sdk-init.json'
+          $policyPath = Join-Path $env:RUNNER_TEMP 'pilot-sdk-policy.json'
+          $init | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $initPath
+          $policy | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $policyPath
+          $env:PATH = "$env:GITHUB_WORKSPACE\target\debug;$env:PATH"
+          & "$env:RUNNER_TEMP\pilot-sdk-c-host.exe" $initPath $policyPath
+          if ($LASTEXITCODE -ne 0) { throw 'Foreign C host execution failed' }
+      - name: Build native macOS UI
+        if: runner.os == 'macOS'
+        run: ./target/debug/xtask build-status-bar --arch '${{ matrix.ui }}' --output target/status-bar/LoongSuitePilotMenuBarApp
+      - name: Package and load from unpacked runtime
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          suffix=""; args=()
+          if [[ "$TARGET" == *windows* ]]; then suffix=.exe; fi
+          if [[ "$TARGET" == *apple* ]]; then args+=(--status-bar-binary target/status-bar/LoongSuitePilotMenuBarApp); fi
+          "./target/debug/xtask$suffix" package --target "$TARGET" \
+            --binary "target/debug/loongsuite-pilot$suffix" --commit "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/pilot-sdk-packages" "${args[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk-${{ matrix.target }}
+          path: |
+            LICENSE
+            include/pilot_sdk.h
+            examples/pilot_sdk_host.c
+            target/debug/loongsuite-pilot
+            target/debug/loongsuite-pilot.exe
+            target/debug/libloongsuite_pilot.so
+            target/debug/libloongsuite_pilot.dylib
+            target/debug/loongsuite_pilot.dll
+            target/debug/loongsuite_pilot.dll.lib
+          if-no-files-found: error
+          retention-days: 7

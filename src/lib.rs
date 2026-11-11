@@ -29,3 +29,5 @@ pub mod status_bar;
 pub mod types;
 pub mod updater;
 pub mod utils;
+
+pub mod sdk;

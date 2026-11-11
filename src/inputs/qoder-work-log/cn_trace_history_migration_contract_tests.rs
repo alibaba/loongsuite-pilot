@@ -724,3 +724,73 @@ async fn cn_sdk_workspace_policy_is_checked_before_optional_content_enrichment()
         ));
     assert!(drain(&input).await.is_empty());
 }
+
+#[tokio::test]
+async fn main_555_cn_trace_clears_stale_model_on_empty_or_partial_truncation() {
+    for split in [0, 30] {
+        let f = Fixture::new();
+        let input = f.input();
+        let key = format!("qoder-work-cn-trace:{}", f.file.display());
+        let time = 1_780_000_000_000;
+        let mut original = vec![policy(time - 200, "old-model")];
+        original.extend(full(
+            "old",
+            "old-msg",
+            (time, time + 1000, 1, 2),
+            Some("old"),
+            &[],
+        ));
+        f.write(&original);
+        let first = input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap();
+        assert!(first
+            .iter()
+            .any(|v| v.response_model.as_deref() == Some("old-model")));
+        let revision = f.store.revision();
+        assert!(input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(f.store.revision(), revision);
+
+        let mut records = vec![policy(time + 2000, "new-model")];
+        records.extend(full(
+            "new",
+            "new-msg",
+            (time + 3000, time + 4000, 3, 4),
+            Some("new"),
+            &[],
+        ));
+        let next = records.concat();
+        std::fs::write(&f.file, &next[..split]).unwrap();
+        assert!(input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            f.store.get(&key).extra().unwrap()["modelPolicy"],
+            Value::Null
+        );
+        assert_eq!(f.store.get_offset(&key), 0.0);
+        f.append(&[next[split..].to_owned()]);
+        let rows = input
+            .inner
+            .body
+            .collect(&input.inner.runtime)
+            .await
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|v| v.session_id == "new" && v.response_model.as_deref() == Some("new-model")));
+    }
+}

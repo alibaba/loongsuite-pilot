@@ -23,6 +23,9 @@ pub struct Options {
     pub target: String,
     #[arg(long)]
     pub binary: PathBuf,
+    /// SDK built from the same source/target as the native host.
+    #[arg(long)]
+    pub sdk_library: Option<PathBuf>,
     #[arg(long)]
     pub commit: String,
     #[arg(long, default_value = "opensource", value_parser = ["opensource", "proprietary"])]
@@ -136,6 +139,20 @@ pub fn build(root: &Path, options: Options) -> Result<()> {
         "bin/loongsuite-pilot"
     };
     copy(&options.binary, &staged.join(binary))?;
+    let sdk_name = if options.target.contains("windows") {
+        "loongsuite_pilot.dll"
+    } else if options.target.contains("apple") {
+        "libloongsuite_pilot.dylib"
+    } else {
+        "libloongsuite_pilot.so"
+    };
+    let sdk = options
+        .sdk_library
+        .clone()
+        .unwrap_or_else(|| options.binary.with_file_name(sdk_name));
+    loongsuite_pilot::utils::native_binary::validate_shared_library(&sdk, &options.target)
+        .context("SDK must be built alongside the native host")?;
+    copy(&sdk, &staged.join("bin").join(sdk_name))?;
     executable(&staged.join(binary))?;
     if options.target.contains("apple") {
         let ui = options
@@ -601,6 +618,7 @@ mod tests {
             let error = build(
                 &absent,
                 Options {
+                    sdk_library: None,
                     target: target.into(),
                     binary: absent.clone(),
                     commit: "a".repeat(40),

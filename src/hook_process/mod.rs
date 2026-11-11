@@ -39,6 +39,19 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let args: Vec<String> = std::env::args().skip(3).collect();
     let bounded_qoder =
         matches!(agent, "qoder" | "qoder-cn") && args.iter().any(|arg| arg == "--wakeup-only");
+    let mut env: Env = std::env::vars().collect();
+    if bounded_qoder {
+        if let Some(index) = args.iter().position(|arg| arg == "--data-dir") {
+            let Some(data_dir) = args
+                .get(index + 1)
+                .filter(|path| std::path::Path::new(path).is_absolute())
+            else {
+                write_empty(&mut std::io::stdout());
+                return 0;
+            };
+            env.insert("LOONGSUITE_PILOT_DATA_DIR".into(), data_dir.clone());
+        }
+    }
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
@@ -62,7 +75,6 @@ pub fn run_hook_process(agent: &str) -> i32 {
             let _ = std::io::stdin().read_to_end(&mut raw);
         }
     }
-    let env = std::env::vars().collect();
     let mut stdout = std::io::stdout();
     dispatch(agent, terminal, &raw, &args, &env, &mut stdout, started)
 }

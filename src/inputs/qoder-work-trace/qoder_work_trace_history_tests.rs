@@ -1609,3 +1609,134 @@ fn end_event_for_rotation(turn: &str) -> Value {
         None,
     )
 }
+
+// Main #555/#559: complete record boundaries and source-local idle progress.
+#[tokio::test]
+async fn main_555_hook_waits_for_utf8_newline_and_persists_oversize_skip_across_restart() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let path = f.root.path().join("hook-history").join(filename());
+    let row = format!("{}\n", entry("split-字", "llm.request", "split", "turn", 1));
+    let split = row.find('字').unwrap() + 1;
+    std::fs::write(&path, &row.as_bytes()[..split]).unwrap();
+    assert!(f.collect().await.is_empty());
+    assert_eq!(f.store.get_offset("qoder-work-trace"), 0.0);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&row.as_bytes()[split..])
+        .unwrap();
+    assert_eq!(f.collect().await[0].event_id, "split-字");
+    assert_eq!(f.store.get_offset("qoder-work-trace"), row.len() as f64);
+
+    // A new file is explicitly oversize, rather than a malformed trailing suffix.
+    let max = crate::inputs::qoder_work_log::bounded_line_tail::LINE_TAIL_READ_BYTES as usize;
+    std::fs::write(path.with_extension("new"), vec![b'x'; max]).unwrap();
+    std::fs::rename(path.with_extension("new"), &path).unwrap();
+    assert!(f.collect().await.is_empty());
+    assert_eq!(f.store.get_offset("qoder-work-trace"), max as f64);
+    assert_eq!(
+        f.store.get("qoder-work-trace").extra().unwrap()["skippingLine"],
+        true
+    );
+    f.store.save().await.unwrap();
+
+    let restored = Arc::new(StateStore::new(f.root.path().join("state.json")));
+    restored.load().await;
+    let resumed = QoderWorkTraceInput::new(QoderWorkTraceOptions {
+        state_store: restored.clone(),
+        log_dir: Some(
+            f.root
+                .path()
+                .join("hook-history")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        segments_root: Some(
+            f.root
+                .path()
+                .join("sessions")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        sdk_log_dir: Some(
+            f.root
+                .path()
+                .join("sdk-logs")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        poll_interval_ms: Some(60000),
+    });
+    let suffix = format!(
+        "{}\n{}\n",
+        entry("discarded-suffix", "llm.request", "skip", "turn2", 1),
+        entry("after-skip", "llm.request", "skip", "turn2", 1)
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(suffix.as_bytes())
+        .unwrap();
+    let rows = resumed
+        .inner
+        .body
+        .collect(&resumed.inner.runtime)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|v| v.event_id.as_str()).collect::<Vec<_>>(),
+        ["after-skip"]
+    );
+    assert_eq!(
+        restored.get_offset("qoder-work-trace"),
+        (max + suffix.len()) as f64
+    );
+}
+
+#[tokio::test]
+async fn main_559_idle_sdk_checkpoint_stays_clean_and_legacy_hook_records_identity() {
+    let f = Fixture::new();
+    let sdk = f.root.path().join("sdk-logs/session/main.log");
+    std::fs::create_dir_all(sdk.parent().unwrap()).unwrap();
+    std::fs::write(&sdk, "already consumed\n").unwrap();
+    let key = format!("qoder-work-trace:sdk-token:{}", sdk.display());
+    f.store
+        .set_offset(&key, std::fs::metadata(&sdk).unwrap().len() as f64);
+    f.collect().await;
+    assert!(f.store.get(&key).extra().unwrap()["fileIdentity"].is_string());
+    let revision = f.store.revision();
+    for _ in 0..2 {
+        assert!(f.collect().await.is_empty());
+    }
+    assert_eq!(
+        f.store.revision(),
+        revision,
+        "idle reads must not dirty StateStore"
+    );
+
+    let path = f.root.path().join("hook-history").join(filename());
+    let old = format!(
+        "{}\n",
+        entry("already-consumed", "llm.request", "idle", "t", 1)
+    );
+    std::fs::write(&path, &old).unwrap();
+    f.store.set(
+        "qoder-work-trace",
+        InputState::new()
+            .with_last_file(filename())
+            .with_last_offset(old.len() as f64),
+    );
+    assert!(f.collect().await.is_empty());
+    assert!(f.store.get("qoder-work-trace").extra().unwrap()["fileIdentity"].is_string());
+    let replacement_id = "new-".to_owned() + &"x".repeat(old.len());
+    let new = format!(
+        "{}\n",
+        entry(&replacement_id, "llm.request", "idle", "t", 1)
+    );
+    std::fs::write(path.with_extension("new"), new).unwrap();
+    std::fs::rename(path.with_extension("new"), &path).unwrap();
+    assert_eq!(f.collect().await[0].event_id, replacement_id);
+}

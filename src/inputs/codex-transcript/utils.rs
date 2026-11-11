@@ -3,8 +3,6 @@
 
 use serde_json::{Map, Number, Value};
 
-use super::types::JsonValue;
-
 pub fn now_ms() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,10 +83,8 @@ pub fn json_number(value: f64) -> Value {
     }
 }
 
-pub fn json_bytes(value: &JsonValue) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0)
+pub fn json_bytes<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+    crate::utils::json_size::serialized_json_size(value).unwrap_or(0)
 }
 
 pub fn string_array(value: Option<&Value>) -> Vec<String> {

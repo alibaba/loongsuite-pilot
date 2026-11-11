@@ -807,11 +807,10 @@ inject_qodercli_token_intercept() {
     if [ "$ALL_AGENTS" != "1" ] && ! echo "$SELECTED_AGENTS" | grep -q 'qoder'; then remove_qodercli_token_intercept; return 0; fi
     if ! command -v qodercli >/dev/null 2>&1; then return 0; fi
 
-    local intercept_script="$DATA_DIR/hooks/qodercli-token-intercept.mjs"
     local runtime_wrapper="$DATA_DIR/hooks/qodercli-runtime-wrapper.sh"
-    if [ ! -f "$intercept_script" ] || [ ! -f "$runtime_wrapper" ]; then return 0; fi
+    if [ ! -f "$runtime_wrapper" ]; then return 0; fi
 
-    msg "==> 配置 qodercli token 采集..." "==> Configuring qodercli token intercept..."
+    msg "==> 配置 qodercli token 采集..." "==> Configuring native qodercli token usage..."
 
     _inject_to_rc() {
         local file="$1"

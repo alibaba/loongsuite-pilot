@@ -1,6 +1,12 @@
 //! 按轮次缓冲事件并执行真实 GenAI 转换、资源投影和 OTLP HTTP/protobuf 导出。
 //! 保留终止信号、批量上限、运行指标及失败落盘；依赖注入仅用于测试和扩展。
 
+#[cfg(test)]
+#[path = "otlp_multimodal_main568_export_tests.rs"]
+mod multimodal_main568_export_tests;
+#[path = "otlp_multimodal_span_metadata.rs"]
+mod multimodal_span_metadata;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1892,6 +1898,7 @@ impl OtlpInner {
         }
         apply_qoder_work_step_timing(records, &mut spans);
         enrich_tool_skills(records, &mut spans);
+        multimodal_span_metadata::enrich(records, &mut spans);
         if agent_type == "openclaw" {
             enrich_openclaw(records, &prepared.identity, &mut spans);
             if let Some(state) = stream.as_deref_mut() {

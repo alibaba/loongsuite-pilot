@@ -83,6 +83,8 @@ impl Default for DiskUsageSnapshot {
 
 pub struct DiskUsageSamplerOptions {
     pub data_dir: String,
+    /// Extra owned SDK state directories; the normal install allowlist stays unchanged.
+    pub additional_directories: Vec<String>,
     pub initial_delay_ms: u64,
     pub interval_ms: u64,
     pub batch_size: u64,
@@ -96,6 +98,7 @@ impl DiskUsageSamplerOptions {
     pub fn new(data_dir: impl Into<String>) -> Self {
         Self {
             data_dir: data_dir.into(),
+            additional_directories: Vec::new(),
             initial_delay_ms: 30_000,
             interval_ms: 10 * 60_000,
             batch_size: 100,
@@ -643,7 +646,10 @@ async fn walk(sampler: &DiskUsageSampler, generation: u64, started: Instant) -> 
             }
             Kind::Directory => {
                 let normalized = name.to_string_lossy().to_lowercase();
-                if parent == root && !SCANNED_DATA_DIRECTORIES.contains(&normalized.as_str()) {
+                if parent == root
+                    && !SCANNED_DATA_DIRECTORIES.contains(&normalized.as_str())
+                    && !sampler.options.additional_directories.contains(&normalized)
+                {
                     continue;
                 }
                 if is_local_worker_payload(&parent, &normalized, &root) {

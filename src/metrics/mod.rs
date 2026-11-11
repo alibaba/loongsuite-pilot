@@ -10,6 +10,8 @@ mod hook_metrics_spool;
 mod metrics_collector;
 mod metrics_writer;
 mod runtime_health;
+#[cfg(any(not(target_os = "linux"), test))]
+mod self_process;
 mod trace_runtime;
 
 pub use alarm_manager::{AlarmContext, AlarmEntry, AlarmManager};

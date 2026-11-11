@@ -175,6 +175,53 @@ async fn fresh_native_publication_materializes_the_exact_dsh_plugin_path_before_
         .contains("PILOT-OBSERVABILITY-MANAGED"));
 }
 
+#[cfg(unix)]
+#[test]
+fn native_publication_materializes_qoder_cli_preload_and_executable_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    minimal_asset_package(&f, "fixture reference\n");
+    let wrapper = include_bytes!("../../assets/hooks/qodercli-runtime-wrapper.sh");
+    let preload = include_bytes!("../../assets/hooks/qodercli-token-intercept.mjs");
+    additional_manifest_asset(&f, "assets/hooks/qodercli-runtime-wrapper.sh", wrapper);
+    additional_manifest_asset(&f, "assets/hooks/qodercli-token-intercept.mjs", preload);
+    let options = stage_assets(&f);
+    let installed_wrapper = f.data.join("hooks/qodercli-runtime-wrapper.sh");
+    let installed_preload = f.data.join("hooks/qodercli-token-intercept.mjs");
+
+    assert!(!installed_wrapper.exists());
+    assert!(!installed_preload.exists());
+    success(&f.helper("publish-package", &options, true));
+    assert_eq!(fs::read(&installed_wrapper).unwrap(), wrapper);
+    assert_eq!(fs::read(&installed_preload).unwrap(), preload);
+    assert_ne!(
+        fs::metadata(&installed_wrapper)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
+
+    fs::write(&installed_preload, b"// customized preload\n").unwrap();
+    fs::set_permissions(&installed_wrapper, fs::Permissions::from_mode(0o644)).unwrap();
+    let result = f.helper("publish-package", &options, true);
+    success(&result);
+    assert_eq!(
+        fs::read(&installed_preload).unwrap(),
+        b"// customized preload\n"
+    );
+    assert_ne!(
+        fs::metadata(&installed_wrapper)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
+}
+
 #[test]
 fn staging_is_pure_and_unknown_optional_skills_are_preserved_and_reported_without_blocking_runtime()
 {

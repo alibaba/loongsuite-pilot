@@ -1,7 +1,7 @@
 //! Incremental byte/record contracts via the actual production file reader.
 use super::*;
 use serde_json::json;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -84,6 +84,98 @@ async fn source_l115_partial_tail_is_revisited_from_last_complete_newline() {
     append(&path, &second[split..]);
     assert_eq!(ids(&f.read().await), vec!["req-a", "req-b"]);
 }
+#[tokio::test]
+async fn unchanged_partial_segment_tail_is_not_reread_until_it_changes() {
+    let f = Fixture::new();
+    let first = pair("req-a", 1000, 2000, 100);
+    let second = pair("req-b", 3000, 4000, 250);
+    let split = second.len() - 2;
+    let path = f.write("segment-0.jsonl", &format!("{first}{}", &second[..split]));
+    let probe = Arc::new(Mutex::new(test_io::Probe::default()));
+    test_io::PROBE
+        .scope(probe.clone(), async {
+            assert_eq!(ids(&f.read().await), vec!["req-a"]);
+            let before = probe.lock().unwrap().read_bytes;
+            assert_eq!(ids(&f.read().await), vec!["req-a"]);
+            assert_eq!(probe.lock().unwrap().read_bytes, before);
+            append(&path, &second[split..]);
+            assert_eq!(ids(&f.read().await), vec!["req-a", "req-b"]);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn partial_segment_tail_notices_same_size_rewrite_with_preserved_mtime() {
+    let f = Fixture::new();
+    let pair = pair("req-repaired", 1000, 2000, 100);
+    let prefix = &pair[..pair.len() - 1];
+    let path = f.write("segment-0.jsonl", &format!("{prefix} "));
+    let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let mtime = file.metadata().unwrap().modified().unwrap();
+    assert!(f.read().await.is_empty());
+    // Let filesystems with millisecond metadata granularity distinguish the write.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    file.seek(SeekFrom::End(-1)).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.set_modified(mtime).unwrap();
+    drop(file);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    assert_eq!(ids(&f.read().await), vec!["req-repaired"]);
+}
+
+#[tokio::test]
+async fn oversized_unterminated_segment_tail_consumes_only_new_bytes_until_delimiter() {
+    let f = Fixture::new();
+    let path = f.write("segment-0.jsonl", "");
+    let length = MAX_RECORD_BYTES + 1;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(length as u64)
+        .unwrap();
+    let probe = Arc::new(Mutex::new(test_io::Probe::default()));
+    test_io::PROBE
+        .scope(probe.clone(), async {
+            assert!(f.read().await.is_empty());
+            let before = probe.lock().unwrap().read_bytes;
+            assert_eq!(before, length);
+            assert!(probe.lock().unwrap().read_calls >= length.div_ceil(READ_CHUNK_BYTES));
+            assert!(f.read().await.is_empty());
+            assert_eq!(probe.lock().unwrap().read_bytes, before);
+            let suffix = format!("\n{}", pair("req-after", 1000, 2000, 100));
+            append(&path, &suffix);
+            assert_eq!(ids(&f.read().await), vec!["req-after"]);
+            assert_eq!(probe.lock().unwrap().read_bytes - before, suffix.len());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn segment_record_of_exactly_32_mib_is_accepted_when_its_delimiter_arrives() {
+    let f = Fixture::new();
+    let body = pair("req-limit", 1000, 2000, 100);
+    let (start, end) = body.split_once('\n').unwrap();
+    let path = f.write("segment-0.jsonl", &format!("{start}\n"));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let end = end.trim_end_matches('\n');
+    file.write_all(end.as_bytes()).unwrap();
+    let padding = vec![b' '; READ_CHUNK_BYTES];
+    let mut remaining = MAX_RECORD_BYTES - end.len();
+    while remaining > 0 {
+        let length = remaining.min(padding.len());
+        file.write_all(&padding[..length]).unwrap();
+        remaining -= length;
+    }
+    drop(file);
+    assert!(f.read().await.is_empty());
+    append(&path, "\n");
+    assert_eq!(ids(&f.read().await), vec!["req-limit"]);
+}
+
 #[tokio::test]
 async fn source_l134_complete_json_without_final_newline_waits_for_writer_commit() {
     let f = Fixture::new();

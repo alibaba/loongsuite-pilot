@@ -279,6 +279,22 @@ pub fn validate_runtime(
         "bin/loongsuite-pilot"
     };
     ensure!(manifest.binary == binary, "运行清单二进制路径无效");
+    // Keep schema 1 and its existing fields: older updaters validate this
+    // manifest before executing the candidate. The SDK is a hashed bin resource.
+    let sdk = if target.contains("windows") {
+        "bin/loongsuite_pilot.dll"
+    } else if target.contains("apple") {
+        "bin/libloongsuite_pilot.dylib"
+    } else {
+        "bin/libloongsuite_pilot.so"
+    };
+    if manifest
+        .resources
+        .iter()
+        .any(|resource| resource.path == sdk)
+    {
+        super::native_binary::validate_shared_library(&resource_file(root, sdk)?, target)?;
+    }
     let mut seen = HashSet::new();
     for resource in &manifest.resources {
         // 各平台使用相同的大小写唯一性规则，避免 Windows 上重复覆盖。

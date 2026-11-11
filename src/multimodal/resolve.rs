@@ -1,4 +1,4 @@
-//! Local image path resolution and OSS endpoint parsing.
+//! Local media path resolution and OSS endpoint parsing.
 //!
 //! Port of `src/multimodal/resolve.ts`. Windows extended-path cases follow the
 //! TypeScript checks on the raw string. `O_NOFOLLOW` is used when opening a
@@ -27,6 +27,17 @@ const IMAGE_EXT_TO_MIME: &[(&str, &str)] = &[
     (".ico", "image/x-icon"),
     (".tif", "image/tiff"),
     (".tiff", "image/tiff"),
+];
+
+const VIDEO_EXT_TO_MIME: &[(&str, &str)] = &[
+    (".mp4", "video/mp4"),
+    (".mov", "video/quicktime"),
+    (".m4v", "video/x-m4v"),
+    (".3gp", "video/3gpp"),
+    (".3g2", "video/3gpp2"),
+    (".webm", "video/webm"),
+    (".mkv", "video/x-matroska"),
+    (".avi", "video/x-msvideo"),
 ];
 
 fn logger() -> crate::utils::BoundLogger {
@@ -128,7 +139,7 @@ pub fn take_unique_extracted_paths(
         if path.is_empty()
             || path.chars().count() > MAX_MULTIMODAL_PATH_CHARS
             || seen.contains(path)
-            || !is_image_file_path(path)
+            || mime_from_media_path(path).is_none()
         {
             continue;
         }
@@ -181,6 +192,16 @@ pub fn mime_from_image_path(file_path: &str) -> Option<&'static str> {
         .map(|(_, mime)| *mime)
 }
 
+pub fn mime_from_media_path(file_path: &str) -> Option<&'static str> {
+    let name = file_path.trim().rsplit(['/', '\\']).next().unwrap_or("");
+    let ext = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_EXT_TO_MIME
+        .iter()
+        .chain(VIDEO_EXT_TO_MIME)
+        .find(|(candidate, _)| candidate.strip_prefix('.') == Some(ext.as_str()))
+        .map(|(_, mime)| *mime)
+}
+
 pub fn is_unc_or_device_path(file_path: &str) -> bool {
     let trimmed = file_path.trim();
     if trimmed.is_empty() {
@@ -199,7 +220,7 @@ pub fn is_unc_or_device_path(file_path: &str) -> bool {
     false
 }
 
-pub fn normalize_local_image_path(file_path: &str) -> Option<String> {
+pub fn normalize_local_media_path(file_path: &str) -> Option<String> {
     let trimmed = file_path.trim();
     if trimmed.is_empty() || is_unc_or_device_path(trimmed) {
         return None;
@@ -208,8 +229,10 @@ pub fn normalize_local_image_path(file_path: &str) -> Option<String> {
         return None;
     }
     let resolved = node_resolve(&strip_extended_prefix(trimmed), None);
-    is_image_file_path(&resolved).then_some(resolved)
+    mime_from_media_path(&resolved).map(|_| resolved)
 }
+
+pub use normalize_local_media_path as normalize_local_image_path;
 
 pub fn resolve_image_path(raw: &str, cwd: Option<&str>) -> String {
     let trimmed = raw.trim().trim_matches(|ch| ch == '\'' || ch == '"');
@@ -345,6 +368,22 @@ pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// The extension and container header must belong to the same media family.
+pub fn sniff_video_mime(bytes: &[u8], file_path: &str) -> Option<&'static str> {
+    let declared = mime_from_media_path(file_path).filter(|mime| mime.starts_with("video/"))?;
+    let ftyp = bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && !matches!(&bytes[8..12], b"M4A " | b"M4B " | b"M4P ");
+    let ebml = bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]);
+    let avi = bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"AVI ";
+    let matches = match declared {
+        "video/webm" | "video/x-matroska" => ebml,
+        "video/x-msvideo" => avi,
+        _ => ftyp,
+    };
+    matches.then_some(declared)
+}
+
 fn svg_tag(head: &str) -> bool {
     Regex::new(r"<svg[\s>]")
         .ok()
@@ -359,7 +398,7 @@ pub struct ListedFile {
     pub ino: u64,
 }
 
-pub async fn lstat_regular_image_file(
+pub async fn lstat_regular_file(
     resolved_path: &str,
     signal: Option<&Arc<AtomicBool>>,
 ) -> Option<ListedFile> {
@@ -381,6 +420,8 @@ pub async fn lstat_regular_image_file(
         ino: id.ino,
     })
 }
+
+pub use lstat_regular_file as lstat_regular_image_file;
 
 #[derive(Clone, Debug)]
 pub struct OpenedImage {
@@ -489,14 +530,14 @@ impl Drop for CancelImageReadOnDrop {
     }
 }
 
-pub async fn open_normalized_local_image(
+pub async fn open_normalized_local_media(
     resolved_path: &str,
     max_bytes: usize,
     allowed_root_paths: Option<&[String]>,
     signal: Option<&Arc<AtomicBool>>,
 ) -> Option<OpenedImage> {
     static IO_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
-    open_normalized_local_image_scoped(
+    open_normalized_local_media_scoped(
         resolved_path,
         max_bytes,
         allowed_root_paths,
@@ -512,10 +553,12 @@ pub async fn open_normalized_local_image(
     .await
 }
 
+pub use open_normalized_local_media as open_normalized_local_image;
+
 /// The permit moves with the entire physical operation, including queued work
 /// and OS open/read calls. Dropping a caller cancels its continuation, never the
 /// permit of a worker that is still running.
-pub(crate) async fn open_normalized_local_image_scoped(
+pub(crate) async fn open_normalized_local_media_scoped(
     resolved_path: &str,
     max_bytes: usize,
     allowed_root_paths: Option<&[String]>,
@@ -605,7 +648,11 @@ fn read_image_blocking<T>(
     {
         return None;
     }
-    let mime = sniff_image_mime(&bytes)?;
+    let mime = if mime_from_media_path(resolved_path)?.starts_with("image/") {
+        sniff_image_mime(&bytes)?
+    } else {
+        sniff_video_mime(&bytes, resolved_path)?
+    };
     Some(OpenedImage {
         size: bytes.len(),
         mime_type: mime.to_owned(),
@@ -837,6 +884,14 @@ pub fn ext_from_mime(mime: &str) -> &'static str {
         "image/webp" => "webp",
         "image/bmp" => "bmp",
         "image/svg+xml" => "svg",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/x-m4v" => "m4v",
+        "video/3gpp" => "3gp",
+        "video/3gpp2" => "3g2",
+        "video/webm" => "webm",
+        "video/x-matroska" => "mkv",
+        "video/x-msvideo" => "avi",
         "audio/mpeg" => "mp3",
         "audio/wav" => "wav",
         "application/pdf" => "pdf",

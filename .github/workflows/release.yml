@@ -125,7 +125,7 @@ jobs:
       - name: 构建开源二进制
         run: |
           set -euo pipefail
-          cargo build --locked --release -p loongsuite-pilot --bin loongsuite-pilot --target "$TARGET"
+          cargo build --locked --release -p loongsuite-pilot --lib --bin loongsuite-pilot --target "$TARGET"
       - name: macOS 原生 UI 与现有 Swift 测试
         if: runner.os == 'macOS'
         env:

@@ -49,7 +49,7 @@ fn metadata(uri: &str, mime: &str) -> Value {
 fn fake_path() -> PathToUri {
     Arc::new(|path, _time| {
         Box::pin(async move {
-            let Some(mime) = crate::multimodal::resolve::mime_from_image_path(&path) else {
+            let Some(mime) = crate::multimodal::resolve::mime_from_media_path(&path) else {
                 return Ok(None);
             };
             let Ok(bytes) = std::fs::read(&path) else {
@@ -61,7 +61,7 @@ fn fake_path() -> PathToUri {
             Ok(Some(UriResult {
                 uri: format!("oss://test/{}", String::from_utf8_lossy(&bytes)),
                 mime_type: mime.into(),
-                modality: Some("image".into()),
+                modality: crate::multimodal::resolve::modality_from_mime(mime).map(str::to_owned),
                 size: bytes.len(),
                 sha256: "deadbeef".into(),
             }))
@@ -433,4 +433,54 @@ fn source479_default_allowlist_has_two_product_directories() {
         .iter()
         .any(|root| root.ends_with("/.qwenworkcn/tmp") || root.ends_with(r"\.qwenworkcn\tmp")));
     assert_eq!(roots.len(), 2);
+}
+
+#[tokio::test]
+async fn main585_completed_present_and_typed_media_read_keep_video_and_leave_other_tools_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_png(dir.path(), "valley.mp4", "valley");
+    let ignored = write_png(dir.path(), "ignored.mp4", "ignored");
+    let mut entries = vec![
+        entry(
+            json!({"event.name":"tool.result","gen_ai.tool.name":"mcp__qw-builtin__qwenwork_media_task",
+            "gen_ai.tool.call.result":json!({"status":"completed","files":[file],"vendor":{"preserve":true}}).to_string()}),
+        ),
+        entry(
+            json!({"event.name":"tool.call","gen_ai.tool.name":"mcp__qw-builtin__qwenwork_file_present_files",
+            "gen_ai.tool.call.arguments":{"files":[{"file_path":file}]}}),
+        ),
+        entry(
+            json!({"event.name":"tool.result","gen_ai.tool.name":"mcp__qw-builtin__qwenwork_media_read",
+            "gen_ai.tool.call.result":json!({"data":{"files":[{"source":file,"kind":"video"},{"source":ignored},{"source":ignored,"kind":"audio"}]}}).to_string()}),
+        ),
+        entry(
+            json!({"event.name":"tool.result","gen_ai.tool.name":"mcp__qw-builtin__qwenwork_video_generate",
+            "gen_ai.tool.call.result":json!({"status":"pending","task_id":"media_1"}).to_string()}),
+        ),
+        entry(
+            json!({"event.name":"tool.call","gen_ai.tool.name":"mcp__qw-builtin__mcp_workspace_bash",
+            "gen_ai.tool.call.arguments":{"command":format!("ls {file}")}}),
+        ),
+    ];
+    let original_completed = entries[0].tool_call_result.clone().unwrap();
+    let unchanged = serde_json::to_value(&entries[3..]).unwrap();
+    enrich(&mut entries, MultimodalUploadMode::All).await;
+    for (index, field) in [
+        (0, "gen_ai.tool.call.result"),
+        (1, "gen_ai.tool.call.arguments"),
+        (2, "gen_ai.tool.call.result"),
+    ] {
+        let output = serde_json::to_value(&entries[index]).unwrap();
+        assert_eq!(
+            uri_parts(&output[field]),
+            vec![
+                json!({"type":"uri","uri":"oss://test/valley","mime_type":"video/mp4","modality":"video"})
+            ]
+        );
+    }
+    assert_eq!(
+        entries[0].tool_call_result.as_ref().unwrap()[0]["content"],
+        original_completed
+    );
+    assert_eq!(serde_json::to_value(&entries[3..]).unwrap(), unchanged);
 }

@@ -1,0 +1,62 @@
+name: Pilot performance site
+
+on:
+  push:
+    branches: [sdk-performance-results]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-performance-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'alibaba/loongsuite-pilot' && github.ref == 'refs/heads/sdk-performance-results'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Skip an obsolete data commit
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/sdk-performance-results" --jq .object.sha)
+          if [ "$current" = "$GITHUB_SHA" ]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::A newer performance data commit exists; this old deployment is skipped.'
+          fi
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        if: steps.tip.outputs.current == 'true'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Stage generated files only
+        if: steps.tip.outputs.current == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/site"
+          cp index.html history.json "$RUNNER_TEMP/site/"
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+        if: steps.tip.outputs.current == 'true'
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        if: steps.tip.outputs.current == 'true'
+        with:
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/site
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        if: steps.tip.outputs.current == 'true'
+        id: deployment
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}

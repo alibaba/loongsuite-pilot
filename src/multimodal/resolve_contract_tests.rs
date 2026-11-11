@@ -10,6 +10,71 @@ const PNG: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 fn image(label: &[u8]) -> Vec<u8> {
     [PNG, label].concat()
 }
+
+#[tokio::test]
+async fn main585_media_suffix_and_header_families_match_without_weakening_image_checks() {
+    let root = tempfile::tempdir().unwrap();
+    let ftyp = |brand: &[u8; 4]| [b"\0\0\0\x10ftyp".as_slice(), brand, &[0; 4]].concat();
+    let mp4 = ftyp(b"isom");
+    let ebml = vec![0x1a, 0x45, 0xdf, 0xa3, 0, 0, 0, 0];
+    let avi = b"RIFF\0\0\0\0AVI ".to_vec();
+    let cases = [
+        ("clip.mp4", mp4.clone(), Some("video/mp4")),
+        ("clip.MOV", ftyp(b"qt  "), Some("video/quicktime")),
+        ("clip.m4v", mp4.clone(), Some("video/x-m4v")),
+        ("clip.3gp", mp4.clone(), Some("video/3gpp")),
+        ("clip.3g2", mp4.clone(), Some("video/3gpp2")),
+        ("clip.webm", ebml.clone(), Some("video/webm")),
+        ("clip.mkv", ebml.clone(), Some("video/x-matroska")),
+        ("clip.avi", avi, Some("video/x-msvideo")),
+        ("audio-a.mp4", ftyp(b"M4A "), None),
+        ("audio-b.mp4", ftyp(b"M4B "), None),
+        ("audio-p.mp4", ftyp(b"M4P "), None),
+        ("wrong.mp4", PNG.to_vec(), None),
+        ("ebml.mp4", ebml, None),
+        ("wrong.webm", mp4.clone(), None),
+        ("wrong.avi", b"RIFF\0\0\0\0WAVE".to_vec(), None),
+        ("song.m4a", mp4.clone(), None),
+        (
+            "photo.png",
+            vec![0xff, 0xd8, 0xff, 0xe0],
+            Some("image/jpeg"),
+        ),
+        ("video.png", mp4, None),
+        ("short.mp4", b"ftyp".to_vec(), None),
+    ];
+    for (name, bytes, expected) in cases {
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let loaded = open_normalized_local_media(path.to_str().unwrap(), 1024, None, None).await;
+        assert_eq!(
+            loaded.as_ref().map(|file| file.mime_type.as_str()),
+            expected,
+            "{name}"
+        );
+        if let Some(mime) = expected.filter(|mime| mime.starts_with("video/")) {
+            assert_eq!(mime_from_media_path(name), Some(mime));
+            assert_eq!(modality_from_mime(mime), Some("video"));
+            assert_eq!(
+                ext_from_mime(mime),
+                Path::new(name)
+                    .extension()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+            );
+        }
+    }
+    assert!(normalize_local_media_path("/a/clip.mp4?x=1").is_none());
+    for path in [
+        r"\\server\share\clip.mp4",
+        r"\\.\pipe\clip.mp4",
+        r"\\?\GLOBALROOT\Device\clip.mp4",
+    ] {
+        assert!(normalize_local_media_path(path).is_none());
+    }
+}
 fn canonical(path: &Path) -> String {
     let text = std::fs::canonicalize(path)
         .unwrap()

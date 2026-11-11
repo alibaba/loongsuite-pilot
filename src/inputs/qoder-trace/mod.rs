@@ -1,6 +1,7 @@
 //! Qoder / qoder-cli trace merge input and its token readers.
 
 mod intercept_token_reader;
+pub(crate) use intercept_token_reader::InterceptTokenIndex;
 pub mod multimodal;
 mod qoder_trace_input;
 mod segment_token_reader;

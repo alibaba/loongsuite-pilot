@@ -20,7 +20,7 @@ fn cached_identity(root: &str) -> (u64, u64, u64) {
         .expect("session");
     assert_eq!(session.files.len(), 1);
     let file = session.files.values().next().expect("file");
-    (file.dev, file.ino, file.committed_offset)
+    (file.dev, file.ino, file.cursor.committed_offset)
 }
 
 #[tokio::test]
@@ -128,18 +128,13 @@ async fn actual_segment_range_uses_the_handle_that_produced_dev_inode_and_size()
     let replacement = source.with_extension("replacement");
     std::fs::write(&replacement, wave("synthetic-new", 22)).expect("replacement");
     std::fs::rename(&replacement, &source).expect("atomic replacement");
-    let mut state = FileState {
-        dev: opened.dev,
-        ino: opened.ino,
-        committed_offset: 0,
-        events: Vec::new(),
-    };
-    let read = read_appended(&mut opened, &mut state).await;
+    let mut cursor = FileCursor::default();
+    let read = read_appended(&mut opened, &mut cursor, "synthetic-session").await;
     assert!(!read.stable_failure, "production incremental reader");
     let events = read.events;
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
         .all(|event| event.request_id.as_deref() == Some("synthetic-old")));
-    assert_eq!(state.committed_offset, old.len() as u64);
+    assert_eq!(cursor.committed_offset, old.len() as u64);
 }

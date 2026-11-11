@@ -229,7 +229,7 @@ impl InputBody for QoderCnTraceBody {
         let extra = rt.state().extra();
         let native = self
             .transcript_source
-            .read(
+            .read_shared(
                 extra.as_ref().and_then(|v| v.get("qoderTranscripts")),
                 persisted,
             )

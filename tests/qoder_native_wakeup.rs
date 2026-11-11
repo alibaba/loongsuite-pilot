@@ -108,7 +108,13 @@ async fn actual_native_hook_notice_reaches_both_real_inputs_without_legacy_jsonl
         std::fs::write(&file, &content).unwrap();
         let payload = json!({"session_id":"native-session","transcript_path":file,"hook_event_name":"Stop","cwd":root,
             "parent_business_info":{"product":"app"}});
-        let mut child = command(&root, agent).spawn().unwrap();
+        let mut hook = command(&root, agent);
+        if agent == "qoder" {
+            hook.env("LOONGSUITE_PILOT_DATA_DIR", root.join("wrong-data-root"))
+                .arg("--data-dir")
+                .arg(&root);
+        }
+        let mut child = hook.spawn().unwrap();
         child
             .stdin
             .take()
