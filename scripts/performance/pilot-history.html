@@ -12,6 +12,7 @@
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 21px}.tools{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.tools label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}button{border:1px solid #cbd8e1;border-radius:8px;background:#fff;padding:7px 11px;color:var(--ink);font-size:12px}.legend{display:flex;gap:15px;flex-wrap:wrap;color:var(--muted);font-size:11px}.legend span{display:inline-flex;gap:6px;align-items:center}.dot{width:7px;height:7px;display:inline-block;border-radius:50%;background:var(--blue)}.range{height:14px;border-left:2px solid #84a8ce;display:inline-block}.hollow{background:transparent;border:1.5px solid #81919e}.notice{border-left:3px solid #759abf;background:#e9f0f7;padding:11px 14px;margin:0 0 19px;border-radius:0 8px 8px 0;color:#36526a;font-size:12px}.notice[hidden]{display:none}.error{border-color:var(--red);background:#f8edef;color:#713c42}
 .load{margin-top:24px}.load-heading{display:flex;gap:12px;align-items:baseline;margin-bottom:9px}.load h2{font-size:16px;font-weight:750}.load-heading p{font-size:12px;color:var(--muted)}.charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.chart{min-width:0;background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.chart-head{padding:16px 18px 7px;display:flex;justify-content:space-between;gap:15px;align-items:baseline}.chart h3{font-size:13px;font-weight:700}.unit{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}.last{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.scroll{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}.scroll svg{display:block;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.empty{height:232px;display:flex;align-items:center;justify-content:center;color:#8b98a2;font-size:13px;margin:12px 18px 16px;border:1px dashed #dfe6eb;border-radius:10px;background:linear-gradient(180deg,#fafcfd,#fff)}.chart-note{color:var(--muted);font-size:10px;padding:0 18px 12px}.gridline{stroke:#e7edf1;stroke-width:1}.axis{fill:#7c8b96;font-size:10px}.version-label{fill:#516571;font-size:10px}.active-version{fill:var(--blue);font-weight:750}.series{stroke:var(--blue);stroke-width:2;fill:none}.whisker{stroke:#8daed0;stroke-width:2}.point{fill:var(--blue);stroke:#fff;stroke-width:2}.partial{fill:#fff;stroke:var(--blue);stroke-dasharray:2 2}.point-target{cursor:crosshair;outline:none}.point-target:focus .point,.point-target:hover .point{stroke:#123f75;stroke-width:3}.point-target:focus .status-mark,.point-target:hover .status-mark{stroke:var(--blue);stroke-width:2}.point-target:focus .focus-ring{stroke:#8cb6e1;stroke-width:2;fill:#2466b018}.focus-ring{fill:transparent;stroke:transparent}.status-mark{fill:#fff;stroke:#96a5b0;stroke-width:1.3}.status-text{fill:#8a98a1;font-size:9px}.failed-mark{stroke:#ad6166}.capacity-point{fill:var(--orange)}.capacity-label{fill:var(--orange)}.tip-sub.capacity-label{color:var(--orange)}.value-label{fill:#3e5669;font-size:10px}.delta-down{fill:var(--green)}.delta-up{fill:var(--orange)}.delta-flat{fill:#697b88}.compact-hidden .compact-label{display:none}
 .foot{border-top:1px solid var(--line);margin-top:29px;padding-top:17px;color:var(--muted);font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px 32px}.foot strong{color:#3b5261;font-weight:600}.foot p+p{margin-top:6px}.source-note{grid-column:1/-1;font-size:10px;overflow-wrap:anywhere}#tooltip{position:fixed;z-index:10;width:min(380px,calc(100vw - 24px));background:#fff;border:1px solid #cbd9e4;border-radius:12px;box-shadow:0 10px 40px #18354b29;padding:16px;color:var(--ink);font-size:12px;overflow-wrap:anywhere;max-height:calc(100vh - 24px);overflow-y:auto}#tooltip[hidden]{display:none}.tip-title{font-size:14px;font-weight:750;line-height:1.4}.tip-sub{color:var(--muted);font-size:11px;margin-top:3px}.tip-value{font-size:25px;font-weight:750;letter-spacing:-.035em;margin-top:9px;font-variant-numeric:tabular-nums}.tip-delta{font-size:12px;margin:2px 0 11px}.tip-delta.down{color:var(--green)}.tip-delta.up{color:var(--orange)}.tip-delta.muted{color:var(--muted)}.tip-rows{display:grid;grid-template-columns:84px 1fr;gap:5px 9px;margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}.tip-rows dt{color:var(--muted)}.tip-rows dd{margin:0;font-variant-numeric:tabular-nums}.tip-link{display:block;margin-top:12px;font-size:11px}.tip-hint{font-size:10px;color:var(--muted);margin-top:8px}.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.tip-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:9px 0 4px}.tip-stat-label{color:var(--muted);font-size:11px}.tip-values .tip-value{margin-top:0;line-height:1.25}
 @media(min-width:1100px){.chart-head{padding-top:18px}.load{margin-top:27px}}
 .plot-row{display:flex;min-width:0}.fixed-axis{flex:0 0 55px;width:55px;background:#fff}.fixed-axis svg{display:block;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.plot-row>.scroll{flex:1;min-width:0}
 .method-select{width:100%;padding:3px 6px;border:1px solid #cbd8e1;border-radius:6px;background:#fff;color:var(--ink);font:inherit}.method-select:focus-visible{outline:3px solid #82b6ee;outline-offset:2px}
@@ -181,15 +182,25 @@
     focused={element,index,load,metric}; tip.replaceChildren();
     const node=nodes[index], s=stats(node,load.id,metric), n=node.workloads?.[load.id]?.repeats, c=comparison(index,load.id,metric);
     const peak = peakStats(node, load.id, metric);
-    const metricLabel = metric.averageName || metric.name;
-    tip.append(text("div",label(node)+" · "+load.name+" · "+metricLabel,"tip-title"));
+    tip.append(text("div",label(node)+" · "+load.name+" · "+metric.name,"tip-title"));
     const valid=usable(node,load.id,metric);
-    tip.append(text("div",valid?valueText(s.median,metric):"待测试","tip-value"));
+    if (valid) {
+      const values = text("div", "", "tip-values");
+      for (const [name, value] of [[metric.peakOnly ? "峰值" : "平均", s], ["峰值", peak]]) {
+        if (!value) continue;
+        const stat = text("div", "", "tip-stat");
+        stat.append(text("div", name, "tip-stat-label"), text("div", valueText(value.median, metric), "tip-value"));
+        values.append(stat);
+      }
+      tip.append(values);
+    } else {
+      tip.append(text("div", "待测试", "tip-value"));
+    }
     const change=c.ok?(c.delta<0?"降低 "+number(Math.abs(c.delta),1)+"%"+(c.capacity?"":"（提升）"):c.delta>0?"增加 "+number(c.delta,1)+"%"+(c.capacity?"":"（回退）"):"持平"):"—";
     tip.append(text("div",c.ok?"资源值较 "+label(c.previous)+" "+change:"—","tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
     if(valid && !node._preview && Number.isInteger(n)) tip.append(text("div",n+"轮 · 范围 "+valueText(s.min,metric)+" — "+valueText(s.max,metric),"tip-sub"));
-    if (peak) tip.append(text("div", metric.peakName + " " + valueText(peak.median, metric)
-      + " · 范围 " + valueText(peak.min, metric) + " — " + valueText(peak.max, metric), "tip-sub"));
+    if (peak) tip.append(text("div", "峰值范围 " + valueText(peak.min, metric)
+      + " — " + valueText(peak.max, metric), "tip-sub"));
     const q=node.workloads?.[load.id]?.quality, limit=capacity(node,load.id);
     if(valid && limit) {
       tip.append(text("div","超出承载能力 · "+limit.rounds.length+"/"+n+" 轮","tip-sub capacity-label"));
