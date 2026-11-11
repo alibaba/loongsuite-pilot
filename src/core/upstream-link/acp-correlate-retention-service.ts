@@ -81,7 +81,7 @@ export class AcpCorrelateRetentionService {
       try {
         const stat = await fs.stat(full);
         if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
-        const claim = /^(.*)\.(?:turn-context-\d+-[a-f0-9]{64}|session-context)\.done$/.exec(file);
+        const claim = /^(.*)\.(?:turn-context-(?:attributes-)?\d+-[a-f0-9]{64}|session-context)\.done$/.exec(file);
         if (claim) {
           try {
             const source = await fs.stat(path.join(this.dir, `${claim[1]}.jsonl`));

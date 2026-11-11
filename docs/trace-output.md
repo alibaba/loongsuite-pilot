@@ -373,7 +373,7 @@ Pilot sets its converter's `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 
 
 ## Custom Span Attributes
 
-Two kinds of extra attributes can be attached to trace spans:
+Trace spans can receive extra attributes from these sources:
 
 **1. Git/workspace attributes (automatic).** When an agent reports its working directory, spans automatically carry `workspace.path` (the absolute working directory / process cwd), plus `git.repo`, `git.branch`, `git.domain`, and `workspace.current_root` inferred from the local git repository. `workspace.path` is present regardless of git; the `git.*` and `workspace.current_root` fields require the directory to be a git repository. These are also present in the event log (SLS / JSONL) output.
 
@@ -407,6 +407,8 @@ Notes:
 - Attributes never overwrite existing span attributes (fill-only).
 
 **3. Per-invocation passthrough attributes.** The three sources above are process-global (one shared pilot daemon), so they cannot vary per agent call. To attribute individual calls (e.g. which user / issue triggered a run), the calling process sets a **per-invocation** env var on the spawned agent, and the daemon passes matching keys through onto that call's spans.
+
+The scope is the actual execution process's environment. Separate Codex CLI children can receive different values; a shared OpenClaw Gateway or Codex app-server does not change its environment per RPC. Setting a variable only on a Gateway client does not forward it to an existing Gateway. Use per-turn correlation below for multiple customers on a persistent service.
 
 - The host process sets `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` (same `key=value,key=value` format) on the agent subprocess. The agent's hook/plugin parses it at startup and stamps the pairs as top-level fields on every record it emits, so each call carries its own values.
 
@@ -444,9 +446,35 @@ Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
 - Except for the two standard identity keys documented above, reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
 - Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
-- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
+- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, grok-build, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw. See the [per-task Grok example](request-attributes.md#cli-one-grok-process-per-task); this path does not require `requestAttributes.enabled`.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
 - Qwen Code CLI captures them from the current `Stop` hook and clears any saved values when a resumed invocation does not provide the variable, preventing stale attributes from leaking into a later turn.
+
+**4. Shared per-turn correlation attributes.** When one persistent Gateway serves multiple customers, publish each turn's identity before sending it. Pilot matches collected native session/turn IDs and adds the attributes to that turn's events and spans. No new Agent process, upstream trace, or `upstreamLink.enabled` is required.
+
+Merge into existing configuration, preserving destinations and other passthrough prefixes:
+
+```json
+{
+  "requestAttributes": { "enabled": true },
+  "otlpTrace": { "spanAttributePassthroughPrefixes": ["memory."] }
+}
+```
+
+For example, A/B requests can use **the same Gateway**, publishing records under `<dataDir>/acp-correlate/<native-session-id>.jsonl`:
+
+```json
+{"type":"turn","sessionId":"session-A","turnId":"native-run-A","attributes":{"memory.user_id":"tenant-A:user-1","memory.request_id":"request-A"}}
+{"type":"turn","sessionId":"session-B","turnId":"native-run-B","attributes":{"memory.user_id":"tenant-B:user-1","memory.request_id":"request-B"}}
+```
+
+Each line belongs in its own session's file and must be complete before sending. `turnId` must equal the collected `gen_ai.turn.id`, not an arbitrary business request ID. Exact-turn records do not enter text FIFO, allowing identical input, concurrent submission, and reverse completion order to remain separately attributed. The caller or Gateway-side adapter needs write access to Pilot's shared data directory; this does not add an `attributes` parameter to arbitrary RPCs.
+
+- **OpenClaw 2026.6.5 `agent` RPC:** native `runId` has been verified to equal `idempotencyKey`, allowing advance exact publication. Confirm other entry points and versions separately.
+- **Codex app-server:** obtain the native thread ID from `thread/start`, then publish the original user text's `contentHash` before a new `turn/start`. Different threads can run concurrently. Wait for `turn/completed` within one thread; another call during an active turn can steer that turn.
+- **Text matching:** serialize each session and publish a record for every turn, including `attributes: {}`. Do not omit an intermediate turn and prewrite a future identical-input record.
+
+See [Per-request attributes](request-attributes.md) for versions, native IDs, the writer helper, and limits, including caller-side [OpenClaw](request-attributes.md#openclaw-per-turn-values-on-a-persistent-gateway) and [Codex](request-attributes.md#codex-cli-children-and-a-persistent-app-server) examples.
 
 ## Verify Trace Output
 

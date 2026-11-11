@@ -268,11 +268,13 @@ export class Orchestrator extends EventEmitter {
 
     // Upstream trace linking (opt-in): stamp trace_id/parent_span_id from the
     // acp-correlate store so agent spans reparent under the upstream span.
-    if (this.config.upstreamLink?.enabled) {
+    if (this.config.upstreamLink?.enabled || this.config.requestAttributes?.enabled) {
       const correlateDir = path.join(this.dataDir, 'acp-correlate');
       await ensureDir(correlateDir);
-      const store = new CorrelationStore(correlateDir);
-      const traceLinker = new TraceLinker(store);
+      const attributesEnabled = this.config.requestAttributes?.enabled === true;
+      const linkTrace = this.config.upstreamLink.enabled;
+      const store = new CorrelationStore(correlateDir, { attributesEnabled, traceEnabled: linkTrace });
+      const traceLinker = new TraceLinker(store, { attributesEnabled, linkTrace });
       this.inputManager.setTraceLinker(traceLinker);
       this.acpCorrelateRetentionService = new AcpCorrelateRetentionService(this.dataDir, this.config.upstreamLink, traceLinker);
       this.acpCorrelateRetentionService.start();

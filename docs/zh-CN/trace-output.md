@@ -356,7 +356,7 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 
 ## 自定义 Span 属性
 
-有两类额外属性可以附加到 trace span 上：
+额外属性可以从以下来源附加到 trace span 上：
 
 **1. Git/工作区属性（自动）**：当 agent 上报了工作目录时，span 会自动带上 `workspace.path`（agent 运行的绝对工作目录 / 进程 cwd），以及由本地 git 仓库推断的 `git.repo`、`git.branch`、`git.domain`、`workspace.current_root`。`workspace.path` 与 git 无关、始终会带上；而 `git.*` 和 `workspace.current_root` 需要该目录是 git 仓库才会出现。这些字段**同时也会**出现在 event log（SLS / JSONL）中。
 
@@ -390,6 +390,8 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 - 属性为 fill-only，绝不覆盖 span 已有属性。
 
 **3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
+
+这里的“按次”以实际执行进程的环境为作用域。例如，每次新建 Codex CLI 子进程可以传入不同值；共享 OpenClaw Gateway 或 Codex app-server 的启动环境不会随每个 RPC 自动变化。只在调用 Gateway 的客户端设置变量，也不会将值传入已运行的 Gateway。长驻服务按请求区分客户时，使用下面的逐轮入口。
 
 - 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
 
@@ -426,10 +428,36 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
 - 除上述两个标准身份 key 外，保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。
+- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、grok-build、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。Grok 的逐次启动示例见[按请求添加自定义属性](request-attributes.md#cli每个任务启动一次-grok)；不要求开启 `requestAttributes.enabled`。
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
+
+**4. 公共逐轮关联属性。** 长驻 Gateway 同时服务多个客户时，在每轮发送前将客户身份写入本轮关联记录，Pilot 按采集侧的原生 session/turn 匹配，再把属性加到该轮事件和 Span。它不要求新建 Agent 进程、上游 Trace 或 `upstreamLink.enabled`。
+
+合并到既有配置，保留上报目标和其他透传前缀：
+
+```json
+{
+  "requestAttributes": { "enabled": true },
+  "otlpTrace": { "spanAttributePassthroughPrefixes": ["memory."] }
+}
+```
+
+例如，A/B 请求可以使用**同一个 Gateway**，分别写入 `<dataDir>/acp-correlate/<原生sessionId>.jsonl`：
+
+```json
+{"type":"turn","sessionId":"session-A","turnId":"native-run-A","attributes":{"memory.user_id":"tenant-A:user-1","memory.request_id":"request-A"}}
+{"type":"turn","sessionId":"session-B","turnId":"native-run-B","attributes":{"memory.user_id":"tenant-B:user-1","memory.request_id":"request-B"}}
+```
+
+上面每行属于各自 session 的文件，须在对应调用前完整写入。`turnId` 必须等于实际采集的 `gen_ai.turn.id`，不能直接填任意业务请求编号。准确原生 turn ID 记录不参与文本 FIFO，因此相同输入、并发提交和完成顺序相反也能分别归属。调用方或 Gateway 所在侧适配层需要能写同一 Pilot 数据目录；这不是给任意 RPC 新增 `attributes` 参数。
+
+- **OpenClaw 2026.6.5 `agent` RPC**：已验证原生 `runId` 等于 `idempotencyKey`，可在发送前写精确记录。其他入口和版本须另行核对。
+- **Codex app-server**：先取得 `thread/start` 的原生 thread ID，再在新 `turn/start` 前写用户原文的 `contentHash`。不同 thread 可并发；同 thread 等 `turn/completed` 后再发下一轮，active turn 上重复调用可能只是 steering。
+- **文本匹配模式**：同一 session 串行执行，每轮都写记录，包括 `attributes: {}`；不能漏写中间轮次后预写未来同文记录。
+
+版本、原生 ID、写入 helper 及详细限制见[按请求添加自定义属性](request-attributes.md)，其中有 [OpenClaw](request-attributes.md#openclaw长驻-gateway-逐轮注入)和 [Codex](request-attributes.md#codexcli-子进程和长驻-app-server) 的调用侧示例。
 
 ## 验证 Trace 输出
 

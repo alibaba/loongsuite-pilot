@@ -1,6 +1,7 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { createLogger } from '../../utils/logger.js';
-import type { CorrelationStore } from './correlation-store.js';
+import type { CorrelationStore, TurnContext } from './correlation-store.js';
+import { stampRequestAttributes, type RequestAttributes } from '../../normalization/request-attributes.js';
 
 const logger = createLogger('trace-linker');
 
@@ -12,12 +13,15 @@ interface ResolveState {
   resolved: boolean;
   traceId?: string;
   parentSpanId?: string;
+  attributes?: RequestAttributes;
 }
 
 interface TraceLinkerOptions {
   /** Retry count when an `other` event misses (record may be slightly late). */
   retries?: number;
   retryDelayMs?: number;
+  attributesEnabled?: boolean;
+  linkTrace?: boolean;
 }
 
 function parseTraceparent(tp: string): { traceId: string; spanId: string } | null {
@@ -83,6 +87,8 @@ export class TraceLinker {
   private readonly store: CorrelationStore;
   private readonly retries: number;
   private readonly retryDelayMs: number;
+  private readonly attributesEnabled: boolean;
+  private readonly linkTrace: boolean;
   private readonly cache = new Map<string, ResolveState>();
   private readonly firstTurnBySession = new Map<string, string>();
   private readonly sessionLastAccess = new Map<string, number>();
@@ -91,6 +97,8 @@ export class TraceLinker {
     this.store = store;
     this.retries = opts.retries ?? 3;
     this.retryDelayMs = opts.retryDelayMs ?? 100;
+    this.attributesEnabled = opts.attributesEnabled === true;
+    this.linkTrace = opts.linkTrace !== false;
   }
 
   async stamp(entries: AgentActivityEntry[]): Promise<void> {
@@ -132,38 +140,44 @@ export class TraceLinker {
     // A separate correlation file must not detach the child or consume a claim.
     if (!sessionId || !turnId || hasDelegatedParent(entry)) return;
 
-    const key = `${sessionId}|${turnId}`;
+    const key = JSON.stringify([sessionId, turnId]);
     const cached = this.cache.get(key);
     if (cached) {
       if (cached.resolved) this.apply(entry, cached);
       return; // already resolved or already attempted (miss)
     }
 
-    // Other events may be metadata-only; their empty text is not a final miss.
-    if (entry['event.name'] !== 'other') return;
+    const exactTurn = this.store.hasExactTurn(sessionId, turnId);
+    // A caller-supplied exact native turn is already an unambiguous selector;
+    // prompt-only correlation retains its input-bearing `other` requirement.
+    if (entry['event.name'] !== 'other' && !exactTurn) return;
 
     const text = extractUserText(entry);
     const hash = extractInputHash(entry);
     // Metadata is not evidence of a user input, including for session fallback.
-    if (!text && !hash) return;
+    if (!text && !hash && !exactTurn) return;
     const isFirstTurn = this.firstTurnBySession.get(sessionId) === turnId;
-    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
+    const context = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
 
-    if (!tp) {
+    if (!context) {
       this.cache.set(key, { resolved: false });
       return;
     }
-    const parsed = parseTraceparent(tp);
-    if (!parsed) {
+    const parsed = this.linkTrace && context.traceparent ? parseTraceparent(context.traceparent) : null;
+    const attributes = this.attributesEnabled ? context.attributes : undefined;
+    if (!parsed && !attributes) {
       this.cache.set(key, { resolved: false });
       return;
     }
-    const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId };
+    const state: ResolveState = { resolved: true,
+      ...(parsed ? { traceId: parsed.traceId, parentSpanId: parsed.spanId } : {}),
+      ...(attributes ? { attributes } : {}),
+    };
     this.cache.set(key, state);
     this.apply(entry, state);
   }
 
-  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<string | null> {
+  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<TurnContext | null> {
     // No correlation file for this session → nothing was written for it, so there
     // is nothing to wait for. Short-circuit to avoid burning the retry budget
     // (retries × retryDelayMs) on the hot path — the common case when linking is
@@ -171,19 +185,34 @@ export class TraceLinker {
     if (!this.store.hasSession(sessionId)) return null;
 
     // Text or a producer-supplied pre-truncation hash identifies a real input.
-    if (text || hash) {
+    if (text || hash || this.store.hasExactTurn(sessionId, turnId)) {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-        const turnTp = this.store.resolveTurn(sessionId, text, turnId, hash);
-        if (turnTp) {
-          if (isFirstTurn) this.store.markSessionConsumed(sessionId);
-          return turnTp;
+        const turnContext: TurnContext | null = this.attributesEnabled
+          ? this.store.resolveTurnContext(sessionId, text, turnId, hash)
+          : this.linkTrace ? (() => {
+              const traceparent = this.store.resolveTurn(sessionId, text, turnId, hash);
+              return traceparent ? { traceparent } : null;
+            })() : null;
+        if (turnContext) {
+          if (this.linkTrace && isFirstTurn) {
+            if (turnContext.traceparent && parseTraceparent(turnContext.traceparent)) {
+              this.store.markSessionConsumed(sessionId);
+            } else if (turnContext.attributes) {
+              const fallback = this.store.resolveSessionFirst(sessionId);
+              if (fallback) return { ...turnContext, traceparent: fallback };
+            }
+          }
+          return turnContext;
         }
         if (attempt < this.retries) await sleep(this.retryDelayMs);
       }
     }
     // Session-level (env) is the final fallback, first turn only.
-    if (isFirstTurn) return this.store.resolveSessionFirst(sessionId);
+    if (this.linkTrace && isFirstTurn) {
+      const traceparent = this.store.resolveSessionFirst(sessionId);
+      if (traceparent) return { traceparent };
+    }
     return null;
   }
 
@@ -197,15 +226,15 @@ export class TraceLinker {
       if (last >= cutoffMs) continue;
       this.sessionLastAccess.delete(sessionId);
       this.firstTurnBySession.delete(sessionId);
-      const prefix = `${sessionId}|`;
       for (const key of this.cache.keys()) {
-        if (key.startsWith(prefix)) this.cache.delete(key);
+        if ((JSON.parse(key) as string[])[0] === sessionId) this.cache.delete(key);
       }
     }
     this.store.pruneIdle(cutoffMs);
   }
 
   private apply(entry: AgentActivityEntry, state: ResolveState): void {
+    if (state.attributes) stampRequestAttributes(entry, state.attributes);
     if (state.traceId) entry.trace_id = state.traceId;
     if (entry['event.name'] === 'other' && state.parentSpanId) {
       entry.parent_span_id = state.parentSpanId;
