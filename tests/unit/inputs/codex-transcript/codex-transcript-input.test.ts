@@ -793,6 +793,7 @@ describe('CodexTranscriptInput', () => {
 
       await writeTranscript(sessionDir, completedTurn());
       await runInputCycle(input);
+      await waitFor(() => entries.some(entry => entry['gen_ai.turn.end'] === true));
       expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(true);
       expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
     } finally {

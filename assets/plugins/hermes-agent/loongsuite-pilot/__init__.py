@@ -1251,7 +1251,7 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
         "gen_ai.provider.name": request.get("gen_ai.provider.name", "unknown"),
         "agent.pilot.correlation.content_hash": turn["input_content_hash"],
         "gen_ai.input.messages_delta": [{"role": "user", "parts": [
-            {"type": "text", "content": turn["input_text"]}
+            {"type": "text", "content": turn["input_text"] if turn["capture_content"] else ""}
         ]}],
     })
     # Reuse stable event ids and append acknowledgement. If this write fails,

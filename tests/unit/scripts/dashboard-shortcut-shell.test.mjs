@@ -65,11 +65,12 @@ cmd_dashboard shortcut status`], { encoding: 'utf8', env: {
     expect(readFileSync(join(configDir, 'node-bin'), 'utf8')).toBe(nodePath + '\n');
     expect(existsSync(join(root, 'absent-cache'))).toBe(false);
   });
-  it('handles absent installation/runtime without starting a collector', () => {
+  it('keeps shortcut operations free of collector lifecycle changes', () => {
     const source = readFileSync(resolve('scripts/loongsuite-pilot.sh'), 'utf8');
     const command = source.slice(source.indexOf('cmd_dashboard()'), source.indexOf('cmd_token_usage()'));
-    expect(command).not.toMatch(/\n\s+(ensure_dirs|sync_bootstrap_scripts|cmd_start|cmd_stop|cmd_restart)\b/);
-    expect(command).toContain('Dashboard shortcut command is missing');
+    const shortcut = command.slice(command.indexOf('shortcut) shift ;;'));
+    expect(shortcut).not.toMatch(/\n\s+(ensure_dirs|sync_bootstrap_scripts|cmd_start|cmd_stop|cmd_restart)\b/);
+    expect(shortcut).toContain('Dashboard shortcut command is missing');
   });
   it('keeps Node resolution read-only for dashboard while preserving other commands', () => {
     const source = readFileSync(resolve('scripts/loongsuite-pilot.sh'), 'utf8');
@@ -111,7 +112,7 @@ resolve_node`;
         encoding: 'utf8', env: { ...process.env, LOONGSUITE_PILOT_CACHE_DIR: options.cacheDir },
       });
       expect(result.status).toBe(2);
-      expect(result.stderr).toContain('dashboard shortcut {install|status|uninstall}');
+      expect(result.stderr).toContain('dashboard start [port] | stop | shortcut {install|status|uninstall}');
       expect(existsSync(options.cacheDir)).toBe(false);
     }
   });

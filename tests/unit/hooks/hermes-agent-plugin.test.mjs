@@ -890,8 +890,8 @@ describe('Hermes Agent native plugin', () => {
     // cannot be retroactively enriched with future response fields.
     expect(skillRecords[1]['gen_ai.skill.description']).toBe('Review LoongSuite PR readiness.');
     expect(skillRecords[1]['gen_ai.skill.version']).toBe('1.2.3');
-    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeDefined();
-    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeDefined();
+    expect(skillRecords[0]['gen_ai.tool.call.arguments']).toBeUndefined();
+    expect(skillRecords[1]['gen_ai.tool.call.result']).toBeUndefined();
   });
 
   it('uses Hermes 0.18 observer-v1 correlation and tool lifecycle fields', () => {
