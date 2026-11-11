@@ -34,6 +34,7 @@ interface SessionRecord {
 
 interface SessionState {
   mtimeMs: number;
+  sizeBytes: number;
   turns: TurnRecord[];
   sessions: SessionRecord[];
   /** Indices already consumed (consume-once), preserved across file re-reads. */
@@ -96,8 +97,8 @@ function safeName(value: string): string {
  *   - `turn`    records (adapter): exact native turn id, otherwise prompt FIFO.
  *   - `session` records (env hook, first turn): applied to a session's first turn.
  *
- * State is per-session and lazily (re)loaded by mtime. Atomic disk claims keep
- * consume-once semantics across collector restarts and idle-state eviction.
+ * State is per-session and lazily (re)loaded by mtime and size. Atomic disk
+ * claims keep consume-once semantics across restarts and idle-state eviction.
  * In-memory cursors avoid rechecking claims within one collector incarnation.
  */
 export class CorrelationStore {
@@ -195,7 +196,9 @@ export class CorrelationStore {
     }
 
     const existing = this.states.get(sessionId);
-    if (existing && existing.mtimeMs === stat.mtimeMs) {
+    // Consecutive appends can share an mtime on filesystems with coarse clocks.
+    // Size must also match before reusing the parsed append-only records.
+    if (existing && existing.mtimeMs === stat.mtimeMs && existing.sizeBytes === stat.size) {
       existing.lastAccessMs = Date.now();
       return existing;
     }
@@ -290,6 +293,7 @@ export class CorrelationStore {
 
     const state: SessionState = {
       mtimeMs: stat.mtimeMs,
+      sizeBytes: stat.size,
       turns,
       sessions,
       consumedTurns: existing?.consumedTurns ?? new Set<number>(),

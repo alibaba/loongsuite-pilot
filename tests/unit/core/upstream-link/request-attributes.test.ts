@@ -223,18 +223,22 @@ describe('request-scoped correlation attributes', () => {
     expect(store.resolveTurnContext('s1', 'same prompt', 't1')?.attributes).toEqual({ 'memory.user_id': 'U001' });
   });
 
-  it.each(['file', 'line'])('rejects an oversized %s update without changing existing claim indices', size => {
+  it.each(['file', 'line'])('recovers from an oversized %s without shifting claims when mtime is unchanged', size => {
     append('s1', { attributes: { 'memory.user_id': 'U001' } });
     const file = path.join(dir, 's1.jsonl');
     const originalSize = fs.statSync(file).size;
+    const timestamp = new Date('2026-01-01T00:00:00.000Z');
+    fs.utimesSync(file, timestamp, timestamp);
     const store = new CorrelationStore(dir, { attributesEnabled: true, traceEnabled: false });
     expect(store.resolveTurnContext('s1', 'same prompt', 't1')?.attributes?.['memory.user_id']).toBe('U001');
     if (size === 'file') fs.truncateSync(file, 32 * 1024 * 1024 + 1);
     else append('s1', { attributes: { 'memory.user_id': 'U002' }, padding: 'x'.repeat(64 * 1024) });
+    fs.utimesSync(file, timestamp, timestamp);
     expect(store.resolveTurnContext('s1', 'same prompt', 't1')?.attributes?.['memory.user_id']).toBe('U001');
     expect(store.resolveTurnContext('s1', 'same prompt', 't2')).toBeNull();
     fs.truncateSync(file, originalSize);
     append('s1', { attributes: { 'memory.user_id': 'U002' } });
+    fs.utimesSync(file, timestamp, timestamp);
     expect(store.resolveTurnContext('s1', 'same prompt', 't2')?.attributes?.['memory.user_id']).toBe('U002');
   });
 
