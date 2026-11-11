@@ -311,6 +311,7 @@ export class CodexTranscriptInput extends BaseInput {
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
     await this.indexDiscoveredTranscriptOwners(discovered);
+    const isBaselineInit = this.stateStore.get(this.id).extra?.isBaselineInit === true;
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
       const meta = this.transcriptMetaByPath.get(filePath);
@@ -321,10 +322,13 @@ export class CodexTranscriptInput extends BaseInput {
         const hasCopiedPrefix = hasCopiedHistoryPrefix(meta);
         if (hasCopiedPrefix) {
           await this.parkForkBaseline(filePath, key);
-        } else {
+        } else if (!isBaselineInit) {
           await this.baselineFile(filePath, key);
         }
       }
+    }
+    if (!isBaselineInit) {
+      this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
     }
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),

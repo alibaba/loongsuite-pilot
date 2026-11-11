@@ -800,6 +800,43 @@ describe('CodexTranscriptInput', () => {
     }
   });
 
+  it('collects a session that finished before the collector restarted', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-restore-finished-session-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const wakeupDir = path.join(root, 'wakeups');
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.mkdir(wakeupDir, { recursive: true });
+    const { input, entries } = await createDormantInput(root);
+    const svc = new AgentDiscoveryService([{
+      id: input.id,
+      type: input.collectionMethod,
+      watchPaths: CodexTranscriptInput.getWatchPaths(wakeupDir, sessionDir),
+      isAvailable: () => CodexTranscriptInput.checkAvailability(wakeupDir, sessionDir),
+      enabled: () => true,
+      start: () => input.start(),
+      stop: () => input.stop(),
+      pollIntervalMs: 50,
+    }]);
+    try {
+      await svc.start();
+      expect(input.running).toBe(true);
+
+      await fs.rm(sessionDir, { recursive: true });
+      await waitFor(() => !input.running);
+      expect(svc.getStates()[input.id]).toBe('idle');
+
+      await fs.mkdir(sessionDir, { recursive: true });
+      await writeTranscript(sessionDir, completedTurn());
+      await waitFor(() => input.running);
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(true);
+      expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
+    } finally {
+      await svc.stop();
+    }
+  });
+
   it('closes the actual wakeup watcher when stopped during Codex initialization', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-stop-during-start-'));
     tempDirs.push(root);
