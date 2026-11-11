@@ -1,4 +1,5 @@
 """Standard-library, non-runtime checks; no containers or Agent installation."""
+import contextlib
 import errno
 import json
 import hashlib
@@ -12,7 +13,8 @@ import urllib.error
 
 from linux_cgroup import cpu_usage_ns, locate
 from pilot_history import (LEGACY_POLL_MS, LOADS, SAMPLE_INTERVAL, SESSION_COUNT, STANDARD_METHOD,
-                           STANDARD_POLL_MS, WINDOW_SECONDS, configure, resources, standard_resource_sampling)
+                           STANDARD_POLL_MS, WINDOW_SECONDS, ProducerRateError, configure, resources,
+                           run_round_with_retry, standard_resource_sampling)
 from prepare_public import download_release, is_target_dev, load_history, select_backfill, source_runtime, stable_releases
 from runtime_layout import resolve
 from native_qoder_fixture import Fixture, atomic_json, begin_notice_transaction
@@ -49,6 +51,36 @@ class FakeNoticeConnection:
 
 
 class Helpers(unittest.TestCase):
+    def test_short_producer_retries_on_fresh_directory(self):
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stderr(io.StringIO()):
+            directory = Path(root, "high-1")
+            attempts = []
+
+            def run(path):
+                self.assertFalse(path.exists())
+                path.mkdir()
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise ProducerRateError(5999, 6000)
+                return 6000
+
+            self.assertEqual(run_round_with_retry(run, directory), 6000)
+            self.assertEqual(attempts, [directory, directory])
+            self.assertTrue(directory.with_name("high-1-producer-retry-1").is_dir())
+
+    def test_quality_error_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root, "high-1")
+            attempts = []
+
+            def run(path):
+                attempts.append(path)
+                raise ValueError("field quality failed")
+
+            with self.assertRaisesRegex(ValueError, "field quality failed"):
+                run_round_with_retry(run, directory)
+            self.assertEqual(attempts, [directory])
+
     def test_standard_method_definition_matches_fixture_poll_warm_and_resource_settings(self):
         method_path = Path(__file__).resolve().parents[2] / "tests/performance_native/pilot-history-method-10s.json"
         method = json.loads(method_path.read_text())

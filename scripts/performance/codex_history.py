@@ -16,9 +16,9 @@ import uuid
 
 from codex_rollout_fixture import CodexRolloutFixture, validate_output
 from pilot_history import (
-    DRAIN_SECONDS, LOADS, SAMPLE_INTERVAL, WINDOW_SECONDS, Output, command, configure, docker_json,
-    file_sha, locate_cgroup, mapped_library, monotonic_ns, resources, stop_container,
-    standard_resource_sampling, summarize_workload, throughput, write_json,
+    DRAIN_SECONDS, LOADS, SAMPLE_INTERVAL, WINDOW_SECONDS, Output, ProducerRateError, command,
+    configure, docker_json, file_sha, locate_cgroup, mapped_library, monotonic_ns, resources,
+    run_round_with_retry, standard_resource_sampling, stop_container, summarize_workload, throughput, write_json,
 )
 from prepare_public import CODEX_MIXED_METHOD
 from publish_history import compact
@@ -228,7 +228,7 @@ def run_round(args, directory, load, repeat, smoke=False):
         raw_input_bytes = fixture.raw_bytes - warm_bytes
         jsonl_output_bytes = output_end - output_start
         if produced != rate * WINDOW_SECONDS:
-            raise RuntimeError("producer could not maintain the fixed rate")
+            raise ProducerRateError(produced, rate * WINDOW_SECONDS)
 
         write_json(directory / "expected.json", fixture.expected)
         exceeded = await_turns(output, warm_record_count, set(produced_at), time.monotonic() + DRAIN_SECONDS,
@@ -333,7 +333,9 @@ def main():
     rounds = []
     for repeat in range(1, 4):
         for load in LOADS:
-            rounds.append(run_round(args, args.output / ("%s-%d" % (load, repeat)), load, repeat))
+            directory = args.output / ("%s-%d" % (load, repeat))
+            result = run_round_with_retry(lambda path: run_round(args, path, load, repeat), directory)
+            rounds.append(result)
             write_json(args.output / "rounds.json", rounds)
     versions = {round_["cgroup_version"] for round_ in rounds}
     if len(versions) != 1:

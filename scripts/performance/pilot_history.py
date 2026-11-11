@@ -49,6 +49,23 @@ EVENT_SHAPE = collections.Counter({"llm.request": 2, "llm.response": 2, "tool.ca
 REQUEST_SOURCE = re.compile(r"\b(?:synthetic(?: result)? |ci-tool-)((?:warm|turn)-[0-9]+)\b")
 
 
+
+class ProducerRateError(RuntimeError):
+    def __init__(self, produced, expected):
+        super().__init__("producer wrote %d of %d turns during the fixed window" % (produced, expected))
+
+
+def run_round_with_retry(run, directory):
+    for attempt in range(1, 4):
+        try:
+            return run(directory)
+        except ProducerRateError as error:
+            if attempt == 3:
+                raise
+            print("%s: %s; retrying on a fresh Pilot instance" % (directory.name, error),
+                  file=sys.stderr, flush=True)
+            directory.rename(directory.with_name("%s-producer-retry-%d" % (directory.name, attempt)))
+
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
@@ -488,8 +505,10 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         active_end = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(active_end)
         active_sampling = standard_resource_sampling(samples) if standard else {}
-        if produced != rate * WINDOW_SECONDS or len(fixture.expected) != produced:
-            raise RuntimeError("producer could not maintain the fixed rate")
+        if produced != rate * WINDOW_SECONDS:
+            raise ProducerRateError(produced, rate * WINDOW_SECONDS)
+        if len(fixture.expected) != produced:
+            raise RuntimeError("producer catalog does not match the written turns")
         deadline = time.monotonic() + drain_seconds
         catalog = set(response_catalog(fixture.expected))
         capacity = None
@@ -710,7 +729,8 @@ def main():
     try:
         for repeat in range(1, 4):
             for load, rate in LOADS.items():
-                result = run_round(args, args.output / ("%s-%s" % (load, repeat)), load, rate, repeat)
+                directory = args.output / ("%s-%s" % (load, repeat))
+                result = run_round_with_retry(lambda path: run_round(args, path, load, rate, repeat), directory)
                 observed = node["environment"].get("cgroup_version")
                 if observed and observed != result["cgroup_version"]:
                     raise RuntimeError("infrastructure: cgroup version changed during a node")
