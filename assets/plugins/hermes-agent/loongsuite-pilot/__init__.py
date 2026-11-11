@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import sys
 import threading
 import time
@@ -1376,8 +1377,13 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         return
     directory = _data_dir() / "logs" / "hermes-agent"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shared = False
     try:
-        os.chmod(directory, 0o700)
+        if str(os.environ.get('LOONGSUITE_PILOT_ROOT_TRIGGER', '')).strip().lower() in ('1', 'true', 'yes', 'on'):
+            info = directory.lstat()
+            shared = info.st_uid == 0 and (info.st_mode & 0o7777) == 0o1777
+        if not shared:
+            os.chmod(directory, 0o700)
     except OSError:
         pass
     path = directory / ("hermes-agent-%s.jsonl" % _PROCESS_FILE_TOKEN)
@@ -1385,8 +1391,13 @@ def _write_records(records: List[Dict[str, Any]]) -> None:
         json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str) + "\n"
         for record in records
     ).encode("utf-8")
-    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | ((getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)) if shared else 0), 0o600)
     try:
+        if shared:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or (hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+                raise OSError('Pilot event file is not a private regular file')
         offset = 0
         while offset < len(payload):
             written = os.write(descriptor, payload[offset:])
@@ -1402,6 +1413,10 @@ def _purge_old_logs() -> None:
     try:
         cutoff = time.time() - LOG_RETENTION_SECONDS
         for candidate in directory.glob("hermes-agent-*.jsonl"):
+            if (str(os.environ.get('LOONGSUITE_PILOT_ROOT_TRIGGER', '')).strip().lower()
+                    in ('1', 'true', 'yes', 'on') and hasattr(os, 'getuid')
+                    and candidate.stat().st_uid != os.getuid()):
+                continue
             if candidate.is_file() and candidate.stat().st_mtime < cutoff:
                 candidate.unlink(missing_ok=True)
     except Exception as error:

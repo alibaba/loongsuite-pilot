@@ -6,6 +6,7 @@ import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { prepareRootTriggerLogDir } from '../../utils/producer-log-dir.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
 const NON_CANONICAL_HOOKS = new Set(['session_start', 'session_end', 'before_model_resolve']);
@@ -23,6 +24,7 @@ export function resolveOpenClawPluginLogDir(dataDir?: string): string {
 }
 
 export async function ensureOpenClawPluginLogDir(logDir: string): Promise<void> {
+  if (prepareRootTriggerLogDir(logDir)) return;
   await fs.mkdir(logDir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') await fs.chmod(logDir, 0o700);
 }
@@ -57,6 +59,16 @@ export class OpenClawPluginInput extends BaseHookInput {
 
   protected override async onStart(): Promise<void> {
     await ensureOpenClawPluginLogDir(this.logDir);
+  }
+
+  protected override isHookLogFile(fileName: string): boolean {
+    return super.isHookLogFile(fileName)
+      || (this.logPrefix === 'openclaw' && /^openclaw-\d{4}-\d{2}-\d{2}-uid\d+\.jsonl$/.test(fileName));
+  }
+
+  protected override isTodayHookLogFile(fileName: string, today: string): boolean {
+    return super.isTodayHookLogFile(fileName, today)
+      || (this.logPrefix === 'openclaw' && this.isHookLogFile(fileName) && fileName.startsWith(`openclaw-${today}-uid`));
   }
 
   protected async transformRecord(

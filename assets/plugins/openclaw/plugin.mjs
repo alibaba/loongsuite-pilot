@@ -46,6 +46,14 @@ import {
   collectResourceAttributesFromEnv,
 } from "../shared/resource-context.mjs";
 import { installFirstTokenObserver } from "./first-token.mjs";
+import { createRequire } from 'node:module';
+// A partial asset update must never make the host fail to import its plugin.
+// Missing observability support disables writing until the next asset repair.
+let privateLog;
+try { privateLog = createRequire(import.meta.url)('../shared/private-log-dir.cjs'); }
+catch { privateLog = { ensurePrivateLogDir() {}, appendPrivateFile() {}, writerSuffix: () => '' }; }
+const { ensurePrivateLogDir, appendPrivateFile: appendSharedPrivateFile, writerSuffix } = privateLog;
+const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
 
 let firstTokenObserver;
 
@@ -128,8 +136,9 @@ function logDir() {
 }
 
 function ensureDir(dir) {
+  if (sharedRootLogs) return ensurePrivateLogDir(dir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
+  if (process.platform !== 'win32') fs.chmodSync(dir, 0o700);
 }
 
 function todayStamp() {
@@ -323,8 +332,9 @@ function debugFailureOnce(source, err) {
 }
 
 function appendPrivateFile(filePath, content) {
-  fs.appendFileSync(filePath, content, { encoding: "utf8", mode: 0o600 });
-  if (process.platform !== "win32" && !_securedFiles.has(filePath)) {
+  if (sharedRootLogs) return appendSharedPrivateFile(filePath, content);
+  fs.appendFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+  if (process.platform !== 'win32' && !_securedFiles.has(filePath)) {
     fs.chmodSync(filePath, 0o600);
     _securedFiles.add(filePath);
   }
@@ -371,7 +381,7 @@ function persistRecord(record) {
       ensureDir(logDir());
       _logDirReady = true;
     }
-    const filePath = path.join(logDir(), `openclaw-${todayStamp()}.jsonl`);
+    const filePath = path.join(logDir(), `openclaw-${todayStamp()}${sharedRootLogs ? writerSuffix() : ''}.jsonl`);
     appendPrivateFile(filePath, safeStringify(record) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
@@ -381,7 +391,7 @@ function persistRecord(record) {
 function writeError(source, err) {
   try {
     ensureDir(logDir());
-    const errPath = path.join(logDir(), `openclaw-error-${todayStamp()}.log`);
+    const errPath = path.join(logDir(), `openclaw-error-${todayStamp()}${sharedRootLogs ? writerSuffix() : ''}.log`);
     appendPrivateFile(
       errPath,
       `${new Date().toISOString()} [${source}] ${err?.stack || err}\n`

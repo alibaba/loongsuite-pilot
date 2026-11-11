@@ -196,6 +196,11 @@ await build({
 await mkdir('dist', { recursive: true });
 await copyFile('src/mask/sensitive-rules.json', 'dist/sensitive-rules.json');
 
+// Public, stdlib-only policies for Node/Python launchers embedding Pilot.
+await mkdir('dist/runtime', { recursive: true });
+await copyFile('assets/runtime/root-trigger.cjs', 'dist/runtime/root-trigger.cjs');
+await copyFile('assets/runtime/root_trigger.py', 'dist/runtime/root_trigger.py');
+
 // Best-effort: build macOS status bar app (Swift)
 if (process.platform === 'darwin') {
   try {

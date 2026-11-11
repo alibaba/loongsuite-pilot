@@ -446,6 +446,15 @@ export class DshYamlPatchStrategy implements DeployStrategy {
 
       const handle = await fs.open(tmp, 'wx', mode ?? 0o644);
       try {
+        // A privileged installer must not replace a user's private YAML with
+        // a root-owned inode: the original CLI still needs to read it.
+        if (process.getuid?.() === 0) {
+          const owner = await fs.stat(target).catch(err => {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+            return fs.stat(path.dirname(target));
+          });
+          if (owner.uid !== process.getuid() || owner.gid !== process.getgid?.()) await handle.chown(owner.uid, owner.gid);
+        }
         await handle.write(nextBytes);
         await handle.sync();
       } finally {

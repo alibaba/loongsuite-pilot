@@ -1,3 +1,4 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import type { Dirent } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -422,7 +423,7 @@ export class DshLogInput extends BaseSessionInput {
     boundSessionId?: string,
   ): Promise<{ offset: number; record: Record<string, unknown> } | undefined> {
     const start = Math.max(0, offset - LEGACY_SCAN_BYTES);
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     try {
       const bytes = Buffer.alloc(offset - start);
       const bytesRead = await this.readChunk(handle, bytes, start);
@@ -461,7 +462,7 @@ export class DshLogInput extends BaseSessionInput {
 
   private async findLegacyActiveTurnStart(filePath: string, offset: number): Promise<number | undefined> {
     const start = Math.max(0, offset - LEGACY_SCAN_BYTES);
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     try {
       const bytes = Buffer.alloc(offset - start);
       const bytesRead = await this.readChunk(handle, bytes, start);
@@ -508,7 +509,7 @@ export class DshLogInput extends BaseSessionInput {
     visit: (line: string | undefined, lineOffset: number, recordBytes: number) => boolean | void,
     options: { extendedEnd?: number; discardedLineStart?: number } = {},
   ): Promise<DshScanResult> {
-    const handle = await fs.open(filePath, 'r');
+    const handle = await fs.open(filePath, producerReadFlags());
     let readEnd = start;
     let offset = start;
     let discardedLineStart = options.discardedLineStart;

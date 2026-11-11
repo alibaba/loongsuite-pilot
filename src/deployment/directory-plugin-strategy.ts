@@ -13,6 +13,7 @@ import type {
 } from '../types/index.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { rootTriggerEnabled } from '../utils/producer-log-dir.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
 
@@ -37,6 +38,7 @@ interface ActivationCommandOutput {
   stdout: string;
   stderr: string;
 }
+type ActivationIdentity = { uid: number; gid: number } | undefined;
 
 type TargetState =
   | { kind: 'missing' }
@@ -132,6 +134,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
         ...(this.dataDir ? { dataDir: this.dataDir } : {}),
       };
       await this.writeMarker(stagingDir, markerFile, marker);
+      // mkdtemp is 0700. Root-triggered installation must leave managed plugin
+      // code readable when the business process subsequently drops privileges.
+      if (process.getuid?.() === 0 && rootTriggerEnabled()) await fs.chmod(stagingDir, 0o755);
 
       if (targetState.kind === 'missing') {
         await fs.rename(stagingDir, targetDir);
@@ -149,7 +154,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const activationHash = this.hashActivation(config.activation);
       let activationStatus: DirectoryPluginMarker['activationStatus'];
       if (config.activation && activationHash) {
-        activationStatus = await this.activate(config.activation);
+        activationStatus = await this.activate(config.activation, await this.activationIdentity(def));
         marker.activationHash = activationHash;
         marker.activationStatus = activationStatus;
         await this.writeMarker(targetDir, markerFile, marker);
@@ -194,7 +199,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
       if (config.activation?.disableArgs?.length) {
         try {
-          await this.deactivate(config.activation);
+          await this.deactivate(config.activation, await this.activationIdentity(def));
         } catch (err) {
           logger.warn('failed to deactivate directory plugin before removal', {
             agentId: def.id,
@@ -241,16 +246,32 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     command: string,
     args: string[],
     timeoutMs = DEFAULT_ACTIVATION_TIMEOUT_MS,
+    identity?: ActivationIdentity,
   ): Promise<ActivationCommandOutput> {
     const result = await execFile(command, args, {
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
       windowsHide: true,
+      ...identity,
     });
     return {
       stdout: String(result.stdout),
       stderr: String(result.stderr),
     };
+  }
+
+  private async activationIdentity(def: AgentDefinition): Promise<ActivationIdentity> {
+    if (process.getuid?.() !== 0 || !rootTriggerEnabled() || !def.directoryPlugin) return undefined;
+    // The CLI can update auth, install locks and configuration while enabling
+    // a plugin. Use the declared configuration root's owner, never a guessed
+    // future process uid and never a root CLI against another user's home.
+    for (const root of def.detection.paths ?? []) {
+      const relative = path.relative(path.resolve(root), path.resolve(def.directoryPlugin.targetDir));
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      const stat = await fs.stat(root);
+      if (stat.isDirectory()) return { uid: stat.uid, gid: stat.gid };
+    }
+    return undefined;
   }
 
   private hashActivation(config?: DirectoryPluginActivationConfig): string | undefined {
@@ -269,8 +290,9 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
   private async activate(
     config: DirectoryPluginActivationConfig,
+    identity?: ActivationIdentity,
   ): Promise<'activated' | 'unsupported'> {
-    const probeOutput = await this.probeActivation(config);
+    const probeOutput = await this.probeActivation(config, identity);
     if (probeOutput === null) return 'unsupported';
     const optionalArgs = (config.optionalEnableArgs ?? [])
       .filter(arg => probeOutput.includes(arg));
@@ -278,26 +300,29 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       config.command,
       [...config.enableArgs, ...optionalArgs],
       this.resolveActivationTimeout(config),
+      identity,
     );
     return 'activated';
   }
 
-  private async deactivate(config: DirectoryPluginActivationConfig): Promise<void> {
-    if (!config.disableArgs?.length || await this.probeActivation(config) === null) return;
+  private async deactivate(config: DirectoryPluginActivationConfig, identity?: ActivationIdentity): Promise<void> {
+    if (!config.disableArgs?.length || await this.probeActivation(config, identity) === null) return;
     await this.runActivationCommand(
       config.command,
       config.disableArgs,
       this.resolveActivationTimeout(config),
+      identity,
     );
   }
 
-  private async probeActivation(config: DirectoryPluginActivationConfig): Promise<string | null> {
+  private async probeActivation(config: DirectoryPluginActivationConfig, identity?: ActivationIdentity): Promise<string | null> {
     if (!config.probeArgs?.length) return '';
     try {
       const result = await this.runActivationCommand(
         config.command,
         config.probeArgs,
         this.resolveActivationTimeout(config),
+        identity,
       );
       return `${result.stdout}\n${result.stderr}`;
     } catch (err) {
