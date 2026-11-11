@@ -1,15 +1,15 @@
 //! Agent discovery. Port of `agent-discovery-service.ts`.
 //!
 //! Each entry moves Idle → Starting → Running → Stopping → Idle. Watch bursts
-//! coalesce onto one in-flight refresh. `notify` is not a crate dependency, so
-//! an existing watch path is observed by mtime polling (1s) and a missing path
-//! falls back to the entry interval. `LOONGSUITE_PILOT_FORCE_POLLING=true`
+//! coalesce onto one in-flight refresh. Discovery polls the first available
+//! watch path every second and reselects it when paths are removed or restored.
+//! Entries with no available watch path at startup fall back to the entry interval. `LOONGSUITE_PILOT_FORCE_POLLING=true`
 //! skips the mtime watcher, matching the TypeScript force-polling switch.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -391,15 +391,12 @@ impl AgentDiscoveryService {
             .get(id)
             .map(|rt| rt.entry.watch_paths().to_vec())
             .unwrap_or_default();
-        if let Some(path) = paths
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists())
-        {
+        let mut previous = watch_signature(&paths, None).ok().flatten();
+        if previous.is_some() {
             let this = Arc::clone(self);
             let id = id.to_string();
             let watched = id.clone();
             let task = tokio::spawn(async move {
-                let mut previous = signature(&path);
                 let mut ticker = tokio::time::interval(Duration::from_millis(WATCH_POLL_MS));
                 ticker.tick().await;
                 loop {
@@ -407,7 +404,9 @@ impl AgentDiscoveryService {
                     if this.stopping.load(Ordering::SeqCst) {
                         break;
                     }
-                    let next = signature(&path);
+                    let Ok(next) = watch_signature(&paths, previous.as_ref()) else {
+                        continue;
+                    };
                     if next != previous {
                         previous = next;
                         this.process_entry(&watched).await;
@@ -469,19 +468,48 @@ impl AgentDiscoveryService {
     }
 }
 
-fn signature(path: &str) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) => format!(
-            "{}:{}",
-            meta.len(),
-            meta.modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        ),
-        Err(_) => "missing".into(),
+#[derive(PartialEq, Eq)]
+struct WatchSignature {
+    path_index: usize,
+    size: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64),
+}
+
+fn watch_signature(
+    paths: &[String],
+    previous: Option<&WatchSignature>,
+) -> std::io::Result<Option<WatchSignature>> {
+    for (path_index, path) in paths.iter().enumerate() {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue
+            }
+            Err(error) if previous.is_some_and(|previous| previous.path_index == path_index) => {
+                return Err(error);
+            }
+            Err(_) => continue,
+        };
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        return Ok(Some(WatchSignature {
+            path_index,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: (metadata.dev(), metadata.ino()),
+        }));
     }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -856,6 +884,39 @@ mod migration_lifecycle_tests {
         );
         no_timers(&service);
     }
+    #[tokio::test(start_paused = true)]
+    async fn watching_fallback_reselects_a_restored_preferred_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let preferred = directory.path().join("sessions");
+        let fallback = directory.path().join("wakeups");
+        std::fs::create_dir(&preferred).unwrap();
+        std::fs::create_dir(&fallback).unwrap();
+        let mut definition = Detection::new("codex");
+        definition.watch = vec![
+            preferred.to_string_lossy().into_owned(),
+            fallback.to_string_lossy().into_owned(),
+        ];
+        let agent = Arc::new(definition);
+        let service = service(vec![agent.clone()]);
+        service.start().await;
+        assert_eq!(service.get_states()[agent.id()], EntryState::Running);
+        tokio::task::yield_now().await;
+
+        std::fs::remove_dir(&preferred).unwrap();
+        agent.available.store(false, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_millis(WATCH_POLL_MS)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(service.get_states()[agent.id()], EntryState::Idle);
+
+        std::fs::create_dir(&preferred).unwrap();
+        agent.available.store(true, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_millis(WATCH_POLL_MS)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(service.get_states()[agent.id()], EntryState::Running);
+        assert_eq!(agent.starts.load(Ordering::SeqCst), 2);
+        service.stop().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn missing_watch_path_uses_polling_and_shutdown_cancels_every_timer() {
         let directory = tempfile::tempdir().unwrap();

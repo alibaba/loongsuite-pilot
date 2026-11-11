@@ -9,6 +9,7 @@ mod multimodal_span_metadata;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -145,6 +146,8 @@ struct TurnBuffer {
     spilled_event_ids: Option<HashSet<String>>,
     resident_bytes: usize,
     completed: bool,
+    is_realtime_hermes: bool,
+    has_hermes_native_run_observer: bool,
     last_activity_ms: i64,
     logical_bytes: f64,
     unmeasured_records: u64,
@@ -377,6 +380,8 @@ struct OtlpInner {
     #[cfg(test)]
     test_conversion_clock: Mutex<Option<TestConversionClock>>,
     idle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    warned_hermes_idle_timeout: AtomicBool,
+    warned_hermes_legacy_idle_timeout: AtomicBool,
     convert_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -526,6 +531,8 @@ impl OtlpTraceFlusher {
             #[cfg(test)]
             test_conversion_clock: Mutex::new(None),
             idle: Mutex::new(None),
+            warned_hermes_idle_timeout: AtomicBool::new(false),
+            warned_hermes_legacy_idle_timeout: AtomicBool::new(false),
             convert_locks: Mutex::new(HashMap::new()),
             endpoints,
             state: Mutex::new(OtlpState {
@@ -1303,12 +1310,7 @@ impl OtlpInner {
                 if buffer.agent_type != agent_type || buf_key == &key || buffer.completed {
                     continue;
                 }
-                if agent_type == "hermes"
-                    && buffer.records.iter().any(|record| {
-                        entry_str(record, "agent.hermes.collection").as_deref()
-                            == Some("realtime-v1")
-                    })
-                {
+                if buffer.is_realtime_hermes {
                     continue;
                 }
                 if incoming_session.is_none()
@@ -1361,6 +1363,8 @@ impl OtlpInner {
                         spilled_event_ids: None,
                         resident_bytes: 0,
                         completed: false,
+                        is_realtime_hermes: false,
+                        has_hermes_native_run_observer: false,
                         last_activity_ms: now,
                         logical_bytes: 0.0,
                         unmeasured_records: 0,
@@ -1369,6 +1373,16 @@ impl OtlpInner {
                     });
                 if buffer.session_id.is_none() {
                     buffer.session_id = incoming_session;
+                }
+                if agent_type == "hermes"
+                    && entry.get("agent.hermes.collection").and_then(Value::as_str)
+                        == Some("realtime-v1")
+                {
+                    buffer.is_realtime_hermes = true;
+                    buffer.has_hermes_native_run_observer |= entry
+                        .get("agent.hermes.native_run_observer")
+                        .and_then(Value::as_bool)
+                        == Some(true);
                 }
                 if !durable_codex && agent_type == "codex" {
                     buffer.spillable = false;
@@ -1670,8 +1684,29 @@ impl OtlpInner {
                 .buffers
                 .iter()
                 .filter(|(_, buffer)| {
-                    !buffer.completed
-                        && now.saturating_sub(buffer.last_activity_ms) > timeout as i64
+                    if buffer.completed
+                        || now.saturating_sub(buffer.last_activity_ms) <= timeout as i64
+                    {
+                        return false;
+                    }
+                    if buffer.has_hermes_native_run_observer {
+                        if !self.warned_hermes_idle_timeout.swap(true, AtomicOrdering::Relaxed) {
+                            create_logger("otlp-trace-flusher").warn(
+                                "Ignoring idle timeout for realtime Hermes turns; waiting for native completion",
+                                None,
+                            );
+                        }
+                        return false;
+                    }
+                    if buffer.is_realtime_hermes
+                        && !self.warned_hermes_legacy_idle_timeout.swap(true, AtomicOrdering::Relaxed)
+                    {
+                        create_logger("otlp-trace-flusher").warn(
+                            "Realtime Hermes turn lacks native completion capability; applying legacy idle timeout",
+                            None,
+                        );
+                    }
+                    true
                 })
                 .map(|(key, _)| key.clone())
                 .collect()
@@ -1679,6 +1714,13 @@ impl OtlpInner {
         for key in stale {
             let buffer = {
                 let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                if !state.buffers.get(&key).is_some_and(|buffer| {
+                    !buffer.completed
+                        && !buffer.has_hermes_native_run_observer
+                        && now.saturating_sub(buffer.last_activity_ms) > timeout as i64
+                }) {
+                    continue;
+                }
                 state.buffers.shift_remove(&key)
             };
             if let Some(mut buffer) = buffer {
@@ -4901,6 +4943,61 @@ mod tests {
             flusher.export_spans_for_agent("codex", Vec::new()).await;
             flusher.shutdown().await.unwrap();
             assert_eq!(shutdowns.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn realtime_hermes_native_observer_prevents_idle_sealing() {
+            let dir = tempfile::tempdir().unwrap();
+            let converter = Arc::new(RecConv {
+                calls: Mutex::new(Vec::new()),
+            });
+            let flusher = OtlpTraceFlusher::with_parts(
+                single(dir.path()),
+                None,
+                None,
+                Some(converter.clone()),
+            )
+            .unwrap();
+
+            for (turn, observed) in [("native", true), ("legacy", false)] {
+                flusher
+                    .send(
+                        entry(json!({
+                            "event.name": "llm.request",
+                            "gen_ai.agent.type": "hermes",
+                            "gen_ai.turn.id": turn,
+                            "agent.hermes.collection": "realtime-v1",
+                            "agent.hermes.native_run_observer": observed
+                        })),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            for buffer in flusher.inner.state.lock().unwrap().buffers.values_mut() {
+                buffer.last_activity_ms -= 1_000;
+            }
+            flusher.inner.tick_idle(100).await;
+            {
+                let state = flusher.inner.state.lock().unwrap();
+                assert!(state.buffers.contains_key("turn:native"));
+                assert!(!state.buffers.contains_key("turn:legacy"));
+            }
+
+            flusher
+                .send(
+                    entry(json!({
+                        "event.name": "other",
+                        "gen_ai.agent.type": "hermes",
+                        "gen_ai.turn.id": "native",
+                        "gen_ai.turn.end": true
+                    })),
+                    None,
+                )
+                .await
+                .unwrap();
+            flusher.shutdown().await.unwrap();
+            assert_eq!(converter.calls.lock().unwrap().len(), 2);
         }
 
         #[tokio::test]

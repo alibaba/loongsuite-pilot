@@ -309,7 +309,7 @@ loongsuite-pilot restart
 | `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
+消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（图像和本地视频；已实现 `codex`、`qoder` IDE/CLI 与 `qwen-work-cn`）。
 
 已有配置文件不会被改写。升级后需重启常驻的 OpenClaw、Pi、Hermes 进程，以加载新版插件。Agent 启停、工作区黑名单、脱敏和多模态上传配置仍各自生效。
 
