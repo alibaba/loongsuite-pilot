@@ -624,26 +624,39 @@ describe('AgentDiscoveryService deleted-directory watches', () => {
     const svc = new AgentDiscoveryService([entry]);
     await svc.start();
 
+    const watched = fs.statSync(tree.codex, { bigint: true });
     fs.rmSync(tree.codex, { recursive: true });
     fs.mkdirSync(tree.codex, { recursive: true });
-    const stale = records[0];
-    for (let i = 0; i < 1_000; i++) stale.cb();
-    await flush();
+    const realStatSync = fs.statSync;
+    const statSpy = vi.spyOn(fs, 'statSync').mockImplementation(((target: fs.PathLike, opts?: fs.StatSyncOptions) => {
+      const st = realStatSync(target, opts);
+      if (String(target) === tree.codex) {
+        Object.defineProperty(st, 'ino', { value: watched.ino + 1n });
+      }
+      return st;
+    }) as typeof fs.statSync);
+    try {
+      const stale = records[0];
+      for (let i = 0; i < 1_000; i++) stale.cb();
+      await flush();
 
-    expect(stale.watcher.close).toHaveBeenCalledOnce();
-    expect(records).toHaveLength(2);
-    expect(records[1].watchPath).toBe(tree.codex);
-    expect(records[1].watcher.close).not.toHaveBeenCalled();
-    expect(svc.getStates()['deploy:codex']).toBe('running');
-    expect(start).toHaveBeenCalledOnce();
-    expect(stop).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(1);
+      expect(stale.watcher.close).toHaveBeenCalledOnce();
+      expect(records).toHaveLength(2);
+      expect(records[1].watchPath).toBe(tree.codex);
+      expect(records[1].watcher.close).not.toHaveBeenCalled();
+      expect(svc.getStates()['deploy:codex']).toBe('running');
+      expect(start).toHaveBeenCalledOnce();
+      expect(stop).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
 
-    const after = checks;
-    for (let i = 0; i < 1_000; i++) stale.cb();
-    await flush();
-    expect(checks).toBe(after);
-    await svc.stop();
+      const after = checks;
+      for (let i = 0; i < 1_000; i++) stale.cb();
+      await flush();
+      expect(checks).toBe(after);
+      await svc.stop();
+    } finally {
+      statSpy.mockRestore();
+    }
   });
 
   it('does not tight-loop when the watcher errors, and rewatches on the next poll', async () => {
