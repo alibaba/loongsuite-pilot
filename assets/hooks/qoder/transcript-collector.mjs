@@ -241,6 +241,7 @@ export class QoderTranscriptCollector {
       this.parentProbes.set(source.key, probe);
     }
     if (probe.complete && probe.version === fileVersion(stat)) return;
+    probe.complete = false; // Appended bytes also invalidate an older complete proof.
     // Unvisited candidates remain unknown when this cycle's probe budget is
     // spent. Otherwise a completed directory pass could authorize fallback.
     if (this.parentProbeBudget <= 0) {
