@@ -1087,7 +1087,7 @@
     }
   ],
   "configuration": {
-    "dev_branch": "codex/cloudshell-sdk-20261107"
+    "dev_branch": "dev/v2.0.0"
   },
   "other_methods": {
     "github-full-pilot-codex-rollout-10s-v1": {
