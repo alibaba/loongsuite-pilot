@@ -947,6 +947,7 @@ async fn intercept_l254_unavailable_plugin_does_not_block_intercept_and_real_str
         markers: vec!["watchdog-fixture-hook.sh".into()],
         bin_path: None,
         install_args: Vec::new(),
+        needs_repair: None,
         change_watch_path: None,
         needs_repair_on_change: None,
         enabled: None,

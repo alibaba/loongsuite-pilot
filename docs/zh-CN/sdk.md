@@ -100,7 +100,7 @@ Linux 动态加载器可能因为外部调用线程上的线程局部存储（TL
 
 云壳嵌入模式保证 Qoder 和 Codex 两个 profile；完整模式的其他 Agent 继续沿用原实现。Qoder 的 `hook_jsonl` 是现有 `qoder-YYYY-MM-DD.jsonl` 历史事件目录，最多一个；`transcript` 是授权的原生 transcript 目录，需通过 SDK Hook 发布现有 Qoder 唤醒元数据。还可显式提供 `sqlite`、`segments`、`intercept` Token 来源。Codex 使用一个原生 rollout 目录。未列出的默认目录不会作为兜底读取。
 
-Qoder CLI 需要通过已部署的启动入口启用真实 token 截获；直接调用底层可执行文件可能绕过该包装。嵌入时显式授权相应 `intercept` 或 `sqlite` 来源。只有 transcript 时不保证包含全部 token 字段；CLI 最终摘要中的零值不能替代缺失的真实用量，SDK 不估算或补造。
+启动普通版 Qoder CLI 时在进程环境中设置 `QODER_EXPOSE_TOKEN_USAGE=true`，SDK 直接从授权 transcript 的逐响应 `message.usage` 读取真实用量。Qoder CLI 1.1.76 已验证。完整 Pilot 的既有 Unix 启动入口会设置该变量，云壳管理 Qoder 进程时应在启动时传入。Qoder 设置文件里的 `env` 对该开关无效。没有正数用量的原生占位记录不作为计量来源。现有诊断 segments 和历史 sidecar 仍可用于兼容读取，Qoder IDE 沿用 SQLite。
 
 `max_files` 默认 512，上限 16384，限制每次采集打开的不同文件，包含必要的元数据；`max_read_bytes` 默认 8 MiB，上限 64 MiB，应用于原生输入的单文件/单次读取预算；轮询默认 1000ms，上限 300000ms。超限保留进度并报告，不静默截断。原生输入本身的边界、历史基线与去重规则继续生效。
 
@@ -148,10 +148,12 @@ loongsuite-pilot sdk-hook --data-dir /var/lib/pilot-sdk/instance-a \
   --channel cloud --agent qoder --event PreToolUse
 ```
 
-Agent JSON 从 stdin 输入；`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。Qoder CLI 输出协议使用 `--agent qodercli`。完整 Pilot 原有 `interceptor hook` 命令保留其 HTTP 和 Agent 协议，也经过同一原生硬截止外壳。
+Qoder CLI 可以把 Pilot 可执行文件的绝对路径作为 `command`，并用 `args` 分别传入这些参数。Agent JSON 从 stdin 输入。`--channel local` 使用 SDK 本地规则，`cloud` 使用 `on_hook`。Qoder CLI 输出协议使用 `--agent qodercli`。完整 Pilot 的 `interceptor hook` 命令保留其 HTTP 和 Agent 协议，也经过同一原生硬截止外壳。
+
+采集唤醒的 `Stop` Hook 可以直接调用同一个可执行文件，参数为 `hook-process qoder --wakeup-only --agent-id qoder --log-prefix qoder --data-dir /var/lib/pilot-sdk/instance-a`。它写入实例的有界唤醒元数据，采集器按 transcript 进度继续读取。
 
 大输入不直接塞进 UDP。客户端把最多 1 MiB JSON 放在实例私有的 `hook-requests-cloud/local` 目录，用最多 16 个跨进程租约限制未完成请求，再发小于 4096 字节的关联报文。SDK 校验 token、进程/实例关联、请求 ID、长度、期限及文件边界。回包不超过 32 KiB；需要自己实现客户端时，报文定义见 `src/sdk/hook_protocol.rs`，发送与租约处理见 `src/sdk/hook_bin.rs`。
 
 SDK 归一化 `trace_id`、`client_event_id`、`agent`、`event`、`session_id`、工具/命令/提示等字段，保留未知字段；`supports_blocking` 来自可信策略和真实 Agent 能力。`on_hook` 写入 `{"action":"allow"}` 或 `{"action":"block","reason":"..."}`。不支持阻断、失败、无效响应和迟到结果一律放行。
 
-bin 从程序入口计算 3 秒截止，包含 stdin、通信和冷启动。工作线程做等待，主线程独占 Agent 输出，独立截止守卫保证阻塞 stdin 或输出时也结束整个进程。裁决记录异步交接，不等待活动 ACK；SDK 丢弃迟到裁决。整条 Agent Hook 的 4 秒目标仍需结合宿主调度验证。
+bin 在端口描述不存在、进程已退出或端口拒绝连接时立即放行。支持接收回执的 SDK 在确认收到请求前最多等待 200 ms，避免残留端口描述指向无响应的端口时拖慢 Agent。收到回执后才等待裁决。bin 从程序入口计算 3 秒截止，包含 stdin、通信和冷启动。工作线程做等待，主线程独占 Agent 输出，独立截止守卫保证阻塞 stdin 或输出时也结束整个进程。裁决记录异步交接，不等待活动 ACK；SDK 丢弃迟到裁决。整条 Agent Hook 的 4 秒目标仍需结合宿主调度验证。

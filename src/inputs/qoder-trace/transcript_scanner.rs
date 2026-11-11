@@ -216,7 +216,7 @@ fn parse(
         _ => (None, Some("invalid-json-line")),
     }
 }
-fn full_line(
+pub(super) fn full_line(
     f: &mut File,
     start: u64,
     end: u64,
@@ -248,6 +248,26 @@ pub fn scan_lines(
     budget: &mut ScanBudget,
     cancel: &AtomicBool,
     mut emit: impl FnMut(Line) -> bool,
+) -> std::io::Result<ScanBatch> {
+    scan_lines_with_file(
+        path,
+        range,
+        options,
+        previous,
+        budget,
+        cancel,
+        |line, _, _, _| emit(line),
+    )
+}
+
+pub(super) fn scan_lines_with_file(
+    path: &Path,
+    range: std::ops::Range<u64>,
+    options: &ScanOptions,
+    previous: Option<PendingLine>,
+    budget: &mut ScanBudget,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(Line, &mut File, &mut ScanBudget, u64) -> bool,
 ) -> std::io::Result<ScanBatch> {
     let (start, end) = (range.start, range.end);
     let mut f = open_regular(path)?;
@@ -319,13 +339,18 @@ pub fn scan_lines(
                 position = z;
                 line_start = z;
                 complete_offset = z;
-                if !emit(Line {
-                    start: a,
-                    end: z,
-                    bytes: z - a,
-                    row: None,
-                    quarantine: Some(why),
-                }) {
+                if !emit(
+                    Line {
+                        start: a,
+                        end: z,
+                        bytes: z - a,
+                        row: None,
+                        quarantine: Some(why),
+                    },
+                    &mut f,
+                    budget,
+                    initial.size,
+                ) {
                     return checked_batch(&f, path, initial, complete_offset, None);
                 }
                 continue;
@@ -372,13 +397,18 @@ pub fn scan_lines(
                 parse(&bytes, false, budget)
             };
             complete_offset = z;
-            if !emit(Line {
-                start: line_start,
-                end: z,
-                bytes: z - line_start,
-                row,
-                quarantine,
-            }) {
+            if !emit(
+                Line {
+                    start: line_start,
+                    end: z,
+                    bytes: z - line_start,
+                    row,
+                    quarantine,
+                },
+                &mut f,
+                budget,
+                initial.size,
+            ) {
                 return checked_batch(&f, path, initial, complete_offset, None);
             }
             line_start = z;
@@ -391,13 +421,18 @@ pub fn scan_lines(
         }
     }
     if options.count_only && options.legacy_count_final && position == end && pending_bytes > 0 {
-        emit(Line {
-            start: line_start,
-            end,
-            bytes: end - line_start,
-            row: None,
-            quarantine: None,
-        });
+        emit(
+            Line {
+                start: line_start,
+                end,
+                bytes: end - line_start,
+                row: None,
+                quarantine: None,
+            },
+            &mut f,
+            budget,
+            initial.size,
+        );
         return checked_batch(&f, path, initial, end, None);
     }
     let mut pending = (pending_bytes > 0).then(|| PendingLine {
@@ -425,13 +460,18 @@ pub fn scan_lines(
             parse(&bytes, false, budget)
         };
         if row.is_some() {
-            emit(Line {
-                start: line_start,
-                end,
-                bytes: end - line_start,
-                row,
-                quarantine,
-            });
+            emit(
+                Line {
+                    start: line_start,
+                    end,
+                    bytes: end - line_start,
+                    row,
+                    quarantine,
+                },
+                &mut f,
+                budget,
+                initial.size,
+            );
             pending = None;
             complete_offset = end;
         }

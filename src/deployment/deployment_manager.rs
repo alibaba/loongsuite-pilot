@@ -481,6 +481,14 @@ impl DeploymentManager {
         merge_hook_settings_paths(self.state.lock().unwrap().get(agent_id), None)
     }
 
+    pub(crate) async fn read_recorded_settings_paths(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<String>, String> {
+        let (state, _) = self.read_state_file().await?;
+        Ok(merge_hook_settings_paths(state.get(agent_id), None))
+    }
+
     pub fn record_installed_by(&self, agent_id: &str) -> Option<InstalledBy> {
         self.state
             .lock()

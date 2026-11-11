@@ -37,6 +37,7 @@ impl Fixture {
             hook_json_path: vec!["hooks".into(), event.into()],
             hook_command: command.into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: Some(true),

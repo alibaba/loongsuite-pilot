@@ -264,7 +264,7 @@ impl AgentDefLoader {
         true
     }
 
-    fn resolve_value(&self, value: &Value) -> Value {
+    pub(super) fn resolve_value(&self, value: &Value) -> Value {
         match value {
             Value::String(text) => Value::String(self.resolve_string(text)),
             Value::Array(items) => {

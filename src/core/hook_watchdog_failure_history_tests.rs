@@ -25,6 +25,7 @@ fn target(root: &Path, calls: Arc<AtomicUsize>) -> PluginCheckTarget {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(true) })
         })),
+        needs_repair: None,
         change_watch_path: None,
         needs_repair_on_change: None,
         enabled: None,

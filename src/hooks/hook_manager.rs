@@ -47,6 +47,7 @@ pub struct HookDefinition {
     pub settings_syntax: Option<SettingsSyntax>,
     pub hook_json_path: Vec<String>,
     pub hook_command: String,
+    pub exec_args: Option<Vec<String>>,
     pub matcher: Option<String>,
     pub history_dir: Option<String>,
     pub replace_hook_commands: Option<Vec<String>>,
@@ -138,7 +139,7 @@ impl HookManager {
                 .filter(|commands| !commands.is_empty())
             {
                 let current = array_at_mut(&mut settings, &def.hook_json_path)?;
-                *current = remove_commands(current, commands);
+                *current = remove_commands(current, commands, None);
             }
             let replaced = def
                 .replace_hook_commands
@@ -146,20 +147,20 @@ impl HookManager {
                 .is_some_and(|commands| !commands.is_empty());
             let present = {
                 let current = array_at(&settings, &def.hook_json_path)?;
-                is_command_present(current, &def.hook_command)
+                is_hook_present(current, def)
             };
             if present {
                 let shell_repaired = {
                     let current = array_at_mut(&mut settings, &def.hook_json_path)?;
-                    apply_shell_to_entries(current, &def.hook_command, def.shell.as_deref())
+                    apply_shell_to_entries(current, def, def.shell.as_deref())
                 };
                 let timeout_repaired = {
                     let current = array_at_mut(&mut settings, &def.hook_json_path)?;
-                    apply_timeout_to_entries(current, &def.hook_command, def.timeout)
+                    apply_timeout_to_entries(current, def, def.timeout)
                 };
                 let moved = {
                     let current = array_at_mut(&mut settings, &def.hook_json_path)?;
-                    move_command_to_head(current, &def.hook_command, def.insert)
+                    move_command_to_head(current, def)
                 };
                 if reassigned || replaced || shell_repaired || timeout_repaired || moved {
                     write_json_file(&def.settings_path, &settings)
@@ -261,16 +262,13 @@ impl HookManager {
                     {
                         return Ok(true);
                     }
-                    let mut commands = vec![def.hook_command.clone()];
-                    if let Some(extra) = &def.replace_hook_commands {
-                        commands.extend(extra.clone());
-                    }
+                    let commands = def.replace_hook_commands.as_deref().unwrap_or_default();
                     let current = target_parent
                         .get(&last)
                         .and_then(|value| value.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    let next = remove_commands(&current, &commands);
+                    let next = remove_commands(&current, commands, Some(def));
                     if next.is_empty() {
                         target_parent.remove(&last);
                     } else {
@@ -322,14 +320,15 @@ impl HookManager {
         if existing.is_some_and(|value| !value.is_array()) {
             return Err("Hook 路径必须为数组".into());
         }
-        let mut commands = def.replace_hook_commands.clone().unwrap_or_default();
-        if remove {
-            commands.push(def.hook_command.clone());
-        }
+        let commands = def.replace_hook_commands.as_deref().unwrap_or_default();
         let mut next = match existing.and_then(Value::as_array) {
-            Some(entries) => {
-                remove_commands_from_jsonc(raw, &def.hook_json_path, entries, &commands)
-            }
+            Some(entries) => remove_commands_from_jsonc(
+                raw,
+                &def.hook_json_path,
+                entries,
+                commands,
+                remove.then_some(def),
+            ),
             None => raw.into(),
         };
         let parsed = parse_json_document(&next, def.syntax()).map_err(|err| err.message)?;
@@ -348,7 +347,7 @@ impl HookManager {
                     JsonEditOptions::default(),
                 );
             }
-        } else if !is_command_present(&entries, &def.hook_command) {
+        } else if !is_hook_present(&entries, def) {
             let entry = build_hook_entry(def);
             if current.is_none() {
                 next = edit_jsonc(
@@ -386,8 +385,7 @@ impl HookManager {
                 for (index, entry) in entries.iter().enumerate() {
                     if let Some(handlers) = entry.get("hooks").and_then(Value::as_array) {
                         for (handler_index, handler) in handlers.iter().enumerate() {
-                            if handler.get("command").and_then(Value::as_str)
-                                == Some(&def.hook_command)
+                            if command_matches(handler, def)
                                 && handler.get("shell").and_then(Value::as_str) != Some(shell)
                             {
                                 let mut path = key_path(&def.hook_json_path);
@@ -418,12 +416,12 @@ impl HookManager {
         if commands
             .iter()
             .any(|command| is_command_present(&entries, command))
+            || (remove && is_hook_present(&entries, def))
             || (!remove
-                && (!is_command_present(&entries, &def.hook_command)
-                    || !has_required_shell(&entries, &def.hook_command, def.shell.as_deref())
-                    || !has_required_timeout(&entries, &def.hook_command, def.timeout)
-                    || (def.insert == Some(HookInsert::Head)
-                        && !is_command_at_head(&entries, &def.hook_command))))
+                && (!is_hook_present(&entries, def)
+                    || !has_required_shell(&entries, def, def.shell.as_deref())
+                    || !has_required_timeout(&entries, def, def.timeout)
+                    || (def.insert == Some(HookInsert::Head) && !is_hook_at_head(&entries, def))))
         {
             return Err("Hook 编辑结果校验失败，原配置未写入".into());
         }
@@ -435,11 +433,15 @@ impl HookManager {
         let JsonDocumentRead::Ok { data, .. } = document else {
             return false;
         };
-        if require_settings_object(&data).is_err() {
+        Self::is_hook_installed_in_settings(&data, def)
+    }
+
+    pub(crate) fn is_hook_installed_in_settings(data: &Value, def: &HookDefinition) -> bool {
+        if require_settings_object(data).is_err() {
             return false;
         }
         let Some(hooks) =
-            value_at_path(&data, &def.hook_json_path).and_then(|value| value.as_array())
+            value_at_path(data, &def.hook_json_path).and_then(|value| value.as_array())
         else {
             return false;
         };
@@ -450,16 +452,16 @@ impl HookManager {
         }) {
             return false;
         }
-        if !is_command_present(hooks, &def.hook_command) {
+        if !is_hook_present(hooks, def) {
             return false;
         }
-        if !has_required_shell(hooks, &def.hook_command, def.shell.as_deref()) {
+        if !has_required_shell(hooks, def, def.shell.as_deref()) {
             return false;
         }
-        if !has_required_timeout(hooks, &def.hook_command, def.timeout) {
+        if !has_required_timeout(hooks, def, def.timeout) {
             return false;
         }
-        if def.insert == Some(HookInsert::Head) && !is_command_at_head(hooks, &def.hook_command) {
+        if def.insert == Some(HookInsert::Head) && !is_hook_at_head(hooks, def) {
             return false;
         }
         true
@@ -510,7 +512,8 @@ impl HookManager {
             .filter(|commands| !commands.is_empty())
         {
             if let Some(Value::Array(entries)) = existing {
-                raw = remove_commands_from_jsonc(&raw, &def.hook_json_path, entries, commands);
+                raw =
+                    remove_commands_from_jsonc(&raw, &def.hook_json_path, entries, commands, None);
             }
         }
         let reparsed = parse_json_document(&raw, JsonSyntax::Jsonc).map_err(|err| err.message)?;
@@ -527,7 +530,7 @@ impl HookManager {
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        if !is_command_present(&hooks, &def.hook_command) {
+        if !is_hook_present(&hooks, def) {
             let entry = build_hook_entry(def);
             raw = if current_value.is_none() {
                 let list = Value::Array(vec![entry]);
@@ -614,12 +617,14 @@ impl HookManager {
                         def.hook_json_path.join(".")
                     ));
                 };
-                let mut commands = vec![def.hook_command.clone()];
-                if let Some(extra) = &def.replace_hook_commands {
-                    commands.extend(extra.clone());
-                }
-                let next =
-                    remove_commands_from_jsonc(&raw, &def.hook_json_path, entries, &commands);
+                let commands = def.replace_hook_commands.as_deref().unwrap_or_default();
+                let next = remove_commands_from_jsonc(
+                    &raw,
+                    &def.hook_json_path,
+                    entries,
+                    commands,
+                    Some(def),
+                );
                 if next == raw {
                     return Ok(true);
                 }
@@ -671,6 +676,7 @@ impl HookManager {
             settings_syntax: None,
             hook_json_path: vec!["hooks".into(), event.into()],
             hook_command: command.clone(),
+            exec_args: None,
             matcher: None,
             history_dir: Some(
                 Path::new(&base)
@@ -817,6 +823,7 @@ impl HookManager {
                 None,
             ),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: None,
@@ -847,6 +854,7 @@ fn nested_stop(
         hook_json_path: vec!["hooks".into(), "Stop".into()],
         hook_command: command,
         matcher: Some("*".into()),
+        exec_args: None,
         history_dir: None,
         replace_hook_commands: replace,
         use_nested_format: Some(true),
@@ -974,30 +982,42 @@ fn path_exists(settings: &Value, json_path: &[String]) -> bool {
     json_path.last().is_some_and(|key| cursor.contains_key(key))
 }
 
-fn entry_matches_command(entry: &Value, command: &str) -> bool {
-    let Some(object) = entry.as_object() else {
-        return false;
-    };
-    if object.get("command").and_then(Value::as_str) == Some(command) {
-        return true;
-    }
-    object
-        .get("hooks")
-        .and_then(Value::as_array)
-        .is_some_and(|hooks| {
-            hooks
-                .iter()
-                .any(|hook| hook.get("command").and_then(Value::as_str) == Some(command))
+fn command_matches(hook: &Value, def: &HookDefinition) -> bool {
+    hook.get("command").and_then(Value::as_str) == Some(def.hook_command.as_str())
+        && def.exec_args.as_ref().is_none_or(|expected| {
+            hook.get("args")
+                .and_then(Value::as_array)
+                .is_some_and(|args| {
+                    args.iter()
+                        .map(Value::as_str)
+                        .eq(expected.iter().map(|arg| Some(arg.as_str())))
+                })
         })
 }
 
-fn is_command_present(entries: &[Value], command: &str) -> bool {
-    entries
-        .iter()
-        .any(|entry| entry_matches_command(entry, command))
+fn entry_matches(entry: &Value, matches: impl Fn(&Value) -> bool) -> bool {
+    matches(entry)
+        || entry
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|hooks| hooks.iter().any(matches))
 }
 
-fn has_required_shell(entries: &[Value], command: &str, shell: Option<&str>) -> bool {
+fn is_command_present(entries: &[Value], command: &str) -> bool {
+    entries.iter().any(|entry| {
+        entry_matches(entry, |hook| {
+            hook.get("command").and_then(Value::as_str) == Some(command)
+        })
+    })
+}
+
+fn is_hook_present(entries: &[Value], def: &HookDefinition) -> bool {
+    entries
+        .iter()
+        .any(|entry| entry_matches(entry, |hook| command_matches(hook, def)))
+}
+
+fn has_required_shell(entries: &[Value], def: &HookDefinition, shell: Option<&str>) -> bool {
     let Some(shell) = shell else {
         return true;
     };
@@ -1007,14 +1027,18 @@ fn has_required_shell(entries: &[Value], command: &str, shell: Option<&str>) -> 
             .and_then(Value::as_array)
             .is_some_and(|hooks| {
                 hooks.iter().any(|hook| {
-                    hook.get("command").and_then(Value::as_str) == Some(command)
+                    command_matches(hook, def)
                         && hook.get("shell").and_then(Value::as_str) == Some(shell)
                 })
             })
     })
 }
 
-fn apply_shell_to_entries(entries: &mut [Value], command: &str, shell: Option<&str>) -> bool {
+fn apply_shell_to_entries(
+    entries: &mut [Value],
+    def: &HookDefinition,
+    shell: Option<&str>,
+) -> bool {
     let Some(shell) = shell else {
         return false;
     };
@@ -1027,7 +1051,7 @@ fn apply_shell_to_entries(entries: &mut [Value], command: &str, shell: Option<&s
             continue;
         };
         for hook in hooks {
-            if hook.get("command").and_then(Value::as_str) == Some(command)
+            if command_matches(hook, def)
                 && hook.get("shell").and_then(Value::as_str) != Some(shell)
             {
                 if let Some(object) = hook.as_object_mut() {
@@ -1040,12 +1064,12 @@ fn apply_shell_to_entries(entries: &mut [Value], command: &str, shell: Option<&s
     changed
 }
 
-fn has_required_timeout(entries: &[Value], command: &str, timeout: Option<f64>) -> bool {
+fn has_required_timeout(entries: &[Value], def: &HookDefinition, timeout: Option<f64>) -> bool {
     let Some(timeout) = timeout else {
         return true;
     };
     entries.iter().any(|entry| {
-        if entry.get("command").and_then(Value::as_str) == Some(command) {
+        if command_matches(entry, def) {
             return number_eq(entry.get("timeout"), timeout);
         }
         entry
@@ -1053,22 +1077,23 @@ fn has_required_timeout(entries: &[Value], command: &str, timeout: Option<f64>) 
             .and_then(Value::as_array)
             .is_some_and(|hooks| {
                 hooks.iter().any(|hook| {
-                    hook.get("command").and_then(Value::as_str) == Some(command)
-                        && number_eq(hook.get("timeout"), timeout)
+                    command_matches(hook, def) && number_eq(hook.get("timeout"), timeout)
                 })
             })
     })
 }
 
-fn apply_timeout_to_entries(entries: &mut [Value], command: &str, timeout: Option<f64>) -> bool {
+fn apply_timeout_to_entries(
+    entries: &mut [Value],
+    def: &HookDefinition,
+    timeout: Option<f64>,
+) -> bool {
     let Some(timeout) = timeout else {
         return false;
     };
     let mut changed = false;
     for entry in entries.iter_mut() {
-        if entry.get("command").and_then(Value::as_str) == Some(command)
-            && !number_eq(entry.get("timeout"), timeout)
-        {
+        if command_matches(entry, def) && !number_eq(entry.get("timeout"), timeout) {
             if let Some(object) = entry.as_object_mut() {
                 object.insert("timeout".into(), json_number(timeout));
                 changed = true;
@@ -1081,9 +1106,7 @@ fn apply_timeout_to_entries(entries: &mut [Value], command: &str, timeout: Optio
             continue;
         };
         for hook in hooks {
-            if hook.get("command").and_then(Value::as_str) == Some(command)
-                && !number_eq(hook.get("timeout"), timeout)
-            {
+            if command_matches(hook, def) && !number_eq(hook.get("timeout"), timeout) {
                 if let Some(object) = hook.as_object_mut() {
                     object.insert("timeout".into(), json_number(timeout));
                     changed = true;
@@ -1112,23 +1135,19 @@ fn json_number(value: f64) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn is_command_at_head(entries: &[Value], command: &str) -> bool {
+fn is_hook_at_head(entries: &[Value], def: &HookDefinition) -> bool {
     entries
         .first()
-        .is_some_and(|entry| entry_matches_command(entry, command))
+        .is_some_and(|entry| entry_matches(entry, |hook| command_matches(hook, def)))
 }
 
-fn move_command_to_head(
-    entries: &mut Vec<Value>,
-    command: &str,
-    insert: Option<HookInsert>,
-) -> bool {
-    if insert != Some(HookInsert::Head) || is_command_at_head(entries, command) {
+fn move_command_to_head(entries: &mut Vec<Value>, def: &HookDefinition) -> bool {
+    if def.insert != Some(HookInsert::Head) || is_hook_at_head(entries, def) {
         return false;
     }
     let Some(index) = entries
         .iter()
-        .position(|entry| entry_matches_command(entry, command))
+        .position(|entry| entry_matches(entry, |hook| command_matches(hook, def)))
     else {
         return false;
     };
@@ -1139,6 +1158,12 @@ fn move_command_to_head(
 
 fn build_hook_entry(def: &HookDefinition) -> Value {
     let mut command = Map::new();
+    if let Some(args) = &def.exec_args {
+        command.insert(
+            "args".into(),
+            Value::Array(args.iter().cloned().map(Value::String).collect()),
+        );
+    }
     if def.use_nested_format == Some(true) {
         command.insert("command".into(), Value::String(def.hook_command.clone()));
         command.insert("type".into(), Value::String("command".into()));
@@ -1168,20 +1193,32 @@ fn build_hook_entry(def: &HookDefinition) -> Value {
     }
 }
 
-fn remove_commands(entries: &[Value], commands: &[String]) -> Vec<Value> {
+fn remove_commands(
+    entries: &[Value],
+    commands: &[String],
+    def: Option<&HookDefinition>,
+) -> Vec<Value> {
     entries
         .iter()
-        .filter_map(|entry| remove_commands_from_entry(entry, commands))
+        .filter_map(|entry| remove_commands_from_entry(entry, commands, def))
         .collect()
 }
 
-fn remove_commands_from_entry(entry: &Value, commands: &[String]) -> Option<Value> {
+fn removes_hook(hook: &Value, commands: &[String], def: Option<&HookDefinition>) -> bool {
+    def.is_some_and(|def| command_matches(hook, def))
+        || hook
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| commands.iter().any(|alias| alias == command))
+}
+
+fn remove_commands_from_entry(
+    entry: &Value,
+    commands: &[String],
+    def: Option<&HookDefinition>,
+) -> Option<Value> {
     let object = entry.as_object()?;
-    if object
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|command| commands.iter().any(|item| item == command))
-    {
+    if removes_hook(entry, commands, def) {
         return None;
     }
     let Some(hooks) = object.get("hooks").and_then(Value::as_array) else {
@@ -1189,12 +1226,7 @@ fn remove_commands_from_entry(entry: &Value, commands: &[String]) -> Option<Valu
     };
     let filtered: Vec<Value> = hooks
         .iter()
-        .filter(|hook| {
-            !hook
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|command| commands.iter().any(|item| item == command))
-        })
+        .filter(|hook| !removes_hook(hook, commands, def))
         .cloned()
         .collect();
     if filtered.is_empty() {
@@ -1217,15 +1249,12 @@ fn remove_commands_from_jsonc(
     hook_path: &[String],
     entries: &[Value],
     commands: &[String],
+    def: Option<&HookDefinition>,
 ) -> String {
     let mut raw = source.to_string();
     for entry_index in (0..entries.len()).rev() {
         let entry = &entries[entry_index];
-        if entry
-            .get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|command| commands.iter().any(|item| item == command))
-        {
+        if removes_hook(entry, commands, def) {
             let mut path = key_path(hook_path);
             path.push(JsonPathSeg::Index(entry_index));
             raw = edit_jsonc(&raw, &path, None, JsonEditOptions::default());
@@ -1239,10 +1268,7 @@ fn remove_commands_from_jsonc(
             .enumerate()
             .rev()
             .filter_map(|(hook_index, hook)| {
-                hook.get("command")
-                    .and_then(Value::as_str)
-                    .filter(|command| commands.iter().any(|item| item == *command))
-                    .map(|_| hook_index)
+                removes_hook(hook, commands, def).then_some(hook_index)
             })
             .collect();
         if matching.len() == hooks.len() && !matching.is_empty() {
@@ -1265,13 +1291,13 @@ fn remove_commands_from_jsonc(
 fn repair_jsonc_hook_entry(raw: &str, def: &HookDefinition, hooks: &[Value]) -> String {
     let Some(index) = hooks
         .iter()
-        .position(|entry| entry_matches_command(entry, &def.hook_command))
+        .position(|entry| entry_matches(entry, |hook| command_matches(hook, def)))
     else {
         return raw.to_string();
     };
     let mut next = apply_timeout_to_jsonc(raw, def, hooks, index);
     let mut hooks = hooks.to_vec();
-    apply_timeout_to_entries(&mut hooks, &def.hook_command, def.timeout);
+    apply_timeout_to_entries(&mut hooks, def, def.timeout);
     if def.insert == Some(HookInsert::Head) && index > 0 {
         let entry = hooks[index].clone();
         let mut path = key_path(&def.hook_json_path);
@@ -1301,9 +1327,7 @@ fn apply_timeout_to_jsonc(
         return raw.to_string();
     };
     let entry = &hooks[entry_index];
-    if entry.get("command").and_then(Value::as_str) == Some(def.hook_command.as_str())
-        && !number_eq(entry.get("timeout"), timeout)
-    {
+    if command_matches(entry, def) && !number_eq(entry.get("timeout"), timeout) {
         let mut path = key_path(&def.hook_json_path);
         path.push(JsonPathSeg::Index(entry_index));
         path.push(JsonPathSeg::Key("timeout".into()));
@@ -1317,9 +1341,7 @@ fn apply_timeout_to_jsonc(
     let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
         return raw.to_string();
     };
-    let Some(hook_index) = inner.iter().position(|hook| {
-        hook.get("command").and_then(Value::as_str) == Some(def.hook_command.as_str())
-    }) else {
+    let Some(hook_index) = inner.iter().position(|hook| command_matches(hook, def)) else {
         return raw.to_string();
     };
     if number_eq(inner[hook_index].get("timeout"), timeout) {
@@ -1347,6 +1369,49 @@ mod tests {
             Some(dir.join("hooks").to_string_lossy().into_owned()),
             Some(dir.join("logs").to_string_lossy().into_owned()),
         )
+    }
+
+    #[test]
+    fn exec_hook_uses_literal_args_and_preserves_other_handlers_for_same_binary() {
+        let mut def = HookManager::build_qoder_cli_hooks(None).remove(0);
+        def.hook_command = "/installed path/loongsuite-pilot".into();
+        def.exec_args = Some(vec!["hook-process".into(), "literal $value *".into()]);
+        def.replace_hook_commands = Some(vec!["/legacy/pilot.sh".into()]);
+        def.shell = None;
+        def.timeout = Some(4.0);
+        def.insert = Some(HookInsert::Head);
+        let raw = r#"{
+          "hooks":{"Stop":[{"matcher":"*","hooks":[
+            {"type":"command","command":"/legacy/pilot.sh"},
+            {"type":"command","command":"/installed path/loongsuite-pilot","args":["custom"]},
+            {"type":"command","command":"/installed path/loongsuite-pilot"}
+          ]}]}
+        }"#;
+        let installed = HookManager::edit_hook(raw, &def, false).unwrap();
+        let value: Value = serde_json::from_str(&installed).unwrap();
+        let groups = value["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups[0]["hooks"][0],
+            serde_json::json!({
+                "type": "command",
+                "command": "/installed path/loongsuite-pilot",
+                "args": ["hook-process", "literal $value *"],
+                "timeout": 4
+            })
+        );
+        assert_eq!(groups[1]["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            HookManager::edit_hook(&installed, &def, false).unwrap(),
+            installed
+        );
+
+        let removed = HookManager::edit_hook(&installed, &def, true).unwrap();
+        let value: Value = serde_json::from_str(&removed).unwrap();
+        let remaining = &value["hooks"]["Stop"][0]["hooks"];
+        assert_eq!(remaining.as_array().unwrap().len(), 2);
+        assert_eq!(remaining[0]["args"], serde_json::json!(["custom"]));
+        assert!(remaining[1].get("args").is_none());
     }
 
     #[test]
@@ -1427,6 +1492,7 @@ mod tests {
             hook_json_path: vec!["hooks".into(), "Stop".into()],
             hook_command: "/opt/loongsuite-pilot/hooks/qoderwork-loongsuite-pilot-hook.sh".into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: Some(vec![
                 "/opt/loongsuite-pilot/hooks/qoder-loongsuite-pilot-hook.sh qoder-work".into(),
@@ -1482,6 +1548,7 @@ mod tests {
                 hook_json_path: vec!["hooks".into(), "Stop".into()],
                 hook_command: "/opt/qoder-loongsuite-pilot-hook.sh".into(),
                 matcher: Some("*".into()),
+                exec_args: None,
                 history_dir: None,
                 replace_hook_commands: None,
                 use_nested_format: Some(true),
@@ -1505,6 +1572,7 @@ mod tests {
             hook_json_path: vec!["hooks".into(), "Stop".into()],
             hook_command: "/opt/qoder-loongsuite-pilot-hook.sh".into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: Some(true),
@@ -1541,6 +1609,7 @@ mod tests {
             hook_command: "/opt/loongsuite-pilot/hooks/codex-loongsuite-pilot-hook.sh pre-tool-use"
                 .into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: Some(vec!["otel-codex-hook pre-tool-use".into()]),
             use_nested_format: Some(true),
@@ -1583,6 +1652,7 @@ mod tests {
             hook_json_path: vec!["hooks".into(), "Stop".into()],
             hook_command: "/opt/qwen-loongsuite-pilot-hook.sh stop".into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: Some(true),
@@ -1637,6 +1707,7 @@ mod tests {
             hook_json_path: vec!["hooks".into(), "PreToolUse".into()],
             hook_command: "/opt/pilot.sh".into(),
             matcher: Some("*".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: Some(true),

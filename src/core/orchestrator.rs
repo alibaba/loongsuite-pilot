@@ -1346,6 +1346,7 @@ impl Orchestrator {
                     let def = def_for_repair.clone();
                     Box::pin(async move { Ok(deployment.deploy_single(&def).await.success) })
                 })),
+                needs_repair: None,
                 change_watch_path: None,
                 needs_repair_on_change: None,
                 enabled: Some(Arc::new(move || {
@@ -1358,6 +1359,16 @@ impl Orchestrator {
                     )
                 })),
             };
+            if def.id == "qoder" {
+                let deployment_check =
+                    Arc::clone(self.deployment.lock().expect("deploy").as_ref().unwrap());
+                let definition = def.clone();
+                target.needs_repair = Some(Arc::new(move || {
+                    let deployment = Arc::clone(&deployment_check);
+                    let definition = definition.clone();
+                    Box::pin(async move { Ok(deployment.needs_redeploy(&definition, None).await) })
+                }));
+            }
             if def.id == "codex" {
                 if let Some(trust) = hook.trust_toml.as_ref() {
                     target.change_watch_path = Some(resolve_home(&trust.config_path));

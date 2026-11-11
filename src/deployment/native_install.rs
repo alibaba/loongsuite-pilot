@@ -161,6 +161,11 @@ pub(super) async fn run_with_retirement(
                                 } else { None };
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
+                                if operation == "rollback-package" {
+                                    super::native_qoder_rollback::restore_legacy_hooks(
+                                        &paths.source_dir, &manifest, &paths.cache_dir, &paths.data_dir,
+                                    ).await.context("恢复旧版本 Qoder Hook 失败；保留当前版本")?;
+                                }
                                 if let Some(plan) = &resources {
                                     plan.install(&mut transaction, paths.deploy_hooks)?;
                                 }
@@ -172,8 +177,8 @@ pub(super) async fn run_with_retirement(
                                     );
                                     transaction.write("config", &prepared.bytes, prepared.mode)?;
                                 }
-                                if paths.deploy_hooks {
-                                    candidate_command(
+                                let qoder_settings = if paths.deploy_hooks {
+                                    let report = candidate_command(
                                         &paths,
                                         &manifest,
                                         &paths.config_path,
@@ -181,7 +186,15 @@ pub(super) async fn run_with_retirement(
                                     )
                                     .await
                                     .context("Hook 部署失败；恢复配置和版本入口")?;
-                                }
+                                    serde_json::from_str::<super::hook_install_service::HookInstallReport>(&report)
+                                        .ok()
+                                        .and_then(|report| report.agents.into_iter().find(|agent| {
+                                            agent.id == "qoder" && matches!(agent.status.as_str(), "ok" | "up-to-date")
+                                        }))
+                                        .and_then(|agent| agent.settings_path)
+                                } else {
+                                    None
+                                };
                                 if publish {
                                     let name = paths
                                         .source_dir
@@ -213,6 +226,16 @@ pub(super) async fn run_with_retirement(
                                     transaction.write(&key, &bytes, mode)?;
                                 }
                                 transaction.commit()?;
+                                if let Some(settings) = qoder_settings {
+                                    if let Err(error) = super::native_qoder_rollback::activate_direct_hooks(
+                                        &paths.source_dir, &paths.cache_dir, &paths.data_dir, &settings,
+                                    ).await {
+                                        crate::utils::create_logger("NativeInstall").warn(
+                                            "Qoder direct Hook reconciliation deferred after native publication",
+                                            json!({"error": error.to_string()}).as_object(),
+                                        );
+                                    }
+                                }
                                 if let Some(plan) = &resources { plan.report(); }
                                 if publish {
                                     if let Err(error) = super::runtime_retirement::cleanup_all(

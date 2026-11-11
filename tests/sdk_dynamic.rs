@@ -647,6 +647,46 @@ fn hook_command(data: &Path, channel: &str, event: &str, payload: &Value) -> std
     child
 }
 #[test]
+fn native_hook_fails_open_quickly_without_a_live_sdk_port() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let source = root.path().join("source");
+    let payload = json!({"hook_event_name":"PreToolUse","tool_name":"Bash",
+        "tool_input":{"command":"echo pilot-sdk-port-probe"}});
+    let assert_fast_allow = |channel| {
+        let started = Instant::now();
+        let output = hook_command(&data, channel, "PreToolUse", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(1), "{channel}");
+    };
+    for channel in ["cloud", "local"] {
+        assert_fast_allow(channel);
+    }
+
+    let mut policy = qoder_policy(&source);
+    policy["hcd"]["agent_configs"]["qoder"]["collection"]["enabled"] = json!(false);
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    // A live process and an open UDP socket alone do not prove that the SDK
+    // still owns a stale descriptor's port. Neither channel waits for a verdict.
+    let unresponsive = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    for channel in ["cloud", "local"] {
+        let path = data.join(format!("sdk-hooks-{channel}.json"));
+        let original = std::fs::read(&path).unwrap();
+        let mut descriptor: Value = serde_json::from_slice(&original).unwrap();
+        descriptor["port"] = json!(unresponsive.local_addr().unwrap().port());
+        std::fs::write(&path, descriptor.to_string()).unwrap();
+        assert_fast_allow(channel);
+        std::fs::write(path, original).unwrap();
+    }
+    assert_eq!(host.ctx.hook_entered.load(Ordering::SeqCst), 0);
+    host.stop();
+}
+
+#[test]
 fn cloud_and_local_verdicts_use_trusted_capabilities_and_the_existing_qoder_protocol() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");

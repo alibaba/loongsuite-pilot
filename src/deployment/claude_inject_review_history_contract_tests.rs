@@ -94,6 +94,7 @@ impl Fixture {
                 crate::hooks::quote_claude_hook_path(&hook.hook_command)
             ),
             matcher: Some("Bash".into()),
+            exec_args: None,
             history_dir: None,
             replace_hook_commands: None,
             use_nested_format: Some(true),

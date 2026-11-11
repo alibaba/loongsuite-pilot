@@ -1210,20 +1210,12 @@ impl Collector {
             cp.as_object_mut().unwrap().remove(key);
         }
     }
-    fn build(
-        &mut self,
-        source: &Value,
-        contexts: &[Arc<Value>],
-        cp: &mut Value,
-        value: &ActiveRows,
+    fn observed_turn_context<'a>(
+        contexts: &'a [Arc<Value>],
+        cp: &Value,
         end: u64,
-        terminal: &str,
-    ) -> Vec<Value> {
-        if !flag(cp, "hasUser") || value.rows.is_empty() {
-            return Vec::new();
-        }
-        let fallback = json!({"cwd":source["cwd"],"desktop":source["desktop"]});
-        let selected = contexts
+    ) -> Option<&'a Value> {
+        contexts
             .iter()
             .rev()
             .find(|c| {
@@ -1242,7 +1234,56 @@ impl Collector {
                 })
             })
             .map(Arc::as_ref)
-            .unwrap_or(&fallback);
+    }
+
+    fn trailing_terminal_context<'a>(
+        contexts: &'a [Arc<Value>],
+        end: u64,
+        source_size: u64,
+        file: &mut std::fs::File,
+        budget: &mut ScanBudget,
+        stopped: &AtomicBool,
+    ) -> Option<&'a Value> {
+        const MAX_TRAILING_CONTROL_BYTES: u64 = 64 * 1024;
+        let terminal_events = ["Stop", "SessionEnd"];
+        let candidate = contexts.iter().find(|context| {
+            number(context, "observedSize") > end
+                && terminal_events.contains(&text(context, "event"))
+        })?;
+        let watermark = number(candidate, "observedSize");
+        let length = watermark - end;
+        if watermark > source_size
+            || length > MAX_TRAILING_CONTROL_BYTES
+            || length > budget.remaining.max(0) as u64
+        {
+            return None;
+        }
+        // Only control rows between last-prompt and a terminal notice prove
+        // that the notice still belongs to this turn.
+        let bytes = scanner::full_line(file, end, watermark, budget, stopped).ok()?;
+        let rows = bytes.strip_suffix(b"\n")?;
+        rows.split(|byte| *byte == b'\n')
+            .all(|line| {
+                serde_json::from_slice::<Value>(line).is_ok_and(|row| {
+                    qoder_is_control_user_row(&row) || terminal_events.contains(&event(&row))
+                })
+            })
+            .then_some(candidate.as_ref())
+    }
+
+    fn build(
+        &mut self,
+        source: &Value,
+        context: Option<&Value>,
+        cp: &mut Value,
+        value: &ActiveRows,
+        terminal: &str,
+    ) -> Vec<Value> {
+        if !flag(cp, "hasUser") || value.rows.is_empty() {
+            return Vec::new();
+        }
+        let fallback = json!({"cwd":source["cwd"],"desktop":source["desktop"]});
+        let selected = context.unwrap_or(&fallback);
         let first = value
             .rows
             .iter()
@@ -1597,14 +1638,14 @@ impl Collector {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .or_else(|| self.tails.shift_remove(&file));
         let mut turns = 0;
-        let batch = scanner::scan_lines(
+        let batch = scanner::scan_lines_with_file(
             &file,
             number(cp, "offset")..stat.size,
             &options,
             prior,
             budget,
             stopped,
-            |line| {
+            |line, input, budget, source_size| {
                 if let Some(reason) = line.quarantine {
                     self.quarantine(source, cp, line.start, line.end, reason)
                 }
@@ -1617,10 +1658,9 @@ impl Collector {
                 if prompt && flag(cp, "hasUser") {
                     records.extend(self.build(
                         source,
-                        contexts,
+                        Self::observed_turn_context(contexts, cp, line.start),
                         cp,
                         &value,
-                        line.start,
                         "next-prompt",
                     ));
                     cp["committedOffset"] = json!(line.start);
@@ -1683,7 +1723,21 @@ impl Collector {
                     } else {
                         "session-end"
                     };
-                    records.extend(self.build(source, contexts, cp, &value, line.end, terminal));
+                    let context =
+                        Self::observed_turn_context(contexts, cp, line.end).or_else(|| {
+                            if terminal != "last-prompt" {
+                                return None;
+                            }
+                            Self::trailing_terminal_context(
+                                contexts,
+                                line.end,
+                                source_size,
+                                input,
+                                budget,
+                                stopped,
+                            )
+                        });
+                    records.extend(self.build(source, context, cp, &value, terminal));
                     cp["committedOffset"] = json!(line.end);
                     Self::clear_active(cp);
                     value = ActiveRows {
@@ -1751,10 +1805,9 @@ impl Collector {
             };
             records.extend(self.build(
                 source,
-                contexts,
+                Self::observed_turn_context(contexts, cp, number(cp, "offset")),
                 cp,
                 &value,
-                number(cp, "offset"),
                 terminal,
             ));
             cp["committedOffset"] = cp["offset"].clone();

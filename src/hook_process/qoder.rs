@@ -2257,6 +2257,7 @@ fn build_events_from_boundaries_with_tool_values(
         let mut tool_calls = Vec::new();
         let mut response_id = None;
         let mut client_request_id = None;
+        let mut native_usage = None;
         let mut first_assistant_ts = None;
         for row in content {
             if typ(row) != "assistant" {
@@ -2270,17 +2271,30 @@ fn build_events_from_boundaries_with_tool_values(
                     }
                 }
             }
-            if client_request_id.is_none() {
-                if let Some(usage) = msg
-                    .and_then(|msg| msg.get("usage"))
-                    .and_then(Value::as_object)
-                {
-                    if let Some(Value::String(id)) = usage.get("request_id") {
-                        if !id.is_empty() {
-                            client_request_id = Some(id.clone());
+            let usage = msg.and_then(|msg| msg.get("usage"));
+            if agent_type == "qoder-cli" {
+                if let Some(usage) = usage {
+                    let input = usage.get("input_tokens").and_then(Value::as_i64);
+                    let output = usage.get("output_tokens").and_then(Value::as_i64);
+                    // Stream fragments and CLI versions with hidden usage emit
+                    // zero-filled placeholders. Keep the latest completed sample.
+                    if let (Some(input @ 0..), Some(output @ 0..)) = (input, output) {
+                        if input > 0 || output > 0 {
+                            native_usage = Some((input, output, usage));
                         }
                     }
                 }
+            }
+            if client_request_id.is_none() {
+                let usable_id = |value: &&Value| value.as_str().is_some_and(|id| !id.is_empty());
+                client_request_id = usage
+                    .and_then(|usage| usage.get("request_id"))
+                    .filter(usable_id)
+                    .or_else(|| {
+                        row.pointer("/requestTokenAnchor/requestId")
+                            .filter(usable_id)
+                    })
+                    .cloned();
             }
             if first_assistant_ts.is_none() {
                 if let Some(ts) = timestamp_str(row) {
@@ -2388,7 +2402,29 @@ fn build_events_from_boundaries_with_tool_values(
                 record.insert("agent.stop_reason".into(), Value::String(reason.clone()));
             }
             if let Some(id) = client_request_id {
-                record.insert("agent.client_request_id".into(), Value::String(id));
+                record.insert("agent.client_request_id".into(), id);
+            }
+            if let Some((input, output, usage)) = native_usage {
+                record.insert("gen_ai.usage.input_tokens".into(), json!(input));
+                record.insert("gen_ai.usage.output_tokens".into(), json!(output));
+                record.insert(
+                    "gen_ai.usage.total_tokens".into(),
+                    json!(input.saturating_add(output)),
+                );
+                for (source, target) in [
+                    (
+                        "cache_read_input_tokens",
+                        "gen_ai.usage.cache_read.input_tokens",
+                    ),
+                    (
+                        "cache_creation_input_tokens",
+                        "gen_ai.usage.cache_creation.input_tokens",
+                    ),
+                ] {
+                    if let Some(count @ 0..) = usage.get(source).and_then(Value::as_i64) {
+                        record.insert(target.into(), json!(count));
+                    }
+                }
             }
             if let Some(ts) = first_assistant_ts.as_deref() {
                 if let Some(ms) = date_parse_millis(ts) {
@@ -4334,6 +4370,54 @@ mod tests {
     }
 
     #[test]
+    fn qoder_cli_uses_completed_native_usage_without_double_counting_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let transcript = root.join("transcript.jsonl");
+        write_transcript(
+            &transcript,
+            &[
+                json!({"type":"user","entrypoint":"cli","uuid":"native-user",
+                    "timestamp":"2026-07-20T10:00:01.000Z","message":{"role":"user","content":"hello"}}),
+                json!({"type":"assistant","timestamp":"2026-07-20T10:00:02.000Z",
+                    "requestTokenAnchor":{"requestId":"native-request"},
+                    "message":{"id":"native-response","model":"qoder-test",
+                    "content":[{"type":"thinking","thinking":"fixture"}],
+                    "usage":{"input_tokens":0,"output_tokens":0}}}),
+                json!({"type":"assistant","timestamp":"2026-07-20T10:00:03.000Z",
+                    "requestTokenAnchor":{"requestId":"native-request"},
+                    "message":{"id":"native-response","model":"qoder-test",
+                    "content":[{"type":"text","text":"answer"}],"stop_reason":"end_turn",
+                    "usage":{"input_tokens":3789,"output_tokens":93,
+                             "cache_read_input_tokens":3072,"cache_creation_input_tokens":0}}}),
+                json!({"type":"last-prompt","lastPrompt":"hello"}),
+            ],
+        );
+        let (code, _) = invoke(
+            root,
+            &["--agent-id", "qoder", "--log-prefix", "qoder"],
+            &json!({"session_id":"native-session","transcript_path":transcript,"cwd":root})
+                .to_string(),
+            &[],
+        );
+        assert_eq!(code, 0);
+        let records = read_history(root, "qoder");
+        let responses: Vec<_> = records
+            .iter()
+            .filter(|event| event["event.name"] == "llm.response")
+            .collect();
+        assert_eq!(responses.len(), 1);
+        let response = responses[0];
+        assert_eq!(response["gen_ai.agent.type"], "qoder-cli");
+        assert_eq!(response["agent.client_request_id"], "native-request");
+        assert_eq!(response["gen_ai.usage.input_tokens"], 3789);
+        assert_eq!(response["gen_ai.usage.output_tokens"], 93);
+        assert_eq!(response["gen_ai.usage.total_tokens"], 3882);
+        assert_eq!(response["gen_ai.usage.cache_read.input_tokens"], 3072);
+        assert_eq!(response["gen_ai.usage.cache_creation.input_tokens"], 0);
+    }
+
+    #[test]
     fn finish_reason_maps_vendor_values_and_drops_unknown() {
         assert_eq!(normalize_finish_reason("tool_use"), Some("tool_call"));
         assert_eq!(normalize_finish_reason("stop_sequence"), Some("stop"));
@@ -4359,7 +4443,7 @@ mod tests {
             &[
                 json!({"type":"progress","timestamp":"2026-07-20T10:00:00.000Z","data":{"hookEvent":"UserPromptSubmit","hookName":"pilot"}}),
                 json!({"type":"user","uuid":"user-1","timestamp":"2026-07-20T10:00:01.000Z","message":{"role":"user","content":"list the files"}}),
-                json!({"type":"assistant","timestamp":"2026-07-20T10:00:02.000Z","message":{"model":"qwen-max","content":[
+                json!({"type":"assistant","timestamp":"2026-07-20T10:00:02.000Z","requestTokenAnchor":{"requestId":"req-native-1"},"message":{"model":"qwen-max","content":[
                     {"type":"thinking","thinking":"look"},
                     {"type":"text","text":"running"},
                     {"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"ls"}},
@@ -4369,7 +4453,7 @@ mod tests {
                     {"type":"tool_result","tool_use_id":"call-2","content":"data"},
                     {"type":"tool_result","tool_use_id":"call-1","content":"a.txt"}
                 ]}}),
-                json!({"type":"assistant","timestamp":"2026-07-20T10:00:06.000Z","message":{
+                json!({"type":"assistant","timestamp":"2026-07-20T10:00:06.000Z","requestTokenAnchor":{"requestId":"req-native-2"},"message":{
                     "id":"message-2","model":"qwen-max",
                     "content":[{"type":"text","text":"there is a.txt"}],
                     "stop_reason":"end_turn",
@@ -4449,7 +4533,10 @@ mod tests {
             json!(["tool_call"])
         );
         assert_eq!(responses[0]["agent.stop_reason"], json!("tool_use"));
-        assert!(responses[0].get("agent.client_request_id").is_none());
+        assert_eq!(
+            responses[0]["agent.client_request_id"],
+            json!("req-native-1")
+        );
         assert_eq!(responses[1]["agent.client_request_id"], json!("req-2"));
         assert_eq!(responses[1]["gen_ai.response.id"], json!("message-2"));
         assert_eq!(responses[1]["gen_ai.turn.end"], json!(true));

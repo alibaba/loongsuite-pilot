@@ -18,6 +18,46 @@ fn legacy_cursor(f: &Fixture, lines: usize) {
     )
     .unwrap();
 }
+fn exit_control() -> Value {
+    json!({"type":"user","entrypoint":"cli","userType":"external","message":{
+        "role":"user","content":"<command-message>exit</command-message>\n<command-name>/exit</command-name>"
+    }})
+}
+
+#[tokio::test]
+async fn last_prompt_uses_only_its_own_trailing_terminal_hook_context() {
+    for intermediate_notice in [true, false] {
+        let mut f = Fixture::new("qoder").await;
+        f.write(&closed_turn(0, false));
+        f.wake("Stop", json!({}));
+        f.settle().await;
+
+        let attributes = |task: &str| json!({"spanAttributes":{"multica.task.id":task}});
+        f.append(&closed_turn(1, false));
+        f.append(&[exit_control()]);
+        if intermediate_notice {
+            f.wake("Stop", attributes("first"));
+        }
+        f.append(&closed_turn(2, false));
+        f.append(&[exit_control()]);
+        f.wake("Stop", attributes("second"));
+
+        let records = f.settle().await;
+        assert_eq!(user_texts(&records), ["prompt 1", "prompt 2"]);
+        let for_task = |task: &str| {
+            user_texts(
+                &records
+                    .iter()
+                    .filter(|record| record["multica.task.id"] == task)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(for_task("second"), ["prompt 2"]);
+        assert_eq!(for_task("first").is_empty(), !intermediate_notice);
+    }
+}
+
 #[tokio::test]
 async fn collector_l210_migrates_exact_legacy_line_cursor_without_replaying_accepted_turn() {
     for agent in ["qoder", "qoder-cn"] {

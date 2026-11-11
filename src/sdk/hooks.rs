@@ -74,6 +74,7 @@ impl Hooks {
                     uuid::Uuid::new_v4().simple()
                 ),
                 instance: instance.clone(),
+                request_receipts: true,
             };
             let path = root.join(format!("sdk-hooks-{channel}.json"));
             atomic_descriptor(&path, &descriptor)?;
@@ -105,6 +106,20 @@ impl Hooks {
                     let mut running=workers.lock().unwrap();
                     let mut index=0;while index<running.len(){if running[index].is_finished(){let thread=running.swap_remove(index);let _=thread.join();}else{index+=1;}}
                     if running.len()>=8{queue.alarm("SDK_HOOK_BUSY","hook concurrency exhausted; bin will fail open");continue;}
+                    if packet.want_receipt {
+                        let receipt = json!({
+                            "id": packet.id,
+                            "instance": descriptor.instance,
+                            "received": true,
+                        });
+                        if serde_json::to_vec(&receipt)
+                            .ok()
+                            .and_then(|bytes| socket.send_to(&bytes, peer).ok())
+                            .is_none()
+                        {
+                            continue;
+                        }
+                    }
                     let (socket,queue,settings,spool,instance,stop)=(socket.clone(),queue.clone(),settings.clone(),spool.clone(),descriptor.instance.clone(),stop.clone());
                     if let Ok(thread)=std::thread::Builder::new().name("pilot-hook-verdict".into()).spawn(move||{
                         let scope=crate::utils::source_access::SourceScope::new(Vec::new(),0,0);

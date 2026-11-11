@@ -154,26 +154,41 @@ fn worker(args: Vec<String>, started: Instant) -> Option<String> {
         length: body.len(),
         agent: agent.clone(),
         event: event.clone(),
+        want_receipt: descriptor.request_receipts,
     };
     let socket = UdpSocket::bind("127.0.0.1:0").ok()?;
     socket.connect(("127.0.0.1", descriptor.port)).ok()?;
-    socket
-        .set_read_timeout(Some(
-            Duration::from_millis(DEADLINE_MS).checked_sub(started.elapsed())?,
-        ))
-        .ok()?;
     socket.send(&serde_json::to_vec(&request).ok()?).ok()?;
-    let mut reply = [0u8; MAX_REPLY];
-    let len = socket.recv(&mut reply).ok()?;
-    if started.elapsed() >= Duration::from_millis(DEADLINE_MS) {
-        return None;
-    }
-    let reply: serde_json::Value = serde_json::from_slice(&reply[..len]).ok()?;
-    if reply.get("id")?.as_str() != Some(id.as_str())
-        || reply.get("instance")?.as_str() != Some(descriptor.instance.as_str())
+    let deadline = started + Duration::from_millis(DEADLINE_MS);
+    // Probe availability as part of the real request. Older SDKs advertise no
+    // receipts, so those pairs continue waiting for the original single reply.
+    let reply = |until: Instant| {
+        let wait = until.checked_duration_since(Instant::now())?;
+        if wait.is_zero() {
+            return None;
+        }
+        socket.set_read_timeout(Some(wait)).ok()?;
+        let mut bytes = [0u8; MAX_REPLY];
+        let len = socket.recv(&mut bytes).ok()?;
+        let reply: serde_json::Value = serde_json::from_slice(&bytes[..len]).ok()?;
+        (Instant::now() < until
+            && reply.get("id")?.as_str() == Some(id.as_str())
+            && reply.get("instance")?.as_str() == Some(descriptor.instance.as_str()))
+        .then_some(reply)
+    };
+    let first_deadline = if descriptor.request_receipts {
+        deadline.min(Instant::now() + Duration::from_millis(RECEIPT_TIMEOUT_MS))
+    } else {
+        deadline
+    };
+    let first = reply(first_deadline)?;
+    let reply = if descriptor.request_receipts
+        && first.get("received").and_then(serde_json::Value::as_bool) == Some(true)
     {
-        return None;
-    }
+        reply(deadline)?
+    } else {
+        first
+    };
     let (action, reason) = reply_action(&reply)?;
     if action == "block" {
         render_block(&agent, &event, reason)

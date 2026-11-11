@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 pub const MAX_REQUEST: usize = 1024 * 1024;
 pub const MAX_REPLY: usize = 32 * 1024;
 pub const DEADLINE_MS: u64 = 3000;
+pub const RECEIPT_TIMEOUT_MS: u64 = 200;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Descriptor {
     pub schema: u32,
@@ -11,6 +12,8 @@ pub struct Descriptor {
     pub port: u16,
     pub token: String,
     pub instance: String,
+    #[serde(default)]
+    pub request_receipts: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Datagram {
@@ -22,6 +25,8 @@ pub struct Datagram {
     pub length: usize,
     pub agent: String,
     pub event: String,
+    #[serde(default)]
+    pub want_receipt: bool,
 }
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
     if !matches!(agent, "qoder" | "qodercli") {

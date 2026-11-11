@@ -247,6 +247,37 @@ fn shell_rejects_bad_pointer_and_missing_binary_without_protocol_noise() {
 
 #[cfg(unix)]
 #[test]
+fn qoder_cli_launcher_enables_native_usage_without_pilot_preload() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("qodercli fixture");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+printf '%s\n' "$QODER_EXPOSE_TOKEN_USAGE" "$NODE_OPTIONS" "$BUN_OPTIONS" "$1"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new("/bin/sh")
+        .arg(workspace().join("assets/hooks/qodercli-runtime-wrapper.sh"))
+        .arg("argument with spaces")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LOONGSUITE_QODERCLI_BIN", &executable)
+        .env("NODE_OPTIONS", "user-node-option")
+        .env("BUN_OPTIONS", "user-bun-option")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout,
+        b"true\nuser-node-option\nuser-bun-option\nargument with spaces\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
     let mut count = 0;
     for entry in fs::read_dir(workspace().join("assets/hooks")).unwrap() {
@@ -260,7 +291,7 @@ fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
             .status()
             .unwrap();
         assert!(status.success(), "{}", path.display());
-        // 此入口在 Agent 进程内加载 preload，属于批准保留的宿主桥接。
+        // 仅 Qoder CN 仍在 Agent 进程内加载 preload。
         if path
             .file_name()
             .is_some_and(|name| name == "qodercli-runtime-wrapper.sh")

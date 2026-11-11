@@ -42,6 +42,7 @@ impl Fixture {
                 repaired.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async { Ok(true) })
             })),
+            needs_repair: None,
             change_watch_path: Some(self.watch.to_string_lossy().into_owned()),
             needs_repair_on_change: Some(Arc::new(move || {
                 inspected.fetch_add(1, Ordering::SeqCst);
