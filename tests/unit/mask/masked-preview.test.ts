@@ -34,7 +34,7 @@ function syntheticPrivateKey(): string {
 }
 
 describe('masked preview replacement mode', () => {
-  it('keeps placeholder output byte-compatible by default', () => {
+  it('keeps placeholder output byte-compatible when explicitly requested', () => {
     expect(maskString('phone=13800138000', placeholderPlan)).toBe(
       'phone=[PHONE_MASKED]',
     );

@@ -26,13 +26,13 @@ Or, Environment variable:
 export LOONGSUITE_PILOT_MASK_MODE=all
 ```
 
-To emit recognizable star-masked previews, set:
+Recognizable star-masked previews are the default when no replacement mode is configured. To keep fixed markers, set:
 
 ```json
 {
   "mask": {
     "mode": "all",
-    "replacementMode": "preview"
+    "replacementMode": "placeholder"
   }
 }
 ```
@@ -40,7 +40,7 @@ To emit recognizable star-masked previews, set:
 or:
 
 ```bash
-export LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview
+export LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=placeholder
 ```
 
 Restart Pilot after changing config:
@@ -99,10 +99,10 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 
 | Mode | Behavior |
 | ---- | -------- |
-| `placeholder` | Default. Emit the existing fixed markers unchanged. |
-| `preview` | Keep the marker and append a star-masked preview inside `{}`. Previews are approximate and not unique. |
+| `placeholder` | Emit the existing fixed markers unchanged. |
+| `preview` | Default. Keep the marker and append a star-masked preview inside `{}`. Previews are approximate and not unique. |
 
-An empty or invalid value falls back to `placeholder`. In `placeholder` mode, Pilot uses these fixed markers:
+An unset, empty, or invalid config/environment value uses `preview`; only an explicit `placeholder` setting uses fixed markers. An invalid installer option is rejected. An explicitly saved `placeholder` setting is preserved when the installer option is omitted. Previews retain parts of the original value; specify `placeholder` when those parts must be hidden. In `placeholder` mode, Pilot uses these fixed markers:
 
 
 | Mask Type        | Replacement Marker     |

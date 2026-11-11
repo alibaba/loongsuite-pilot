@@ -14,6 +14,7 @@ function mask(value: string, types: MaskType[] = ALL_PII_TYPES): string {
     loadMaskPlan({
       mode: 'custom',
       types,
+      replacementMode: 'placeholder',
     }),
   );
 }
@@ -222,7 +223,7 @@ describe('PII mask detectors', () => {
     const value = 'mysql://agent:secret@example.com:3306/db';
 
     expect(
-      maskString(value, loadMaskPlan({ mode: 'all', types: [] })),
+      maskString(value, loadMaskPlan({ mode: 'all', types: [], replacementMode: 'placeholder' })),
     ).toBe('[DATABASEURL_MASKED]');
   });
 

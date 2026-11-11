@@ -14,10 +14,10 @@ LoongSuite Pilot 可以在规范化事件发送到输出后端前，对常见密
 bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all
 ```
 
-如需输出可近似区分的星号预览：
+未指定替换格式时默认输出可近似区分的星号预览。若要继续使用固定占位符：
 
 ```bash
-bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all --mask-replacement-mode preview
+bash /tmp/loongsuite-pilot-installer.sh install --mask-mode all --mask-replacement-mode placeholder
 ```
 
 自定义模式安装参数：
@@ -94,10 +94,12 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 
 | 模式 | 行为 |
 |------|------|
-| `placeholder` | 默认值。使用固定 marker，保持旧版本输出不变。 |
-| `preview` | 保留 marker，并在 `{}` 中附加星号预览。预览只用于近似区分，不保证唯一。 |
+| `placeholder` | 使用固定 marker，保持旧版本输出不变。 |
+| `preview` | 默认值。保留 marker，并在 `{}` 中附加星号预览。预览只用于近似区分，不保证唯一。 |
 
-等价环境变量为 `LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE=preview`。空值或非法值回退到 `placeholder`。
+可用环境变量 `LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE` 覆盖配置文件。未配置、空值或配置文件／环境变量中的非法值均使用 `preview`；只有明确指定 `placeholder` 才使用固定占位符。安装参数中的非法值会被拒绝。已有配置显式写入 `placeholder` 时，安装器不传此参数会保留该设置。
+
+`preview` 会保留部分原文以便人工区分。需要完全隐藏原文片段时，请明确指定 `placeholder`。
 
 规则命中后，`placeholder` 使用以下固定标记：
 

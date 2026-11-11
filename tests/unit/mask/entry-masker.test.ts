@@ -17,7 +17,7 @@ describe('agent activity entry masker', () => {
     const masked = maskAgentActivityEntry(entry, allConfig);
 
     expect(masked['gen_ai.input.messages']).toEqual([
-      { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+      { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
     ]);
     expect(masked['workspace.current_root']).toBe(`/tmp/${rawSecret}`);
     expect(entry['gen_ai.input.messages']).toEqual([

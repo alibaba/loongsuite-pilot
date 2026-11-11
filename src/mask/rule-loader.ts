@@ -50,7 +50,9 @@ export function loadEnabledRules(config: MaskConfig): CompiledMaskRule[] {
 
 export function loadMaskPlan(config: MaskConfig): MaskPlan {
   const enabledTypes = resolveEnabledMaskTypes(config);
-  const replacementMode = config.replacementMode ?? 'placeholder';
+  const replacementMode = config.replacementMode === 'placeholder'
+    ? 'placeholder'
+    : 'preview';
   if (enabledTypes.size === 0) {
     return {
       rules: [],
