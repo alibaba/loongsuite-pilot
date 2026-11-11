@@ -223,7 +223,7 @@ export class QoderTranscriptCollector {
   }
 
   async probeParentOwners(source, stat) {
-    if (this.parentProbeBudget <= 0 || ![...this.parentRequests].some(([key, request]) => key !== source.key
+    if (![...this.parentRequests].some(([key, request]) => key !== source.key
       && request.sessionId === source.sessionId && !this.links.find(request.sessionId, request.callId, request.parentAgentId))) return;
     let probe = this.parentProbes.get(source.key);
     if (!probe || probe.inode !== stat.ino || stat.size < probe.offset
@@ -241,6 +241,14 @@ export class QoderTranscriptCollector {
       this.parentProbes.set(source.key, probe);
     }
     if (probe.complete && probe.version === fileVersion(stat)) return;
+    // Unvisited candidates remain unknown when this cycle's probe budget is
+    // spent. Otherwise a completed directory pass could authorize fallback.
+    if (this.parentProbeBudget <= 0) {
+      if (!this.prioritySources.has(source.key) && this.prioritySources.size < MAX_PRIORITY_SOURCES) {
+        this.prioritySources.set(source.key, { name: source.key });
+      }
+      return;
+    }
     this.parentProbeBudget--;
     const budget = this.remainingBytes;
     const limit = Math.min(budget, CHUNK_BYTES);

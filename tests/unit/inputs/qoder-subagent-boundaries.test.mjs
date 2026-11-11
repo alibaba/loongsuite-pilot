@@ -109,7 +109,7 @@ describe('Qoder native delegation boundaries', () => {
     expect((await collect()).records).toEqual([]);
   });
 
-  it('bounds an unavailable ancestor without detaching the available nested parent', async () => {
+  it.each([false, true])('bounds an unavailable ancestor without detaching the available nested parent (inner first=%s)', async innerFirst => {
     const inner = path.join(root, session, 'subagents/agent-grandchild.jsonl');
     await fs.writeFile(parent, '');
     await write(child, [user('child', 'missing-root-call'),
@@ -120,6 +120,9 @@ describe('Qoder native delegation boundaries', () => {
     await write(inner, [{ ...user('inner', 'outer-inner'), agentId: 'grandchild' },
       model('inner-end', [{ type: 'text', text: 'done' }]), ...end]);
     wake('grandchild', 'SubagentStop'); wake('child', 'SubagentStop');
+    const queue = (innerFirst ? [inner, parent, child] : [child, parent, inner]).map(file => qoderSourceKey(session, file));
+    let index = 0;
+    collector.discovery = { async read() { const name = queue[index++]; return name ? { name, isDirectory: () => true } : null; }, async close() {} };
     const warnings = []; collector.warn = (_message, fields) => warnings.push(fields);
     const records = [...(await collect()).records]; clock += 61_000;
     for (let i = 0; i < 12; i++) { records.push(...(await collect()).records); clock += 10_000; }
