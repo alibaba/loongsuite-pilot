@@ -6,6 +6,58 @@
 
 公共逐轮入口复用[逐轮 Trace 关联](upstream-trace-correlation.md)的关联文件，但不要求已有上游 Trace，也不要求开启 `upstreamLink.enabled`。每个任务启动一次 Grok 时，也可选择下面的子进程环境变量入口。两种入口都不向 Agent 的网络请求注入字段，不从上游 Span 自动复制属性，也不替代 Agent 插件的安装和采集。
 
+## 快速接入：业务 server 每次请求启动 Grok
+
+如果平台通过 HTTP 接收业务请求，再为每次请求 `spawn` 一个 Grok 进程，按以下步骤接入即可。长驻 SDK/RPC 的接入见后文逐轮文件方式。
+
+### 1. 升级指定包，并确认实际 Hook 已更新
+
+先使用**明确包含本功能的 Pilot 包或镜像**。源码分支已有代码，不表示公开下载的 `latest` 包已经包含它；联调交付应同时给出源码 commit、安装包或镜像地址、校验和，以及支持的 Agent 版本。安装与指定包参数见[安装指南](installation.md)。
+
+升级要同时覆盖 Collector 和已部署的 Hook/Plugin 资产，仅替换 Collector 的 `dist` 或重启服务不够。安装流程会更新 Pilot 资产；随后还要核对 Grok 实际加载的 Hook 命令指向新资产。已运行的业务进程不会因 Collector 重启而改变环境，后续请求必须启动带本轮 env 的新 Agent 进程。
+
+**多租户与系统级接入另有部署前提：**默认开源 Grok 部署将 Hook 注册到当前 `$GROK_HOME/hooks/loongsuite-pilot.json`，不等于自动为未来创建的所有子目录注册。使用动态 `GROK_HOME`、共享 managed 配置或定制安装器的平台，必须保留并核验现有 Hook 注册机制，再升级它引用的 Collector/Hook 资产。不能直接用普通单用户安装覆盖这类部署并假定兼容；容器部署应将变更固化到镜像或注入模板，并用新建的租户目录验证。
+
+### 2. 在 Pilot 中允许 `memory.` 字段进入 Span
+
+合并到现有 `config.json`，保留既有 OTLP/CMS 目标，并把 `memory.` **追加**到已有前缀列表：
+
+```json
+{
+  "otlpTrace": {
+    "spanAttributePassthroughPrefixes": ["memory."]
+  }
+}
+```
+
+重启 Collector 加载配置。此子进程入口不需要开启 `requestAttributes.enabled` 或 `upstreamLink.enabled`，也不需要创建关联文件。Trace 上报本身应已经正常工作。
+
+### 3. 业务调用方为每个子进程传入本轮用户
+
+用户值取平台已经认证的身份，跨终端保持稳定，例如 `tenant-001:user-007`；请求编号每次不同。先校验/编码标识，避免包含逗号分隔符。沿用现有命令、参数、工作目录和环境，只修改每次 `spawn` 的参数：
+
+```js
+import { spawn } from 'node:child_process';
+
+// 以下值来自本次已认证的业务请求。
+const attributes = `memory.user_id=${tenantUserId},memory.request_id=${requestId}`;
+const child = spawn(grokCommand, grokArgs, {
+  ...existingSpawnOptions,
+  env: {
+    ...(existingSpawnOptions.env ?? process.env),
+    LOONGSUITE_PILOT_SPAN_ATTRIBUTES: attributes,
+  },
+});
+```
+
+每个请求创建独立 env 对象，不修改共享 `process.env`。并发 A/B 请求因此分别把 A/B 的属性传给自己的 Agent 与 Hook。只在 Collector 环境设置这个变量无效；这一轮开始前必须让它进入 Agent 子进程。
+
+### 4. 核对 Trace，再配置记忆归属
+
+让两个用户通过真实业务入口同时发请求，核对它们各自 Trace 的 AGENT Span：`memory.user_id` 对应业务用户，`memory.request_id` 对应本次请求。多租户平台还应在**新创建的租户目录**中重复该检查，确认共享 Hook 注册仍然生效。
+
+用于记忆时，将 userId 映射设为 `$.agent_attributes.attributes["memory.user_id"]`。先读取真实轨迹，确认 `agent_attributes.attributes` 中也包含该字段，再测试映射、提取及召回。默认 userId 映射不会自动采用这个自定义字段；详细边界见后文。**字段进入 Trace、字段进入轨迹、记忆提取/召回成功是三项独立验收。**
+
 ## 用户归属与并发边界
 
 用于记忆提取时，`memory.user_id` 应来自业务平台已经认证的用户身份。同一用户跨终端使用同一稳定值；有多个租户时使用租户内不冲突的组合标识，例如 `tenant-001:user-007`。`memory.request_id` 每次请求变化，用于排查归属，不能代替稳定的用户标识。Agent 实例编号、容器的 root 用户、工作目录和原生 session ID 都不能直接当作业务用户。

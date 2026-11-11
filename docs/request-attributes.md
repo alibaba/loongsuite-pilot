@@ -6,6 +6,58 @@ Before sending each user turn, an application can write customer, user, or task 
 
 The shared per-turn path uses the [per-turn trace correlation](zh-CN/upstream-trace-correlation.md) files, but does not require an upstream trace or `upstreamLink.enabled`. Applications starting a separate Grok process for each task can also use the process-environment path below. Neither path injects values into the agent's network requests, copies attributes from an upstream span, or installs a missing agent plugin.
 
+## Quick start: a server starts Grok for each request
+
+Use these steps when an HTTP application starts a separate Grok process for each business request. Long-running SDK/RPC processes use the per-turn file integration below.
+
+### 1. Upgrade a specified package and verify the deployed Hook
+
+Use a **Pilot package or image known to contain this feature**. Source code on a feature branch does not mean the public `latest` package includes it. A candidate handoff should identify the source commit, package/image location, checksum, and supported Agent versions. See [installation](installation.md) for specified-package options.
+
+Upgrade both the Collector and deployed Hook/Plugin assets. Replacing Collector `dist` alone or restarting the service is insufficient. Installation updates Pilot assets; also verify the command Grok actually loads points to the new Hook. Restarting the Collector does not change an existing business process's environment. Subsequent requests must launch new Agent processes with their request values.
+
+**Multitenant and system deployment has an additional prerequisite:** default open-source Grok deployment registers `$GROK_HOME/hooks/loongsuite-pilot.json` for the current home, not all future tenant directories. Platforms using dynamic `GROK_HOME`, shared managed configuration, or customized installers must preserve and verify their existing Hook registration before upgrading its referenced Collector/Hook assets. Do not replace that deployment with a normal single-user installation and assume compatibility. Persist container changes in the image or injection template and verify a newly created tenant directory.
+
+### 2. Allow `memory.` span fields in Pilot
+
+Merge into the existing `config.json`, retaining OTLP/CMS destinations and **appending** `memory.` to existing prefixes:
+
+```json
+{
+  "otlpTrace": {
+    "spanAttributePassthroughPrefixes": ["memory."]
+  }
+}
+```
+
+Restart the Collector to load configuration. This child-process path needs neither `requestAttributes.enabled` nor `upstreamLink.enabled`, and requires no correlation file. Trace reporting should already work.
+
+### 3. Pass the current user to each child process
+
+Use the application's authenticated, stable identity, consistent across clients, such as `tenant-001:user-007`. Generate a separate request ID each time. Validate or encode identifiers to avoid commas. Preserve the existing command, arguments, working directory, and environment:
+
+```js
+import { spawn } from 'node:child_process';
+
+// Values come from the current authenticated business request.
+const attributes = `memory.user_id=${tenantUserId},memory.request_id=${requestId}`;
+const child = spawn(grokCommand, grokArgs, {
+  ...existingSpawnOptions,
+  env: {
+    ...(existingSpawnOptions.env ?? process.env),
+    LOONGSUITE_PILOT_SPAN_ATTRIBUTES: attributes,
+  },
+});
+```
+
+Create a separate environment object for every request without mutating shared `process.env`. Concurrent A/B requests pass their own values to their respective Agents and Hooks. Setting this variable only on the Collector does not annotate business requests; it must reach the Agent before the turn starts.
+
+### 4. Check traces, then configure memory ownership
+
+Send simultaneous requests from two users through the actual application. Check each Trace's AGENT span for the correct `memory.user_id` and `memory.request_id`. Multitenant platforms must repeat this in a **new tenant directory** to verify shared Hook registration remains effective.
+
+For memory ownership, map userId to `$.agent_attributes.attributes["memory.user_id"]`. Read an actual trajectory first to confirm that field exists, then test mapping, extraction, and recall. The default userId mapping does not automatically use it. **Trace attributes, trajectory attributes, and successful memory extraction/recall are separate acceptance checks.**
+
 ## User ownership and concurrency
 
 For memory extraction, derive `memory.user_id` from the application's authenticated identity. Use the same stable value across clients, qualified by tenant where needed, such as `tenant-001:user-007`. `memory.request_id` changes per request and is for diagnosis. Agent instance IDs, the container's root user, working directories, and native session IDs do not establish business-user identity.
