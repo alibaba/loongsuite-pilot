@@ -31,7 +31,7 @@
     <dl class="facts" id="facts">
       <div class="fact"><dt>展示节点</dt><dd id="node-count">等待记录</dd></div>
       <div class="fact"><dt>最新节点</dt><dd id="latest-node">待测</dd></div>
-      <div class="fact"><dt id="method-label">测试方法</dt><dd class="small"><span id="method">尚未设置</span><select id="method-select" class="method-select" aria-labelledby="method-label" hidden></select><span id="method-sampling" class="method-sampling"></span></dd></div>
+      <div class="fact"><dt id="method-label">测试对象</dt><dd class="small"><select id="method-select" class="method-select" aria-labelledby="method-label"><option value="github-full-pilot-qoder-native-10s-v1">Qoder</option><option value="github-full-pilot-codex-rollout-10s-v1">Codex</option></select><span class="method-sampling">预热 64 个会话 · CPU 与 RSS 每 100 ms 采样</span></dd></div>
       <div class="fact"><dt>最后更新 · UTC</dt><dd id="updated" class="small">暂无记录</dd></div>
     </dl>
   </header>
@@ -56,9 +56,7 @@
   const NS = "http://www.w3.org/2000/svg";
   const LOADS = [{id:"idle",name:"空闲",rate:0},{id:"low",name:"低负载",rate:10},{id:"high",name:"高负载",rate:200}];
   const CPU = {id:"cpu_percent",name:"CPU",averageName:"CPU 平均",peakId:"cpu_peak_percent",peakName:"CPU 峰值",unit:"%",digits:2};
-  const RSS_PEAK = {id:"rss_mib",name:"峰值内存",unit:"MiB",digits:1,peakOnly:true};
   const RSS_AVERAGE = {id:"rss_average_mib",name:"内存",averageName:"平均内存",peakId:"rss_mib",peakName:"峰值内存",unit:"MiB",digits:1};
-  const LEGACY_QODER = "github-full-pilot-qoder-native-v1";
   const STANDARD_QODER = "github-full-pilot-qoder-native-10s-v1";
   const STATUS = {passed:"已通过",pending:"待测试",failed:"未通过"};
   const byId = id => document.getElementById(id);
@@ -186,7 +184,7 @@
     const valid=usable(node,load.id,metric);
     if (valid) {
       const values = text("div", "", "tip-values");
-      for (const [name, value] of [[metric.peakOnly ? "峰值" : "平均", s], ["峰值", peak]]) {
+      for (const [name, value] of [["平均", s], ["峰值", peak]]) {
         if (!value) continue;
         const stat = text("div", "", "tip-stat");
         stat.append(text("div", name, "tip-stat-label"), text("div", valueText(value.median, metric), "tip-value"));
@@ -264,7 +262,7 @@
       if (peak) peakPath += (peakPath ? " L " : " M ") + x(index) + " " + y(peak.median);
     });
     if (peakPath) plot.append(svg("path", {d: peakPath, class: "peak-series"}));
-    if(path) plot.append(svg("path",{d:path,class:metric.peakOnly?"peak-series":"series"}));
+    if(path) plot.append(svg("path",{d:path,class:"series"}));
     const targets=[];
     nodes.forEach((node,index) => {
       const s=stats(node,load.id,metric), valid=usable(node,load.id,metric), at=x(index), c=comparison(index,load.id,metric), n=node.workloads?.[load.id]?.repeats;
@@ -308,32 +306,15 @@
     });
     axis.append(axisPlot); scroll.append(plot); const row=text("div","","plot-row"); row.append(axis,scroll); card.append(row);
     if (!usingPreview) {
-      const metricNote = peakPath ? "实线为平均值，虚线为峰值。变化按平均值计算。"
-        : metric.peakOnly ? "每轮取最大 RSS，图中展示三轮峰值的中位数。" : "";
+      const metricNote = peakPath ? "实线为平均值，虚线为峰值。变化按平均值计算。" : "";
       card.append(text("p", metricNote + "变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。", "chart-note"));
     }
     return card;
   }
-  function methodLabel(method) {
-    if (!method) return "尚未设置";
-    return method.display_name || (method.id === LEGACY_QODER ? "Qoder · 100 ms 轮询" : method.id);
-  }
-  function samplingLabel(method) {
-    if (!method) return "";
-    const labels = [];
-    if (Number.isInteger(method.session_count)) labels.push("预热 " + method.session_count + " 个会话");
-    if (Number.isInteger(method.cpu_sample_ms) && method.cpu_sample_ms === method.rss_sample_ms) {
-      labels.push("CPU 与 RSS 每 " + method.cpu_sample_ms + " ms 采样");
-    } else if (Number.isInteger(method.resource_sample_ms)) {
-      labels.push("RSS 每 " + method.resource_sample_ms + " ms 采样");
-    }
-    return labels.join(" · ");
-  }
-  function render(payload,source,canSwitchMethod=false) {
+  function render(payload,source) {
     const preview=payload?.temporary_preview;
     usingPreview=!!(preview?.schema===1 && preview.kind==="temporary_preview" && Array.isArray(preview.rows) && preview.rows.some(row=>payload.nodes.some(node=>node.id===row.id && node.status!=="passed")));
     nodes=prepare(payload); hideTip();
-    byId("facts").style.display=usingPreview && !canSwitchMethod?"none":"";
     document.querySelector(".intro").style.display=usingPreview?"none":"";
     document.querySelector(".foot").style.display=usingPreview?"none":"";
     byId("charts").classList.toggle("compact-hidden",!byId("labels").checked);
@@ -342,14 +323,12 @@
     byId("repository").textContent=payload.repository || "公开版本持续验收";
     byId("node-count").textContent=nodes.length?nodes.length+" 个节点":"等待记录";
     const latest=nodes[nodes.length-1]; byId("latest-node").textContent=latest?label(latest)+" · "+STATUS[latest.status]+" · "+shortSha(latest.commit):"待测";
-    byId("method").textContent=methodLabel(payload.method);
-    byId("method-sampling").textContent=samplingLabel(payload.method);
     byId("updated").textContent=date(payload.updated_at);
     const compatibility=payload.compatibility;
     if(!usingPreview && compatibility?.excluded_at_or_before){byId("compatibility").textContent="兼容性边界："+compatibility.excluded_at_or_before+" 及更早版本已排除。"+(compatibility.reason || "");byId("compatibility").hidden=false;}
     else byId("compatibility").hidden=true;
     const target=byId("charts"); target.replaceChildren();
-    const metrics = [CPU, Number.isInteger(payload.method?.cpu_sample_ms) ? RSS_AVERAGE : RSS_PEAK];
+    const metrics = [CPU, RSS_AVERAGE];
     for(const load of LOADS) {
       const section=text("section","","load"), heading=text("div","","load-heading");
       heading.append(text("h2",load.name),text("p",(payload.method?.loads?.[load.id]?.turns_per_second ?? load.rate)+" 轮/秒"));
@@ -366,31 +345,21 @@
   }
   function renderMethods(payload, source) {
     const select = byId("method-select");
-    const method = payload?.method;
-    const alternatives = Object.values(payload?.other_methods ?? {});
-    select.hidden = !method || alternatives.length === 0;
-    byId("method").hidden = !select.hidden;
-    if (select.hidden) {
-      render(payload, source);
-      return;
-    }
-    const choices = new Map([[method.id, payload]]);
-    for (const series of alternatives) {
-      const id = series.method.id;
-      choices.set(id, {
+    const showSelected = () => {
+      const selected = select.value;
+      if (payload.method?.id === selected) {
+        render(payload, source);
+        return;
+      }
+      const series = payload.other_methods?.[selected];
+      render({
         schema: payload.schema, repository: payload.repository, configuration: payload.configuration,
-        method: series.method, nodes: series.nodes, updated_at: series.updated_at,
-      });
-    }
-    select.replaceChildren(...Array.from(choices, ([id, series]) => {
-      const option = text("option", methodLabel(series.method));
-      option.value = id;
-      return option;
-    }));
-    const standard = choices.get(STANDARD_QODER);
-    select.value = standard?.nodes.some(node => node.status === "passed") ? STANDARD_QODER : method.id;
-    select.onchange = () => render(choices.get(select.value), source, true);
-    render(choices.get(select.value), source, true);
+        method: series?.method, nodes: series?.nodes ?? [], updated_at: series?.updated_at,
+      }, source);
+    };
+    select.value = STANDARD_QODER;
+    select.onchange = showSelected;
+    showSelected();
   }
   byId("labels").addEventListener("change",event=>byId("charts").classList.toggle("compact-hidden",!event.target.checked));
   byId("latest-button").addEventListener("click",()=>document.querySelectorAll(".scroll").forEach(el=>{el.scrollLeft=el.scrollWidth;}));

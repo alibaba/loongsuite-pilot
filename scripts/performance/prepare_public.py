@@ -114,17 +114,17 @@ def stable_releases(repository):
     return releases
 
 
-QODER_LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
 QODER_STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
+CODEX_STANDARD_METHOD = "github-full-pilot-codex-rollout-10s-v1"
 
 
 def history_for_method(history, method):
-    if method == QODER_LEGACY_METHOD:
+    if method is None or method == (history.get("method") or {}).get("id"):
         return history
     return history.get("other_methods", {}).get(method, {"nodes": []})
 
 
-def select_backfill(repository, history, method=QODER_LEGACY_METHOD):
+def select_backfill(repository, history, method=None):
     history = history_for_method(history, method)
     done = {node["id"] for node in history.get("nodes", [])
             if node.get("kind") == "release" and node.get("status") == "passed"}
@@ -193,12 +193,14 @@ def main():
     parser.add_argument("--repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--mode", choices=("main", "dev", "release", "backfill"), required=True)
     parser.add_argument("--ref", default="main")
-    parser.add_argument("--benchmark-method", choices=(QODER_LEGACY_METHOD, QODER_STANDARD_METHOD),
-                        default=QODER_LEGACY_METHOD)
+    parser.add_argument("--benchmark-method", choices=(QODER_STANDARD_METHOD, CODEX_STANDARD_METHOD),
+                        default=QODER_STANDARD_METHOD)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-repository", default="alibaba/loongsuite-pilot")
     args = parser.parse_args()
+    if args.benchmark_method == CODEX_STANDARD_METHOD and args.mode == "backfill":
+        parser.error("Codex requires an explicit public Rust ref or release; historical backfill is not enabled")
     args.output.mkdir(parents=True, exist_ok=True)
     public_repository(args.repository)
     if args.mode in ("release", "backfill") and args.repository != "alibaba/loongsuite-pilot":
@@ -231,6 +233,8 @@ def main():
         result["release_url"] = release["html_url"]
     else:
         result["runtime"] = source_runtime(args.repository, result["commit"])
+    if args.benchmark_method == CODEX_STANDARD_METHOD and result["runtime"] != "rust":
+        raise ValueError("Codex performance method requires a public Rust host and adjacent SDK")
     (args.output / "selection.json").write_text(json.dumps(result, indent=2) + "\n")
 
 

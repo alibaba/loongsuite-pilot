@@ -171,3 +171,14 @@ performance report node or comparable CPU/RSS result.
 
 All 33 protocol-helper/publication unit checks passed in an isolated remote directory, including bounded gate contention, rollback release, one-time native/token writes and trusted site-workflow copying. GitHub runs for public v1.16.0, v1.15.2 and the designated dev completed all nine rounds and publication after the fixture repair. The explicit polling canary remains separate. The short smoke's initial `metrics-summary.json`
 is not a completed self-monitoring or token-summary acceptance result.
+
+### Codex 性能
+
+在 GitHub Actions 手动运行 Full Pilot performance history 时，选择
+github-full-pilot-codex-rollout-10s-v1 和明确的公开 Rust ref 或发布标签。
+Codex 使用原始 rollout、默认 10 秒轮询和正常 Stop 唤醒。保留三种负载各三轮，
+按 100 毫秒采样平均与峰值 CPU、平均与峰值内存。它使用独立的版本序列。
+历史 JS 兼容性尚未验证，Codex 选项暂时支持 main、dev 和 Rust release。
+高负载在 15 秒内交付不完时，已交付前缀仍须通过完整校验。若有未读源字节或
+能证明截止后已交付，保留资源结果并标为超出承载能力。低负载缺失与任何数据错误
+都会阻断测试。

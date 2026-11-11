@@ -1,5 +1,8 @@
 """Data-only publication regressions; no network, Docker, build or benchmark."""
+from contextlib import redirect_stderr
 import copy
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,6 +90,28 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(publisher.target_dev_matches({}, node("release")))
         self.assertFalse(publisher.target_dev_matches({}, old))
 
+    def test_retire_legacy_qoder_promotes_verified_standard_slots_only(self):
+        from prepare_public import history_for_method
+        standard_id = publisher.STANDARD_METHOD
+        codex_id = publisher.CODEX_STANDARD_METHOD
+        data = history()
+        data.update(method={"id": publisher.LEGACY_METHOD}, nodes=[{"old": "100 ms"}],
+                    temporary_preview={"old": True}, compatibility={"excluded_at_or_before": "v1.14.0"})
+        standard = {"id": standard_id}
+        new_node = {"id": "v1.15.2"}
+        codex = {"method": {"id": codex_id}, "nodes": [], "updated_at": None}
+        data["other_methods"] = {standard_id: {"method": standard, "nodes": [new_node],
+                                              "updated_at": "2026-11-11T00:00:00Z"},
+                                 codex_id: codex}
+        self.assertTrue(publisher.retire_legacy_qoder(data, standard))
+        self.assertFalse(publisher.retire_legacy_qoder(data, standard))
+        self.assertIs(history_for_method(data, standard_id), data)
+        self.assertEqual(data["nodes"], [new_node])
+        self.assertEqual(data["other_methods"], {codex_id: codex})
+        self.assertEqual(data["updated_at"], "2026-11-11T00:00:00Z")
+        self.assertIsNone(data["compatibility"])
+        self.assertNotIn("temporary_preview", data)
+
     def test_invalid_history_and_duplicate_slots_fail_before_cutoff_or_merge(self):
         data = history(); data["nodes"] = [node(), node()]
         with self.assertRaises(ValueError):
@@ -115,6 +140,74 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(series["method"], method)
         self.assertEqual([item["id"] for item in series["nodes"]], ["v1.16.0", "dev"])
         publisher.validate_history(data)
+
+    def test_codex_selector_requires_a_rust_runtime_and_never_enters_backfill(self):
+        import prepare_public as selector
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "selection"
+            args = ["prepare_public.py", "--output", str(output),
+                    "--benchmark-method", selector.CODEX_STANDARD_METHOD]
+            with patch("sys.argv", args + ["--mode", "backfill"]), patch.object(selector, "public_repository") as query:
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                    selector.main()
+                self.assertEqual(error.exception.code, 2)
+                query.assert_not_called()
+                self.assertFalse(output.exists())
+            with patch("sys.argv", args + ["--mode", "dev", "--ref", "dev/v2.0.0"]), \
+                    patch.object(selector, "public_repository"), patch.object(selector, "load_history", return_value=history()), \
+                    patch.object(selector, "resolve", return_value="a" * 40), \
+                    patch.object(selector, "source_runtime", return_value="js") as runtime:
+                with self.assertRaisesRegex(ValueError, "requires a public Rust host"):
+                    selector.main()
+                selection = output / "selection.json"
+                self.assertFalse(selection.exists())
+                runtime.return_value = "rust"
+                selector.main()
+                actual = json.loads(selection.read_text(encoding="utf-8"))
+                self.assertEqual(actual["method_id"], selector.CODEX_STANDARD_METHOD)
+                self.assertEqual(actual["runtime"], "rust")
+
+    def test_codex_high_capacity_has_three_waves_and_requires_source_evidence(self):
+        method = publisher.CODEX_STANDARD_METHOD
+        round_ = {"repeat": 1, "produced_turns": 6000, "completed_turns": 5998, "missing_responses": 6,
+                  "backlog": {"pending_turns": 2, "late_turns": 0, "unread_bytes": 4131}}
+        sample = {"capacity": {"drain_seconds": 15, "rounds": [round_]}}
+        quality = {"passed": False, "validated_prefix": True, "missing": 8, "duplicates": 0}
+        publisher.validate_capacity(sample, quality, method)
+        with self.assertRaises(ValueError):
+            publisher.validate_capacity(sample, quality)
+        round_["backlog"]["unread_bytes"] = 0
+        with self.assertRaisesRegex(ValueError, "Codex backlog"):
+            publisher.validate_capacity(sample, quality, method)
+        round_["backlog"]["late_turns"] = 2
+        publisher.validate_capacity(sample, quality, method)
+        round_["missing_responses"] = 7
+        with self.assertRaisesRegex(ValueError, "round counts"):
+            publisher.validate_capacity(sample, quality, method)
+
+    def test_trusted_codex_method_keeps_both_metrics_in_its_own_series(self):
+        descriptor = Path(__file__).resolve().parents[2] / "tests/performance_native"
+        method_id = publisher.CODEX_STANDARD_METHOD
+        method = json.loads((descriptor / publisher.METHOD_FILES[method_id]).read_text(encoding="utf-8"))
+        data = history()
+        data["method"] = {"id": publisher.LEGACY_METHOD}
+        value = node()
+        value["method_id"] = method_id
+        with self.assertRaisesRegex(ValueError, "resource statistic"):
+            publisher.merge_method(data, method, value)
+        for sample in value["workloads"].values():
+            sample["cpu_peak_percent"] = {"median": 4, "min": 3, "max": 5}
+            sample["rss_average_mib"] = {"median": 19, "min": 18, "max": 20}
+        self.assertTrue(publisher.merge_method(data, method, value))
+        self.assertEqual(data["nodes"], [])
+        actual = data["other_methods"][method_id]["nodes"][0]["workloads"]["idle"]
+        self.assertEqual(actual["cpu_peak_percent"]["median"], 4)
+        self.assertEqual(actual["rss_average_mib"]["median"], 19)
+        invalid_method = copy.deepcopy(data)
+        invalid_method["other_methods"][method_id]["method"]["poll_interval_ms"] = 100
+        with self.assertRaisesRegex(ValueError, "measurement settings"):
+            publisher.validate_history(invalid_method)
 
     def test_additional_method_rejects_cross_method_nodes_and_changed_parameters(self):
         data = history()

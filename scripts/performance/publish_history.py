@@ -17,15 +17,17 @@ import sys
 import time
 import urllib.parse
 
+from prepare_public import CODEX_STANDARD_METHOD
+
 LOADS = ("idle", "low", "high")
 HIGH_TURNS = 6000
 DRAIN_SECONDS = 15
 LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
 STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
-PEAK_METHODS = {STANDARD_METHOD, "github-full-pilot-codex-rollout-10s-v1"}
+PEAK_METHODS = {STANDARD_METHOD, CODEX_STANDARD_METHOD}
 METHOD_FILES = {
-    LEGACY_METHOD: "pilot-history-method.json",
     STANDARD_METHOD: "pilot-history-method-10s.json",
+    CODEX_STANDARD_METHOD: "pilot-history-method-codex-10s.json",
 }
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
@@ -56,7 +58,7 @@ def count(value, name):
         raise ValueError("invalid count: " + name)
 
 
-def validate_capacity(sample, quality):
+def validate_capacity(sample, quality, method_id=LEGACY_METHOD):
     capacity = sample["capacity"]
     if (not isinstance(capacity, dict) or set(capacity) != {"drain_seconds", "rounds"}
             or capacity["drain_seconds"] != DRAIN_SECONDS):
@@ -73,16 +75,24 @@ def validate_capacity(sample, quality):
             count(round_[field], field)
         repeat, produced = round_["repeat"], round_["produced_turns"]
         completed, absent = round_["completed_turns"], round_["missing_responses"]
+        codex = method_id == CODEX_STANDARD_METHOD
+        pending = produced - completed
         if (repeat not in (1, 2, 3) or repeat in repeats or produced != HIGH_TURNS
-                or not 0 <= completed < produced or not 0 < absent <= 2 * (produced - completed)):
+                or not 0 <= completed < produced or not (0 if codex else 1) <= absent <= (3 if codex else 2) * pending):
             raise ValueError("invalid high-load round counts")
         repeats.add(repeat)
-        missing += absent
+        missing += absent + (pending if codex else 0)
         backlog = round_["backlog"]
         if not isinstance(backlog, dict):
             raise ValueError("missing high-load backlog")
         for field, value in backlog.items():
             count(value, field)
+        if codex:
+            if (set(backlog) != {"pending_turns", "late_turns", "unread_bytes"}
+                    or backlog["pending_turns"] != pending or not 0 <= backlog["late_turns"] <= pending
+                    or (backlog["late_turns"] == pending) != (backlog["unread_bytes"] == 0)):
+                raise ValueError("invalid high-load Codex backlog counts")
+            continue
         if set(backlog) == {"pending_notices"} and backlog["pending_notices"] > 0:
             continue
         if (set(backlog) != {"queued", "started", "completed", "active", "pending"}
@@ -152,7 +162,7 @@ def validate_node(node):
         if "capacity" in sample:
             if name != "high":
                 raise ValueError("capacity results require high load")
-            validate_capacity(sample, quality)
+            validate_capacity(sample, quality, node["method_id"])
         elif quality.get("passed") is not True or quality["missing"] or quality["duplicates"]:
             raise ValueError("quality failure cannot be a passed node")
         metrics = ["cpu_percent", "rss_mib"]
@@ -202,23 +212,23 @@ def validate_node_slots(nodes, method_id=None):
 def validate_history(history):
     if not isinstance(history, dict) or history.get("schema") != 1 or history.get("repository") != OFFICIAL:
         raise ValueError("invalid generated history identity")
-    validate_node_slots(history.get("nodes"))
     methods = history.get("other_methods", {})
     if not isinstance(methods, dict):
         raise ValueError("invalid additional test methods")
     primary = history.get("method") or {}
     if not isinstance(primary, dict):
         raise ValueError("invalid primary test method")
+    validate_node_slots(history.get("nodes"), primary.get("id"))
     for method_id, series in methods.items():
         if (not isinstance(method_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", method_id)
                 or not isinstance(series, dict) or set(series) != {"method", "nodes", "updated_at"}
                 or not isinstance(series["method"], dict) or series["method"].get("id") != method_id
                 or method_id == primary.get("id")):
             raise ValueError("invalid additional test method identity")
-        if method_id == STANDARD_METHOD and any(series["method"].get(key) != value for key, value in (
+        if method_id in PEAK_METHODS and any(series["method"].get(key) != value for key, value in (
                 ("session_count", 64), ("window_seconds", 30), ("poll_interval_ms", 10_000),
                 ("cpu_sample_ms", 100), ("rss_sample_ms", 100))):
-            raise ValueError("invalid standard Qoder measurement settings")
+            raise ValueError("invalid standard measurement settings")
         validate_node_slots(series["nodes"], method_id)
     compatibility = history.get("compatibility")
     if compatibility is not None and not isinstance(compatibility, dict):
@@ -395,6 +405,18 @@ def merge_method(history, method, node, *, current_main=None, current_dev=None, 
     return True
 
 
+def retire_legacy_qoder(history, standard_method):
+    """Promote the measured Qoder series and discard obsolete polling data."""
+    if (history.get("method") or {}).get("id") != LEGACY_METHOD:
+        return False
+    methods = history.get("other_methods", {})
+    standard = methods.pop(STANDARD_METHOD, {})
+    history.pop("temporary_preview", None)
+    history.update(method=standard_method, nodes=standard.get("nodes", []),
+                   updated_at=standard.get("updated_at"), compatibility=None)
+    return True
+
+
 def apply_cutoff(history, event):
     """Only an explicit trusted confirmation with source AND smoke evidence cuts history."""
     validate_history(history)
@@ -514,15 +536,15 @@ def github_publish():
     if not SHA.fullmatch(commit) or expected.get("kind") not in ("release", "main", "dev"):
         raise ValueError("invalid trusted selector identity")
     artifact = Path(os.environ["PUBLICATION_INPUT"])
-    method_id = expected.get("method_id") or LEGACY_METHOD
+    method_id = expected.get("method_id")
     if method_id not in METHOD_FILES:
         raise ValueError("unrecognized benchmark method from the trusted selector")
     method_dir = trusted / "tests/performance_native"
     method = read_json(method_dir / METHOD_FILES[method_id])
     if method.get("id") != method_id:
         raise ValueError("trusted benchmark method file has the wrong identity")
-    primary = method_id == LEGACY_METHOD
-    legacy_method = method if primary else read_json(method_dir / METHOD_FILES[LEGACY_METHOD])
+    primary = method_id == STANDARD_METHOD
+    standard_method = method if primary else read_json(method_dir / METHOD_FILES[STANDARD_METHOD])
     template = (trusted / "scripts/performance/pilot-history.html").read_text(encoding="utf-8")
     number = int(os.environ["GITHUB_RUN_NUMBER"])
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -619,9 +641,10 @@ def github_publish():
         history_path = history_root / "history.json"
         history = read_json(history_path) if history_path.exists() else {
             "schema": 1, "repository": OFFICIAL, "updated_at": None,
-            "method": legacy_method, "compatibility": None, "nodes": []}
+            "method": standard_method, "compatibility": None, "nodes": []}
         validate_history(history)
-        if (history.get("method") or legacy_method).get("id") != LEGACY_METHOD:
+        migrated = retire_legacy_qoder(history, standard_method)
+        if (history.get("method") or {}).get("id") != STANDARD_METHOD:
             raise ValueError("primary Qoder history has an unexpected method")
         # Check after EVERY fresh fetch. A configuration switch creates a new
         # results commit: an in-flight old branch either fails this gate, or its
@@ -634,7 +657,7 @@ def github_publish():
         # Resolve on EVERY CAS retry, not just once before a slow publication.
         current_main = resolve(OFFICIAL, "main")
         ensure_public_commit(OFFICIAL, current_main)
-        initial_main = ensure_main_slot(history, current_main, LEGACY_METHOD)
+        initial_main = ensure_main_slot(history, current_main, STANDARD_METHOD)
         try:
             current_dev = resolve(repository, ref) if expected["kind"] == "dev" else None
         except urllib.error.HTTPError as error:
@@ -668,15 +691,15 @@ def github_publish():
                         if contains(trusted, merge_sha, current_main):
                             merged_dev = dev["commit"]
                             break
-        changed = initial_main
+        changed = initial_main or migrated
         if node:
             changed = merge_method(history, method, node, current_main=current_main,
                                    current_dev=current_dev, source_repo=trusted,
                                    merged_dev=merged_dev, publication=publication) or changed
         if cutoff:
             changed = apply_cutoff(history, cutoff) or changed
-        if changed and (primary or initial_main):
-            history["method"] = legacy_method
+        if changed and (primary or initial_main or migrated):
+            history["method"] = standard_method
             history["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         encoded_html = render(template, history)
         history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")

@@ -14,9 +14,9 @@ on:
         options: [main, dev, release, backfill]
         default: dev
       benchmark_method:
-        description: Full Pilot Qoder benchmark method
+        description: Full Pilot benchmark method (Codex requires an explicit Rust source or release)
         type: choice
-        options: [github-full-pilot-qoder-native-10s-v1, github-full-pilot-qoder-native-v1]
+        options: [github-full-pilot-qoder-native-10s-v1, github-full-pilot-codex-rollout-10s-v1]
         default: github-full-pilot-qoder-native-10s-v1
       public_repository:
         description: Public source repository; formal releases use official upstream
@@ -104,13 +104,13 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, subprocess, sys, urllib.parse
           sys.path.insert(0, 'scripts/performance')
-          from prepare_public import api, public_repository, resolve, STABLE, QODER_LEGACY_METHOD
+          from prepare_public import api, public_repository, resolve, STABLE, QODER_STANDARD_METHOD
           mode=os.environ['MODE']; repository=os.environ['PUBLIC_REPOSITORY']; ref=os.environ['PUBLIC_REF']
           method=os.environ['BENCHMARK_METHOD']
           if mode=='main': repository='alibaba/loongsuite-pilot'; ref='main'
           out=pathlib.Path(os.environ['RUNNER_TEMP'],'selection'); confirm=os.environ.get('CONFIRMED_TAG','')
           if confirm:
-              if method != QODER_LEGACY_METHOD:
+              if method != QODER_STANDARD_METHOD:
                   raise ValueError('choose the method tested by the compatibility evidence')
               if mode!='backfill' or repository!='alibaba/loongsuite-pilot' or not STABLE.fullmatch(confirm):
                   raise ValueError('explicit cutoff requires an official stable backfill release')
@@ -218,13 +218,18 @@ jobs:
           SOURCE_REF: ${{ steps.select.outputs.ref }}
         run: |
           python3 - <<'PY'
-          import os, pathlib, subprocess
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, 'scripts/performance')
+          from prepare_public import CODEX_STANDARD_METHOD
+          method=os.environ['BENCHMARK_METHOD']
+          codex=method==CODEX_STANDARD_METHOD
+          driver='codex_history.py' if codex else 'pilot_history.py'
           package=os.environ['PACKAGE'] if os.environ['KIND']=='release' else str(pathlib.Path(os.environ['RUNNER_TEMP'],'pilot-runtime'))
-          args=['python3','scripts/performance/pilot_history.py','--package',package,'--image',os.environ['PERF_IMAGE'],
-              '--runtime',os.environ['RUNTIME'],'--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'smoke')),
+          args=['python3','scripts/performance/'+driver,'--package',package,'--image',os.environ['PERF_IMAGE'],
+              '--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'smoke')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
-              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],
-              '--benchmark-method',os.environ['BENCHMARK_METHOD'],'--smoke-only']
+              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],'--smoke-only']
+          if not codex: args+=['--runtime',os.environ['RUNTIME'],'--benchmark-method',method]
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)
@@ -244,13 +249,18 @@ jobs:
           SOURCE_REF: ${{ steps.select.outputs.ref }}
         run: |
           python3 - <<'PY'
-          import os, pathlib, subprocess
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, 'scripts/performance')
+          from prepare_public import CODEX_STANDARD_METHOD
+          method=os.environ['BENCHMARK_METHOD']
+          codex=method==CODEX_STANDARD_METHOD
+          driver='codex_history.py' if codex else 'pilot_history.py'
           package=os.environ['PACKAGE'] if os.environ['KIND']=='release' else str(pathlib.Path(os.environ['RUNNER_TEMP'],'pilot-runtime'))
-          args=['python3','scripts/performance/pilot_history.py','--package',package,'--image',os.environ['PERF_IMAGE'],
-              '--runtime',os.environ['RUNTIME'],'--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'performance')),
+          args=['python3','scripts/performance/'+driver,'--package',package,'--image',os.environ['PERF_IMAGE'],
+              '--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'performance')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
-              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],
-              '--benchmark-method',os.environ['BENCHMARK_METHOD']]
+              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF']]
+          if not codex: args+=['--runtime',os.environ['RUNTIME'],'--benchmark-method',method]
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)

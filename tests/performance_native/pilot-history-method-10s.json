@@ -1,6 +1,6 @@
 {
   "id": "github-full-pilot-qoder-native-10s-v1",
-  "display_name": "Qoder · 10 秒轮询",
+  "display_name": "Qoder",
   "window_seconds": 30,
   "session_count": 64,
   "cpu_limit": 2,
