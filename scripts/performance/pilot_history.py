@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import statistics
@@ -29,6 +30,8 @@ from runtime_layout import resolve as resolve_layout
 
 METHOD = "github-full-pilot-qoder-native-v1"
 LOADS = {"idle": 0, "low": 10, "high": 200}
+WINDOW_SECONDS = 30
+DRAIN_SECONDS = 15
 COMMON = ("event.id", "time_unix_nano", "user.id", "gen_ai.agent.type", "gen_ai.session.id", "gen_ai.step.id")
 REQUIRED = {
     "llm.request": COMMON + ("gen_ai.turn.id", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.input.messages_delta"),
@@ -36,6 +39,8 @@ REQUIRED = {
     "tool.call": COMMON + ("gen_ai.tool.name", "gen_ai.tool.call.id", "gen_ai.tool.call.arguments"),
     "tool.result": COMMON + ("gen_ai.tool.name", "gen_ai.tool.call.id", "gen_ai.tool.call.result"),
 }
+EVENT_SHAPE = collections.Counter({"llm.request": 2, "llm.response": 2, "tool.call": 1, "tool.result": 1})
+REQUEST_SOURCE = re.compile(r"\b(?:synthetic(?: result)? |ci-tool-)((?:warm|turn)-[0-9]+)\b")
 
 
 def write_json(path, value):
@@ -126,7 +131,7 @@ class Output:
         self.directory, self.offsets, self.records = Path(directory), {}, []
         self.responses = set()
 
-    def read(self):
+    def read(self, final=False):
         for path in sorted(self.directory.glob("*.jsonl")):
             try:
                 opened = path.open("rb")
@@ -141,9 +146,15 @@ class Output:
                 stream.seek(offset)
                 while True:
                     line = stream.readline()
-                    if not line or not line.endswith(b"\n"):
+                    if not line:
+                        break
+                    if not line.endswith(b"\n"):
+                        if final:
+                            raise ValueError("unterminated output JSONL record")
                         break
                     value = json.loads(line)
+                    if not isinstance(value, dict):
+                        raise ValueError("output JSONL record must be an object")
                     self.records.append((monotonic_ns(), value))
                     if value.get("event.name") == "llm.response" and isinstance(value.get("gen_ai.response.id"), str):
                         self.responses.add(value["gen_ai.response.id"])
@@ -155,6 +166,26 @@ class Output:
 def response_catalog(expected):
     return {response: (identifier, metadata) for identifier, metadata in expected.items()
             for response in metadata["response_ids"]}
+
+
+def validate_event(row, metadata):
+    kind = row["event.name"]
+    if row.get("gen_ai.session.id") != metadata["session"]:
+        raise ValueError("native session identity mismatch")
+    if row.get("gen_ai.agent.type") != "qoder-cli":
+        raise ValueError("raw CLI transcript did not retain its qoder-cli label")
+    for name in REQUIRED[kind]:
+        value = row.get(name)
+        if value is None or value == "" or value == "null" or value == []:
+            raise ValueError("missing required native field: " + name)
+        if name == "time_unix_nano" and int(value) <= 0:
+            raise ValueError("invalid event timestamp")
+    if kind.startswith("tool.") and row["gen_ai.tool.call.id"] != metadata["tool_id"]:
+        raise ValueError("tool linkage mismatch")
+    if kind == "llm.response" and (
+            row["gen_ai.usage.input_tokens"] != metadata["input_tokens"]
+            or row["gen_ai.usage.output_tokens"] != metadata["output_tokens"]):
+        raise ValueError("exact native token enrichment failed")
 
 
 def validate(records, expected):
@@ -185,28 +216,15 @@ def validate(records, expected):
         identifier = turns[row["gen_ai.turn.id"]]
         metadata = expected[identifier]
         counts[identifier][kind] += 1
-        if row.get("gen_ai.session.id") != metadata["session"]:
-            raise ValueError("native session identity mismatch")
-        if row.get("gen_ai.agent.type") != "qoder-cli":
-            raise ValueError("raw CLI transcript did not retain its qoder-cli label")
+        validate_event(row, metadata)
         for name in REQUIRED[kind]:
-            value = row.get(name)
-            if value is None or value == "" or value == "null" or value == []:
-                raise ValueError("missing required native field: " + name)
-            if name == "time_unix_nano" and int(value) == 0:
-                raise ValueError("zero event timestamp")
             fields[kind][name] += 1
-        if kind.startswith("tool.") and row["gen_ai.tool.call.id"] != metadata["tool_id"]:
-            raise ValueError("tool linkage mismatch")
-    shape = collections.Counter({"llm.request": 2, "llm.response": 2, "tool.call": 1, "tool.result": 1})
     for identifier in expected:
-        if counts[identifier] != shape:
+        if counts[identifier] != EVENT_SHAPE:
             raise ValueError("fixed public native event cardinality failed: %s" % identifier)
     latencies = []
     for response, (identifier, metadata) in catalog.items():
         observed, row = known[response]
-        if row["gen_ai.usage.input_tokens"] != metadata["input_tokens"] or row["gen_ai.usage.output_tokens"] != metadata["output_tokens"]:
-            raise ValueError("exact native token enrichment failed")
         if response.endswith("-final"):
             latency = (observed - metadata["published_monotonic_ns"]) / 1e6
             if latency < 0 or not math.isfinite(latency):
@@ -215,6 +233,93 @@ def validate(records, expected):
     return {"passed": True, "missing": 0, "duplicates": 0,
             "required_field_counts": fields, "turns": len(expected),
             "p95_ms": sorted(latencies)[math.ceil(.95 * len(latencies)) - 1] if latencies else None}
+
+
+def validate_delivered_prefix(records, warm, expected):
+    """Accept only an intact prefix per source when the high-load drain expires."""
+    all_expected = dict(warm, **expected)
+    responses = response_catalog(all_expected)
+    tools = {metadata["tool_id"]: identifier for identifier, metadata in all_expected.items()}
+    turns, source_turns, seen_responses, seen_events = {}, {}, set(), set()
+    core = [row for _, row in records if row.get("event.name") in REQUIRED]
+
+    def bind(turn, identifier):
+        if (turns.setdefault(turn, identifier) != identifier
+                or source_turns.setdefault(identifier, turn) != turn):
+            raise ValueError("conflicting native turn identity")
+
+    for row in core:
+        event_id, turn = row.get("event.id"), row.get("gen_ai.turn.id")
+        if not all(isinstance(value, str) and value and value != "null" for value in (event_id, turn)):
+            raise ValueError("missing event.id or turn.id in delivered prefix")
+        if event_id in seen_events:
+            raise ValueError("duplicate event.id in delivered prefix")
+        seen_events.add(event_id)
+        kind = row["event.name"]
+        if kind == "llm.response":
+            response = row.get("gen_ai.response.id")
+            if response not in responses or response in seen_responses:
+                raise ValueError("unknown or duplicate native response identity")
+            seen_responses.add(response)
+            bind(turn, responses[response][0])
+        elif kind.startswith("tool."):
+            tool = row.get("gen_ai.tool.call.id")
+            if tool not in tools:
+                raise ValueError("unknown native tool identity")
+            bind(turn, tools[tool])
+
+    counts = collections.defaultdict(collections.Counter)
+    for row in core:
+        turn = row["gen_ai.turn.id"]
+        if turn not in turns:
+            # A request can be the only event from the final in-flight turn.
+            # Recover its fixture identity from the raw prompt/tool marker.
+            identifiers = set(REQUEST_SOURCE.findall(compact(row.get("gen_ai.input.messages_delta"))))
+            if len(identifiers) != 1 or not identifiers.issubset(all_expected):
+                raise ValueError("cannot attribute delivered native request")
+            bind(turn, next(iter(identifiers)))
+        identifier = turns[turn]
+        validate_event(row, all_expected[identifier])
+        kind = row["event.name"]
+        counts[identifier][kind] += 1
+        if counts[identifier][kind] > EVENT_SHAPE[kind]:
+            raise ValueError("extra native events in delivered prefix")
+
+    incomplete_sources, completed = set(), 0
+    for identifier, metadata in all_expected.items():
+        observed = counts[identifier]
+        session = metadata["session"]
+        complete = observed == EVENT_SHAPE
+        terminal = metadata["response_ids"][-1] in seen_responses
+        if (identifier in warm or terminal) and not complete:
+            raise ValueError("incomplete delivered native turn: " + identifier)
+        if observed and session in incomplete_sources:
+            raise ValueError("gap in delivered native source prefix: " + identifier)
+        if complete and identifier in expected:
+            completed += 1
+        if not complete:
+            incomplete_sources.add(session)
+
+    missing = len(set(response_catalog(expected)) - seen_responses)
+    return {"passed": missing == 0, "missing": missing, "duplicates": 0,
+            "validated_prefix": True, "turns": completed, "p95_ms": None}
+
+
+def capacity_backlog(fixture, legacy, expected_turns):
+    if legacy:
+        status = fixture.check()
+        if not status or status["queued"] != expected_turns:
+            raise RuntimeError("legacy Stop queue did not receive every trigger")
+        backlog = {key: status[key] for key in ("queued", "started", "completed", "active", "pending")}
+        if (backlog["queued"] != backlog["started"] + backlog["pending"]
+                or backlog["started"] != backlog["completed"] + backlog["active"]
+                or backlog["pending"] + backlog["active"] <= 0):
+            raise RuntimeError("legacy Stop drain timeout has no consistent backlog")
+        return backlog
+    pending = sum(1 for _ in fixture.sources.glob("*/events/*.json"))
+    if not pending:
+        raise RuntimeError("native drain timeout has no pending source notices")
+    return {"pending_notices": pending}
 
 
 def configure(fixture, output):
@@ -318,7 +423,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             if legacy:
                 fixture.finish(timeout=15)
             stop_container(container)
-            output.read()
+            output.read(final=True)
             quality = validate(output.records, warm)
             write_json(directory / "expected.json", warm)
             return {"status": "passed", "smoke_only": True, "report_node": False,
@@ -327,13 +432,13 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         time.sleep(1)
         first = resources(container, cgroup, cpu=True)
         samples.append(first)
-        start = time.monotonic(); end = start + 30
+        start = time.monotonic(); end = start + WINDOW_SECONDS
         produced, next_sample = 0, start
         while time.monotonic() < end:
             if legacy:
                 fixture.check()
             now = time.monotonic()
-            due = min(int((now - start) * rate) + 1, rate * 30) if rate else 0
+            due = min(int((now - start) * rate) + 1, rate * WINDOW_SECONDS) if rate else 0
             while produced < due:
                 late.append(max(0, time.monotonic() - (start + produced / rate)) * 1000)
                 fixture.append_turn(produced % 64, "turn-%06d" % produced)
@@ -343,36 +448,53 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             time.sleep(.001 if rate else .02)
         active_end = resources(container, cgroup, cpu=True)
         samples.append(active_end)
-        if produced != rate * 30:
+        if produced != rate * WINDOW_SECONDS or len(fixture.expected) != produced:
             raise RuntimeError("producer could not maintain the fixed rate")
-        deadline = time.monotonic() + 15
-        catalog = response_catalog(fixture.expected)
+        deadline = time.monotonic() + DRAIN_SECONDS
+        catalog = set(response_catalog(fixture.expected))
+        capacity = None
         while True:
             if legacy:
                 fixture.check()
             output.read()
-            if set(catalog).issubset(output.responses):
+            if catalog.issubset(output.responses):
                 break
             if time.monotonic() > deadline:
-                raise RuntimeError("native input failed to drain")
+                if load != "high":
+                    raise RuntimeError("native input failed to drain")
+                state = docker_json("/containers/%s/json" % container)["State"]
+                if not state.get("Running") or state.get("OOMKilled"):
+                    raise RuntimeError("container exited before the high-load drain")
+                quality = validate_delivered_prefix(output.records, warm, fixture.expected)
+                if not 0 <= quality["turns"] < produced or not quality["missing"]:
+                    raise RuntimeError("high-load drain requires incomplete delivery")
+                capacity = {"repeat": repeat, "produced_turns": produced,
+                            "completed_turns": quality["turns"], "missing_responses": quality["missing"],
+                            "backlog": capacity_backlog(fixture, legacy, len(warm) + produced)}
+                break
             samples.append(resources(container, cgroup)); time.sleep(.1)
-        if legacy:
+        if legacy and capacity is None:
             fixture.finish(timeout=max(0, deadline - time.monotonic()))
         drained = resources(container, cgroup, cpu=True)
         samples.append(drained)
         peak_file = cgroup["memory_peak"]
         cgroup_peak = int(peak_file.read_text()) if peak_file and peak_file.exists() else None
+        if legacy and capacity:
+            fixture.close()
         stop_container(container)
-        output.read()
-        validate(output.records, dict(warm, **fixture.expected))
-        quality = validate(output.records, fixture.expected)
+        output.read(final=True)
+        if capacity:
+            validate_delivered_prefix(output.records, warm, fixture.expected)
+        else:
+            validate(output.records, dict(warm, **fixture.expected))
+            quality = validate(output.records, fixture.expected)
         write_json(directory / "expected.json", fixture.expected)
         write_json(directory / "resource-samples.json", samples)
         active_wall = (active_end["at_ns"] - first["at_ns"]) / 1e9
         cpu = (active_end["cpu_ns"] - first["cpu_ns"]) / 1e9
         if active_wall <= 0 or cpu < 0 or not math.isfinite(cpu / active_wall):
             raise RuntimeError("invalid measured CPU interval")
-        return {"load": load, "repeat": repeat, "cpu_percent": cpu / active_wall * 100,
+        result = {"load": load, "repeat": repeat, "cpu_percent": cpu / active_wall * 100,
                 "rss_mib": max(value["rss_bytes"] for value in samples) / 1048576,
                 "active_cpu_seconds": cpu, "active_wall_seconds": active_wall,
                 "through_drain_cpu_seconds": (drained["cpu_ns"] - first["cpu_ns"]) / 1e9,
@@ -380,6 +502,9 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                 "cgroup_version": cgroup["version"],
                 "produced_turns": produced, "producer_max_lateness_ms": max(late) if late else None,
                 "quality": quality}
+        if capacity:
+            result["capacity"] = capacity
+        return result
     finally:
         if legacy:
             fixture.close()
@@ -394,6 +519,23 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
 
 def summary(values):
     return {"median": statistics.median(values), "min": min(values), "max": max(values)}
+
+
+def summarize_workload(rounds, load):
+    capacity_rounds = [round_["capacity"] for round_ in rounds if "capacity" in round_]
+    quality = {"passed": not capacity_rounds,
+               "missing": sum(round_["quality"]["missing"] for round_ in rounds),
+               "duplicates": sum(round_["quality"]["duplicates"] for round_ in rounds)}
+    result = {"repeats": len(rounds),
+              "cpu_percent": summary([round_["cpu_percent"] for round_ in rounds]),
+              "rss_mib": summary([round_["rss_mib"] for round_ in rounds]),
+              "quality": quality,
+              "p95_ms": None if load == "idle" or capacity_rounds else
+                        summary([round_["quality"]["p95_ms"] for round_ in rounds])}
+    if capacity_rounds:
+        quality["validated_prefix"] = True
+        result["capacity"] = {"drain_seconds": DRAIN_SECONDS, "rounds": capacity_rounds}
+    return result
 
 
 def environment_facts(args):
@@ -490,11 +632,7 @@ def main():
                 write_json(args.output / "node.json", node)
         for load in LOADS:
             rounds = [value for value in node["rounds"] if value["load"] == load]
-            node["workloads"][load] = {"repeats": len(rounds),
-                "cpu_percent": summary([value["cpu_percent"] for value in rounds]),
-                "rss_mib": summary([value["rss_mib"] for value in rounds]),
-                "quality": {"passed": True, "missing": 0, "duplicates": 0},
-                "p95_ms": summary([value["quality"]["p95_ms"] for value in rounds]) if load != "idle" else None}
+            node["workloads"][load] = summarize_workload(rounds, load)
         node["status"] = "passed"
     except Exception as error:
         node["status"] = "failed"; node["error"] = "%s: %s" % (type(error).__name__, error); code = 1

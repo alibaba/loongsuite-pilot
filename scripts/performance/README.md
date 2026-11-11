@@ -27,10 +27,16 @@ There are 64 native sessions and 100 ms collection polling. Each of idle
 (0 turns/s), low (10 turns/s, 低负载) and high (200 turns/s) runs for a 30-second
 input interval, three repeats, with a 2-CPU/1-GiB container. Warmup and drain are
 separate. The raw source producer is outside the measured container. Historical Hook
-processing runs inside that container and must finish within the same drain
+processing runs inside that container and uses the same 15-second drain
 window. Fixed-rate input, event cardinality, tokens and field checks also apply
-to these releases. A capacity or drain failure retains its actual failure
-category and artifact evidence.
+to these releases.
+
+At high load a healthy run that produces all 6,000 turns can publish its measured
+CPU and RSS after the drain expires if queued work remains and delivered events
+form an intact prefix for each source. The report marks the affected high-load
+point as 超出承载能力 and records the affected rounds, completed turns, missing
+responses and backlog. The prefix check validates every attributable event and
+requires complete event sets for warmup and delivered terminal responses.
 
 CPU uses cumulative Docker accounting at interval boundaries and the actual
 elapsed interval. One CPU is 100%. Resource samples retain the actual interval,
@@ -41,9 +47,10 @@ Both cgroup v1 and v2 are supported and the observed version enters the
 environment identity. Missing accounting is an infrastructure error.
 
 Latency is publication-to-first-observed-JSONL p95 for the final response,
-including observer cadence. It is not callback latency. Cardinality, loss,
-duplicate IDs, fields and exact tokens are hard checks. A failed or partial
-run never supplies invented zeros or claims three successful repeats.
+including observer cadence. Cardinality, duplicate IDs, required fields and
+exact tokens are hard checks. Idle and low load require full delivery. High load
+requires three actual resource samples across three rounds. A capacity result
+reports the missing responses and omits the aggregate latency.
 
 ## Preparation and commands
 
@@ -98,8 +105,9 @@ commit nodes. Main is measured at its exact merged commit. Clearing dev requires
 proof that this exact development commit was merged. Stale runs cannot replace
 newer main/dev results. Release history is measured once and retained.
 
-One backfill invocation selects one unmeasured release, newest first. The first
-confirmed native-contract incompatibility may exclude that version and older
+One backfill invocation selects one unmeasured release, newest first. An accepted
+high-load capacity result counts as measured and lets backfill continue. The
+first confirmed native-contract incompatibility may exclude that version and older
 ones only with reviewed public-source plus actual smoke evidence. Missing
 assets, network failures, builds, OOM, bad config or unknown failures do not
 advance that boundary. Resume pending infrastructure failures explicitly.

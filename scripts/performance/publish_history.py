@@ -18,6 +18,8 @@ import time
 import urllib.parse
 
 LOADS = ("idle", "low", "high")
+HIGH_TURNS = 6000
+DRAIN_SECONDS = 15
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -45,6 +47,46 @@ def read_json(path):
 def count(value, name):
     if type(value) is not int or value < 0:
         raise ValueError("invalid count: " + name)
+
+
+def validate_capacity(sample, quality):
+    capacity = sample["capacity"]
+    if (not isinstance(capacity, dict) or set(capacity) != {"drain_seconds", "rounds"}
+            or capacity["drain_seconds"] != DRAIN_SECONDS):
+        raise ValueError("invalid high-load drain evidence")
+    rounds = capacity["rounds"]
+    if not isinstance(rounds, list) or not 1 <= len(rounds) <= 3:
+        raise ValueError("invalid number of high-load capacity rounds")
+    repeats, missing = set(), 0
+    for round_ in rounds:
+        if not isinstance(round_, dict) or set(round_) != {
+                "repeat", "produced_turns", "completed_turns", "missing_responses", "backlog"}:
+            raise ValueError("invalid capacity round evidence")
+        for field in ("repeat", "produced_turns", "completed_turns", "missing_responses"):
+            count(round_[field], field)
+        repeat, produced = round_["repeat"], round_["produced_turns"]
+        completed, absent = round_["completed_turns"], round_["missing_responses"]
+        if (repeat not in (1, 2, 3) or repeat in repeats or produced != HIGH_TURNS
+                or not 0 <= completed < produced or not 0 < absent <= 2 * (produced - completed)):
+            raise ValueError("invalid high-load round counts")
+        repeats.add(repeat)
+        missing += absent
+        backlog = round_["backlog"]
+        if not isinstance(backlog, dict):
+            raise ValueError("missing high-load backlog")
+        for field, value in backlog.items():
+            count(value, field)
+        if set(backlog) == {"pending_notices"} and backlog["pending_notices"] > 0:
+            continue
+        if (set(backlog) != {"queued", "started", "completed", "active", "pending"}
+                or backlog["queued"] != produced + 64
+                or backlog["queued"] != backlog["started"] + backlog["pending"]
+                or backlog["started"] != backlog["completed"] + backlog["active"]
+                or backlog["pending"] + backlog["active"] <= 0):
+            raise ValueError("invalid high-load backlog counts")
+    if (quality.get("passed") is not False or quality.get("validated_prefix") is not True
+            or quality["missing"] != missing or quality["duplicates"] or sample.get("p95_ms") is not None):
+        raise ValueError("invalid high-load prefix quality evidence")
 
 
 def validate_node(node):
@@ -100,7 +142,11 @@ def validate_node(node):
             raise ValueError("workload quality must be an object")
         for field in ("missing", "duplicates"):
             count(quality.get(field), field)
-        if quality.get("passed") is not True or quality["missing"] or quality["duplicates"]:
+        if "capacity" in sample:
+            if name != "high":
+                raise ValueError("capacity results require high load")
+            validate_capacity(sample, quality)
+        elif quality.get("passed") is not True or quality["missing"] or quality["duplicates"]:
             raise ValueError("quality failure cannot be a passed node")
         for field in ("cpu_percent", "rss_mib"):
             summary = sample.get(field, {})
@@ -204,6 +250,9 @@ def compact(node, publication=None, asset_sha256=None):
             kept[key] = {name: summary[name] for name in ("median", "min", "max") if name in summary} if isinstance(summary, dict) else None
         quality = sample.get("quality")
         kept["quality"] = {key: quality[key] for key in ("passed", "missing", "duplicates") if key in quality} if isinstance(quality, dict) else None
+        if node["status"] == "passed" and "capacity" in sample:
+            kept["capacity"] = copy.deepcopy(sample["capacity"])
+            kept["quality"]["validated_prefix"] = True
         result["workloads"][load] = kept
     allowed_provenance = ("collection", "legacy_fixture_sha256", "legacy_dispatcher_sha256",
                           "entry_sha256", "library_sha256", "fixture_sha256", "compiler", "asset_sha256", "release_url",
