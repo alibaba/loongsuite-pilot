@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { contentHash } from '../../utils/content-hash.js';
 import { MAX_MULTIMODAL_PARTS, type BlobToUriFn, type UriPart } from '../../multimodal/types.js';
 import {
   multimodalUploadIncludesInput,
@@ -184,6 +185,7 @@ function extractCodexTurn(
   const uploadMode = opts.uploadMode ?? (blobToUri ? 'all' : 'none');
   let prompt: string | undefined;
   const promptParts: string[] = [];
+  const submittedPromptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
   const stepEnvelopes: StepEnvelope[] = [];
   const unmatchedTokenUsages: CodexTranscriptUsage[] = [];
@@ -245,6 +247,9 @@ function extractCodexTurn(
     promptParts.push(value);
     prompt = promptParts.join('\n');
   };
+  const appendSubmittedPrompt = (value: string | undefined): void => {
+    if (value && !submittedPromptParts.includes(value)) submittedPromptParts.push(value);
+  };
   const markActivity = (timestamp: number): void => {
     if (timestamp > 0) lastActivityAtMs = timestamp;
   };
@@ -293,6 +298,7 @@ function extractCodexTurn(
     if (record.type === 'event_msg') {
       if (payload.type === 'user_message') {
         appendPrompt(stringValue(payload.message));
+        appendSubmittedPrompt(stringValue(payload.message));
         sawSubmittedUserMessage = true;
         markActivity(timestamp);
         continue;
@@ -449,6 +455,7 @@ function extractCodexTurn(
           inputMessages.push(message);
           if (role === 'user') {
             appendPrompt(extractMessageText(payload.content));
+            appendSubmittedPrompt(extractUserAuthoredText(payload, expectedTurnId));
           }
         }
         markActivity(timestamp);
@@ -567,6 +574,7 @@ function extractCodexTurn(
     startedAtMs: startedAtMs || terminalAtMs,
     terminalAtMs,
     ...(prompt ? { prompt } : {}),
+    ...(submittedPromptParts.length ? { correlationContentHash: contentHash(submittedPromptParts.join('\n')) } : {}),
     promptReady,
     inputMessages,
     ...(cwd ? { cwd } : {}),
@@ -820,6 +828,20 @@ function stringValue(value: unknown): string | undefined {
 function readInstructionText(value: unknown): string | undefined {
   const record = asRecord(value);
   return stringValue(record?.text) ?? stringValue(value);
+}
+
+/** Native provenance distinguishes app-server environment context from input.
+ * Never strip text by its XML spelling: users can legitimately submit it.
+ */
+function extractUserAuthoredText(payload: Record<string, unknown>, turnId: string): string | undefined {
+  const metadata = asRecord(payload.internal_chat_message_metadata_passthrough);
+  const nativeTurnId = stringValue(metadata?.turn_id);
+  if (nativeTurnId && nativeTurnId !== turnId) return undefined;
+  const content = payload.content;
+  const provenance = metadata?.content_item_metadata;
+  if (!Array.isArray(content) || !Array.isArray(provenance) || content.length !== provenance.length) return undefined;
+  return extractMessageText(content.filter((_, index) =>
+    asRecord(asRecord(provenance[index])?.provenance)?.type === 'user'));
 }
 
 function extractMessageText(content: unknown): string | undefined {
