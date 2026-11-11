@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "alibaba/loongsuite-pilot",
-  "updated_at": "2026-11-11T02:33:13.600065Z",
+  "updated_at": "2026-11-11T05:39:25.592084Z",
   "method": {
     "id": "github-full-pilot-qoder-native-v1",
     "window_seconds": 30,
@@ -24,7 +24,7 @@
     "resource_sample_ms": 100,
     "rss_basis": "sum of owned process RSS; shared pages may be counted more than once",
     "cpu_basis": "Docker cumulative container CPU; includes owned children, excludes producer",
-    "input": "raw native Qoder transcript, source/notice metadata and raw intercept tokens",
+    "input": "raw native Qoder transcript and intercept tokens; packaged native wakeup or original legacy Stop Hook collection",
     "output": "complete Pilot JSONL flusher",
     "node_order": [
       "stable releases ascending",
@@ -467,18 +467,34 @@
       "kind": "release",
       "version": "v1.15.1",
       "commit": "df1110fc1478cb807d1970a66960d94e3d91335b",
-      "recorded_at": "2026-11-10T10:08:08.743980+00:00",
+      "recorded_at": "2026-11-11T05:33:31.847199Z",
       "status": "failed",
       "method_id": "github-full-pilot-qoder-native-v1",
-      "environment_id": "unavailable",
-      "environment": {},
-      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42796380576",
+      "environment_id": "085462d3669f3b03c936fd3f5f1bb04d39efc53cf73f528283f0a7d47cb66d22",
+      "environment": {
+        "cpu_model": "AMD EPYC 7763 64-Core Processor",
+        "runner_os": "Linux",
+        "runner_image": "ubuntu22/20261101.347.1",
+        "container_digest": "sha256:8700da48cc6592503feabf399d242414f932197c3b44f43970d2cbc5671e06b0",
+        "cgroup_version": "v2",
+        "kernel": "6.8.0-1070-azure",
+        "architecture": "x86_64",
+        "cpus": 4,
+        "node_version": "v22.23.4"
+      },
+      "run_url": "https://github.com/alibaba/loongsuite-pilot/actions/runs/42955992312",
       "workloads": {},
       "source": {
         "repository": "alibaba/loongsuite-pilot",
         "ref": "v1.15.1"
       },
       "provenance": {
+        "collection": "legacy-stop",
+        "legacy_fixture_sha256": "cae39621ec1247cc96aed76d8d47661807f215f0a4b2bdca7b07dcf9875a726d",
+        "legacy_dispatcher_sha256": "f8cffe1702e9410ab9f8141d66e779bba2fd31a75657e78cc8272649dbca21c4",
+        "entry_sha256": "d15640cec20e3c459a796c1e7764cf360ae8b56ddb30057293300bb06b1c9bd0",
+        "fixture_sha256": "ead957ff4c64e51c0f8c2f72c100e9b48558f71ff28ee4c848df6c83ce210636",
+        "compiler": null,
         "asset_sha256": "1bd8438d48d73d3bb339d9c7b694072c898621d5dd1106b7eed2d41b2487ac1b",
         "release_url": "https://github.com/alibaba/loongsuite-pilot/releases/tag/v1.15.1",
         "asset_id": 687478861,
@@ -489,8 +505,8 @@
       },
       "failure_category": "infrastructure",
       "publication": {
-        "run_number": 13,
-        "run_id": "42796380576"
+        "run_number": 27,
+        "run_id": "42955992312"
       }
     },
     {
