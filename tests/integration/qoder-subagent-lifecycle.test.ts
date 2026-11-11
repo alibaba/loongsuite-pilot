@@ -212,6 +212,30 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(new Set(work.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(1);
   });
 
+  it('shares the proven trailing Stop context with delegation invoke, tool and result', async () => {
+    const h = await harness(agentId);
+    const previous = process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+    try {
+      process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = 'gen_ai.session.id=business-control-tail';
+      await h.write(null, [prompt('control-parent', 0), ...dispatch('control-call', 1, 'control-child'),
+        ...end('control-parent-end', 3),
+        { type: 'user', entrypoint: 'cli', userType: 'external', timestamp: at(3.1),
+          message: { role: 'user', content: '<command-message>exit</command-message>\n<command-name>/exit</command-name>' } }]);
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+      else process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES = previous;
+    }
+    await h.start(); await h.cycle(); await h.stop();
+    const work = h.entries().filter(entry => entry['gen_ai.tool.call.id'] === 'control-call');
+    for (const name of ['gen_ai.agent.invoke', 'tool.call', 'tool.result', 'gen_ai.agent.result']) {
+      const event = work.find(entry => entry['event.name'] === name)!;
+      expect(event).toBeDefined();
+      expect(event['gen_ai.session.id']).toBe('business-control-tail');
+    }
+    expect(new Set(work.map(entry => entry['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(work.map(entry => entry['gen_ai.agent.invocation.id'])).size).toBe(1);
+  });
+
   it('joins parallel children to actual TOOL spans and preserves native sessions, usage, audit IDs and masking', async () => {
     const h = await harness(agentId);
     await h.write(null, [prompt('parent', 0), ...dispatch('call-a', 1, 'child-a'), ...dispatch('call-b', 2, 'child-b'), ...end('parent-end', 6, 17)]);

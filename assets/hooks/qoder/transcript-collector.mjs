@@ -32,6 +32,8 @@ const MAX_TAIL_SCANS = 256;
 const MAX_DEFERRED_SOURCES = 1024;
 const LEGACY_LOCK_GRACE_MS = 1000;
 const LEGACY_LOCK_AGE_MS = 60_000;
+const MAX_TRAILING_CONTROL_BYTES = 64 * 1024;
+const TERMINAL_CONTEXT_EVENTS = new Set(['Stop', 'SessionEnd']);
 const DEFERRED_CONTENT_ERRORS = new Set([
   'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
   'bootstrap-record-byte-limit', 'invalid-json-line',
@@ -950,21 +952,61 @@ export class QoderTranscriptCollector {
     return value;
   }
 
-  contextFor(source, contexts, checkpoint, endOffset) {
-    return [...contexts].reverse().find(item => checkpoint.activeRequestSetId
-      && item.requestSetId === checkpoint.activeRequestSetId)
-      ?? [...contexts].reverse().find(item => item.observedSize <= endOffset
-      && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
-        && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))))
-      ?? { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
+  async trailingTerminalContext(source, contexts, endOffset) {
+    const candidate = contexts.find(item => item.observedSize > endOffset
+      && TERMINAL_CONTEXT_EVENTS.has(item.event));
+    if (!candidate) return null;
+    const bytes = candidate.observedSize - endOffset;
+    // A later invocation can publish the next terminal context when this
+    // Turn's Stop notice is absent. Only borrow across the small native CLI
+    // control tail that follows last-prompt; any content row keeps ownership
+    // unproven and falls back to source metadata.
+    if (bytes <= 0 || bytes > MAX_TRAILING_CONTROL_BYTES || bytes > this.remainingBytes) return null;
+    let handle;
+    try {
+      handle = await this.open(source.transcriptPath);
+      const stat = await handle.stat();
+      if (candidate.observedSize > stat.size) return null;
+      const buffer = Buffer.alloc(bytes);
+      for (let offset = 0; offset < bytes;) {
+        const read = await this.read(handle, buffer.subarray(offset), endOffset + offset);
+        if (!read) return null;
+        offset += read;
+      }
+      // Hook watermarks can observe a concurrent partial write. Such a range
+      // cannot prove ownership, even when its prefix resembles a CLI control.
+      if (buffer[buffer.length - 1] !== 0x0a) return null;
+      const lines = buffer.toString('utf8').split('\n');
+      lines.pop();
+      for (const line of lines) {
+        if (!line) return null;
+        const row = JSON.parse(line);
+        if (!isControlUserRow(row) && !TERMINAL_CONTEXT_EVENTS.has(eventOf(row))) return null;
+      }
+      return candidate;
+    } catch {
+      return null;
+    } finally {
+      await handle?.close().catch(() => {});
+    }
   }
 
-  emitInvokes(source, contexts, checkpoint, value, records, endOffset, complete = false) {
+  contextFor(source, contexts, checkpoint, endOffset) {
+    const reverseContexts = [...contexts].reverse();
+    return reverseContexts.find(item => checkpoint.activeRequestSetId
+      && item.requestSetId === checkpoint.activeRequestSetId)
+      ?? reverseContexts.find(item => item.observedSize <= endOffset
+      && (item.observedSize > checkpoint.activeStart || (item.observedSize >= (checkpoint.contextFloor ?? checkpoint.activeStart)
+        && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))));
+  }
+
+  emitInvokes(source, contexts, checkpoint, value, records, endOffset, complete = false,
+    context = this.contextFor(source, contexts, checkpoint, endOffset)) {
     if (!checkpoint.turnId || !checkpoint.traceContext) return;
-    const context = this.contextFor(source, contexts, checkpoint, endOffset);
     // A Hook may observe progress written after the tool line. Finish this
     // bounded scan before selecting its snapshot; never borrow a later turn's.
-    if (!complete && !Number.isFinite(context.observedSize)) return;
+    if (!complete && !Number.isFinite(context?.observedSize)) return;
+    context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     for (const row of value.rows) {
       if (!Number.isFinite(Date.parse(row.timestamp))) continue;
       for (const { link, block } of this.links.register(source, checkpoint, row)) {
@@ -992,7 +1034,14 @@ export class QoderTranscriptCollector {
   async build(source, contexts, checkpoint, value, endOffset, terminalSource, earlyRecords) {
     if (this.stopped) throw new Error('stopped');
     if (!checkpoint.hasUser || !value.rows.length) return [];
-    const context = this.contextFor(source, contexts, checkpoint, endOffset);
+    let context = this.contextFor(source, contexts, checkpoint, endOffset);
+    // Qoder can invoke Stop after appending last-prompt or a local /exit row.
+    // Prove that intervening bytes are only that control tail before borrowing
+    // the following context; a next-prompt boundary must never look forward.
+    if (!context && terminalSource === 'last-prompt') {
+      context = await this.trailingTerminalContext(source, contexts, endOffset);
+    }
+    context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       userIdentity: context.userIdentity ?? source.userIdentity,
       resourceAttributes: context.resourceAttributes ?? {},
@@ -1003,7 +1052,7 @@ export class QoderTranscriptCollector {
     // or leak into the next model request when a turn is still being drained.
     const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
     await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
-    if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true);
+    if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true, context);
     const turnId = checkpoint.turnId;
     const boundaries = buildLlmBoundaries([], content);
     const records = buildEventsFromBoundaries(boundaries, content, value.rows, turnId,

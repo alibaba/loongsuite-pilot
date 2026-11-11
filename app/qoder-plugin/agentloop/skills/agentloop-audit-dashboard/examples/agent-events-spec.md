@@ -18,7 +18,7 @@ data:
 
 - 有效用户事件：`user.id` 非空。
 - 活跃用户：当前时间范围内出现过事件的 `user.id` 去重数。
-- Token、事件数、AI Agent、模型、供应商、Tool、Skill 和集中度口径遵循 `schema.md` 中的 SQL 原子元素。
+- Token、事件数、AI Agent、模型、供应商、Tool、Skill 和集中度口径遵循 [共享数据模型](../../agentloop-audit-query/references/schema.md) 中的 SQL 原子元素。
 - 用户维度只展示 `user_id`；不展示姓名、部门、团队。
 - 不生成总在册人数、覆盖率、未产生日志员工列表、部门/团队 TopN。
 - Section 行仅作为布局分隔，不需要显式标题、背景或边框；生成 `dashboardrow` 时 `showTitle`、`showBackground`、`showBorder` 均设置为 `false`。

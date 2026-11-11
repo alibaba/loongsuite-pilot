@@ -6,6 +6,7 @@ import {
 import {
   asRecord,
   attachMultimodalMetadataForEntry,
+  convertPathsToUriParts,
   matchAll,
   takeUniqueExtractedPaths,
   timeUnixNanoToMillis,
@@ -218,7 +219,7 @@ function toolCallRawPaths(kind: ToolKind | null, record: Record<string, unknown>
 
 function toolResultRawPaths(kind: ToolKind | null, record: Record<string, unknown>): string[] {
   if (kind === ToolKind.MEDIA_READ) {
-    return fieldList(asRecord(record.data)?.files, 'source', item => item.kind === 'image');
+    return fieldList(asRecord(record.data)?.files, 'source', item => item.kind === 'image' || item.kind === 'video');
   }
   if (kind === ToolKind.MEDIA_TASK) {
     return record.status === 'completed' ? stringList(record.files) : [];
@@ -273,7 +274,7 @@ async function rewriteToolCall(
   if (!isValidValue(raw)) return 0;
   const paths = extractQwenWorkCNToolCallPaths(name, raw, cwdOf(entry));
   if (paths.length === 0) return 0;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
   if (uriParts.length === 0) return 0;
   record[field] = uriPayload(raw, uriParts);
   return uriParts.length;
@@ -291,7 +292,7 @@ async function rewriteToolResult(
   if (!isValidValue(raw)) return 0;
   const paths = extractQwenWorkCNToolResultPaths(name, raw, cwdOf(entry));
   if (paths.length === 0) return 0;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
   if (uriParts.length === 0) return 0;
   record[field] = uriPayload(raw, uriParts);
   return uriParts.length;
@@ -335,47 +336,12 @@ async function appendUriPartsToMessagesDelta(
   const cacheKey = `${turnId}\0${paths.join('\0')}`;
   let uriParts = pathUriCache.get(cacheKey);
   if (!uriParts) {
-    uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+    uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats, logger);
     pathUriCache.set(cacheKey, uriParts);
   }
   if (uriParts.length === 0) return 0;
   record.parts = [...parts, ...uriParts];
   return uriParts.length;
-}
-
-async function convertPathsToUriParts(
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<UriPart[]> {
-  const parts: UriPart[] = [];
-  for (const filePath of paths) {
-    const trimmed = filePath.trim();
-    let result;
-    try {
-      result = await pathToUri(trimmed, timeMs);
-    } catch (err) {
-      stats.skipped += 1;
-      logger.warn('qwen-work-cn multimodal pathToUri threw; skipping image', {
-        error: String(err),
-        path: trimmed,
-      });
-      continue;
-    }
-    if (!result) {
-      stats.skipped += 1;
-      logger.warn('qwen-work-cn multimodal path skipped', { path: trimmed });
-      continue;
-    }
-    parts.push({
-      type: 'uri',
-      mime_type: result.mime_type,
-      modality: 'image',
-      uri: result.uri,
-    });
-  }
-  return parts;
 }
 
 function cwdOf(entry: AgentActivityEntry): string | undefined {

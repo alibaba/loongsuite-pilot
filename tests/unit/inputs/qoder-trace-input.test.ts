@@ -38,6 +38,7 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import {
+  parseAttachedImagePaths,
   readAttachedImagePathsForRequestIds,
   type AttachedImageLookup,
   type SqliteTokenData,
@@ -1727,6 +1728,80 @@ describe('QoderTraceInput multimodal', () => {
         listed.slice(0, MAX_MULTIMODAL_PARTS),
       );
     });
+  });
+
+  describe('parseAttachedImagePaths', () => {
+    const IMAGE = '/Users/me/Library/Application Support/Qoder/SharedClientCache/cache/images/s/pic.png';
+    const IMAGE_TEMP = '/var/folders/aicoding-image-cache/pic.png';
+    const VIDEO = '/Users/me/video/clip.mp4';
+
+    it('keeps attachedImagePaths and ignores the image temp identifier', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [{
+          name: 'image',
+          selectedItem: { identifier: IMAGE_TEMP, name: 'pic.png' },
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a video file selectedItem.identifier from the same extra', () => {
+      const extra = JSON.stringify({
+        context: [{
+          name: 'file',
+          selectedItem: { identifier: VIDEO, name: 'clip.mp4' },
+          parsedContextItems: [{ identifier: VIDEO, value: 'clip.mp4' }],
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([VIDEO]);
+    });
+
+    it('keeps media file identifiers and drops other suffixes when attachedImagePaths is set', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [
+          { name: 'image', imgUrl: 'https://example/a.png', filePath: IMAGE_TEMP, selectedItem: { identifier: IMAGE_TEMP } },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/notes.txt' } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/main.ts' } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
+    });
+
+    it('reads image filePath when attachedImagePaths is missing', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a local image imgUrl when attachedImagePaths is empty', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: ['  '],
+        context: [
+          { name: 'image', imgUrl: IMAGE },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
+    });
+
+    it('reads imgUrl when fileType is image and name is absent', () => {
+      const extra = JSON.stringify({
+        context: [{ fileType: 'image', imgUrl: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads filePath when name is file and fileType is image', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'file', fileType: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
   });
 
   describe('enrichIdeMultimodal', () => {

@@ -407,14 +407,14 @@ describe('MultimodalProcessor.pathToUri', () => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
       return {
         ...actual,
-        openNormalizedLocalImage: async (
+        openNormalizedLocalMedia: async (
           filePath: string,
           maxBytes?: number,
           allowedRootPaths?: string[],
         ) => {
           if (++readsStarted === 2) notifyBothReadsStarted();
           await holdReads;
-          return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
+          return actual.openNormalizedLocalMedia(filePath, maxBytes, allowedRootPaths);
         },
       };
     });
@@ -549,14 +549,14 @@ describe('MultimodalProcessor.pathToUri', () => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
       return {
         ...actual,
-        openNormalizedLocalImage: async (
+        openNormalizedLocalMedia: async (
           filePath: string,
           maxBytes?: number,
           allowedRootPaths?: string[],
         ) => {
           await holdRead;
           readsFinished += 1;
-          return actual.openNormalizedLocalImage(filePath, maxBytes, allowedRootPaths);
+          return actual.openNormalizedLocalMedia(filePath, maxBytes, allowedRootPaths);
         },
       };
     });
@@ -590,7 +590,7 @@ describe('MultimodalProcessor.pathToUri', () => {
       const actual = await importOriginal<typeof import('../../../src/multimodal/resolve.js')>();
       return {
         ...actual,
-        lstatRegularImageFile: () => new Promise(() => {}),
+        lstatRegularFile: () => new Promise(() => {}),
       };
     });
     try {

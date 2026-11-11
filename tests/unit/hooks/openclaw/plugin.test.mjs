@@ -5,7 +5,7 @@
  * plugin.test.mjs — OpenClaw plugin.mjs stateful pipeline integration test.
  *
  * Replay researcher fixtures (pilot-probe-events-smoke.jsonl + cp2) through
- * the real plugin entry (register(api) + 16 api.on handlers) and assert the
+ * the real plugin entry (register(api) + 15 api.on handlers) and assert the
  * JSONL output is canonical event_t with correct cross-hook state:
  *   - llm_input data attaches to first model_call_started's llm.request
  *   - each AssistantMessage contributes its own usage/output/finish reason
@@ -214,7 +214,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     );
   });
 
-  it('registers 16 hooks via api.on', async () => {
+  it('observes agent completion without enabling the host final-answer rewrite gate', async () => {
     const plugin = await loadPlugin();
     const registered = new Set();
     const api = {
@@ -223,7 +223,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
       on: (name) => registered.add(name),
     };
     plugin.register(api);
-    expect(registered.size).toBe(16);
+    expect(registered.size).toBe(15);
     expect(registered.has('session_start')).toBe(true);
     expect(registered.has('session_end')).toBe(true);
     expect(registered.has('before_agent_run')).toBe(true);
@@ -236,7 +236,9 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(registered.has('after_tool_call')).toBe(true);
     expect(registered.has('tool_result_persist')).toBe(true);
     expect(registered.has('before_message_write')).toBe(true);
-    expect(registered.has('before_agent_finalize')).toBe(true);
+    // OpenClaw 2026.6.5 buffers all assistant delivery merely when this hook
+    // has a listener, even if the listener never asks to revise the answer.
+    expect(registered.has('before_agent_finalize')).toBe(false);
     expect(registered.has('before_agent_reply')).toBe(true);
     expect(registered.has('before_model_resolve')).toBe(true);
     expect(registered.has('before_prompt_build')).toBe(true);
@@ -327,7 +329,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
         on: (name) => registered.add(name),
       });
 
-      expect(registered.size).toBe(16);
+      expect(registered.size).toBe(15);
     },
   );
 
@@ -948,7 +950,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(lateRecords).toHaveLength(0);
   });
 
-  it('captures all 16 hooks present in fixtures + handles non-firing hooks gracefully', async () => {
+  it('captures lifecycle hooks present in fixtures and handles non-firing hooks gracefully', async () => {
     const plugin = await loadPlugin();
     // Synthesize envelopes for the 4 conversation hooks that didn't fire in --local mode.
     const sessionStart = { ts: Date.now(), hook: 'session_start', event: { sessionId: 's1', sessionKey: 'agent:test:r1', resumedFrom: null } };

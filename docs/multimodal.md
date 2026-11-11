@@ -4,7 +4,7 @@ English | [简体中文](zh-CN/multimodal.md)
 
 > **Experimental.** Multimodal config and event fields may change.
 
-LoongSuite Pilot can convert media in agent messages or tool results (images today: inline base64, or local paths read and encoded at write time) into object-storage `uri` parts, upload them asynchronously to OSS or SLS PutObject, and attach a short summary on normalized events. Use this when downstream analysis needs image content without embedding large base64 blobs in JSONL.
+LoongSuite Pilot can convert media in agent messages or tool results (inline image base64, local image paths, or local video paths, read and encoded at write time) into object-storage `uri` parts, upload them asynchronously to OSS or SLS PutObject, and attach a short summary on normalized events. Use this when downstream analysis needs the media without embedding large base64 blobs in JSONL.
 
 `agents.<id>.multimodal.uploadMode` controls whether—and on which surfaces—media
 becomes `uri` parts. Legacy `captureMessageContent` settings do not disable
@@ -16,7 +16,7 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 
 | Item | Status |
 |------|--------|
-| Media types | **Images only**. Audio and video are future work. |
+| Media types | **Images** and **video**. Audio is future work. |
 | Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, and **`qwen-work-cn`**. Other agents ignore `uploadMode` until their extractors land. |
 
 ### Detection
@@ -102,7 +102,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
 | `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. |
 
-UNC/device paths, symlinks, and non-image magic bytes are skipped. Local paths are treated as filesystem paths. A URL query after the image extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to `a.png`.
+UNC/device paths and symlinks are skipped. An image suffix is accepted only when the bytes are an image header. Video suffixes `.mp4`, `.mov`, `.m4v`, `.3gp`, and `.3g2` need `ftyp` at offset 4, and the major brand must not be `M4A `, `M4B `, or `M4P `. `.webm` and `.mkv` need an EBML header. `.avi` needs `RIFF` with `AVI ` at offset 8. A suffix and header from different families are skipped. Local paths are treated as filesystem paths. A URL query after the extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to the path with the query removed.
 
 ## What Each Agent Collects
 
@@ -137,7 +137,7 @@ Qoder IDE (`qoder`) converts on the `qoder-trace` path after IDE token enrichmen
 | `uploadMode` | Qoder IDE surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | SQLite `chat_record.extra.attachedImagePaths` (and image context entries); `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; Read image, ImageGen |
+| `input` | Read from SQLite; `tool.result` text: `Image file: <path>` or ImageGen `absolute path of the image is: <path>` | Paste / @ image; cite a video file; Read image, ImageGen |
 | `output` | `![...](path)` in `llm.response` `gen_ai.output.messages` (image extensions); `tool.call` image `file_path` | Assistant replies that embed read/generated images; Read image by path |
 | `all` | All of the above | Attachments, tool read/generate, and output embeds |
 
@@ -153,7 +153,7 @@ Qoder CLI (`qoder-cli`, still configured via `agents.qoder.multimodal`) converts
 | `uploadMode` | Qoder CLI surface | Typical user action / event |
 |--------------|-------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
+| `input` | Union of `agent.qoder.attachments[].filename`, `[Image: source: <path>]`, `@path` (relative paths join `agent.qoder.cwd`), and `文件：<image or video path>` (CLI 1.1.61 paste citation), then unique-resolve; `tool.result` text: `Read image: <path>`, `Image file: <path>`, ImageGen `absolute path of the image is: <path>` | Paste image, `@` / `--attachment`; path in the prompt then Read; ImageGen then Read to preview |
 | `output` | `tool.call` image `file_path` | Path in the prompt then Read; find then Read |
 | `all` | User attachments, tool-result images, and tool-call image paths | Paste/`@` plus tool read/generate |
 
@@ -165,18 +165,19 @@ Notes:
 
 ### Qwen Work CN
 
-Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Pasted images and local image paths on tools become `uri` parts. Failures are fail-open.
+Qwen Work CN (`qwen-work-cn`) converts on the `qwen-work-cn-trace` path after turn enrichment. Policy is `agents.qwen-work-cn.multimodal`. The hook is unchanged. Pasted images and local image or video paths on tools become `uri` parts. Failures are fail-open.
 
 | `uploadMode` | Qwen Work CN surface | Typical user action / event |
 |--------------|----------------------|-----------------------------|
 | `none` | No conversion | — |
-| `input` | Paste tag in the user message; `qwenwork_media_read` result `data.files[].source` where `kind` is `image`; `qwenwork_media_task` `files` when `status` is `completed`; `qwenwork_file_present_files` result `artifacts[].filePath` | Paste, select, or drag; the model finds images; generation completes and is presented |
-| `output` | `Read` `file_path`; `qwenwork_media_read` call `files`; `qwenwork_file_present_files` call `files[].file_path` | A path in the message then Read; the model finds images; present an already generated file |
+| `input` | Paste tag in the user message; `qwenwork_media_read` result `data.files[].source` where `kind` is `image` or `video`; `qwenwork_media_task` `files` when `status` is `completed`; `qwenwork_file_present_files` result `artifacts[].filePath` | Paste, select, or drag; the model finds images or reads video; generation completes and is presented |
+| `output` | `Read` `file_path`; `qwenwork_media_read` call `files`; `qwenwork_file_present_files` call `files[].file_path` | A path in the message then Read; the model finds images or reads video; present an already generated file |
 | `all` | All of the above | Paste, read, and generate |
 
 Notes:
 
-- A `pending` `qwenwork_image_generate` result, a `qwenwork_media_task` call that only has `output_name`, and a bare filename with no image read are not collected.
+- A `pending` `qwenwork_image_generate` or `qwenwork_video_generate` result, a `qwenwork_media_task` call that only has `output_name`, `mcp_workspace_bash` command text, and a bare filename with no read are not collected.
+- A `qwenwork_media_read` result item with no `kind`, or a `kind` other than `image` / `video`, is not collected.
 - `uri` and `originalUri` on a present result repeat `filePath`. Only `filePath` is taken.
 - OSS URLs are not a collection source.
 - Selected, dragged, Read, found, and generated files live in the session directory. Reading them requires that directory in `allowedRootPaths`.
