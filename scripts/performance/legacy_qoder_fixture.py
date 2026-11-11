@@ -79,7 +79,9 @@ class LegacyFixture(Fixture):
         if self.process is None:
             raise RuntimeError("legacy Stop dispatcher was not started")
         self.closing = True
-        self.done.write_text(str(self.queue.stat().st_size), encoding="ascii")
+        pending = self.done.with_suffix(".done.tmp")
+        pending.write_text(str(self.queue.stat().st_size), encoding="ascii")
+        pending.replace(self.done)
         try:
             code = self.process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as error:

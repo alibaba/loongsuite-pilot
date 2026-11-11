@@ -166,9 +166,19 @@ class LegacyRawFixtureTests(unittest.TestCase):
                 }))
                 process.wait.return_value = 1
                 process.poll.return_value = 1
+                replace = Path.replace
+
+                def publish(pending, target):
+                    self.assertEqual(target, fixture.done)
+                    self.assertFalse(target.exists())
+                    self.assertEqual(int(pending.read_text()), fixture.queue.stat().st_size)
+                    return replace(pending, target)
+
                 try:
-                    with self.assertRaisesRegex(RuntimeError, "code=7"):
-                        fixture.finish(timeout=0)
+                    with patch.object(Path, "replace", autospec=True, side_effect=publish) as rename:
+                        with self.assertRaisesRegex(RuntimeError, "code=7"):
+                            fixture.finish(timeout=0)
+                    rename.assert_called_once()
                     self.assertEqual(int(fixture.done.read_text()), fixture.queue.stat().st_size)
                 finally:
                     fixture.close()
