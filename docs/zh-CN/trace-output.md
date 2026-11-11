@@ -391,6 +391,8 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 
 **3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
 
+这里的“按次”以实际执行进程的环境为作用域。例如，每次新建 Codex CLI 子进程可以传入不同值；共享 OpenClaw Gateway 或 Codex app-server 的启动环境不会随每个 RPC 自动变化。只在调用 Gateway 的客户端设置变量，也不会将值传入已运行的 Gateway。长驻服务按请求区分客户时，使用下面的逐轮入口。
+
 - 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
 
   ```bash
@@ -431,7 +433,31 @@ Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固�
 - Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。
 
-**4. 公共逐轮关联属性。** 调用方可以开启 `requestAttributes.enabled`，在每轮发送前向 `acp-correlate/<原生sessionId>.jsonl` 追加带 `attributes` 的 `turn` 记录；没有属性的一轮也写 `attributes: {}` 占位。Pilot 在公共处理层按原生会话及本轮输入匹配，将属性附加到事件；`otlpTrace.spanAttributePassthroughPrefixes` 继续控制哪些字段进入 Span。该路径不要求新建 Agent 进程，也不要求上游 Trace 或 `upstreamLink.enabled`。独立会话可并发运行；同一会话须逐轮先写后发并串行执行，不能仅凭输入文本区分并发同文请求，也不能漏写中间轮次后预写未来同文记录。完整配置、SDK/RPC 写入示例和采集前提见[按请求添加自定义属性](request-attributes.md)。
+**4. 公共逐轮关联属性。** 长驻 Gateway 同时服务多个客户时，在每轮发送前将客户身份写入本轮关联记录，Pilot 按采集侧的原生 session/turn 匹配，再把属性加到该轮事件和 Span。它不要求新建 Agent 进程、上游 Trace 或 `upstreamLink.enabled`。
+
+合并到既有配置，保留上报目标和其他透传前缀：
+
+```json
+{
+  "requestAttributes": { "enabled": true },
+  "otlpTrace": { "spanAttributePassthroughPrefixes": ["memory."] }
+}
+```
+
+例如，A/B 请求可以使用**同一个 Gateway**，分别写入 `<dataDir>/acp-correlate/<原生sessionId>.jsonl`：
+
+```json
+{"type":"turn","sessionId":"session-A","turnId":"native-run-A","attributes":{"memory.user_id":"tenant-A:user-1","memory.request_id":"request-A"}}
+{"type":"turn","sessionId":"session-B","turnId":"native-run-B","attributes":{"memory.user_id":"tenant-B:user-1","memory.request_id":"request-B"}}
+```
+
+上面每行属于各自 session 的文件，须在对应调用前完整写入。`turnId` 必须等于实际采集的 `gen_ai.turn.id`，不能直接填任意业务请求编号。准确原生 turn ID 记录不参与文本 FIFO，因此相同输入、并发提交和完成顺序相反也能分别归属。调用方或 Gateway 所在侧适配层需要能写同一 Pilot 数据目录；这不是给任意 RPC 新增 `attributes` 参数。
+
+- **OpenClaw 2026.6.5 `agent` RPC**：已验证原生 `runId` 等于 `idempotencyKey`，可在发送前写精确记录。其他入口和版本须另行核对。
+- **Codex app-server**：先取得 `thread/start` 的原生 thread ID，再在新 `turn/start` 前写用户原文的 `contentHash`。不同 thread 可并发；同 thread 等 `turn/completed` 后再发下一轮，active turn 上重复调用可能只是 steering。
+- **文本匹配模式**：同一 session 串行执行，每轮都写记录，包括 `attributes: {}`；不能漏写中间轮次后预写未来同文记录。
+
+版本、原生 ID、写入 helper 及详细限制见[按请求添加自定义属性](request-attributes.md)，其中有 [OpenClaw](request-attributes.md#openclaw长驻-gateway-逐轮注入)和 [Codex](request-attributes.md#codexcli-子进程和长驻-app-server) 的调用侧示例。
 
 ## 验证 Trace 输出
 
