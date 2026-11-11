@@ -1,8 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
   AgentDefinition,
   DeployResult,
@@ -14,7 +12,7 @@ import { fileExists, resolveHome, writeTextFileAtomic } from '../utils/fs-utils.
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveOpenClawHost, isOpenClawHostBound, openClawBindingProblem, type OpenClawHost } from './openclaw-version-resolver.js';
-import { rootTriggerEnabled } from '../utils/producer-log-dir.js';
+import { createAgentConfigFileIfMissing } from './agent-config-owner.js';
 
 const logger = createLogger('PluginInjectStrategy');
 
@@ -273,35 +271,9 @@ export class PluginInjectStrategy implements DeployStrategy {
 
     if (createIfMissing && configPaths.length > 0) {
       const resolved = resolveHome(configPaths[0]);
-      if (this.isOpenclawNested(config) && process.getuid?.() === 0 && rootTriggerEnabled()) {
-        // Root initialization can precede the user's first OpenClaw command.
-        // Create missing config as its nearest existing directory's owner;
-        // otherwise root's 0600 file (or root-owned directory) blocks the CLI.
-        let parent = path.dirname(resolved);
-        let owner;
-        for (;;) {
-          try { owner = await fs.stat(parent); break; }
-          catch (err) {
-            if ((err as NodeJS.ErrnoException).code !== 'ENOENT' || parent === path.dirname(parent)) throw err;
-            parent = path.dirname(parent);
-          }
-        }
-        if (owner.uid !== 0) {
-          // This is our small filesystem helper, never the Agent CLI. Publish
-          // only a complete file, without replacing a concurrently created one.
-          await promisify(execFile)(process.execPath, ['-e', [
-            "const fs = require('node:fs'), path = require('node:path');",
-            "const file = process.argv[1], tmp = file + '.pilot-' + process.pid;",
-            'fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });',
-            "try { fs.writeFileSync(tmp, '{}\\n', { flag: 'wx', mode: 0o600 });",
-            "  try { fs.linkSync(tmp, file); } catch (e) { if (e.code !== 'EEXIST') throw e; }",
-            '} finally { try { fs.unlinkSync(tmp); } catch {} }',
-          ].join('\n'), resolved], {
-            uid: owner.uid, gid: owner.gid, cwd: parent, timeout: 5000, maxBuffer: 64 * 1024,
-            env: { ...process.env, NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '' },
-          });
-          return resolved;
-        }
+      if (this.isOpenclawNested(config)) {
+        await createAgentConfigFileIfMissing(resolved);
+        return resolved;
       }
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, '{}\n', {

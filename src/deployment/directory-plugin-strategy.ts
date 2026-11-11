@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -14,6 +15,7 @@ import type {
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { rootTriggerEnabled } from '../utils/producer-log-dir.js';
+import { agentConfigOwner, ensureAgentConfigDirectory } from './agent-config-owner.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
 
@@ -54,7 +56,15 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    return detectAgent(def.detection);
+    if (await detectAgent(def.detection)) return true;
+    // A first-time home need not exist yet. The resolved native activation
+    // entry can still identify a standard installation outside a thin PATH.
+    const command = def.directoryPlugin?.activation?.command;
+    if (!command || !path.isAbsolute(command)) return false;
+    try {
+      await fs.access(command, constants.X_OK);
+      return (await fs.stat(command)).isFile();
+    } catch { return false; }
   }
 
   async needsDeploy(
@@ -115,7 +125,7 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
       const sourceHash = await this.hashDirectory(sourceDir, markerFile);
       const parentDir = path.dirname(targetDir);
-      await fs.mkdir(parentDir, { recursive: true });
+      await ensureAgentConfigDirectory(parentDir);
       stagingDir = await fs.mkdtemp(
         path.join(parentDir, `.${path.basename(targetDir)}.loongsuite-pilot-`),
       );
@@ -268,8 +278,8 @@ export class DirectoryPluginStrategy implements DeployStrategy {
     for (const root of def.detection.paths ?? []) {
       const relative = path.relative(path.resolve(root), path.resolve(def.directoryPlugin.targetDir));
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
-      const stat = await fs.stat(root);
-      if (stat.isDirectory()) return { uid: stat.uid, gid: stat.gid };
+      const owner = await agentConfigOwner(root);
+      return { uid: owner.uid, gid: owner.gid };
     }
     return undefined;
   }

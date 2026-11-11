@@ -12,6 +12,7 @@ import type {
 import { fileExists, resolveHome } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { DshRuntimeLocator, type DshRuntimeTarget } from './dsh-runtime-locator.js';
+import { agentConfigOwner, ensureAgentConfigDirectory } from './agent-config-owner.js';
 
 const logger = createLogger('DshYamlPatchStrategy');
 
@@ -438,7 +439,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
     h0: string,
     mode: number | undefined,
   ): Promise<boolean> {
-    await fs.mkdir(path.dirname(target), { recursive: true });
+    await ensureAgentConfigDirectory(path.dirname(target));
     const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
     try {
       const currentBytes = await this.readBytes(target);
@@ -449,10 +450,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
         // A privileged installer must not replace a user's private YAML with
         // a root-owned inode: the original CLI still needs to read it.
         if (process.getuid?.() === 0) {
-          const owner = await fs.stat(target).catch(err => {
-            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-            return fs.stat(path.dirname(target));
-          });
+          const owner = await agentConfigOwner(target);
           if (owner.uid !== process.getuid() || owner.gid !== process.getgid?.()) await handle.chown(owner.uid, owner.gid);
         }
         await handle.write(nextBytes);
@@ -522,7 +520,7 @@ export class DshYamlPatchStrategy implements DeployStrategy {
   private async acquirePatchLock(target: string): Promise<string | null> {
     const lockPath = `${target}${LOCK_SUFFIX}`;
     const gatePath = `${lockPath}${LOCK_GATE_SUFFIX}`;
-    await fs.mkdir(path.dirname(lockPath), { recursive: true });
+    await ensureAgentConfigDirectory(path.dirname(lockPath));
     const token = `${process.pid}:${crypto.randomBytes(12).toString('hex')}`;
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     while (Date.now() <= deadline) {
