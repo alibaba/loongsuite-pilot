@@ -175,21 +175,15 @@ is not a completed self-monitoring or token-summary acceptance result.
 ### Codex 性能
 
 在 GitHub Actions 手动运行 Full Pilot performance history 时，选择
-github-full-pilot-codex-rollout-v2 和明确的公开 Rust ref 或发布标签。
-Codex 使用原始 rollout 和正常 Stop 唤醒，使用独立的版本序列。
+github-full-pilot-codex-rollout-v2。main 和 dev 测试选定的公开源码，release 测试官方发布包，
+backfill 按发布版本从新到旧补测。JS 与 Rust 均使用原始 rollout 和正常 Stop 唤醒，
+复用同一套事件与 token 校验。Codex 使用独立的版本序列，发布包最低为 v1.15.0。
+更早的 JS 版本未将监听器轮询配置传给 Codex transcript 采集。
 
 Qoder 和 Codex 均使用空闲与低负载 10 秒采集轮询、高负载 100 毫秒采集轮询。
 三档各测三轮，每轮预热 64 个会话，随后采样 30 秒。资源采样间隔为 100 毫秒。
 原始 transcript 与 Pilot 输出 JSONL 的每秒速率按 30 秒窗口内的实际字节数计算。
 停压后的输出用于 15 秒排空验收。
-历史 JS 兼容性尚未验证，Codex 选项暂时支持 main、dev 和 Rust release。
 高负载在 15 秒内交付不完时，已交付前缀仍须通过完整校验。若有未读源字节或
 能证明截止后已交付，保留资源结果并标为超出承载能力。低负载缺失与任何数据错误
 都会阻断测试。
-
-### Qoder 固定 30 秒轮询的历史版
-
-使用 \`github-full-pilot-qoder-stop-30s-v1\` 按发布标签回填 v1.10.0–v1.14.0。
-这些发布版用原版 Stop Hook，采集器固定 30 秒轮询。预热与排空均最多等待 45 秒。
-每轮仍在预热后测量 30 秒 CPU、内存和吞吐量，保留 64 个会话、三档负载及每档三轮。
-报表将这些节点标出 30 秒轮询，同一口径的节点连接并计算变化。

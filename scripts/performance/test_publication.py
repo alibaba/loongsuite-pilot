@@ -1,7 +1,5 @@
 """Data-only publication regressions; no network, Docker, build or benchmark."""
-from contextlib import redirect_stderr
 import copy
-import io
 import json
 from pathlib import Path
 import tempfile
@@ -141,33 +139,6 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in series["nodes"]], ["v1.16.0", "dev"])
         publisher.validate_history(data)
 
-    def test_codex_selector_requires_a_rust_runtime_and_never_enters_backfill(self):
-        import prepare_public as selector
-
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "selection"
-            args = ["prepare_public.py", "--output", str(output),
-                    "--benchmark-method", selector.CODEX_MIXED_METHOD]
-            with patch("sys.argv", args + ["--mode", "backfill"]), patch.object(selector, "public_repository") as query:
-                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
-                    selector.main()
-                self.assertEqual(error.exception.code, 2)
-                query.assert_not_called()
-                self.assertFalse(output.exists())
-            with patch("sys.argv", args + ["--mode", "dev", "--ref", "dev/v2.0.0"]), \
-                    patch.object(selector, "public_repository"), patch.object(selector, "load_history", return_value=history()), \
-                    patch.object(selector, "resolve", return_value="a" * 40), \
-                    patch.object(selector, "source_runtime", return_value="js") as runtime:
-                with self.assertRaisesRegex(ValueError, "requires a public Rust host"):
-                    selector.main()
-                selection = output / "selection.json"
-                self.assertFalse(selection.exists())
-                runtime.return_value = "rust"
-                selector.main()
-                actual = json.loads(selection.read_text(encoding="utf-8"))
-                self.assertEqual(actual["method_id"], selector.CODEX_MIXED_METHOD)
-                self.assertEqual(actual["runtime"], "rust")
-
     def test_codex_high_capacity_has_three_waves_and_requires_source_evidence(self):
         method = publisher.CODEX_STANDARD_METHOD
         round_ = {"repeat": 1, "produced_turns": 6000, "completed_turns": 5998, "missing_responses": 6,
@@ -233,6 +204,57 @@ class PublicationTests(unittest.TestCase):
         high["capacity"]["drain_seconds"] = 15
         with self.assertRaisesRegex(ValueError, "high-load drain evidence"):
             publisher.validate_node(value)
+
+    def test_codex_selector_accepts_js_main_and_its_own_next_historical_release(self):
+        import prepare_public as selector
+
+        method = selector.CODEX_MIXED_METHOD
+        releases = [{"tag_name": "v1.16.0", "html_url": "https://example.test/v1.16.0"},
+                    {"tag_name": "v1.15.2", "html_url": "https://example.test/v1.15.2"}]
+        data = history()
+        data["method"] = {"id": selector.QODER_MIXED_METHOD}
+        data["nodes"] = [{"kind": "release", "id": "v1.15.2", "status": "passed"}]
+        data["other_methods"] = {method: {"nodes": [{"kind": "release", "id": "v1.16.0", "version": "v1.16.0", "status": "passed"}]}}
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(selector, "public_repository"), patch.object(selector, "load_history", return_value=data), \
+                patch.object(selector, "resolve", return_value="a" * 40), \
+                patch.object(selector, "source_runtime", return_value="js"), \
+                patch.object(selector, "stable_releases", return_value=releases), \
+                patch.object(selector, "download_release", return_value={"runtime": "js", "package": "/fixture"}):
+            for mode, ref in (("main", "main"), ("backfill", "v1.15.2")):
+                with self.subTest(mode=mode):
+                    output = Path(temporary) / mode
+                    argv = ["prepare_public.py", "--mode", mode, "--output", str(output), "--benchmark-method", method]
+                    with patch("sys.argv", argv):
+                        selector.main()
+                    selected = json.loads((output / "selection.json").read_text(encoding="utf-8"))
+                    self.assertEqual(selected["method_id"], method)
+                    self.assertEqual(selected["runtime"], "js")
+                    self.assertEqual(selected["ref"], ref)
+                    self.assertEqual(selected["kind"], "release" if mode == "backfill" else "main")
+
+    def test_codex_mixed_release_floor_does_not_cut_qoder_history(self):
+        import prepare_public as selector
+
+        method = selector.CODEX_MIXED_METHOD
+        releases = [{"tag_name": tag} for tag in ("v1.15.0", "v1.14.0", "v1.13.0")]
+        data = history()
+        data["method"] = {"id": selector.QODER_MIXED_METHOD}
+        data["nodes"] = [{"id": "v1.15.0", "kind": "release", "status": "passed"}]
+        data["other_methods"] = {method: {"nodes": []}}
+        with patch.object(selector, "stable_releases", return_value=releases):
+            self.assertEqual(selector.select_backfill(publisher.OFFICIAL, data, method)["tag_name"], "v1.15.0")
+            data["other_methods"][method]["nodes"] = [{"id": "v1.15.0", "kind": "release", "status": "passed"}]
+            self.assertIsNone(selector.select_backfill(publisher.OFFICIAL, data, method))
+            self.assertEqual(selector.select_backfill(publisher.OFFICIAL, data, selector.QODER_MIXED_METHOD)["tag_name"],
+                             "v1.14.0")
+        with tempfile.TemporaryDirectory() as temporary, patch.object(selector, "public_repository"), \
+                patch.object(selector, "load_history", return_value=data), patch.object(selector, "api") as query:
+            argv = ["prepare_public.py", "--mode", "release", "--ref", "v1.14.0",
+                    "--output", temporary, "--benchmark-method", method]
+            with patch("sys.argv", argv), self.assertRaisesRegex(ValueError, "before v1.15.0"):
+                selector.main()
+            query.assert_not_called()
 
     def test_trusted_codex_method_keeps_both_metrics_in_its_own_series(self):
         descriptor = Path(__file__).resolve().parents[2] / "tests/performance_native"

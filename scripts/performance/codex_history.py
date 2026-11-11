@@ -158,6 +158,7 @@ def run_round(args, directory, load, repeat, smoke=False):
     poll_interval_ms = 100 if load == "high" and not smoke else 10_000
     configure_codex(fixture, output.directory, poll_interval_ms)
     name = "pilot-codex-perf-" + uuid.uuid4().hex
+    entry = (["node"] if args.runtime == "js" else []) + ["/opt/pilot/" + args.layout["entry"]]
     launch = ["docker", "run", "-d", "--pull=never", "--name", name, "--network", "none",
               "--cpus", "2", "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "256",
               "--user", "%s:%s" % (os.getuid(), os.getgid()),
@@ -168,17 +169,18 @@ def run_round(args, directory, load, repeat, smoke=False):
               "-e", "AGENT_DATA_COLLECTION_CONFIG=/bench/home/.loongsuite-pilot/config.json",
               "-e", "LOONGSUITE_PILOT_RESOURCE_ROOT=/opt/pilot",
               "-e", "LOONGSUITE_PILOT_POLL_INTERVAL_MS=",
-              args.image, "/opt/pilot/" + args.layout["entry"]]
+              args.image] + entry
     try:
         container = command(launch).strip()
         pid = docker_json("/containers/%s/json" % container)["State"]["Pid"]
         cgroup = locate_cgroup(pid)
-        library = args.package / args.layout["library"]
-        until = time.monotonic() + 10
-        while not mapped_library(pid, library):
-            if time.monotonic() >= until:
-                raise RuntimeError("native host did not map the exact adjacent SDK")
-            time.sleep(.05)
+        if args.runtime == "rust":
+            library = args.package / args.layout["library"]
+            until = time.monotonic() + 10
+            while not mapped_library(pid, library):
+                if time.monotonic() >= until:
+                    raise RuntimeError("native host did not map the exact adjacent SDK")
+                time.sleep(.05)
 
         deadline = time.monotonic() + 25
         await_input(fixture, container, deadline)
@@ -281,7 +283,7 @@ def make_node(args):
         "kernel": platform.release(), "architecture": platform.machine(), "cpus": os.cpu_count(),
         "container_digest": json.loads(command(["docker", "image", "inspect", args.image]))[0]["Id"],
     }
-    return {
+    node = {
         "id": "v" + version.lstrip("v") if args.kind == "release" else args.kind,
         "kind": args.kind, "version": version, "commit": args.commit,
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -291,17 +293,20 @@ def make_node(args):
         "workloads": {},
         "provenance": {
             "entry_sha256": file_sha(args.package / args.layout["entry"]),
-            "library_sha256": file_sha(args.package / args.layout["library"]),
             "fixture_sha256": file_sha(Path(__file__).with_name("codex_rollout_fixture.py")),
             "compiler": os.environ.get("PILOT_BUILD_COMPILER"),
         },
     }
+    if args.runtime == "rust":
+        node["provenance"]["library_sha256"] = file_sha(args.package / args.layout["library"])
+    return node
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument("--native-entry")
+    parser.add_argument("--runtime", choices=("rust", "js"), default="rust")
     parser.add_argument("--image", required=True, help="already present Docker image containing the OS runtime")
     parser.add_argument("--output", type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument("--commit", required=True)
@@ -312,7 +317,7 @@ def main():
     parser.add_argument("--smoke-only", action="store_true")
     args = parser.parse_args()
     args.output.mkdir()
-    args.layout = resolve(args.package, "rust", args.native_entry)
+    args.layout = resolve(args.package, args.runtime, args.native_entry)
     args.package = args.layout["package"]
     node = make_node(args)
 

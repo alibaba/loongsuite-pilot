@@ -121,6 +121,7 @@ QODER_FIXED_30S_METHOD = "github-full-pilot-qoder-stop-30s-v1"
 QODER_FIXED_30S_POLL_MS = 30_000
 QODER_FIXED_30S_DRAIN_SECONDS = 45
 CODEX_MIXED_METHOD = "github-full-pilot-codex-rollout-v2"
+CODEX_MIXED_RELEASE_FLOOR = (1, 15, 0)
 
 
 def history_for_method(history, method):
@@ -135,9 +136,12 @@ def select_backfill(repository, history, method=None):
             if node.get("kind") == "release" and node.get("status") == "passed"}
     cutoff = (history.get("compatibility") or {}).get("excluded_at_or_before")
     for release in stable_releases(repository):
-        if cutoff and key(release["tag_name"]) <= key(cutoff):
+        version = key(release["tag_name"])
+        if method == CODEX_MIXED_METHOD and version < CODEX_MIXED_RELEASE_FLOOR:
             break
-        tag = "v" + ".".join(map(str, key(release["tag_name"])))
+        if cutoff and version <= key(cutoff):
+            break
+        tag = "v" + ".".join(map(str, version))
         if tag not in done:
             return release
     return None
@@ -206,10 +210,8 @@ def main():
     args = parser.parse_args()
     if args.benchmark_method == QODER_FIXED_30S_METHOD and (
             args.mode != "release" or not STABLE.fullmatch(args.ref)
-            or not (1, 10, 0) <= key(args.ref) <= (1, 14, 0)):
-        parser.error("the fixed 30s Qoder method is for the verified v1.10.0–v1.14.0 stable releases")
-    if args.benchmark_method == CODEX_MIXED_METHOD and args.mode == "backfill":
-        parser.error("Codex requires an explicit public Rust ref or release; historical backfill is not enabled")
+            or not (1, 1, 0) <= key(args.ref) <= (1, 14, 0)):
+        parser.error("the fixed 30s Qoder method is for stable releases from v1.1.0 through v1.14.0")
     args.output.mkdir(parents=True, exist_ok=True)
     public_repository(args.repository)
     if args.mode in ("release", "backfill") and args.repository != "alibaba/loongsuite-pilot":
@@ -225,6 +227,8 @@ def main():
     elif args.mode == "release":
         if not STABLE.fullmatch(args.ref):
             raise ValueError("release target must be stable tag")
+        if args.benchmark_method == CODEX_MIXED_METHOD and key(args.ref) < CODEX_MIXED_RELEASE_FLOOR:
+            raise ValueError("Codex releases before v1.15.0 do not support the configured listener poll interval")
         release = api("repos/%s/releases/tags/%s" % (args.repository, urllib.parse.quote(args.ref, safe="")))
         if release["draft"] or release["prerelease"]:
             raise ValueError("draft/prerelease is not a formal history node")
@@ -242,8 +246,6 @@ def main():
         result["release_url"] = release["html_url"]
     else:
         result["runtime"] = source_runtime(args.repository, result["commit"])
-    if args.benchmark_method == CODEX_MIXED_METHOD and result["runtime"] != "rust":
-        raise ValueError("Codex performance method requires a public Rust host and adjacent SDK")
     (args.output / "selection.json").write_text(json.dumps(result, indent=2) + "\n")
 
 

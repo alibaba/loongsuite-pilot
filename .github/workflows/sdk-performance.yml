@@ -14,7 +14,7 @@ on:
         options: [main, dev, release, backfill]
         default: dev
       benchmark_method:
-        description: Full Pilot benchmark method (Codex requires an explicit Rust source or release)
+        description: Full Pilot benchmark method
         type: choice
         options: [github-full-pilot-qoder-native-v2, github-full-pilot-codex-rollout-v2, github-full-pilot-qoder-stop-30s-v1]
         default: github-full-pilot-qoder-native-v2
@@ -229,7 +229,8 @@ jobs:
               '--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'smoke')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
               '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],'--smoke-only']
-          if not codex: args+=['--runtime',os.environ['RUNTIME'],'--benchmark-method',method]
+          args+=['--runtime',os.environ['RUNTIME']]
+          if not codex: args+=['--benchmark-method',method]
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)
@@ -260,7 +261,8 @@ jobs:
               '--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'performance')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
               '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF']]
-          if not codex: args+=['--runtime',os.environ['RUNTIME'],'--benchmark-method',method]
+          args+=['--runtime',os.environ['RUNTIME']]
+          if not codex: args+=['--benchmark-method',method]
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)
