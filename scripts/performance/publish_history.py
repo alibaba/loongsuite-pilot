@@ -205,7 +205,8 @@ def compact(node, publication=None, asset_sha256=None):
         quality = sample.get("quality")
         kept["quality"] = {key: quality[key] for key in ("passed", "missing", "duplicates") if key in quality} if isinstance(quality, dict) else None
         result["workloads"][load] = kept
-    allowed_provenance = ("entry_sha256", "library_sha256", "fixture_sha256", "compiler", "asset_sha256", "release_url",
+    allowed_provenance = ("collection", "legacy_fixture_sha256", "legacy_dispatcher_sha256",
+                          "entry_sha256", "library_sha256", "fixture_sha256", "compiler", "asset_sha256", "release_url",
                           "asset_id", "asset_name", "asset_size_bytes", "asset_url", "checksum_source")
     provenance = node.get("provenance") or {}
     if not isinstance(provenance, dict):

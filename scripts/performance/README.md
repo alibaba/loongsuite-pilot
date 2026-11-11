@@ -7,6 +7,14 @@ raw synthetic Qoder native transcripts, source descriptors, event notices and
 raw token sidecars through the actual input and JSONL flusher. No real Agent,
 account, private recording, private endpoint or commercial helper is required.
 
+Historical JS packages using Hook-produced history run their original packaged
+Qoder Stop script for each raw turn. Capability selection reads the packaged
+Qoder processor and collector bundle. Its script, processor and dependencies
+run inside the measured container, with every required Hook process included
+in cumulative CPU and RSS. The external source generator publishes raw input
+and queues Stop triggers at the same fixed rate. An external bounded dispatcher preserves
+all triggers, serializes calls for each transcript and reports child failures.
+
 The fixture comes from the public Qoder transcript history tests and public
 `hook-wakeup.mjs`/`qoder_wakeup.rs` publisher protocol. Its independent expected
 identities require two requests, two responses, one tool call and one tool
@@ -18,7 +26,11 @@ result per turn, including exact token enrichment and required fields.
 There are 64 native sessions and 100 ms collection polling. Each of idle
 (0 turns/s), low (10 turns/s, 低负载) and high (200 turns/s) runs for a 30-second
 input interval, three repeats, with a 2-CPU/1-GiB container. Warmup and drain are
-separate. The producer is outside the measured container.
+separate. The raw source producer is outside the measured container. Historical Hook
+processing runs inside that container and must finish within the same drain
+window. Fixed-rate input, event cardinality, tokens and field checks also apply
+to these releases. A capacity or drain failure retains its actual failure
+category and artifact evidence.
 
 CPU uses cumulative Docker accounting at interval boundaries and the actual
 elapsed interval. One CPU is 100%. Resource samples retain the actual interval,

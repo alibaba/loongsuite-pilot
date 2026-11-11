@@ -14,7 +14,7 @@
   "resource_sample_ms": 100,
   "rss_basis": "sum of owned process RSS; shared pages may be counted more than once",
   "cpu_basis": "Docker cumulative container CPU; includes owned children, excludes producer",
-  "input": "raw native Qoder transcript, source/notice metadata and raw intercept tokens",
+  "input": "raw native Qoder transcript and intercept tokens; packaged native wakeup or original legacy Stop Hook collection",
   "output": "complete Pilot JSONL flusher",
   "node_order": ["stable releases ascending", "mutable main", "optional mutable dev"]
 }

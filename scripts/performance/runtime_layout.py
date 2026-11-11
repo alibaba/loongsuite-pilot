@@ -17,6 +17,18 @@ def inside(root, relative):
     return path
 
 
+
+def collection_mode(root, entry):
+    processor = inside(root, "assets/hooks/qoder-hook-processor.mjs")
+    wrapper = inside(root, "assets/hooks/qoder-loongsuite-pilot-hook.sh")
+    if processor.is_file() and wrapper.is_file():
+        source = processor.read_text(encoding="utf-8")
+        if ("appendRowsToHistory(" in source and "publishQoderWakeup" not in source
+                and b"qoder-transcripts" not in entry.read_bytes()):
+            return "legacy-stop"
+    return "native"
+
+
 def resolve(package, runtime=None, native_entry=None):
     package = Path(package).resolve()
     roots = [package]
@@ -64,6 +76,7 @@ def resolve(package, runtime=None, native_entry=None):
                 continue
             entry = inside(root, relative)
             if entry.is_file():
-                return {"runtime": "js", "package": root, "entry": entry.relative_to(root).as_posix(), "library": None}
+                return {"runtime": "js", "package": root, "entry": entry.relative_to(root).as_posix(),
+                        "library": None, "collection": collection_mode(root, entry)}
         errors.append("declared public JS CLI is absent")
     raise RuntimeError("infrastructure: public runtime layout unresolved; " + "; ".join(errors))

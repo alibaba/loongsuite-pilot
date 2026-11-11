@@ -193,7 +193,7 @@ jobs:
       - name: Prepare shared public runtime image before timing
         if: steps.select.outputs.complete == 'false' && steps.select.outputs.confirmation_only != 'true'
         run: docker pull "$PERF_IMAGE"
-      - name: Exact public full-runtime native protocol smoke
+      - name: Exact public full-runtime collection protocol smoke
         id: smoke
         if: steps.select.outputs.complete == 'false' && steps.select.outputs.confirmation_only != 'true'
         continue-on-error: true

@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import shutil
 import socket
 import statistics
 import subprocess
@@ -22,6 +23,7 @@ import time
 import uuid
 
 from native_qoder_fixture import Fixture, compact, monotonic_ns
+from legacy_qoder_fixture import LegacyFixture
 from linux_cgroup import locate as locate_cgroup
 from runtime_layout import resolve as resolve_layout
 
@@ -233,11 +235,34 @@ def configure(fixture, output):
     write_json(fixture.data / "config.json", config)
 
 
+def wait_for_legacy_input(fixture, deadline):
+    while True:
+        for path in (fixture.data / "logs").glob("loongsuite-pilot-service.log*"):
+            try:
+                with path.open(encoding="utf-8") as log:
+                    for line in log:
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if (isinstance(event, dict) and event.get("id") == "qoder-trace"
+                                and event.get("msg") == "input started"):
+                            return
+            except FileNotFoundError:
+                continue
+        if time.monotonic() >= deadline:
+            raise RuntimeError("legacy qoder-trace input did not become ready before warmup")
+        time.sleep(.05)
+
+
 def run_round(args, directory, load, rate, repeat, smoke=False):
     directory.mkdir(parents=True)
-    fixture = Fixture(directory)
+    legacy = args.layout.get("collection") == "legacy-stop"
+    fixture = LegacyFixture(directory) if legacy else Fixture(directory)
     output = Output(directory / "output")
     configure(fixture, output.directory)
+    if legacy:
+        shutil.copytree(str(args.package / "assets/hooks"), str(fixture.data / "hooks"))
     name = "pilot-native-perf-" + uuid.uuid4().hex
     entry = (["node"] if args.runtime == "js" else []) + ["/opt/pilot/" + args.layout["entry"]]
     launch = ["docker", "run", "-d", "--name", name, "--network", "none", "--cpus", "2", "--memory", "1g",
@@ -247,6 +272,8 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
               "-e", "HOME=/bench/home", "-e", "USERPROFILE=/bench/home", "-e", "LOONGSUITE_PILOT_DATA_DIR=/bench/home/.loongsuite-pilot",
               "-e", "AGENT_DATA_COLLECTION_CONFIG=/bench/home/.loongsuite-pilot/config.json",
               "-e", "LOONGSUITE_PILOT_RESOURCE_ROOT=/opt/pilot", args.image] + entry
+    if legacy:
+        launch.insert(3, "--init")
     samples, late, container = [], [], None
     try:
         container = command(launch).strip()
@@ -262,24 +289,34 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             if not mapping:
                 raise RuntimeError("infrastructure: native shell did not map the exact staged SDK inode")
             write_json(directory / "mapped-sdk.json", {"sha256": file_sha(library), "mappings": mapping})
+        warm_deadline = time.monotonic() + 25
+        if legacy:
+            wait_for_legacy_input(fixture, warm_deadline)
+            fixture.start(container)
         # One warm turn per source makes all64 native sessions active before idle.
         warm = {}
         for session in range(64):
             identifier = "warm-%02d" % session
             fixture.append_turn(session, identifier, True)
         warm.update(fixture.expected)
-        deadline = time.monotonic() + 25
+        deadline = warm_deadline if legacy else time.monotonic() + 25
         warm_responses = set(response_catalog(warm))
         while True:
+            if legacy:
+                fixture.check()
             output.read()
             if warm_responses.issubset(output.responses):
                 break
             if time.monotonic() > deadline:
                 raise RuntimeError("public full-runtime native smoke did not deliver all64 sources")
             time.sleep(.1)
+        if legacy:
+            fixture.drain(timeout=max(0, deadline - time.monotonic()))
         validate(output.records, warm)
         if smoke:
             observation = resources(container, cgroup, cpu=True)
+            if legacy:
+                fixture.finish(timeout=15)
             stop_container(container)
             output.read()
             quality = validate(output.records, warm)
@@ -293,6 +330,8 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         start = time.monotonic(); end = start + 30
         produced, next_sample = 0, start
         while time.monotonic() < end:
+            if legacy:
+                fixture.check()
             now = time.monotonic()
             due = min(int((now - start) * rate) + 1, rate * 30) if rate else 0
             while produced < due:
@@ -309,12 +348,16 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         deadline = time.monotonic() + 15
         catalog = response_catalog(fixture.expected)
         while True:
+            if legacy:
+                fixture.check()
             output.read()
             if set(catalog).issubset(output.responses):
                 break
             if time.monotonic() > deadline:
                 raise RuntimeError("native input failed to drain")
             samples.append(resources(container, cgroup)); time.sleep(.1)
+        if legacy:
+            fixture.finish(timeout=max(0, deadline - time.monotonic()))
         drained = resources(container, cgroup, cpu=True)
         samples.append(drained)
         peak_file = cgroup["memory_peak"]
@@ -338,6 +381,8 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                 "produced_turns": produced, "producer_max_lateness_ms": max(late) if late else None,
                 "quality": quality}
     finally:
+        if legacy:
+            fixture.close()
         if container:
             try:
                 with (directory / "collector.log").open("wb") as log:
@@ -425,6 +470,10 @@ def main():
     node["provenance"] = {"entry_sha256": file_sha(entry),
         "compiler": os.environ.get("PILOT_BUILD_COMPILER"),
         "fixture_sha256": file_sha(Path(__file__).with_name("native_qoder_fixture.py"))}
+    if args.layout.get("collection") == "legacy-stop":
+        node["provenance"].update(collection="legacy-stop",
+            legacy_fixture_sha256=file_sha(Path(__file__).with_name("legacy_qoder_fixture.py")),
+            legacy_dispatcher_sha256=file_sha(Path(__file__).with_name("legacy_hook_dispatcher.cjs")))
     if args.runtime == "rust":
         node["provenance"]["library_sha256"] = file_sha(args.package / args.layout["library"])
     code = 0
