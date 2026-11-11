@@ -184,6 +184,18 @@ interface DynamicDirectoryWalkBudget {
   remainingRolloutFiles: number;
 }
 
+interface DynamicDirectoryWalkCursor {
+  stack: Array<{ dir: string; depth: number; after?: string }>;
+  startedAtMs: number;
+  modifiedAfterMs: number;
+}
+
+interface DynamicSessionRoot {
+  tier: number;
+  receivedAtMs: number;
+  walk: DynamicDirectoryWalkCursor;
+}
+
 interface CodexWakeupMarker {
   initialTurnId?: string;
   recoveryTurnId?: string;
@@ -230,6 +242,12 @@ export class CodexTranscriptInput extends BaseInput {
   private wakeupDiscoveryRevision = 0;
   private lastFullScanAt = -Infinity;
   private readonly wakeupPaths = new Map<string, Set<string>>();
+  private static readonly availabilityMarkerCursors = new LruMap<string>(MAX_LINK_DESCRIPTORS);
+  private discoveryMarkerCursor?: string;
+  private discoveryRootCursor?: string;
+  private discoveryTranscriptCursor?: string;
+  private readonly dynamicSessionRoots = new Map<string, DynamicSessionRoot>();
+  private readonly dynamicWakeupTranscripts = new Map<string, number>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
   private lastSubagentLinkSummary = '';
@@ -294,7 +312,9 @@ export class CodexTranscriptInput extends BaseInput {
     try {
       const entries = await fs.readdir(wakeupDir, { withFileTypes: true });
       const now = Date.now();
-      for (const entry of selectCodexWakeupMarkers(entries)) {
+      const markers = selectCodexWakeupMarkers(entries, this.availabilityMarkerCursors.get(wakeupDir));
+      if (markers.length) this.availabilityMarkerCursors.set(wakeupDir, markers[markers.length - 1]!.name);
+      for (const entry of markers) {
         const roots = await readCodexWakeupRoots(path.join(wakeupDir, entry.name), now);
         for (const candidate of roots.flat()) {
           if (await directoryExists(candidate)) return true;
@@ -355,6 +375,11 @@ export class CodexTranscriptInput extends BaseInput {
     this.wakeupDiscoveryPending = false;
     this.wakeupDiscoveryRevision = 0;
     this.wakeupPaths.clear();
+    this.dynamicSessionRoots.clear();
+    this.dynamicWakeupTranscripts.clear();
+    this.discoveryMarkerCursor = undefined;
+    this.discoveryRootCursor = undefined;
+    this.discoveryTranscriptCursor = undefined;
     this.lastFullScanAt = -Infinity;
     this.multimodalUriCache.clear();
     this.incompleteTails.clear();
@@ -403,6 +428,21 @@ export class CodexTranscriptInput extends BaseInput {
       }
       for (const file of paths ?? []) targeted.add(file);
     }
+    // A resumed/reverted session can point at a file that has never appeared in
+    // the bounded directory walk. Read the changed marker itself, not only the
+    // old thread-to-path index. These paths undergo the same root validation.
+    if (dirty.size) {
+      const canonicalDefault = await canonicalDirectoryPath(this.sessionDir);
+      for (const marker of [...dirty].slice(0, MAX_DYNAMIC_SESSION_FILES)) {
+        const transcript = await readCodexWakeupTranscript(path.join(this.wakeupDir, marker), Date.now());
+        if (!transcript) continue;
+        // Preserve the default tree's existing checkpoint spelling (notably
+        // /var versus /private/var on macOS), or the same file gets replayed.
+        targeted.add(transcript.startsWith(canonicalDefault + path.sep)
+          ? path.join(this.sessionDir, path.relative(canonicalDefault, transcript))
+          : transcript);
+      }
+    }
     const discoveryRevision = this.wakeupDiscoveryRevision;
     const now = Date.now();
     const fullScan = !wakeupOnly || now - this.lastFullScanAt >= this.pollIntervalMs;
@@ -411,7 +451,7 @@ export class CodexTranscriptInput extends BaseInput {
     let discovered: DiscoveredSessionFile[];
     let skipPaths = new Set<string>();
     if (fullScan) {
-      discovered = await this.discoverSessionFiles();
+      discovered = await this.discoverSessionFiles(dirty, targeted);
       this.lastFullScanAt = now;
       const discoveredPaths = new Set(discovered.map(file => file.filePath));
       for (const filePath of this.rolloutIdleSnapshot.keys()) {
@@ -435,7 +475,8 @@ export class CodexTranscriptInput extends BaseInput {
     } else {
       // Known sessions need no directory/marker enumeration. Newly created
       // sessions and filename-less notifications retain full polling fallback.
-      discovered = [...targeted].map(filePath => ({ filePath, baselineOnStart: false }));
+      discovered = [...targeted].slice(0, MAX_DYNAMIC_SESSION_FILES)
+        .map(filePath => ({ filePath, baselineOnStart: false }));
       await this.indexDiscoveredTranscriptOwners(discovered, skipPaths, 'targeted');
     }
     discovered.sort((left, right) => {
@@ -2368,7 +2409,10 @@ export class CodexTranscriptInput extends BaseInput {
     });
   }
 
-  private async discoverSessionFiles(): Promise<DiscoveredSessionFile[]> {
+  private async discoverSessionFiles(
+    priorityMarkers = new Set<string>(),
+    priorityPaths = new Set<string>(),
+  ): Promise<DiscoveredSessionFile[]> {
     const discovered = new Map<string, DiscoveredSessionFile>();
     const canonicalDefaultSessionDir = await canonicalDirectoryPath(this.sessionDir);
     const defaultFiles = await this.listDefaultRolloutFiles();
@@ -2383,32 +2427,63 @@ export class CodexTranscriptInput extends BaseInput {
       discovered.set(canonicalPath, { filePath, baselineOnStart: true });
     }
 
+    const sessionDirs = await this.discoverDynamicSessionDirs(canonicalDefaultSessionDir, priorityMarkers);
     let remainingDynamicFiles = MAX_DYNAMIC_SESSION_FILES;
-    for (const sessionDir of await this.discoverDynamicSessionDirs(canonicalDefaultSessionDir)) {
+    const addDynamicFile = (filePath: string): void => {
+      const canonicalPath = filePath.startsWith(this.sessionDir + path.sep)
+        ? path.join(canonicalDefaultSessionDir, path.relative(this.sessionDir, filePath))
+        : filePath;
+      if (discovered.has(canonicalPath)) return;
+      discovered.set(canonicalPath, { filePath, baselineOnStart: false });
+      remainingDynamicFiles--;
+    };
+    // Reserve half the file budget for the fallback walk, even when every Hook
+    // supplies a path. Explicit paths do not expire with the 15-minute mtime
+    // filter: a pending terminal still needs processing after a long outage.
+    const priorities = [...priorityPaths].slice(0, MAX_DYNAMIC_SESSION_FILES / 4);
+    const explicitPaths = rotateDiscoveryItems(
+      [...this.dynamicWakeupTranscripts.keys()].sort((a, b) => b.localeCompare(a)),
+      value => value,
+      this.discoveryTranscriptCursor,
+    ).filter(file => !priorities.includes(file))
+      .slice(0, MAX_DYNAMIC_SESSION_FILES / 2 - priorities.length);
+    for (const filePath of priorities) addDynamicFile(filePath);
+    for (const filePath of explicitPaths) {
+      this.discoveryTranscriptCursor = filePath;
+      addDynamicFile(filePath);
+    }
+    for (const sessionDir of sessionDirs) {
       if (remainingDynamicFiles <= 0) break;
+      this.discoveryRootCursor = sessionDir;
       const files: string[] = [];
+      const root = this.dynamicSessionRoots.get(sessionDir)!;
       await collectRecentRolloutFiles(
         sessionDir,
         files,
-        Date.now() - DYNAMIC_SESSION_FILE_MAX_IDLE_MS,
+        root.walk.modifiedAfterMs,
         remainingDynamicFiles,
         {
           remainingDirectories: MAX_DYNAMIC_DIRECTORIES_PER_ROOT,
           remainingRolloutFiles: MAX_DYNAMIC_ROLLOUT_FILES_PER_ROOT,
         },
+        root.walk,
+        (filePath, stat) => {
+          const checkpoint = this.readCheckpoint(this.stateKey(filePath));
+          return checkpoint !== null && !rolloutCaughtUp(checkpoint, stat);
+        },
       );
       for (const filePath of files) {
-        if (discovered.has(filePath)) continue;
-        discovered.set(filePath, { filePath, baselineOnStart: false });
-        remainingDynamicFiles--;
-        if (remainingDynamicFiles <= 0) break;
+        addDynamicFile(filePath);
       }
     }
 
     return [...discovered.values()].sort((left, right) => left.filePath.localeCompare(right.filePath));
   }
 
-  private async discoverDynamicSessionDirs(canonicalDefaultSessionDir: string): Promise<string[]> {
+  private async discoverDynamicSessionDirs(
+    canonicalDefaultSessionDir: string,
+    priorityMarkers = new Set<string>(),
+  ): Promise<string[]> {
     let entries: Dirent[];
     try {
       entries = await fs.readdir(this.wakeupDir, { withFileTypes: true });
@@ -2420,29 +2495,69 @@ export class CodexTranscriptInput extends BaseInput {
       .filter(entry => entry.isFile() && entry.name.endsWith('.json'));
     const now = Date.now();
     await this.cleanupExpiredWakeupMarkers(allMarkerEntries, now);
-    // Reserve the global budget for evidence-backed roots before legacy fallbacks.
-    // Per-marker ordering alone still spends two slots per dual-layout home.
-    const tiers: Set<string>[] = [new Set(), new Set(), new Set()];
-    for (const entry of selectCodexWakeupMarkers(allMarkerEntries)) {
-      const roots = await readCodexWakeupRoots(path.join(this.wakeupDir, entry.name), now);
+    const priorities = allMarkerEntries.filter(entry => priorityMarkers.has(entry.name))
+      .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY / 2);
+    const markers = selectCodexWakeupMarkers(allMarkerEntries, this.discoveryMarkerCursor)
+      .filter(entry => !priorities.includes(entry))
+      .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY - priorities.length);
+    if (markers.length) this.discoveryMarkerCursor = markers[markers.length - 1]!.name;
+    // Cache roots across marker pages so a root does not lose its place when
+    // more than 256 markers exist. Both caches have a TTL and a hard size cap.
+    const tiers: Map<string, number>[] = [new Map(), new Map(), new Map()];
+    for (const entry of [...priorities, ...markers]) {
+      const markerPath = path.join(this.wakeupDir, entry.name);
+      let marker: Record<string, unknown> | null;
+      try {
+        marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+      } catch {
+        continue;
+      }
+      if (!marker) continue;
+      const roots = await readCodexWakeupRoots(markerPath, now, marker);
+      const transcript = await readCodexWakeupTranscript(markerPath, now, marker);
+      const receivedAtMs = Date.parse(stringValue(marker.received_at) ?? '');
+      if (transcript) {
+        this.dynamicWakeupTranscripts.set(transcript,
+          Math.max(this.dynamicWakeupTranscripts.get(transcript) ?? 0, receivedAtMs));
+      }
       roots.forEach((candidates, tier) => {
-        for (const candidate of candidates) tiers[tier].add(candidate);
+        for (const candidate of candidates) {
+          tiers[tier].set(candidate, Math.max(tiers[tier].get(candidate) ?? 0, receivedAtMs));
+        }
       });
     }
-    const sessionDirs = new Set<string>();
-    for (const candidates of tiers) {
-      for (const candidate of candidates) {
+    for (const [tier, candidates] of tiers.entries()) {
+      for (const [candidate, receivedAtMs] of candidates) {
         try {
           const canonical = await fs.realpath(candidate);
           if (canonical === canonicalDefaultSessionDir || !(await fs.stat(canonical)).isDirectory()) continue;
-          sessionDirs.add(canonical);
+          const existing = this.dynamicSessionRoots.get(canonical);
+          if (existing) {
+            existing.receivedAtMs = Math.max(existing.receivedAtMs, receivedAtMs);
+            existing.tier = Math.min(existing.tier, tier);
+          } else {
+            this.dynamicSessionRoots.set(canonical, {
+              tier, receivedAtMs,
+              walk: { stack: [], startedAtMs: now, modifiedAfterMs: now - DYNAMIC_SESSION_FILE_MAX_IDLE_MS },
+            });
+          }
         } catch {
           // A temporarily unavailable root can be retried on the next discovery.
         }
       }
     }
+    for (const [dir, root] of this.dynamicSessionRoots) {
+      if (now - root.receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) this.dynamicSessionRoots.delete(dir);
+    }
+    for (const [file, receivedAtMs] of this.dynamicWakeupTranscripts) {
+      if (now - receivedAtMs > WAKEUP_MARKER_DISCOVERY_TTL_MS) this.dynamicWakeupTranscripts.delete(file);
+    }
+    trimOldestMap(this.dynamicSessionRoots, MAX_LINK_DESCRIPTORS);
+    trimOldestMap(this.dynamicWakeupTranscripts, MAX_LINK_DESCRIPTORS);
+    const sessionDirs = [...this.dynamicSessionRoots.keys()]
+      .sort((a, b) => this.dynamicSessionRoots.get(a)!.tier - this.dynamicSessionRoots.get(b)!.tier);
     // At most three roots per marker are examined within the existing marker cap.
-    const dropped = sessionDirs.size - MAX_DYNAMIC_SESSION_DIRS;
+    const dropped = sessionDirs.length - MAX_DYNAMIC_SESSION_DIRS;
     if (dropped > 0 && now - this.lastDynamicRootLimitWarningAtMs >= WAKEUP_MARKER_CLEANUP_INTERVAL_MS) {
       this.lastDynamicRootLimitWarningAtMs = now;
       this.logger.warn('Codex dynamic session root limit reached within scanned markers', {
@@ -2450,7 +2565,8 @@ export class CodexTranscriptInput extends BaseInput {
         cap: MAX_DYNAMIC_SESSION_DIRS,
       });
     }
-    return [...sessionDirs].slice(0, MAX_DYNAMIC_SESSION_DIRS);
+    return rotateDiscoveryItems(sessionDirs, value => value, this.discoveryRootCursor)
+      .slice(0, MAX_DYNAMIC_SESSION_DIRS);
   }
 
   private async cleanupExpiredWakeupMarkers(entries: Dirent[], now: number): Promise<void> {
@@ -2890,41 +3006,96 @@ async function collectRecentRolloutFiles(
   modifiedAfterMs: number,
   maxFiles: number,
   budget: DynamicDirectoryWalkBudget,
-  depth = 0,
+  cursor: DynamicDirectoryWalkCursor,
+  hasPendingData: (filePath: string, stat: { ino: number; size: number }) => boolean,
 ): Promise<void> {
-  if (files.length >= maxFiles || budget.remainingDirectories <= 0) return;
-  budget.remainingDirectories--;
-  let entries: Dirent[];
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return;
+  if (!cursor.stack.length) {
+    cursor.stack.push({ dir, depth: 0 });
   }
-
-  entries.sort((left, right) => right.name.localeCompare(left.name));
-  for (const entry of entries) {
-    if (files.length >= maxFiles) return;
-    const entryPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (!isCodexSessionDateDirectory(entry.name, depth)) continue;
-      await collectRecentRolloutFiles(entryPath, files, modifiedAfterMs, maxFiles, budget, depth + 1);
-      continue;
-    }
-    if (
-      depth !== 3
-      || !entry.isFile()
-      || !entry.name.startsWith('rollout-')
-      || !entry.name.endsWith('.jsonl')
-    ) {
-      continue;
-    }
-    if (budget.remainingRolloutFiles <= 0) return;
-    budget.remainingRolloutFiles--;
+  while (cursor.stack.length && files.length < maxFiles && budget.remainingDirectories > 0) {
+    const frame = cursor.stack[cursor.stack.length - 1]!;
+    let entries: Dirent[];
+    budget.remainingDirectories--;
     try {
-      if ((await fs.stat(entryPath)).mtimeMs >= modifiedAfterMs) files.push(entryPath);
-    } catch {
-      // The transcript may disappear while a short-lived task directory is being cleaned up.
+      // A saved frame can outlive a directory replacement. As with freshly
+      // enumerated Dirents, do not follow a substituted symlink on resume.
+      if (await fs.realpath(frame.dir) !== frame.dir) {
+        cursor.stack.pop();
+        return;
+      }
+      entries = await fs.readdir(frame.dir, { withFileTypes: true });
+    } catch (error) {
+      // Preserve a temporarily unreadable directory's position for the next
+      // poll. A removed directory must not block the rest of the traversal.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') cursor.stack.pop();
+      return;
     }
+    entries.sort((left, right) => right.name.localeCompare(left.name));
+    let descended = false;
+    for (const entry of entries) {
+      if (frame.after !== undefined && entry.name.localeCompare(frame.after) >= 0) continue;
+      const entryPath = path.join(frame.dir, entry.name);
+      if (entry.isDirectory() && isCodexSessionDateDirectory(entry.name, frame.depth)) {
+        if (budget.remainingDirectories <= 0) return;
+        frame.after = entry.name;
+        cursor.stack.push({ dir: entryPath, depth: frame.depth + 1 });
+        descended = true;
+        break;
+      }
+      if (frame.depth === 3 && entry.isFile()
+        && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
+        if (budget.remainingRolloutFiles <= 0) return;
+        budget.remainingRolloutFiles--;
+        frame.after = entry.name;
+        try {
+          const stat = await fs.stat(entryPath);
+          if (stat.mtimeMs >= modifiedAfterMs || hasPendingData(entryPath, stat)) files.push(entryPath);
+        } catch {
+          // A later sweep retries files removed/replaced during stat.
+        }
+        if (files.length >= maxFiles) return;
+      } else {
+        frame.after = entry.name;
+      }
+    }
+    if (!descended) cursor.stack.pop();
+  }
+  if (!cursor.stack.length) {
+    // A slow sweep must not let its earliest files age out before the next
+    // sweep reaches them. Cover changes since the previous sweep began.
+    cursor.modifiedAfterMs = cursor.startedAtMs - DYNAMIC_SESSION_FILE_MAX_IDLE_MS;
+    cursor.startedAtMs = Date.now();
+  }
+}
+
+function rotateDiscoveryItems<T>(items: T[], key: (item: T) => string, after?: string): T[] {
+  if (after === undefined) return items;
+  const index = items.findIndex(item => key(item) === after);
+  return index < 0 ? items : [...items.slice(index + 1), ...items.slice(0, index + 1)];
+}
+
+/** A Hook path bypasses walk/mtime limits only after validating its root and real path. */
+async function readCodexWakeupTranscript(
+  markerPath: string,
+  now: number,
+  record?: Record<string, unknown>,
+): Promise<string | undefined> {
+  try {
+    const marker = record ?? asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+    const transcript = stringValue(marker?.transcript_path);
+    if (!transcript) return;
+    const sessionDir = sessionDirFromTranscriptPath(transcript);
+    if (!sessionDir) return;
+    const roots = await readCodexWakeupRoots(markerPath, now, marker ?? undefined);
+    if (!roots.flat().includes(sessionDir)) return;
+    const canonicalRoot = await fs.realpath(sessionDir);
+    const canonicalTranscript = await fs.realpath(transcript);
+    if (canonicalTranscript !== path.join(canonicalRoot, path.relative(sessionDir, transcript))) return;
+    if (!(await fs.lstat(transcript)).isFile()) return;
+    return canonicalTranscript;
+  } catch {
+    // A marker may precede transcript publication or race with atomic rename.
+    return;
   }
 }
 
@@ -2936,10 +3107,14 @@ function isCodexSessionDateDirectory(name: string, depth: number): boolean {
 }
 
 /** Shared by activation and collection so stale/invalid markers cannot start an Input. */
-async function readCodexWakeupRoots(markerPath: string, now: number): Promise<string[][]> {
+async function readCodexWakeupRoots(
+  markerPath: string,
+  now: number,
+  record?: Record<string, unknown>,
+): Promise<string[][]> {
   const roots: string[][] = [[], [], []];
   try {
-    const marker = asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
+    const marker = record ?? asRecord(JSON.parse(await fs.readFile(markerPath, 'utf8')));
     if (!marker) return roots;
     const receivedAt = stringValue(marker.received_at);
     const receivedAtMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
@@ -2965,10 +3140,11 @@ async function readCodexWakeupRoots(markerPath: string, now: number): Promise<st
   return roots;
 }
 
-function selectCodexWakeupMarkers(entries: Dirent[]): Dirent[] {
-  // UUIDv7 marker names sort newest first; keep every read within the scan budget.
-  return entries.filter(entry => entry.isFile() && entry.name.endsWith('.json'))
-    .sort((left, right) => right.name.localeCompare(left.name))
+function selectCodexWakeupMarkers(entries: Dirent[], after?: string): Dirent[] {
+  // Start with new session IDs, then continue across polls rather than
+  // repeatedly excluding freshly resumed sessions with older IDs.
+  return rotateDiscoveryItems(entries.filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+    .sort((left, right) => right.name.localeCompare(left.name)), entry => entry.name, after)
     .slice(0, MAX_WAKEUP_MARKERS_FOR_DISCOVERY);
 }
 

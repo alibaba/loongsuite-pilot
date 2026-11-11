@@ -60,7 +60,11 @@ it('keeps notifications while a cycle is busy and retries until collect consumes
 it('retains same-session updates arriving during collection for a following cycle', async () => {
   const f = await scheduler();
   f.process.mockImplementationOnce(async () => { f.probe.noteWakeup('a.json'); return 0; });
-  f.probe.noteWakeup('a.json'); await vi.advanceTimersByTimeAsync(400); await Promise.all(f.jobs);
+  f.probe.noteWakeup('a.json');
+  await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
+  // Path validation performs real async I/O. Drain the first cycle before
+  // advancing the next window so fake time does not outrun its notification.
+  await vi.advanceTimersByTimeAsync(200); await Promise.all(f.jobs);
   expect(f.process.mock.calls.map(call => call[0])).toEqual(['/sessions/a', '/sessions/a']);
 });
 
