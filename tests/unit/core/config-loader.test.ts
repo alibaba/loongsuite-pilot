@@ -353,7 +353,9 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners['doubao-work'].enabled).toBe(false);
       expect(config.listeners.workbuddy.enabled).toBe(true);
-      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener');
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener', {
+        valueType: 'string', allowedValues: ['doubao-work', 'doubao'],
+      });
     });
 
     it('merges file-level listener overrides', async () => {

@@ -11,8 +11,7 @@ function withoutNativeReminderPrefix(value: string): string {
     while (start < value.length && /\s/.test(value[start])) start++;
     if (!value.startsWith(open, start)) break;
     const body = start + open.length, end = value.indexOf(close, body);
-    const nested = value.indexOf(open, body);
-    if (end < 0 || (nested >= 0 && nested < end)) return value;
+    if (end < 0 || value.slice(body, end).includes(open)) return value;
     const next = end + close.length;
     if (next < value.length && !/\s/.test(value[next])) return value;
     cursor = next; removed = true;

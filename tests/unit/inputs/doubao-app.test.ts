@@ -47,6 +47,7 @@ describe('Doubao App and Work source isolation', () => {
     await appendFile(files.Doubao, source()); await appendFile(files.DoubaoWork, source());
     const events = await input.poll();
     expect(events).toHaveLength(2);
+    expect(events.every(event => event['loongsuite.doubao_work.client'] === 'doubao')).toBe(true);
     expect(JSON.stringify(events[0]['gen_ai.input.messages_delta'])).toContain('CURRENT_REQUEST');
     expect(JSON.stringify(events[1]['gen_ai.output.messages'])).toContain('Doubao_FINAL');
     expect(JSON.stringify(events[0]['agent.doubao_work.assistant_rounds'])).toContain('Doubao_FINAL');
@@ -62,6 +63,7 @@ describe('Doubao App and Work source isolation', () => {
     await input.poll(); clock.mockRestore();
     await appendFile(files.Doubao, source()); await appendFile(files.DoubaoWork, source());
     const events = await input.poll();
+    expect(events.every(event => event['loongsuite.doubao_work.client'] === 'doubao-work')).toBe(true);
     expect(JSON.stringify(events[1]['gen_ai.output.messages'])).toContain('DoubaoWork_FINAL');
     expect(JSON.stringify(events)).not.toContain('Doubao_FINAL');
   });

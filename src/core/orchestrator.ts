@@ -335,6 +335,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
       installedBy: 'daemon',
+      doubaoWork: this.config.listeners['doubao-work'],
     });
     await this.deploymentManager.loadDefinitions();
     await this.refreshDeploymentScope();

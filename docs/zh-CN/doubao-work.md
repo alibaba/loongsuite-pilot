@@ -85,9 +85,11 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 切换客户端前等待旧任务收口并重启 collector；切换后的 checkpoint 会重新基线化该产品的现有日志，只采集之后的新请求，不沿用另一产品的待配对记录或回放它的历史。旧版无客户端标记的 checkpoint 仍按豆包工作解释。普通“对话”模式不保证产生工作模式原生 trajectory，可能仅采到请求边界，无法据此生成 LLM 或补出输入输出。
 
-测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会禁用该 listener 并记录警告，其他 Agent 不受影响。
+测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会在配置加载时禁用该 listener，警告包含合法取值及非法值类型。显式 Agent-control 强制启用可覆盖 listener 的 enabled 标记；此时非法 client 回退到默认 Work 数据源，不会自动切换 App。
 
-`logDir` 只覆盖日志读取和监听目录；原生会话与 `coding/snapshot` 仍从平台默认的豆包数据目录读取，不从自定义日志目录向上推导。Agent 检测使用同一平台路径解析，Windows 同样遵循 `LOCALAPPDATA`。
+`logDir` 覆盖日志读取、监听及内置 Agent 定义的检测路径；原生会话与 `coding/snapshot` 仍从所选产品的默认数据目录读取，不从自定义日志目录向上推导。安装器 probe、`deploy --require doubao-work` 与 collector discovery 均使用所选数据源，Windows 同样遵循 `LOCALAPPDATA`。只安装豆包 App、使用默认 client 时，不会被检测成豆包工作；需先显式配置 `client: "doubao"` 再检测或部署。
+
+新增事件及其 OTLP Span 均包含 `loongsuite.doubao_work.client`：`doubao-work` 表示豆包工作，`doubao` 表示 App 工作模式。统一 Agent ID 仍为 `doubao-work`；历史记录没有此字段时保留未知，不根据 ID 猜测补标。多条真实需求即使文本或时间戳相同仍视为歧义，不能仅按文本去重后假定它们属于同一次 invocation。
 
 ```json
 {

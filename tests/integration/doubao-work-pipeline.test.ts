@@ -64,6 +64,8 @@ it('routes native first output and late execution snapshots through the masked p
     expect(native.spanContext().traceId).toBe(rootAgent.spanContext().traceId);
     expect(native.startTime).toEqual([Math.floor(execution.startedAtMs / 1000), (execution.startedAtMs % 1000) * 1_000_000]);
     const events = (await readFile(path.join(outputDir, 'doubao-work-all.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(events.every(event => event['loongsuite.doubao_work.client'] === 'doubao-work')).toBe(true);
+    expect(spans.every(span => span.attributes['loongsuite.doubao_work.client'] === 'doubao-work')).toBe(true);
     expect(events).toHaveLength(10); expect(new Set(events.map(e => e['event.id'])).size).toBe(10);
     expect(events.filter(e => e['event.name'] === 'agent.input')).toHaveLength(3);
     expect(events.filter(e => e['gen_ai.turn.start'] === true)).toHaveLength(1);

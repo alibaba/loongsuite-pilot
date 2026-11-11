@@ -393,6 +393,7 @@ export class DoubaoWorkInput extends BaseInput {
       this.nextCacheDiagnosticsAt = Date.now() + 60_000;
       this.logger.debug('Doubao Work native cache statistics', { ...this.nativeReader.stats() });
     }
+    for (const entry of entries) entry['loongsuite.doubao_work.client'] = this.client;
     return entries;
   }
 

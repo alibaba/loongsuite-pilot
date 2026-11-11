@@ -50,6 +50,12 @@ describe('Doubao native I/O and decision identity', () => {
     expect(nativeTaskContent(absent, actor, DOUBAO_EPOCH, nano(3000), ['call-one'])).toEqual({});
   });
 
+  it.each([10, 20])('does not collapse repeated identical demands into an invented unique invocation (second=%s)', offset => {
+    const task = assignment(10, 'SAME_REQUEST') + assignment(offset, 'SAME_REQUEST');
+    const content = parseNativeContent({ [actor]: lines([{ role: 'user', content: 'SAME_REQUEST' }, ...rows]) }, { [actor]: task })!;
+    expect(nativeTaskContent(content, actor, DOUBAO_EPOCH, nano(3000), ['call-one'])).toEqual({});
+  });
+
   it('retains one native decision ID for parallel calls, with exact call/result identity and names', () => {
     const source = [
       { role: 'assistant', tool_calls: [
