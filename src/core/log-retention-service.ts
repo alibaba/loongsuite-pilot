@@ -242,10 +242,12 @@ export class LogRetentionService {
             });
             // Daily writers compute the date at every append. Keep two whole
             // days for timezone skew/late writers before treating an old,
-            // quiet daily file as closed. Segment closure requires its pointer.
-            const legacyClosed = !active && file === base && date !== undefined
+            // quiet daily family as closed, including the final published
+            // segment: tomorrow's writer will use a different daily family.
+            const dailyClosed = date !== undefined
+              && ((!active && file === base) || (active === file && file !== base))
               && date < dateCutoff(2) && localDateString(new Date(stat.mtimeMs)) < dateCutoff(2);
-            if (!legacyClosed && !isPublishedSuccessor(file, base, active)) continue;
+            if (!dailyClosed && !isPublishedSuccessor(file, base, active)) continue;
             await fs.unlink(fullPath);
             deleted++;
             totalBytes -= stat.size;

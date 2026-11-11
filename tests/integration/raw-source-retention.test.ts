@@ -371,6 +371,69 @@ describe('raw source disk retention', () => {
     await expect(fs.stat(active)).resolves.toBeDefined();
   });
 
+  it.each(['unread', 'unpersisted', 'recent-write', 'current-day', 'busy'] as const)(
+    'protects a daily final segment when %s', async condition => {
+      if (condition === 'current-day') file = path.join(dir, 'raw-' + getTodayDateString() + '.jsonl');
+      append('base'); const tail = append('tail');
+      seed(); await consume();
+      await fs.utimes(tail, oldTime(), oldTime());
+      // The completed base segment is not part of this final-segment assertion.
+      await fs.unlink(file);
+      if (condition === 'recent-write') await fs.utimes(tail, new Date(), new Date());
+      if (condition === 'unread' || condition === 'unpersisted') {
+        const offsets = store.get('raw-test').extra!.hookLogOffsets as Record<string, number>;
+        store.update('raw-test', { extra: { hookLogOffsets: {
+          ...offsets, [path.basename(tail)]: condition === 'unread' ? 0 : offsets[path.basename(tail)],
+        } } });
+        if (condition === 'unread') await store.save();
+      }
+      const gate = condition === 'busy' ? acquireRawSourceGate(dir) : null;
+      try {
+        expect(await new LogRetentionService(root, { ...config, hookHistoryDays: 0 }, store).runCleanup())
+          .toMatchObject({ deleted: 0, errors: 0 });
+        await expect(fs.stat(tail)).resolves.toBeDefined();
+      } finally { gate?.release(); }
+    });
+
+  it.each([false, true])('reclaims old daily final segments under age/pressure policy (pressure=%s)', async pressure => {
+    const offsets: Record<string, number> = {};
+    const identities: Record<string, string> = {};
+    const tails: string[] = [];
+    for (let day = 0; day < 22; day++) {
+      const date = new Date(Date.now() - (day + 10) * 86400000);
+      const stamp = [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+      const name = 'raw-' + stamp + '.segment-000000000001-' + 'a'.repeat(32) + '.jsonl';
+      const tail = path.join(dir, name);
+      await fs.writeFile(tail, '');
+      await fs.truncate(tail, 100 * 1024 * 1024); // sparse: no 2 GiB physical allocation
+      await fs.utimes(tail, oldTime(), oldTime());
+      await fs.writeFile(path.join(dir, 'raw-' + stamp + '.jsonl.active'), name);
+      const stat = await fs.stat(tail);
+      offsets[name] = stat.size;
+      identities[name] = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      tails.push(tail);
+    }
+    const liveName = 'raw-' + getTodayDateString() + '.segment-000000000001-' + 'b'.repeat(32) + '.jsonl';
+    const live = path.join(dir, liveName);
+    await fs.writeFile(live, '');
+    await fs.truncate(live, 100 * 1024 * 1024);
+    await fs.writeFile(path.join(dir, 'raw-' + getTodayDateString() + '.jsonl.active'), liveName);
+    const liveStat = await fs.stat(live);
+    offsets[liveName] = liveStat.size;
+    identities[liveName] = `${liveStat.dev}:${liveStat.ino}:${liveStat.birthtimeMs}`;
+    store.set('raw-test', { extra: { hookLogDir: dir, hookLogPrefix: 'raw', hookLogOffsets: offsets, hookLogIdentities: identities } });
+    await store.save();
+    const service = new LogRetentionService(root, { ...config, hookHistoryDays: pressure ? 365 : 7 }, store);
+    const result = pressure ? await service.runPressureCleanup() : await service.runCleanup();
+    expect(result.errors).toBe(0);
+    expect(result.deleted).toBeGreaterThan(0);
+    let remaining = 0;
+    for (const tail of tails) remaining += (await fs.stat(tail).catch(() => null))?.size ?? 0;
+    expect(remaining + (pressure ? liveStat.size : 0)).toBeLessThanOrEqual(pressure ? RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES : 0);
+    await expect(fs.stat(live)).resolves.toMatchObject({ size: liveStat.size });
+    expect(await service.runCleanup()).toMatchObject({ deleted: 0, errors: 0 });
+  });
+
   it.each(['cursor', 'qwen-work-cn'])('protects nested %s history before registration and until its cursor is durable', async family => {
     dir = path.join(root, 'logs', family, 'history');
     await fs.mkdir(dir, { recursive: true });

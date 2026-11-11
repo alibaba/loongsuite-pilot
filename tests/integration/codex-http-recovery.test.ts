@@ -265,11 +265,11 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
     try {
       f.input.enqueue('event-first-start');
       await within(f.manager.startInput(f.input.id));
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(1); }, { timeout: 3000 });
       await within(f.manager.stopInput(f.input.id));
       f.input.enqueue('event-second-start');
       await within(f.manager.startInput(f.input.id));
-      await f.store.save();
+      await vi.waitFor(async () => { await f.store.save(); expect(await f.checkpoint()).toBe(2); }, { timeout: 3000 });
       expect(await f.checkpoint()).toBe(2);
       const expected = ['event-first-start', 'event-second-start'];
       expect(accepted.flat().map(entry => entry['event.id'])).toEqual(expected);

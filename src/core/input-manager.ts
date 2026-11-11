@@ -510,10 +510,11 @@ export class InputManager extends EventEmitter {
     const counter = this.counters.get(inputId);
     try {
       const signal = this.entryAbortControllers.get(inputId)?.signal;
+      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
       let quotaAlarmed = false;
       while (true) {
         try {
-          await (signal ? this.flusher.sendBatch(entries, logicalBytes, signal) : this.flusher.sendBatch(entries, logicalBytes));
+          await deliver();
           break;
         } catch (error) {
           const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
