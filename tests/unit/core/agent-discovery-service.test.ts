@@ -809,7 +809,7 @@ describe('AgentDiscoveryService deleted-directory watches', () => {
     expect(transcriptStop).toHaveBeenCalledTimes(1);
     expect(records.map(r => r.watchPath)).toEqual([tree.codex, tree.sessions, tree.wakeup]);
     expect(records[2].watcher.close).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(2);
+    expect(vi.getTimerCount()).toBe(3);
 
     const deployMark = deployChecks;
     const transcriptMark = transcriptChecks;
@@ -822,16 +822,13 @@ describe('AgentDiscoveryService deleted-directory watches', () => {
 
     fs.mkdirSync(tree.sessions, { recursive: true });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(svc.getStates()).toEqual({ 'deploy:codex': 'running', 'codex-transcript': 'idle' });
-    expect(deployStart).toHaveBeenCalledTimes(2);
-    expect(transcriptStart).toHaveBeenCalledTimes(1);
-    expect(records.filter(r => r.watchPath === tree.codex && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
-    expect(records.filter(r => r.watchPath === tree.wakeup && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
-
-    await vi.advanceTimersByTimeAsync(60_000);
     expect(svc.getStates()).toEqual({ 'deploy:codex': 'running', 'codex-transcript': 'running' });
+    expect(deployStart).toHaveBeenCalledTimes(2);
     expect(transcriptStart).toHaveBeenCalledTimes(2);
-    expect(records.filter(r => r.watchPath === tree.sessions && r.watcher.close.mock.calls.length === 0)).toHaveLength(0);
+    expect(records.filter(r => r.watchPath === tree.codex && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
+    expect(records.filter(r => r.watchPath === tree.sessions && r.watcher.close.mock.calls.length === 0)).toHaveLength(1);
+    expect(records.filter(r => r.watchPath === tree.wakeup && r.watcher.close.mock.calls.length === 0)).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(1);
 
     await svc.stop();
     expect(vi.getTimerCount()).toBe(0);

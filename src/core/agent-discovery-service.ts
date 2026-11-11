@@ -126,6 +126,7 @@ export class AgentDiscoveryService extends EventEmitter {
 
   private async processEntryOnce(rt: EntryRuntime): Promise<void> {
     this.retireWatcherIfStale(rt);
+    this.detachIfEarlierPathExists(rt);
     if (!rt.watcher) this.setupWatcher(rt);
     const { entry } = rt;
     try {
@@ -207,6 +208,22 @@ export class AgentDiscoveryService extends EventEmitter {
     }
   }
 
+  private detachIfEarlierPathExists(rt: EntryRuntime): void {
+    const watcher = rt.watcher;
+    const watchedPath = rt.watchedPath;
+    if (!watcher || !watchedPath) return;
+    const current = rt.entry.watchPaths.indexOf(watchedPath);
+    if (current <= 0) return;
+    for (let i = 0; i < current; i++) {
+      const identity = readWatchIdentity(rt.entry.watchPaths[i]);
+      if (identity === 'transient') return;
+      if (identity) {
+        this.detachWatcher(rt, watcher);
+        return;
+      }
+    }
+  }
+
   private detachWatcher(rt: EntryRuntime, watcher: fs.FSWatcher | null): void {
     if (!watcher || rt.watcher !== watcher) return;
     const watchedPath = rt.watchedPath;
@@ -244,7 +261,8 @@ export class AgentDiscoveryService extends EventEmitter {
         rt.watcher = watcher;
         rt.watchedPath = watchPath;
         rt.watchIdentity = identity;
-        this.clearPollTimer(rt);
+        if (rt.entry.watchPaths[0] === watchPath) this.clearPollTimer(rt);
+        else this.setupPolling(rt);
         return;
       } catch {
         if (watcher) {
