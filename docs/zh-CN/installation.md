@@ -144,6 +144,18 @@ Windows 兼容两种产物布局：`bin\node.exe` 与官方 zip 的根目录 `no
 
 诊断提示：安装日志出现 `下载托管 Node.js` / `Downloading managed Node.js` 即走托管路径；出现 `回退系统 node` / `falling back to system node` 说明托管下载失败或平台不受支持，随后会使用系统 node；`sha256 mismatch` 表示产物校验失败，已中止落盘并回退。
 
+### Linux 下 root 初始化后的采集
+
+`LOONGSUITE_PILOT_ROOT_TRIGGER=1` 显式启用 root 触发模式，不会提权，与
+`--scope system` 相互独立。OpenClaw、Hermes、DSH 复用现有共享配置根时，
+root Collector 可以读取后续普通用户进程生成的私有事件文件。Pilot 保留配置属主的访问权限，
+仅共享自有事件目录；未设置该变量时保持默认安装行为。
+Collector 和参与采集的业务 Agent 进程需要使用一致的该环境变量。
+Pilot 运行时和数据目录需位于各参与 UID 均可读取、穿过的公共路径，不能使用仅 root 可访问的私有 home 作为公共运行目录。
+
+嵌入 Pilot 的启动器需要保留业务工作目录，并复用已有 Collector，接入方式见
+[公共启动协调模块](../runtime-bootstrap.md)。
+
 ## 验证安装
 
 ```bash

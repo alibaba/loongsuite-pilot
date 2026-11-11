@@ -19,6 +19,12 @@ import { appendFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectResourceAttributesFromEnv } from '../shared/resource-context.mjs';
+import { createRequire } from 'node:module';
+let privateLog;
+try { privateLog = createRequire(import.meta.url)('../shared/private-log-dir.cjs'); }
+catch { privateLog = { ensurePrivateLogDir() {}, appendPrivateFile() {} }; }
+const { ensurePrivateLogDir, appendPrivateFile } = privateLog;
+const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_PILOT_ROOT_TRIGGER || '').trim());
 
 const AGENT = 'loongsuite-pilot-observability';
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
@@ -33,6 +39,7 @@ function dataDir() {
 function logDir() { return path.join(dataDir(), 'logs', 'dsh'); }
 function collectionEnabled() { return existsSync(ENABLED_MARKER); }
 function ensureDir(d) {
+  if (sharedRootLogs) return ensurePrivateLogDir(d);
   mkdirSync(d, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') chmodSync(d, 0o700);
 }
@@ -53,8 +60,11 @@ function redact(value) {
 function appendLine(file, obj) {
   try {
     if (!existsSync(file)) ensureDir(path.dirname(file));
-    appendFileSync(file, JSON.stringify(obj) + '\n');
-    if (process.platform !== 'win32') chmodSync(file, 0o600);
+    if (sharedRootLogs) appendPrivateFile(file, JSON.stringify(obj) + '\n');
+    else {
+      appendFileSync(file, JSON.stringify(obj) + '\n');
+      if (process.platform !== 'win32') chmodSync(file, 0o600);
+    }
   } catch {
     // Collection is best effort. Retry only when another business event arrives.
   }

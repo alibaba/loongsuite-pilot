@@ -37,6 +37,7 @@ import {
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
 import { resolveHookInstallScope } from './deployment/hook-scope.js';
+import { prepareRootTriggerLogDirs } from './utils/producer-log-dir.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
@@ -205,6 +206,7 @@ export async function runEagerInjection(): Promise<number> {
 
   const pilotDir = args.pilotDir ? resolveHome(args.pilotDir) : path.resolve(__inject_dirname, '..');
   const dataDir = resolveDataDir(args.dataDir);
+  prepareRootTriggerLogDirs(dataDir);
 
   // Existing container launchers already inherit business-Pod env. Opted-in
   // scope uses the shared lifecycle service, including DSH's home patch; the

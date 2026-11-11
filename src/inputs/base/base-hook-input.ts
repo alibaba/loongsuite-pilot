@@ -1,3 +1,4 @@
+import { producerReadFlags } from '../../utils/producer-log-dir.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CollectionMethod } from '../../types/index.js';
@@ -6,7 +7,7 @@ import { BaseInput, type InputOptions } from './base-input.js';
 import { getTodayDateString, ensureDir } from '../../utils/fs-utils.js';
 
 const OFFSET_MAP_EXTRA_KEY = 'hookLogOffsets';
-const RECENT_LOG_FILE_LIMIT = 3;
+const RECENT_LOG_DATE_LIMIT = 3;
 
 type OffsetMap = Record<string, number>;
 
@@ -157,7 +158,7 @@ export abstract class BaseHookInput extends BaseInput {
     if (stat.size <= offset) return { entries, offset: stat.size };
     runtime?.observeBacklog(stat.size - offset);
 
-    const handle = await fs.open(logFile, 'r');
+    const handle = await fs.open(logFile, producerReadFlags());
     let checkpointOffset = offset;
     try {
       const buf = Buffer.alloc(stat.size - offset);
@@ -248,11 +249,15 @@ export abstract class BaseHookInput extends BaseInput {
       .sort();
   }
 
-  private isHookLogFile(fileName: string): boolean {
+  protected isHookLogFile(fileName: string): boolean {
     const prefix = `${this.logPrefix}-`;
     if (!fileName.startsWith(prefix)) return false;
     const suffix = fileName.slice(prefix.length);
     return /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(suffix);
+  }
+
+  protected isTodayHookLogFile(fileName: string, today: string): boolean {
+    return fileName === `${this.logPrefix}-${today}.jsonl`;
   }
 
   private getCandidateFileNames(
@@ -260,18 +265,23 @@ export abstract class BaseHookInput extends BaseInput {
     lastFile: string | undefined,
     today: string,
   ): string[] {
-    const todayFileName = `${this.logPrefix}-${today}.jsonl`;
     const candidates = new Set<string>();
-    // Hook writers may inherit a different TZ than the collector, so keep a
-    // small rolling window active instead of trusting only today's filename.
-    for (const fileName of fileNames.slice(-RECENT_LOG_FILE_LIMIT)) {
+    // Hook writers may inherit a different TZ than the collector. Keep the
+    // recent dates active, including every uid file for each date.
+    const dates = new Set<string>();
+    const dateStart = this.logPrefix.length + 1;
+    for (let index = fileNames.length - 1; index >= 0; index--) {
+      const fileName = fileNames[index];
+      const date = fileName.slice(dateStart, dateStart + 10);
+      if (!dates.has(date) && dates.size >= RECENT_LOG_DATE_LIMIT) break;
+      dates.add(date);
       candidates.add(fileName);
     }
     if (lastFile && fileNames.includes(lastFile)) {
       candidates.add(lastFile);
     }
-    if (fileNames.includes(todayFileName)) {
-      candidates.add(todayFileName);
+    for (const fileName of fileNames) {
+      if (this.isTodayHookLogFile(fileName, today)) candidates.add(fileName);
     }
     return Array.from(candidates).sort();
   }
@@ -314,22 +324,23 @@ export abstract class BaseHookInput extends BaseInput {
       }
     }
 
-    const todayFileName = `${this.logPrefix}-${today}.jsonl`;
     if (state.lastFile && fileNames.includes(state.lastFile)) {
       // Migration from legacy lastFile/lastOffset state: resume draining the
       // previously tracked file from where we left off, and start reading
       // today's file from the beginning if it is a newer file.
       offsets[state.lastFile] = state.lastOffset ?? 0;
-      if (state.lastFile !== todayFileName && fileNames.includes(todayFileName)) {
-        offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (fileName !== state.lastFile && this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
       }
-    } else if (fileNames.includes(todayFileName)) {
+    } else {
       // True cold start (no prior state): skip all existing history and only
       // begin reading today's file from the start. Do NOT seed a non-today
       // file to 0 — that would re-ingest an entire day of history a previous
       // daemon run already dispatched (the collector's local date may still
       // lag behind the newest hook file when it first comes up).
-      offsets[todayFileName] = 0;
+      for (const fileName of fileNames) {
+        if (this.isTodayHookLogFile(fileName, today)) offsets[fileName] = 0;
+      }
     }
 
     return offsets;

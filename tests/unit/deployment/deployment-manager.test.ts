@@ -71,6 +71,32 @@ describe('DeploymentManager', () => {
     return fs.writeFile(path.join(builtinDir, `${def.id}.json`), JSON.stringify(def));
   }
 
+  it('does not create shared producer directories without explicit root mode', async () => {
+    const previous = process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    try {
+      await makeManager().deployAll();
+      await expect(fs.stat(path.join(dataDir, 'logs', 'openclaw'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+      else process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = previous;
+    }
+  });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)('prepares shared producer directories through the normal deployment entry', async () => {
+    const previous = process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+    process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = '1';
+    try {
+      await makeManager().deployAll();
+      for (const id of ['openclaw', 'hermes-agent', 'dsh']) {
+        expect((await fs.stat(path.join(dataDir, 'logs', id))).mode & 0o7777).toBe(0o1777);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_ROOT_TRIGGER;
+      else process.env.LOONGSUITE_PILOT_ROOT_TRIGGER = previous;
+    }
+  });
+
   describe('deployAll', () => {
     it('deploys hook agents that are detected', async () => {
       const def: AgentDefinition = {
