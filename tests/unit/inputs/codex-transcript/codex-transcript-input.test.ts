@@ -785,11 +785,19 @@ describe('CodexTranscriptInput', () => {
       expect(input.running).toBe(true);
 
       await fs.rm(sessionDir, { recursive: true });
-      await waitFor(() => !input.running);
+      await svc.refresh('test-sessions-removed');
       expect(svc.getStates()[input.id]).toBe('idle');
+      expect(input.running).toBe(false);
 
       await fs.mkdir(sessionDir, { recursive: true });
-      await waitFor(() => input.running);
+      // BaseInput.running becomes true before onStart finishes baselining.
+      // Await discovery's lifecycle transition and drain the startup cycle
+      // before publishing the new session. Native watch notifications can
+      // arrive before that transition, or be delayed independently of it.
+      await svc.refresh('test-sessions-restored');
+      await runInputCycle(input);
+      expect(svc.getStates()[input.id]).toBe('running');
+      expect(input.running).toBe(true);
 
       await writeTranscript(sessionDir, completedTurn());
       await runInputCycle(input);
