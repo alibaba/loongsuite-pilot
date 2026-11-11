@@ -25,6 +25,7 @@ import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } fro
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
+import { removeMessageContentFields, stripAgentMessageContent } from '../normalization/agent-content-policy.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -1454,7 +1455,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
-          const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
+          // Existing process-wide OTel env vars may still request content on
+          // spans. Enforce this flusher's explicit opt-out at the conversion
+          // boundary instead of relying on env defaults.
+          const conversionRecords = this.cfg.captureMessageContent === false
+            ? prepared.records.map(stripAgentMessageContent)
+            : prepared.records;
+          const stream = planTurnStream(conversionRecords, { handler: prepared.handler, passthroughKeys });
           if (stream) {
             streamedExportSucceeded = true;
             const reasoning = { seen: false, total: 0 };
@@ -1499,7 +1506,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               : agentType === 'doubao-work' ? convertDoubaoWorkTurn
               : convertEventLogToTrace;
             result = convert(
-              prepared.records,
+              conversionRecords,
               { handler: prepared.handler, strict: false, passthroughKeys,
                 ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
             );
@@ -1589,6 +1596,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
     this.patchCopilotCustomAttributes(spans, records);
+
+    // Enrichers can reattach source fields after conversion. Apply the same
+    // opt-out to the final span attributes and events before debug or export.
+    if (this.cfg.captureMessageContent === false) {
+      for (const span of spans) {
+        removeMessageContentFields(span.attributes as Record<string, unknown>);
+        for (const event of span.events) {
+          if (event.attributes) removeMessageContentFields(event.attributes as Record<string, unknown>);
+        }
+      }
+    }
 
     const exportState = this.getOrCreateExportState(agentType, serviceName);
 

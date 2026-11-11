@@ -75,6 +75,25 @@ describe('applyAgentContentPolicy', () => {
     expect(result['agent.file_path']).toBe('/workspace/app.ts');
   });
 
+  it('removes Qoder Work legacy body fields while preserving tool identity', () => {
+    const result = applyAgentContentPolicy(makeEntry({
+      'gen_ai.agent.type': ClientType.QoderWork,
+      'agent._cinput': { command: 'private command' },
+      'agent._ctext': 'private prompt',
+      'agent._ccontent': 'private result',
+      'agent._cthinking': 'private reasoning',
+      'agent._cname': 'terminal',
+      attributes: { _ctext: 'nested private prompt', _cid: 'tool-1' },
+    }), { [ClientType.QoderWork]: { captureMessageContent: false } });
+
+    for (const field of ['agent._cinput', 'agent._ctext', 'agent._ccontent', 'agent._cthinking']) {
+      expect(result).not.toHaveProperty(field);
+    }
+    expect(result.attributes).not.toHaveProperty('_ctext');
+    expect(result.attributes).toHaveProperty('_cid', 'tool-1');
+    expect(result['agent._cname']).toBe('terminal');
+  });
+
   it('does not mutate the input entry', () => {
     const entry = makeEntry();
     applyAgentContentPolicy(entry, {

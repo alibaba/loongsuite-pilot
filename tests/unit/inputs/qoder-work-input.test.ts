@@ -5,7 +5,9 @@ import * as os from 'node:os';
 import { ClientType, ActionType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkInput } from '../../../src/inputs/qoder-work/qoder-work-input.js';
+import { InputManager } from '../../../src/core/input-manager.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { MockFlusher } from '../../helpers/mock-flusher.js';
 
 function getTodayDateString(): string {
   const d = new Date();
@@ -31,6 +33,45 @@ describe('QoderWorkInput', () => {
   afterEach(async () => {
     if (input.running) await input.stop();
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('filters legacy prompt, tool and thinking bodies through InputManager', async () => {
+    const manager = new InputManager();
+    const flusher = new MockFlusher();
+    manager.setFlusher(flusher);
+    manager.setAgentsConfig({ [ClientType.QoderWork]: { captureMessageContent: false } });
+    manager.registerInput(input);
+    const rows = [
+      { type: 'user', message: { role: 'user', content: 'private-prompt-marker' } },
+      { type: 'assistant', message: { role: 'assistant', content: [{
+        type: 'tool_use', name: 'terminal', id: 'tool-1', input: { command: 'private-args-marker' },
+      }] } },
+      { type: 'user', message: { role: 'user', content: [{
+        type: 'tool_result', tool_use_id: 'tool-1', content: 'private-result-marker',
+      }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{
+        type: 'thinking', thinking: 'private-thinking-marker',
+      }] } },
+    ].map((row, index) => ({ ...row, session_id: 'session-1', timestamp: Date.now() + index }));
+    await fs.writeFile(path.join(tmpDir, `qoder-work-${getTodayDateString()}.jsonl`),
+      rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    await input.start();
+    await manager.stopAll();
+    const output = flusher.batchCalls.flat();
+    expect(output).toHaveLength(4);
+    expect(output.map(entry => entry['event.name'])).toEqual([
+      'llm.request', 'tool.call', 'tool.result', 'llm.response',
+    ]);
+    expect(output.find(entry => entry['event.name'] === 'tool.call')?.['gen_ai.tool.call.id']).toBe('tool-1');
+    for (const entry of output) {
+      for (const field of ['agent._cinput', 'agent._ctext', 'agent._ccontent', 'agent._cthinking',
+        'gen_ai.input.messages_delta', 'gen_ai.output.messages',
+        'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']) {
+        expect(entry).not.toHaveProperty(field);
+      }
+    }
+    expect(JSON.stringify(output)).not.toContain('private-');
   });
 
   describe('PostToolUse event filtering', () => {

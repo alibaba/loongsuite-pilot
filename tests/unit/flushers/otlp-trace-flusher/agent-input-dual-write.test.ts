@@ -78,10 +78,10 @@ function makeLegacyTurn(): AgentActivityEntry[] {
   ];
 }
 
-async function convert(records: AgentActivityEntry[]): Promise<CapturedSpan[]> {
+async function convert(records: AgentActivityEntry[], captureMessageContent?: boolean): Promise<CapturedSpan[]> {
   const captured: CapturedSpan[] = [];
   const flusher = new OtlpTraceFlusher(
-    makeConfig(),
+    { ...makeConfig(), captureMessageContent },
     undefined,
     () => makeCapturingExporter(captured),
   );
@@ -111,6 +111,35 @@ function semanticSnapshot(spans: CapturedSpan[]) {
 }
 
 describe('OtlpTraceFlusher agent.input compatibility dual-write', () => {
+  it('honors captureMessageContent=false despite pre-existing OTel capture environment', async () => {
+    const stability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const capture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const source = makeLegacyTurn();
+      const enabled = await convert(source);
+      const disabled = await convert(source, false);
+      const enabledAttributes = JSON.stringify(enabled.map(span => span.attributes));
+      const disabledAttributes = JSON.stringify(disabled.map(span => span.attributes));
+      expect(enabledAttributes).toContain('hello');
+      expect(enabledAttributes).toContain('world');
+      expect(disabled).toHaveLength(enabled.length);
+      expect(disabledAttributes).not.toContain('hello');
+      expect(disabledAttributes).not.toContain('world');
+      for (const span of disabled) {
+        expect(span.attributes).not.toHaveProperty('gen_ai.input.messages');
+        expect(span.attributes).not.toHaveProperty('gen_ai.output.messages');
+      }
+      expect(source[0]['gen_ai.input.messages_delta']).toBeDefined();
+    } finally {
+      if (stability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = stability;
+      if (capture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = capture;
+    }
+  });
+
   it('preserves real converter Span semantics at the compatibility boundary', async () => {
     const legacy = makeLegacyTurn();
     const expanded = expandAgentInputEvents(legacy);
