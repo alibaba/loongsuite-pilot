@@ -1,4 +1,5 @@
 """Standard-library, non-runtime checks; no containers or Agent installation."""
+import errno
 import json
 import hashlib
 import io
@@ -10,6 +11,7 @@ from unittest.mock import patch
 import urllib.error
 
 from linux_cgroup import locate
+from pilot_history import resources
 from prepare_public import download_release, is_target_dev, load_history, select_backfill, source_runtime, stable_releases
 from runtime_layout import resolve
 from native_qoder_fixture import Fixture, atomic_json, begin_notice_transaction
@@ -46,6 +48,20 @@ class FakeNoticeConnection:
 
 
 class Helpers(unittest.TestCase):
+    def test_resource_sampler_skips_exited_pids_and_counts_live_rss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            processes = Path(temporary) / "cgroup.procs"
+            processes.write_text("101\n102\n103\n")
+            cgroup = {"processes": processes, "memory_usage": None}
+            with patch("pilot_history.Path") as process_path:
+                process_path.return_value.read_text.side_effect = [
+                    ProcessLookupError(errno.ESRCH, "No such process"),
+                    FileNotFoundError(errno.ENOENT, "No such file"),
+                    "Name:\tcollector\nVmRSS:\t2048 kB\n",
+                ]
+                sample = resources("collector", cgroup)
+            self.assertEqual(sample["rss_bytes"], 2048 * 1024)
+
     def test_notice_begin_contention_retries_gate_without_rewriting_inputs_and_releases_by_rollback(self):
         clock = FakeNoticeClock()
         connection = FakeNoticeConnection(begin_failures=2)

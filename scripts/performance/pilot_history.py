@@ -91,7 +91,7 @@ def resources(container, cgroup, cpu=False):
                 if line.startswith("VmRSS:"):
                     memory += int(line.split()[1]) * 1024
                     break
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             pass  # an owned short-lived process ended during this sample
     if not pids or memory <= 0:
         raise RuntimeError("actual process RSS unavailable")
