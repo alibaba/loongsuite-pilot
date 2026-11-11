@@ -25,7 +25,6 @@ import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
   resolvePilotDir as resolvePilotDirIn,
 } from '../deployment/deploy-command.js';
-import { detectAgent } from '../deployment/detect-utils.js';
 import {
   ensureRegisteredPiSdkWrappers,
   isPiSdkRegistryBusyError,
@@ -909,10 +908,13 @@ export class Orchestrator extends EventEmitter {
         enabled: () => this.isAgentGatedEnabled(def.id) && this.scopeAllows(def.id),
         precondition: async () =>
           (await directoryExists(def.directoryPlugin!.sourceDir))
-          && (await detectAgent(def.detection)),
+          && (await this.deploymentManager.isAgentDetected(def)),
         check: async () => !(await this.deploymentManager.needsRedeploy(def)),
         repair: async () => {
           const result = await this.deploymentManager.deploySingle(def);
+          if (result.skipped && result.reason === 'not-detected') {
+            throw new Error(`Agent disappeared before directory plugin repair for ${def.id}`);
+          }
           if (!result.success) {
             throw new Error(result.error ?? `directory plugin repair failed for ${def.id}`);
           }

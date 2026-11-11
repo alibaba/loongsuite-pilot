@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -52,7 +53,32 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    return detectAgent(def.detection);
+    if (!(await detectAgent(def.detection))) return false;
+    const command = def.directoryPlugin?.activation?.command;
+    if (!command) return true;
+
+    // A home directory can outlive the CLI. Check the command we will actually
+    // spawn, without using the generic detection cache in a long-running agent.
+    if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+      try {
+        const stat = await fs.stat(command);
+        if (!stat.isFile()) return false;
+        await fs.access(command, process.platform === 'win32' ? fsConstants.F_OK : fsConstants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    try {
+      await execFile(process.platform === 'win32' ? 'where.exe' : 'which', [command], {
+        timeout: 2000,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async needsDeploy(

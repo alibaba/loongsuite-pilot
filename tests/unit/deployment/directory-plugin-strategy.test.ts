@@ -84,6 +84,46 @@ describe('DirectoryPluginStrategy', () => {
     expect(detectAgent).toHaveBeenCalledWith(def.detection);
   });
 
+  it('requires the activation executable even when the home directory detects Hermes', async () => {
+    const actual = await vi.importActual<typeof import('../../../src/deployment/detect-utils.js')>(
+      '../../../src/deployment/detect-utils.js',
+    );
+    vi.mocked(detectAgent).mockImplementation(actual.detectAgent);
+    const hermesHome = path.join(tmpDir, '.hermes');
+    await fs.mkdir(hermesHome);
+    const command = path.join(tmpDir, 'hermes-cli');
+    const def = withActivation(makeDef());
+    def.detection = { paths: [hermesHome], commands: ['hermes'] };
+    def.directoryPlugin!.activation!.command = command;
+
+    await expect(detectAgent(def.detection)).resolves.toBe(true);
+    await expect(strategy.detect(def)).resolves.toBe(false);
+    await fs.writeFile(command, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    await expect(strategy.detect(def)).resolves.toBe(true);
+
+    if (process.platform !== 'win32') {
+      await fs.chmod(command, 0o644);
+      await expect(strategy.detect(def)).resolves.toBe(false);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('notices a CLI installed on PATH after an earlier miss', async () => {
+    vi.mocked(detectAgent).mockResolvedValue(true);
+    const command = `hermes-test-${path.basename(tmpDir)}`;
+    const def = withActivation(makeDef());
+    def.directoryPlugin!.activation!.command = command;
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${tmpDir}${path.delimiter}${previousPath ?? ''}`;
+    try {
+      await expect(strategy.detect(def)).resolves.toBe(false);
+      await fs.writeFile(path.join(tmpDir, command), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await expect(strategy.detect(def)).resolves.toBe(true);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
   it('copies a plugin directory and writes its ownership marker', async () => {
     const def = makeDef();
     await expect(strategy.needsDeploy(def)).resolves.toBe(true);
