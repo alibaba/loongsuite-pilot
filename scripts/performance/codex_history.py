@@ -18,9 +18,9 @@ from codex_rollout_fixture import CodexRolloutFixture, validate_output
 from pilot_history import (
     DRAIN_SECONDS, LOADS, SAMPLE_INTERVAL, WINDOW_SECONDS, Output, command, configure, docker_json,
     file_sha, locate_cgroup, mapped_library, monotonic_ns, resources, stop_container,
-    standard_resource_sampling, summarize_workload, write_json,
+    standard_resource_sampling, summarize_workload, throughput, write_json,
 )
-from prepare_public import CODEX_STANDARD_METHOD
+from prepare_public import CODEX_MIXED_METHOD
 from publish_history import compact
 from runtime_layout import resolve
 
@@ -29,12 +29,12 @@ SESSIONS = 64
 TERMINAL_STATUS = "gen_ai.turn.end"
 
 
-def configure_codex(fixture, output):
+def configure_codex(fixture, output, poll_interval_ms):
     configure(fixture, output)
     path = fixture.data / "config.json"
     value = json.loads(path.read_text(encoding="utf-8"))
     value["listeners"]["qoder-trace"]["enabled"] = False
-    value["listeners"]["codex-transcript"] = {"enabled": True}
+    value["listeners"]["codex-transcript"] = {"enabled": True, "pollInterval": poll_interval_ms}
     value.pop("agents", None)
     write_json(path, value)
 
@@ -155,7 +155,8 @@ def run_round(args, directory, load, repeat, smoke=False):
     directory.mkdir()
     fixture = CodexRolloutFixture(directory, sessions=SESSIONS)
     output = Output(directory / "output")
-    configure_codex(fixture, output.directory)
+    poll_interval_ms = 100 if load == "high" and not smoke else 10_000
+    configure_codex(fixture, output.directory, poll_interval_ms)
     name = "pilot-codex-perf-" + uuid.uuid4().hex
     launch = ["docker", "run", "-d", "--pull=never", "--name", name, "--network", "none",
               "--cpus", "2", "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "256",
@@ -192,13 +193,14 @@ def run_round(args, directory, load, repeat, smoke=False):
             quality = quality_for(output.records, warm_turns, {})
             return {"status": "passed", "smoke_only": True, "report_node": False,
                     "quality": quality, "cgroup_version": cgroup["version"], "resources": observation,
-                    "raw_bytes": fixture.raw_bytes}
+                    "raw_bytes": fixture.raw_bytes, "poll_interval_ms": poll_interval_ms}
 
         time.sleep(1)
         warm_record_count = len(output.records)
         warm_bytes = fixture.raw_bytes
         rate = LOADS[load]
         first = resources(container, cgroup, cpu=True, direct_cpu=True)
+        output_start = output.bytes_written()
         samples = [first]
         start = time.monotonic()
         next_sample = start + SAMPLE_INTERVAL
@@ -217,9 +219,12 @@ def run_round(args, directory, load, repeat, smoke=False):
                 output.read()
                 next_sample = now + SAMPLE_INTERVAL
             time.sleep(.001 if rate else .02)
+        output_end = output.bytes_written()
         active_end = resources(container, cgroup, cpu=True, direct_cpu=True)
         samples.append(active_end)
         active_resources = standard_resource_sampling(samples)
+        raw_input_bytes = fixture.raw_bytes - warm_bytes
+        jsonl_output_bytes = output_end - output_start
         if produced != rate * WINDOW_SECONDS:
             raise RuntimeError("producer could not maintain the fixed rate")
 
@@ -247,7 +252,8 @@ def run_round(args, directory, load, repeat, smoke=False):
             raise RuntimeError("invalid CPU sample interval")
         result = {"load": load, "repeat": repeat, "cpu_percent": cpu / wall * 100,
                   "cgroup_version": cgroup["version"], "quality": quality, "produced_turns": produced,
-                  "raw_bytes": fixture.raw_bytes - warm_bytes, **active_resources}
+                  "raw_bytes": raw_input_bytes, "active_wall_seconds": wall, **active_resources}
+        result.update(throughput(raw_input_bytes, jsonl_output_bytes, wall, poll_interval_ms))
         if capacity is not None:
             result["capacity"] = capacity
         return result
@@ -279,7 +285,7 @@ def make_node(args):
         "id": "v" + version.lstrip("v") if args.kind == "release" else args.kind,
         "kind": args.kind, "version": version, "commit": args.commit,
         "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "status": "pending", "method_id": CODEX_STANDARD_METHOD, "environment": env, "environment_id": "pending",
+        "status": "pending", "method_id": CODEX_MIXED_METHOD, "environment": env, "environment_id": "pending",
         "source": {"repository": args.source_repository, "ref": args.source_ref},
         "run_url": "https://github.com/%s/actions/runs/%s" % (repository, run_id) if run_id.isdecimal() and repository else "",
         "workloads": {},

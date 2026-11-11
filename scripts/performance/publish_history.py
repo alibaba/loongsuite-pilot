@@ -17,17 +17,22 @@ import sys
 import time
 import urllib.parse
 
-from prepare_public import CODEX_STANDARD_METHOD
+from prepare_public import CODEX_MIXED_METHOD, CODEX_STANDARD_METHOD, QODER_MIXED_METHOD
 
 LOADS = ("idle", "low", "high")
 HIGH_TURNS = 6000
 DRAIN_SECONDS = 15
 LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
 STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
-PEAK_METHODS = {STANDARD_METHOD, CODEX_STANDARD_METHOD}
+MIXED_METHODS = {QODER_MIXED_METHOD, CODEX_MIXED_METHOD}
+PEAK_METHODS = {STANDARD_METHOD, CODEX_STANDARD_METHOD} | MIXED_METHODS
+POLL_BY_LOAD = {"idle": 10_000, "low": 10_000, "high": 100}
+THROUGHPUT_METRICS = ("raw_input_bytes_per_second", "jsonl_output_bytes_per_second")
 METHOD_FILES = {
     STANDARD_METHOD: "pilot-history-method-10s.json",
     CODEX_STANDARD_METHOD: "pilot-history-method-codex-10s.json",
+    QODER_MIXED_METHOD: "pilot-history-method-qoder-v2.json",
+    CODEX_MIXED_METHOD: "pilot-history-method-codex-v2.json",
 }
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
@@ -75,7 +80,7 @@ def validate_capacity(sample, quality, method_id=LEGACY_METHOD):
             count(round_[field], field)
         repeat, produced = round_["repeat"], round_["produced_turns"]
         completed, absent = round_["completed_turns"], round_["missing_responses"]
-        codex = method_id == CODEX_STANDARD_METHOD
+        codex = method_id in (CODEX_STANDARD_METHOD, CODEX_MIXED_METHOD)
         pending = produced - completed
         if (repeat not in (1, 2, 3) or repeat in repeats or produced != HIGH_TURNS
                 or not 0 <= completed < produced or not (0 if codex else 1) <= absent <= (3 if codex else 2) * pending):
@@ -170,6 +175,10 @@ def validate_node(node):
             metrics.append("cpu_peak_percent")
         if node["method_id"] in PEAK_METHODS or "rss_average_mib" in sample:
             metrics.append("rss_average_mib")
+        if node["method_id"] in MIXED_METHODS:
+            if sample.get("poll_interval_ms") != POLL_BY_LOAD[name]:
+                raise ValueError("invalid workload polling interval")
+            metrics.extend(THROUGHPUT_METRICS)
         for field in metrics:
             summary = sample.get(field, {})
             if not isinstance(summary, dict):
@@ -225,10 +234,18 @@ def validate_history(history):
                 or not isinstance(series["method"], dict) or series["method"].get("id") != method_id
                 or method_id == primary.get("id")):
             raise ValueError("invalid additional test method identity")
-        if method_id in PEAK_METHODS and any(series["method"].get(key) != value for key, value in (
-                ("session_count", 64), ("window_seconds", 30), ("poll_interval_ms", 10_000),
-                ("cpu_sample_ms", 100), ("rss_sample_ms", 100))):
-            raise ValueError("invalid standard measurement settings")
+        method = series["method"]
+        if method_id in PEAK_METHODS:
+            expected = {"session_count": 64, "window_seconds": 30, "cpu_sample_ms": 100, "rss_sample_ms": 100}
+            if method_id not in MIXED_METHODS:
+                expected["poll_interval_ms"] = 10_000
+            if any(method.get(key) != value for key, value in expected.items()):
+                raise ValueError("invalid standard measurement settings")
+        if method_id in MIXED_METHODS:
+            loads = method.get("loads")
+            if not isinstance(loads, dict) or any(not isinstance(loads.get(load), dict)
+                    or loads[load].get("poll_interval_ms") != interval for load, interval in POLL_BY_LOAD.items()):
+                raise ValueError("invalid workload measurement settings")
         validate_node_slots(series["nodes"], method_id)
     compatibility = history.get("compatibility")
     if compatibility is not None and not isinstance(compatibility, dict):
@@ -297,12 +314,13 @@ def compact(node, publication=None, asset_sha256=None):
         sample = workloads.get(load)
         if not isinstance(sample, dict):
             continue
-        kept = {key: sample[key] for key in ("repeats", "p95_ms") if key in sample}
+        kept = {key: sample[key] for key in ("repeats", "p95_ms", "poll_interval_ms") if key in sample}
         metrics = ["cpu_percent", "rss_mib"]
         if "cpu_peak_percent" in sample:
             metrics.append("cpu_peak_percent")
         if "rss_average_mib" in sample:
             metrics.append("rss_average_mib")
+        metrics.extend(field for field in THROUGHPUT_METRICS if field in sample)
         for key in metrics:
             summary = sample.get(key)
             kept[key] = {name: summary[name] for name in ("median", "min", "max") if name in summary} if isinstance(summary, dict) else None

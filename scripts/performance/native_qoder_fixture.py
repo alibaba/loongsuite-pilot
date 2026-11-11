@@ -86,6 +86,7 @@ class Fixture:
         self.session_count = sessions
         self.sequence = 0
         self.expected = {}
+        self.raw_bytes = 0
         for index in range(sessions):
             self.file(index).touch()
             self.notice(index, "UserPromptSubmit")
@@ -164,8 +165,10 @@ class Fixture:
         with self.tokens.open("a", encoding="utf-8") as stream:
             stream.write("".join(compact(row) + "\n" for row in token_rows))
         published = monotonic_ns()
-        with self.file(session).open("a", encoding="utf-8") as stream:
-            stream.write("".join(compact(row) + "\n" for row in rows))
+        payload = "".join(compact(row) + "\n" for row in rows).encode("utf-8")
+        with self.file(session).open("ab") as stream:
+            stream.write(payload)
+        self.raw_bytes += len(payload)
         if measured:
             self.expected[identifier] = {"session": "ci-native-%02d" % session,
                 "tool_id": tool, "response_ids": [row["id"] for row in token_rows],

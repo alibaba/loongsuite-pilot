@@ -16,8 +16,8 @@ on:
       benchmark_method:
         description: Full Pilot benchmark method (Codex requires an explicit Rust source or release)
         type: choice
-        options: [github-full-pilot-qoder-native-10s-v1, github-full-pilot-codex-rollout-10s-v1]
-        default: github-full-pilot-qoder-native-10s-v1
+        options: [github-full-pilot-qoder-native-v2, github-full-pilot-codex-rollout-v2]
+        default: github-full-pilot-qoder-native-v2
       public_repository:
         description: Public source repository; formal releases use official upstream
         default: alibaba/loongsuite-pilot
@@ -49,7 +49,7 @@ permissions:
 # Unrelated branches cannot evict the designated dev branch's pending request. Backfill requests all mean
 # "select the next untested release" and can safely coalesce without skipping a tag.
 concurrency:
-  group: pilot-performance-${{ github.repository }}-${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-10s-v1' }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || format('dev-{0}-{1}', inputs.public_repository || github.repository, inputs.public_ref || github.ref_name) }}
+  group: pilot-performance-${{ github.repository }}-${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-v2' }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || format('dev-{0}-{1}', inputs.public_repository || github.repository, inputs.public_ref || github.ref_name) }}
   cancel-in-progress: false
 
 jobs:
@@ -77,7 +77,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.99.1
       CARGO_TERM_COLOR: always
       PERF_IMAGE: node:22-bookworm-slim
-      BENCHMARK_METHOD: ${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-10s-v1' }}
+      BENCHMARK_METHOD: ${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-v2' }}
     steps:
       # PR/fork code runs only in this read-token job. The publication job never
       # checks out or executes a candidate. No pull_request_target is used.
@@ -104,13 +104,13 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, subprocess, sys, urllib.parse
           sys.path.insert(0, 'scripts/performance')
-          from prepare_public import api, public_repository, resolve, STABLE, QODER_STANDARD_METHOD
+          from prepare_public import api, public_repository, resolve, STABLE, QODER_MIXED_METHOD
           mode=os.environ['MODE']; repository=os.environ['PUBLIC_REPOSITORY']; ref=os.environ['PUBLIC_REF']
           method=os.environ['BENCHMARK_METHOD']
           if mode=='main': repository='alibaba/loongsuite-pilot'; ref='main'
           out=pathlib.Path(os.environ['RUNNER_TEMP'],'selection'); confirm=os.environ.get('CONFIRMED_TAG','')
           if confirm:
-              if method != QODER_STANDARD_METHOD:
+              if method != QODER_MIXED_METHOD:
                   raise ValueError('choose the method tested by the compatibility evidence')
               if mode!='backfill' or repository!='alibaba/loongsuite-pilot' or not STABLE.fullmatch(confirm):
                   raise ValueError('explicit cutoff requires an official stable backfill release')
@@ -220,9 +220,9 @@ jobs:
           python3 - <<'PY'
           import os, pathlib, subprocess, sys
           sys.path.insert(0, 'scripts/performance')
-          from prepare_public import CODEX_STANDARD_METHOD
+          from prepare_public import CODEX_MIXED_METHOD
           method=os.environ['BENCHMARK_METHOD']
-          codex=method==CODEX_STANDARD_METHOD
+          codex=method==CODEX_MIXED_METHOD
           driver='codex_history.py' if codex else 'pilot_history.py'
           package=os.environ['PACKAGE'] if os.environ['KIND']=='release' else str(pathlib.Path(os.environ['RUNNER_TEMP'],'pilot-runtime'))
           args=['python3','scripts/performance/'+driver,'--package',package,'--image',os.environ['PERF_IMAGE'],
@@ -251,9 +251,9 @@ jobs:
           python3 - <<'PY'
           import os, pathlib, subprocess, sys
           sys.path.insert(0, 'scripts/performance')
-          from prepare_public import CODEX_STANDARD_METHOD
+          from prepare_public import CODEX_MIXED_METHOD
           method=os.environ['BENCHMARK_METHOD']
-          codex=method==CODEX_STANDARD_METHOD
+          codex=method==CODEX_MIXED_METHOD
           driver='codex_history.py' if codex else 'pilot_history.py'
           package=os.environ['PACKAGE'] if os.environ['KIND']=='release' else str(pathlib.Path(os.environ['RUNNER_TEMP'],'pilot-runtime'))
           args=['python3','scripts/performance/'+driver,'--package',package,'--image',os.environ['PERF_IMAGE'],

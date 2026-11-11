@@ -116,6 +116,8 @@ def stable_releases(repository):
 
 QODER_STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
 CODEX_STANDARD_METHOD = "github-full-pilot-codex-rollout-10s-v1"
+QODER_MIXED_METHOD = "github-full-pilot-qoder-native-v2"
+CODEX_MIXED_METHOD = "github-full-pilot-codex-rollout-v2"
 
 
 def history_for_method(history, method):
@@ -193,13 +195,13 @@ def main():
     parser.add_argument("--repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--mode", choices=("main", "dev", "release", "backfill"), required=True)
     parser.add_argument("--ref", default="main")
-    parser.add_argument("--benchmark-method", choices=(QODER_STANDARD_METHOD, CODEX_STANDARD_METHOD),
-                        default=QODER_STANDARD_METHOD)
+    parser.add_argument("--benchmark-method", choices=(QODER_MIXED_METHOD, CODEX_MIXED_METHOD),
+                        default=QODER_MIXED_METHOD)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-repository", default="alibaba/loongsuite-pilot")
     args = parser.parse_args()
-    if args.benchmark_method == CODEX_STANDARD_METHOD and args.mode == "backfill":
+    if args.benchmark_method == CODEX_MIXED_METHOD and args.mode == "backfill":
         parser.error("Codex requires an explicit public Rust ref or release; historical backfill is not enabled")
     args.output.mkdir(parents=True, exist_ok=True)
     public_repository(args.repository)
@@ -233,7 +235,7 @@ def main():
         result["release_url"] = release["html_url"]
     else:
         result["runtime"] = source_runtime(args.repository, result["commit"])
-    if args.benchmark_method == CODEX_STANDARD_METHOD and result["runtime"] != "rust":
+    if args.benchmark_method == CODEX_MIXED_METHOD and result["runtime"] != "rust":
         raise ValueError("Codex performance method requires a public Rust host and adjacent SDK")
     (args.output / "selection.json").write_text(json.dumps(result, indent=2) + "\n")
 

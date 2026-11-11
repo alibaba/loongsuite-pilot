@@ -147,7 +147,7 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "selection"
             args = ["prepare_public.py", "--output", str(output),
-                    "--benchmark-method", selector.CODEX_STANDARD_METHOD]
+                    "--benchmark-method", selector.CODEX_MIXED_METHOD]
             with patch("sys.argv", args + ["--mode", "backfill"]), patch.object(selector, "public_repository") as query:
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
                     selector.main()
@@ -165,7 +165,7 @@ class PublicationTests(unittest.TestCase):
                 runtime.return_value = "rust"
                 selector.main()
                 actual = json.loads(selection.read_text(encoding="utf-8"))
-                self.assertEqual(actual["method_id"], selector.CODEX_STANDARD_METHOD)
+                self.assertEqual(actual["method_id"], selector.CODEX_MIXED_METHOD)
                 self.assertEqual(actual["runtime"], "rust")
 
     def test_codex_high_capacity_has_three_waves_and_requires_source_evidence(self):
@@ -185,6 +185,29 @@ class PublicationTests(unittest.TestCase):
         round_["missing_responses"] = 7
         with self.assertRaisesRegex(ValueError, "round counts"):
             publisher.validate_capacity(sample, quality, method)
+
+    def test_mixed_workload_requires_throughput_and_the_exact_cadence(self):
+        directory = Path(__file__).resolve().parents[2] / "tests/performance_native"
+        method_id = publisher.QODER_MIXED_METHOD
+        method = json.loads((directory / publisher.METHOD_FILES[method_id]).read_text())
+        value = node()
+        value["method_id"] = method_id
+        for load, sample in value["workloads"].items():
+            rate = 0 if load == "idle" else 2
+            sample.update(poll_interval_ms=method["loads"][load]["poll_interval_ms"],
+                          cpu_peak_percent={"median": 4, "min": 3, "max": 5},
+                          rss_average_mib={"median": 19, "min": 18, "max": 20},
+                          raw_input_bytes_per_second={"median": rate, "min": rate, "max": rate},
+                          jsonl_output_bytes_per_second={"median": rate, "min": rate, "max": rate})
+        data = history()
+        self.assertTrue(publisher.merge_method(data, method, value))
+        value["workloads"]["high"]["poll_interval_ms"] = 10_000
+        with self.assertRaisesRegex(ValueError, "workload polling interval"):
+            publisher.validate_node(value)
+        value["workloads"]["high"]["poll_interval_ms"] = 100
+        del value["workloads"]["high"]["jsonl_output_bytes_per_second"]
+        with self.assertRaisesRegex(ValueError, "statistic"):
+            publisher.validate_node(value)
 
     def test_trusted_codex_method_keeps_both_metrics_in_its_own_series(self):
         descriptor = Path(__file__).resolve().parents[2] / "tests/performance_native"

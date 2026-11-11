@@ -175,9 +175,13 @@ is not a completed self-monitoring or token-summary acceptance result.
 ### Codex 性能
 
 在 GitHub Actions 手动运行 Full Pilot performance history 时，选择
-github-full-pilot-codex-rollout-10s-v1 和明确的公开 Rust ref 或发布标签。
-Codex 使用原始 rollout、默认 10 秒轮询和正常 Stop 唤醒。保留三种负载各三轮，
-按 100 毫秒采样平均与峰值 CPU、平均与峰值内存。它使用独立的版本序列。
+github-full-pilot-codex-rollout-v2 和明确的公开 Rust ref 或发布标签。
+Codex 使用原始 rollout 和正常 Stop 唤醒，使用独立的版本序列。
+
+Qoder 和 Codex 均使用空闲与低负载 10 秒采集轮询、高负载 100 毫秒采集轮询。
+三档各测三轮，每轮预热 64 个会话，随后采样 30 秒。资源采样间隔为 100 毫秒。
+原始 transcript 与 Pilot 输出 JSONL 的每秒速率按 30 秒窗口内的实际字节数计算。
+停压后的输出用于 15 秒排空验收。
 历史 JS 兼容性尚未验证，Codex 选项暂时支持 main、dev 和 Rust release。
 高负载在 15 秒内交付不完时，已交付前缀仍须通过完整校验。若有未读源字节或
 能证明截止后已交付，保留资源结果并标为超出承载能力。低负载缺失与任何数据错误

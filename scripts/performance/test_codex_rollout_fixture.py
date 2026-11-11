@@ -5,7 +5,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from codex_history import await_turns, capacity_result
+from codex_history import await_turns, capacity_result, configure_codex
 from codex_rollout_fixture import CodexRolloutFixture, USAGE, validate_output
 
 
@@ -58,6 +58,17 @@ class CodexRolloutFixtureTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.fixture = CodexRolloutFixture(self.directory.name, sessions=2)
+
+    def test_codex_collection_poll_is_independent_of_sample_cadence(self):
+        for poll_ms in (100, 10_000):
+            with self.subTest(poll_ms=poll_ms), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = CodexRolloutFixture(root, sessions=1)
+                configure_codex(fixture, root / "output", poll_ms)
+                config = json.loads((fixture.data / "config.json").read_text(encoding="utf-8"))
+                self.assertEqual(config["listeners"]["codex-transcript"],
+                                 {"enabled": True, "pollInterval": poll_ms})
+                self.assertFalse(config["listeners"]["qoder-trace"]["enabled"])
 
     def test_raw_rollout_and_wakeup_have_expected_shapes(self):
         session, path, _ = self.fixture.sessions[0]

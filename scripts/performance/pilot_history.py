@@ -25,6 +25,7 @@ import uuid
 
 from native_qoder_fixture import Fixture, compact, monotonic_ns
 from legacy_qoder_fixture import LegacyFixture
+from prepare_public import QODER_MIXED_METHOD
 from linux_cgroup import cpu_usage_ns, locate as locate_cgroup
 from runtime_layout import resolve as resolve_layout
 
@@ -143,6 +144,16 @@ class Output:
     def __init__(self, directory):
         self.directory, self.offsets, self.records = Path(directory), {}, []
         self.responses = set()
+
+    def bytes_written(self):
+        sizes = {}
+        for path in self.directory.glob("*.jsonl"):
+            try:
+                identity = path.stat()
+            except FileNotFoundError:
+                continue  # a concurrent rename will be counted at its destination
+            sizes[(identity.st_dev, identity.st_ino)] = identity.st_size
+        return sum(sizes.values())
 
     def read(self, final=False):
         for path in sorted(self.directory.glob("*.jsonl")):
@@ -376,10 +387,12 @@ def wait_for_legacy_input(fixture, deadline):
 def run_round(args, directory, load, rate, repeat, smoke=False):
     directory.mkdir(parents=True)
     legacy = args.layout.get("collection") == "legacy-stop"
-    standard = args.benchmark_method == STANDARD_METHOD
+    standard = args.benchmark_method in (STANDARD_METHOD, QODER_MIXED_METHOD)
+    mixed = args.benchmark_method == QODER_MIXED_METHOD
+    poll_ms = LEGACY_POLL_MS if not standard or (mixed and load == "high") else STANDARD_POLL_MS
     fixture = (LegacyFixture if legacy else Fixture)(directory, sessions=SESSION_COUNT)
     output = Output(directory / "output")
-    configure(fixture, output.directory, STANDARD_POLL_MS if standard else LEGACY_POLL_MS)
+    configure(fixture, output.directory, poll_ms)
     if legacy:
         shutil.copytree(str(args.package / "assets/hooks"), str(fixture.data / "hooks"))
     name = "pilot-native-perf-" + uuid.uuid4().hex
@@ -446,6 +459,8 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         time.sleep(1)
         first = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(first)
+        raw_start = fixture.raw_bytes
+        output_start = output.bytes_written() if mixed else 0
         start = time.monotonic(); end = start + WINDOW_SECONDS
         produced, next_sample = 0, start + SAMPLE_INTERVAL if standard else start
         while time.monotonic() < end:
@@ -462,6 +477,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                 output.read()
                 next_sample = now + SAMPLE_INTERVAL
             time.sleep(.001 if rate else .02)
+        output_end = output.bytes_written() if mixed else 0
         active_end = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(active_end)
         active_sampling = standard_resource_sampling(samples) if standard else {}
@@ -524,6 +540,9 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             result["capacity"] = capacity
         if standard:
             result.update(active_sampling, prewarmed_sessions=len(warm))
+        if mixed:
+            result.update(throughput(fixture.raw_bytes - raw_start, output_end - output_start,
+                                     active_wall, poll_ms))
         return result
     finally:
         if legacy:
@@ -563,6 +582,14 @@ def standard_resource_sampling(samples):
             "rss_mib": max(sample["rss_bytes"] for sample in samples) / 1_048_576}
 
 
+def throughput(raw_bytes, output_bytes, active_wall, poll_ms):
+    if raw_bytes < 0 or output_bytes < 0 or not math.isfinite(active_wall) or active_wall <= 0:
+        raise RuntimeError("invalid active-window throughput measurement")
+    return {"raw_input_bytes": raw_bytes, "jsonl_output_bytes": output_bytes,
+            "raw_input_bytes_per_second": raw_bytes / active_wall,
+            "jsonl_output_bytes_per_second": output_bytes / active_wall, "poll_interval_ms": poll_ms}
+
+
 def summarize_workload(rounds, load):
     capacity_rounds = [round_["capacity"] for round_ in rounds if "capacity" in round_]
     quality = {"passed": not capacity_rounds,
@@ -581,6 +608,13 @@ def summarize_workload(rounds, load):
         result["cpu_peak_percent"] = summary([round_["cpu_peak_percent"] for round_ in rounds])
     if rounds and all("rss_average_mib" in round_ for round_ in rounds):
         result["rss_average_mib"] = summary([round_["rss_average_mib"] for round_ in rounds])
+    if rounds and "poll_interval_ms" in rounds[0]:
+        cadence = {round_["poll_interval_ms"] for round_ in rounds}
+        if len(cadence) != 1:
+            raise RuntimeError("workload polling cadence changed between rounds")
+        result["poll_interval_ms"] = cadence.pop()
+        for field in ("raw_input_bytes_per_second", "jsonl_output_bytes_per_second"):
+            result[field] = summary([round_[field] for round_ in rounds])
     return result
 
 
@@ -608,7 +642,7 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--source-repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--source-ref", default="main")
-    parser.add_argument("--benchmark-method", choices=(METHOD, STANDARD_METHOD), default=METHOD)
+    parser.add_argument("--benchmark-method", choices=(METHOD, STANDARD_METHOD, QODER_MIXED_METHOD), default=QODER_MIXED_METHOD)
     parser.add_argument("--smoke-only", action="store_true", help="Functional64-source check only; never emits node.json")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,7 @@
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}button,input{font:inherit}button,a,input{accent-color:var(--blue)}button{cursor:pointer}a{color:var(--blue);text-decoration-thickness:1px;text-underline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid #82b6ee;outline-offset:3px}
 .page{max-width:1560px;margin:auto;padding:38px 30px 42px}.eyebrow{font-size:11px;letter-spacing:.13em;font-weight:750;color:var(--blue)}h1{font-size:clamp(27px,4vw,40px);letter-spacing:-.035em;line-height:1.15;margin:11px 0 13px}h2,h3,p{margin:0}.intro{max-width:780px;color:var(--muted);font-size:15px}.topline{display:flex;align-items:center;justify-content:space-between;gap:16px}.repo{font-size:12px;word-break:break-word;color:var(--muted)}.facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:27px 0 19px}.fact{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px 16px;min-width:0}.fact dt{font-size:11px;color:var(--muted);margin-bottom:5px}.fact dd{margin:0;font-size:15px;font-weight:650;overflow-wrap:anywhere}.fact .small{font-size:12px;font-weight:500}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:0 0 21px}.tools{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.tools label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}button{border:1px solid #cbd8e1;border-radius:8px;background:#fff;padding:7px 11px;color:var(--ink);font-size:12px}.legend{display:flex;gap:15px;flex-wrap:wrap;color:var(--muted);font-size:11px}.legend span{display:inline-flex;gap:6px;align-items:center}.dot{width:7px;height:7px;display:inline-block;border-radius:50%;background:var(--blue)}.range{height:14px;border-left:2px solid #84a8ce;display:inline-block}.hollow{background:transparent;border:1.5px solid #81919e}.notice{border-left:3px solid #759abf;background:#e9f0f7;padding:11px 14px;margin:0 0 19px;border-radius:0 8px 8px 0;color:#36526a;font-size:12px}.notice[hidden]{display:none}.error{border-color:var(--red);background:#f8edef;color:#713c42}
-.load{margin-top:24px}.load-heading{display:flex;gap:12px;align-items:baseline;margin-bottom:9px}.load h2{font-size:16px;font-weight:750}.load-heading p{font-size:12px;color:var(--muted)}.charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.chart{min-width:0;background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.chart-head{padding:16px 18px 7px;display:flex;justify-content:space-between;gap:15px;align-items:baseline}.chart h3{font-size:13px;font-weight:700}.unit{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}.last{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.scroll{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}.scroll svg{display:block;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.empty{height:232px;display:flex;align-items:center;justify-content:center;color:#8b98a2;font-size:13px;margin:12px 18px 16px;border:1px dashed #dfe6eb;border-radius:10px;background:linear-gradient(180deg,#fafcfd,#fff)}.chart-note{color:var(--muted);font-size:10px;padding:0 18px 12px}.gridline{stroke:#e7edf1;stroke-width:1}.axis{fill:#7c8b96;font-size:10px}.version-label{fill:#516571;font-size:10px}.active-version{fill:var(--blue);font-weight:750}.series{stroke:var(--blue);stroke-width:2;fill:none}.whisker{stroke:#8daed0;stroke-width:2}.point{fill:var(--blue);stroke:#fff;stroke-width:2}.partial{fill:#fff;stroke:var(--blue);stroke-dasharray:2 2}.point-target{cursor:crosshair;outline:none}.point-target:focus .point,.point-target:hover .point{stroke:#123f75;stroke-width:3}.point-target:focus .status-mark,.point-target:hover .status-mark{stroke:var(--blue);stroke-width:2}.point-target:focus .focus-ring{stroke:#8cb6e1;stroke-width:2;fill:#2466b018}.focus-ring{fill:transparent;stroke:transparent}.status-mark{fill:#fff;stroke:#96a5b0;stroke-width:1.3}.status-text{fill:#8a98a1;font-size:9px}.failed-mark{stroke:#ad6166}.capacity-point{fill:var(--orange)}.capacity-label{fill:var(--orange)}.tip-sub.capacity-label{color:var(--orange)}.value-label{fill:#3e5669;font-size:10px}.delta-down{fill:var(--green)}.delta-up{fill:var(--orange)}.delta-flat{fill:#697b88}.compact-hidden .compact-label{display:none}
+.load{margin-top:24px}.load-heading{display:flex;gap:12px;align-items:baseline;margin-bottom:9px}.load h2{flex:none;font-size:16px;font-weight:750}.load-heading p{font-size:12px;color:var(--muted)}.charts{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.chart{min-width:0;background:#fff;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}.chart-head{padding:16px 18px 7px;display:flex;justify-content:space-between;gap:15px;align-items:baseline}.chart h3{font-size:13px;font-weight:700}.unit{font-size:11px;font-weight:400;color:var(--muted);margin-left:7px}.last{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.scroll{overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:thin}.scroll svg{display:block;font:11px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}.empty{height:232px;display:flex;align-items:center;justify-content:center;color:#8b98a2;font-size:13px;margin:12px 18px 16px;border:1px dashed #dfe6eb;border-radius:10px;background:linear-gradient(180deg,#fafcfd,#fff)}.chart-note{color:var(--muted);font-size:10px;padding:0 18px 12px}.gridline{stroke:#e7edf1;stroke-width:1}.axis{fill:#7c8b96;font-size:10px}.version-label{fill:#516571;font-size:10px}.active-version{fill:var(--blue);font-weight:750}.series{stroke:var(--blue);stroke-width:2;fill:none}.whisker{stroke:#8daed0;stroke-width:2}.point{fill:var(--blue);stroke:#fff;stroke-width:2}.partial{fill:#fff;stroke:var(--blue);stroke-dasharray:2 2}.point-target{cursor:crosshair;outline:none}.point-target:focus .point,.point-target:hover .point{stroke:#123f75;stroke-width:3}.point-target:focus .status-mark,.point-target:hover .status-mark{stroke:var(--blue);stroke-width:2}.point-target:focus .focus-ring{stroke:#8cb6e1;stroke-width:2;fill:#2466b018}.focus-ring{fill:transparent;stroke:transparent}.status-mark{fill:#fff;stroke:#96a5b0;stroke-width:1.3}.status-text{fill:#8a98a1;font-size:9px}.failed-mark{stroke:#ad6166}.capacity-point{fill:var(--orange)}.capacity-label{fill:var(--orange)}.tip-sub.capacity-label{color:var(--orange)}.value-label{fill:#3e5669;font-size:10px}.delta-down{fill:var(--green)}.delta-up{fill:var(--orange)}.delta-flat{fill:#697b88}.compact-hidden .compact-label{display:none}
 .foot{border-top:1px solid var(--line);margin-top:29px;padding-top:17px;color:var(--muted);font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px 32px}.foot strong{color:#3b5261;font-weight:600}.foot p+p{margin-top:6px}.source-note{grid-column:1/-1;font-size:10px;overflow-wrap:anywhere}#tooltip{position:fixed;z-index:10;width:min(380px,calc(100vw - 24px));background:#fff;border:1px solid #cbd9e4;border-radius:12px;box-shadow:0 10px 40px #18354b29;padding:16px;color:var(--ink);font-size:12px;overflow-wrap:anywhere;max-height:calc(100vh - 24px);overflow-y:auto}#tooltip[hidden]{display:none}.tip-title{font-size:14px;font-weight:750;line-height:1.4}.tip-sub{color:var(--muted);font-size:11px;margin-top:3px}.tip-value{font-size:25px;font-weight:750;letter-spacing:-.035em;margin-top:9px;font-variant-numeric:tabular-nums}.tip-delta{font-size:12px;margin:2px 0 11px}.tip-delta.down{color:var(--green)}.tip-delta.up{color:var(--orange)}.tip-delta.muted{color:var(--muted)}.tip-rows{display:grid;grid-template-columns:84px 1fr;gap:5px 9px;margin:10px 0 0;padding-top:10px;border-top:1px solid var(--line)}.tip-rows dt{color:var(--muted)}.tip-rows dd{margin:0;font-variant-numeric:tabular-nums}.tip-link{display:block;margin-top:12px;font-size:11px}.tip-hint{font-size:10px;color:var(--muted);margin-top:8px}.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .tip-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:9px 0 4px}.tip-stat-label{color:var(--muted);font-size:11px}.tip-values .tip-value{margin-top:0;line-height:1.25}
 @media(min-width:1100px){.chart-head{padding-top:18px}.load{margin-top:27px}}
@@ -31,7 +31,7 @@
     <dl class="facts" id="facts">
       <div class="fact"><dt>展示节点</dt><dd id="node-count">等待记录</dd></div>
       <div class="fact"><dt>最新节点</dt><dd id="latest-node">待测</dd></div>
-      <div class="fact"><dt id="method-label">测试对象</dt><dd class="small"><select id="method-select" class="method-select" aria-labelledby="method-label"><option value="github-full-pilot-qoder-native-10s-v1">Qoder</option><option value="github-full-pilot-codex-rollout-10s-v1">Codex</option></select><span class="method-sampling">预热 64 个会话 · CPU 与 RSS 每 100 ms 采样</span></dd></div>
+      <div class="fact"><dt id="method-label">测试对象</dt><dd class="small"><select id="method-select" class="method-select" aria-labelledby="method-label"><option value="qoder">Qoder</option><option value="codex">Codex</option></select><span class="method-sampling">预热 64 个会话 · CPU 与 RSS 每 100 ms 采样</span></dd></div>
       <div class="fact"><dt>最后更新 · UTC</dt><dd id="updated" class="small">暂无记录</dd></div>
     </dl>
   </header>
@@ -54,10 +54,13 @@
 "use strict";
 (() => {
   const NS = "http://www.w3.org/2000/svg";
-  const LOADS = [{id:"idle",name:"空闲",rate:0},{id:"low",name:"低负载",rate:10},{id:"high",name:"高负载",rate:200}];
+  const LOADS = [{id:"idle",name:"空闲"},{id:"low",name:"低负载"},{id:"high",name:"高负载"}];
   const CPU = {id:"cpu_percent",name:"CPU",averageName:"CPU 平均",peakId:"cpu_peak_percent",peakName:"CPU 峰值",unit:"%",digits:2};
   const RSS_AVERAGE = {id:"rss_average_mib",name:"内存",averageName:"平均内存",peakId:"rss_mib",peakName:"峰值内存",unit:"MiB",digits:1};
-  const STANDARD_QODER = "github-full-pilot-qoder-native-10s-v1";
+  const SUBJECT_METHODS = {
+    qoder: ["github-full-pilot-qoder-native-v2","github-full-pilot-qoder-native-10s-v1"],
+    codex: ["github-full-pilot-codex-rollout-v2","github-full-pilot-codex-rollout-10s-v1"],
+  };
   const STATUS = {passed:"已通过",pending:"待测试",failed:"未通过"};
   const byId = id => document.getElementById(id);
   const tip = byId("tooltip");
@@ -311,6 +314,36 @@
     }
     return card;
   }
+  function bytesPerSecond(value) {
+    if (!Number.isFinite(value) || value < 0) return null;
+    if (value >= 1048576) return number(value / 1048576, 2) + " MiB/s";
+    if (value >= 1024) return number(value / 1024, 2) + " KiB/s";
+    return number(value, value % 1 === 0 ? 0 : 2) + " B/s";
+  }
+  function workloadHeading(method, load, historyNodes) {
+    const workload = method?.loads?.[load.id];
+    const details = [];
+    if (Number.isFinite(workload?.turns_per_second)) details.push(workload.turns_per_second + " 轮/秒");
+    const latest = historyNodes.findLast(node => node.status === "passed" && node.workloads?.[load.id]);
+    const measured = latest?.workloads[load.id];
+    const input = bytesPerSecond(measured?.raw_input_bytes_per_second?.median);
+    const output = bytesPerSecond(measured?.jsonl_output_bytes_per_second?.median);
+    if (input !== null) details.push("原始 transcript " + input);
+    if (output !== null) details.push("采集 JSONL " + output);
+    const previousMethod = method?.id === SUBJECT_METHODS.qoder[1] || method?.id === SUBJECT_METHODS.codex[1];
+    const poll = workload?.poll_interval_ms ?? (previousMethod ? method.poll_interval_ms : null);
+    if (Number.isFinite(poll) && poll > 0) {
+      details.push("轮询 " + (poll % 1000 === 0 ? poll / 1000 + " 秒" : poll + " ms"));
+    }
+    const heading = text("div","","load-heading");
+    heading.append(text("h2",load.name));
+    if (details.length) {
+      const description = text("p",details.join(" · "));
+      if (input !== null || output !== null) description.title = "吞吐量来自 " + label(latest) + " 的三轮中位数";
+      heading.append(description);
+    }
+    return heading;
+  }
   function render(payload,source) {
     const preview=payload?.temporary_preview;
     usingPreview=!!(preview?.schema===1 && preview.kind==="temporary_preview" && Array.isArray(preview.rows) && preview.rows.some(row=>payload.nodes.some(node=>node.id===row.id && node.status!=="passed")));
@@ -330,8 +363,7 @@
     const target=byId("charts"); target.replaceChildren();
     const metrics = [CPU, RSS_AVERAGE];
     for(const load of LOADS) {
-      const section=text("section","","load"), heading=text("div","","load-heading");
-      heading.append(text("h2",load.name),text("p",(payload.method?.loads?.[load.id]?.turns_per_second ?? load.rate)+" 轮/秒"));
+      const section=text("section","","load"), heading=workloadHeading(payload.method,load,nodes);
       const charts=text("div","","charts"); metrics.forEach(metric=>charts.append(drawChart(load,metric))); section.append(heading,charts); target.append(section);
     }
     requestAnimationFrame(()=>document.querySelectorAll(".scroll").forEach(element=>{element.scrollLeft=element.scrollWidth;}));
@@ -346,18 +378,20 @@
   function renderMethods(payload, source) {
     const select = byId("method-select");
     const showSelected = () => {
-      const selected = select.value;
-      if (payload.method?.id === selected) {
+      const methods = SUBJECT_METHODS[select.value] ?? [];
+      const candidates = methods.map(id => payload.method?.id === id ? payload : payload.other_methods?.[id]);
+      const series = candidates.find(value => value?.nodes.some(node => node.status === "passed"))
+        ?? candidates.find(Boolean);
+      if (series === payload) {
         render(payload, source);
         return;
       }
-      const series = payload.other_methods?.[selected];
       render({
         schema: payload.schema, repository: payload.repository, configuration: payload.configuration,
         method: series?.method, nodes: series?.nodes ?? [], updated_at: series?.updated_at,
       }, source);
     };
-    select.value = STANDARD_QODER;
+    select.value = "qoder";
     select.onchange = showSelected;
     showSelected();
   }
