@@ -2,7 +2,7 @@ name: Full Pilot performance history
 
 on:
   push:
-    branches: [main, dev/v2.0.0, codex/cloudshell-sdk-20261107]
+    branches: [main, dev/v2.0.0]
   pull_request:
     branches: [main, dev/v2.0.0]
   release:
