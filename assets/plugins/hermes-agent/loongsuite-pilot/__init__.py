@@ -442,6 +442,21 @@ def _report_internal_error(operation: str, error: Exception) -> None:
         pass
 
 
+def _capture_message_content(config: Dict[str, Any]) -> bool:
+    agents = config.get("agents")
+    if not isinstance(agents, dict):
+        return True
+    agent_config = agents.get("hermes-agent")
+    if not isinstance(agent_config, dict):
+        agent_config = agents.get("hermes")
+    if not isinstance(agent_config, dict):
+        return True
+    value = agent_config.get("captureMessageContent")
+    if value is False:
+        return False
+    return not (isinstance(value, str) and value.strip().lower() == "false")
+
+
 def _hostname() -> str:
     try:
         return socket.gethostname() or "unknown"
@@ -799,6 +814,7 @@ def _new_turn(
         "user_id": user_identity["user_id"],
         "user_id_source": user_identity["source"],
         "sender_id": normalized_sender_id,
+        "capture_content": _capture_message_content(config),
         "user_message": user_message if isinstance(user_message, str) else str(user_message or ""),
         # None means the initial history boundary was not observed. Do not
         # confuse an empty snapshot with a known first-message boundary.
@@ -920,7 +936,7 @@ def _numeric(value: Any) -> Optional[int]:
     return None
 
 
-def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _tool_calls(message: Dict[str, Any], capture_content: bool) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     calls = message.get("tool_calls")
     if not isinstance(calls, list):
@@ -936,13 +952,13 @@ def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
             "id": str(call_id) if call_id else None,
             "name": str(name),
         }
-        if "arguments" in function:
+        if capture_content and "arguments" in function:
             part["arguments"] = _bounded_value(_decode_json(function.get("arguments")))
         output.append(part)
     return output
 
 
-def _message(message: Any) -> Optional[Dict[str, Any]]:
+def _message(message: Any, capture_content: bool) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "unknown")
@@ -951,7 +967,7 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
 
     if role == "tool":
         call_id = message.get("tool_call_id") or message.get("call_id")
-        response = _bounded_value(_decode_json(content))
+        response = _bounded_value(_decode_json(content)) if capture_content else ""
         parts.append({
             "type": "tool_call_response",
             "id": str(call_id) if call_id else None,
@@ -960,21 +976,21 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     else:
         if isinstance(content, str):
             if content or not message.get("tool_calls"):
-                parts.append({"type": "text", "content": _truncate(content)})
+                parts.append({"type": "text", "content": _truncate(content) if capture_content else ""})
         elif isinstance(content, list):
             for item in content[:MAX_PARTS]:
                 if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
                     text = item.get("text", item.get("content", ""))
                     parts.append({
                         "type": "text",
-                        "content": _truncate(str(text or "")),
+                        "content": _truncate(str(text or "")) if capture_content else "",
                     })
         elif content is not None:
             parts.append({
                 "type": "text",
-                "content": _truncate(str(content)),
+                "content": _truncate(str(content)) if capture_content else "",
             })
-        parts.extend(_tool_calls(message))
+        parts.extend(_tool_calls(message, capture_content))
 
     if not parts:
         parts.append({"type": "text", "content": ""})
@@ -985,10 +1001,10 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     return output
 
 
-def _messages(messages: List[Any]) -> List[Dict[str, Any]]:
+def _messages(messages: List[Any], capture_content: bool) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     for item in messages[-MAX_TURN_MESSAGES:]:
-        converted = _message(item)
+        converted = _message(item, capture_content)
         if converted is not None:
             output.append(converted)
     return output
@@ -1272,6 +1288,7 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
+    capture = bool(turn["capture_content"])
     _capture_turn_input(turn, messages)
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
@@ -1280,7 +1297,7 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         if positions:
             delta_start = positions[-1]
     pre = api.get("pre") or {}
-    inputs = _messages(messages)
+    inputs = _messages(messages, capture)
     record = _common_fields(turn, state, "llm.request", api["pre_ns"], step_id, api["span_id"])
     record.update({
         "gen_ai.provider.name": _provider_name(pre.get("provider")),
@@ -1288,12 +1305,14 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         "gen_ai.response.id": response_id,
         "gen_ai.request.model": pre.get("model") or turn.get("model") or "unknown",
         "gen_ai.input.messages": inputs,
-        "gen_ai.input.messages_delta": _messages(messages[delta_start:]),
+        "gen_ai.input.messages_delta": _messages(messages[delta_start:], capture),
         "gen_ai.input.messages_hash": hashlib.sha256(
             json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "agent.hermes.hook": "pre_api_request",
     })
     for key in ("tool_definitions", "system_instructions"):
+        if not capture:
+            continue
         if pre.get(key):
             record["gen_ai.tool.definitions" if key == "tool_definitions" else "gen_ai.system_instructions"] = pre[key]
     _write_new_records(turn, [record])
@@ -1314,6 +1333,7 @@ def _build_records(
         index for index, message in enumerate(current_messages)
         if message.get("role") == "assistant"
     ]
+    capture = bool(turn["capture_content"])
     turn_id = _turn_id(turn)
     records: List[Dict[str, Any]] = []
     tool_step: Dict[str, int] = {}
@@ -1366,7 +1386,7 @@ def _build_records(
         if isinstance(known_assistant, dict):
             assistant_message = known_assistant
 
-        for call in _tool_calls(assistant_message):
+        for call in _tool_calls(assistant_message, capture):
             call_id = call.get("id")
             if call_id:
                 tool_step[str(call_id)] = index
@@ -1377,9 +1397,9 @@ def _build_records(
         # System instructions are provider configuration, not turn messages.
         # Keep them in their dedicated field so they do not alter the existing
         # input, delta, or input-hash semantics.
-        input_messages = _messages(input_source)
-        input_delta = _messages(delta_source)
-        output_message = _message(assistant_message)
+        input_messages = _messages(input_source, capture)
+        input_delta = _messages(delta_source, capture)
+        output_message = _message(assistant_message, capture)
         provider = _provider_name(post.get("provider") or pre.get("provider"))
         request_model = str(pre.get("model") or post.get("model") or turn.get("model") or session_state.get("model") or "unknown")
         response_model = str(post.get("response_model") or post.get("model") or request_model)
@@ -1401,9 +1421,9 @@ def _build_records(
                 json.dumps(input_messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest(),
         })
-        if isinstance(tool_definitions, list) and tool_definitions:
+        if capture and isinstance(tool_definitions, list) and tool_definitions:
             request["gen_ai.tool.definitions"] = tool_definitions
-        if isinstance(system_instructions, list) and system_instructions:
+        if capture and isinstance(system_instructions, list) and system_instructions:
             request["gen_ai.system_instructions"] = system_instructions
         records.append(request)
 
@@ -1426,7 +1446,11 @@ def _build_records(
         error_type = post.get("error_type")
         if error_type:
             response["error.type"] = str(error_type)
-            response["error.message"] = str(post.get("error_message") or "provider request failed")
+            response["error.message"] = (
+                str(post.get("error_message") or "provider request failed")
+                if capture
+                else "provider request failed"
+            )
             status_code = _numeric(post.get("status_code"))
             if status_code is not None:
                 response["http.status_code"] = status_code
@@ -1464,7 +1488,7 @@ def _build_records(
             "gen_ai.tool.call.id": call_id,
             "gen_ai.tool.call.exec.id": call_id,
         })
-        if "args" in tool:
+        if capture and "args" in tool:
             call["gen_ai.tool.call.arguments"] = tool["args"]
         call.update(tool.get("skill_attributes") or {})
         records.append(call)
@@ -1487,7 +1511,7 @@ def _build_records(
             "gen_ai.tool.call.duration": duration_ms,
             "tool.result.status": tool.get("status") or "success",
         })
-        if "result" in tool:
+        if capture and "result" in tool:
             result["gen_ai.tool.call.result"] = tool["result"]
         result.update(tool.get("skill_attributes") or {})
         records.append(result)
@@ -1610,8 +1634,16 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
-            "tool_definitions": _tool_definitions(payload.get("request")),
-            "system_instructions": _system_instructions(payload.get("request")),
+            "tool_definitions": (
+                _tool_definitions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
+            "system_instructions": (
+                _system_instructions(payload.get("request"))
+                if turn["capture_content"]
+                else []
+            ),
         },
         "post": {},
     }
@@ -1750,7 +1782,8 @@ def _handle_pre_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
                 payload.get("tool_name"), payload.get("args")
             ),
         }
-        tool["args"] = _bounded_value(payload.get("args"))
+        if turn["capture_content"]:
+            tool["args"] = _bounded_value(payload.get("args"))
         turn["tools"][call_id] = tool
         _write_new_records(turn, _build_records(turn, state, payload))
     if payload.get("tool_name") == "delegate_task":
@@ -1786,9 +1819,10 @@ def _handle_post_tool_call(now_ns: int, payload: Dict[str, Any]) -> None:
     duration_ms = _numeric(payload.get("duration_ms"))
     if duration_ms is not None:
         tool["duration_ms"] = duration_ms
-    if "args" not in tool:
-        tool["args"] = _bounded_value(payload.get("args"))
-    tool["result"] = _bounded_value(_decode_json(payload.get("result")))
+    if turn["capture_content"]:
+        if "args" not in tool:
+            tool["args"] = _bounded_value(payload.get("args"))
+        tool["result"] = _bounded_value(_decode_json(payload.get("result")))
     tool["skill_attributes"] = _skill_attributes(
         tool.get("tool_name"), payload.get("args"), payload.get("result")
     ) or tool.get("skill_attributes", {})

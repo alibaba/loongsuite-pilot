@@ -1,7 +1,9 @@
 import type { AgentActivityEntry, AgentConfig, AgentsConfig } from '../types/index.js';
 import { MULTIMODAL_SUPPORTED_AGENT_IDS } from '../types/index.js';
 
-const DEFAULT_CONFIG: AgentConfig = {};
+const DEFAULT_CONFIG: AgentConfig = {
+  captureMessageContent: true,
+};
 
 export function isMultimodalSupportedAgent(agentId: string): boolean {
   return (MULTIMODAL_SUPPORTED_AGENT_IDS as readonly string[]).includes(agentId);
@@ -23,7 +25,7 @@ export interface ResolvedAgentConfig {
 
 /**
  * Resolve per-agent policy for an activity entry.
- * Shared by agent-specific processors such as multimodal collection.
+ * Shared by content policy and multimodal processor.
  */
 export function resolveAgentConfig(
   entry: AgentActivityEntry,

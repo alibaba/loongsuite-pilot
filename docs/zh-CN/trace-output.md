@@ -340,7 +340,7 @@ Pilot 会在 OTLP Trace 的两个层级上记录 Token 用量：
 
 ## Trace 中的内容采集
 
-Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。历史 `captureMessageContent` 配置会被忽略；敏感或团队统一管理的环境建议开启脱敏：
+Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感内容。敏感或团队统一管理的环境建议开启脱敏：
 
 ```json
 {
@@ -351,8 +351,6 @@ Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感�
 ```
 
 完整规则和边界见[数据脱敏](masking.md)。
-
-Pilot 将转换器的 `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` 固定为 `SPAN_ONLY`，并在保留其他取值的基础上把 `gen_ai_latest_experimental` 加入 `OTEL_SEMCONV_STABILITY_OPT_IN`。继承的 `NO_CONTENT` 等 SDK 配置也不再关闭 Pilot Trace 中的内容。
 
 ## 自定义 Span 属性
 

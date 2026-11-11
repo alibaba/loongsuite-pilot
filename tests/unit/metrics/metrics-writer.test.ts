@@ -462,7 +462,7 @@ describe('MetricsWriter', () => {
     expect(hasManagedLogFile(metricDir, 'pilot-hook-metrics')).toBe(false);
   });
 
-  it('keeps capture_message_disabled_agents empty for compatibility', async () => {
+  it('includes capture_message_disabled_agents in L1 metrics', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,
       version: '2.0.0',
@@ -481,7 +481,7 @@ describe('MetricsWriter', () => {
     const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
     const entry = JSON.parse(lines[0]);
 
-    expect(entry.capture_message_disabled_agents).toBe('');
+    expect(entry.capture_message_disabled_agents).toBe('qoder');
   });
 
   describe('process resource thresholds', () => {

@@ -117,7 +117,7 @@ Important files and directories:
 
 - Install Pilot with [Installation](installation.md).
 - Configure outputs and agent selection in [Configuration Guide](configuration.md).
-- Choose agents and content capture policy in [Agent Configuration](agents.md).
+- Choose agents in [Agent Configuration](agents.md).
 - Configure local output in [Local JSONL Output](local-jsonl-output.md).
 - Configure SLS reporting in [SLS Output](sls-output.md).
 - Configure trace reporting in [Trace Output](trace-output.md).

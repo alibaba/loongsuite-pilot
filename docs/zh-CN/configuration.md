@@ -19,7 +19,7 @@ Pilot 按以下顺序解析配置：
 
 - 全局 `multimodal` 按整块选择。用户写了该字段，就不从托管配置补存储目标或凭据；用户未写时才使用托管配置。选中用户块后，仍按下文规则判断能否复用用户自己的 SLS `apiKey` 目标。
 - `agents` 按 Agent 名合并，用户字段覆盖托管默认值；其中 `multimodal` 子对象按字段浅合并。例如用户只改 `uploadMode`，可保留托管配置的 `allowedRootPaths`。
-- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 `enabled` 或 `captureMessageContent`。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
+- 托管端的 `agents.<id>` 只能设置 `multimodal`，不能设置 Agent 启停。只配置某个 Agent 的多模态设置不会限制其他已发现 Agent 的默认采集；用户可以在 `config.json` 中用 `enabled: false` 关闭指定 Agent。
 
 ## 常用全局配置
 
@@ -30,7 +30,7 @@ Pilot 按以下顺序解析配置：
   "userId": "your-user-id",
   "collectLog": true,
   "collectTrace": true,
-  "dashboard": { "port": 8765 },
+  "dashboard": { "enabled": false, "port": 8765 },
   "serviceName": "my-agent-service",
   "interceptor": { "mode": "none" }
 }
@@ -43,7 +43,8 @@ Pilot 按以下顺序解析配置：
 | `userId` | 写入输出事件的用户标识，默认使用机器 hostname。 |
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
-| `dashboard.port` | 本机 Dashboard 端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
+| `dashboard.enabled` | 本地 Dashboard 开关，仅布尔值 `true` 启用；未填写或其他值均关闭。 |
+| `dashboard.port` | 启用后的本机端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
 | `serviceNamePrefix` | 兼容原有行为的服务名基础值。未设置 `serviceName` 时，各 Agent 以 `<serviceNamePrefix>-<agentType>` 上报。 |
 | `interceptor` | 本地拦截。格式与 `mask` 相同（`mode` + `types`），`types` 为 mask 类型的密钥子集。详见 [本地拦截](interceptor.md)。 |

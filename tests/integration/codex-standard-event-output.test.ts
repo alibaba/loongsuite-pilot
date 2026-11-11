@@ -94,7 +94,7 @@ async function nativeAgentEvents(directory: string): Promise<AgentActivityEntry[
 }
 
 describe('Codex standard event output boundaries', () => {
-  it.each([true, false])('keeps content and identities across JSONL, HTTP and SLS despite legacy content=%s', async captureMessageContent => {
+  it.each([true, false])('applies content=%s across JSONL, HTTP and SLS while preserving identities', async captureMessageContent => {
     postLogs.mockClear();
     const directory = await mkdtemp(path.join(tmpdir(), 'pilot-codex-output-'));
     const received: Record<string, string>[][] = [];
@@ -148,7 +148,10 @@ describe('Codex standard event output boundaries', () => {
       const manager = new InputManager();
       manager.setAgentsConfig({ [ClientType.CodexCliHook]: { captureMessageContent } });
       const entries = manager.prepareRestoredEntries(rawEntries);
-      for (const field of contentFields) expect(entries[0][field]).toEqual(rawEntries[0][field]);
+      for (const field of contentFields) {
+        if (captureMessageContent) expect(entries[0][field]).toEqual(rawEntries[0][field]);
+        else expect(entries[0]).not.toHaveProperty(field);
+      }
       const expectedNames = entries.map(entry => entry['event.name']);
       // The existing agent.input compatibility path must not double-write standard events.
       const output = expandAgentInputEvents(entries);
@@ -176,19 +179,31 @@ describe('Codex standard event output boundaries', () => {
           for (const field of Object.keys(relationFields)) expect(logs[i][field]).toBe(entries[i][field]);
         }
       }
-      // JSON-native JSONL and string-only transports retain content despite the legacy opt-out.
+      // Every destination must receive the same content policy result.
       const activityLogs = postLogs.mock.calls.find(call => call[1] === 'activity')![2].logs;
       for (const field of contentFields) {
-        expect(jsonLogs[0][field]).toEqual(entries[0][field]);
-        expect(JSON.parse(received[0][0][field])).toEqual(entries[0][field]);
-        expect(JSON.parse(activityLogs[0].content[field])).toEqual(entries[0][field]);
+        if (captureMessageContent) {
+          expect(jsonLogs[0][field]).toEqual(entries[0][field]);
+          expect(JSON.parse(received[0][0][field])).toEqual(entries[0][field]);
+          expect(JSON.parse(activityLogs[0].content[field])).toEqual(entries[0][field]);
+        } else {
+          expect(jsonLogs[0]).not.toHaveProperty(field);
+          expect(received[0][0]).not.toHaveProperty(field);
+          expect(activityLogs[0].content).not.toHaveProperty(field);
+        }
       }
       for (const entry of native) {
         const index = entries.findIndex(item => item['event.id'] === entry['event.id']);
         const field = entry['event.name'] === 'gen_ai.agent.invoke' ? 'gen_ai.input.messages' : 'gen_ai.output.messages';
-        expect(jsonLogs[index][field]).toEqual(entry[field]);
-        expect(JSON.parse(received[0][index][field])).toEqual(entry[field]);
-        expect(JSON.parse(activityLogs[index].content[field])).toEqual(entry[field]);
+        if (captureMessageContent) {
+          expect(jsonLogs[index][field]).toEqual(entry[field]);
+          expect(JSON.parse(received[0][index][field])).toEqual(entry[field]);
+          expect(JSON.parse(activityLogs[index].content[field])).toEqual(entry[field]);
+        } else {
+          expect(jsonLogs[index]).not.toHaveProperty(field);
+          expect(received[0][index]).not.toHaveProperty(field);
+          expect(activityLogs[index].content).not.toHaveProperty(field);
+        }
       }
       const redacted = postLogs.mock.calls.find(call => call[1] === 'redacted')![2].logs;
       for (const { content } of redacted) {

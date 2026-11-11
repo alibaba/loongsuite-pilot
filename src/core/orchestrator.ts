@@ -470,16 +470,18 @@ export class Orchestrator extends EventEmitter {
     );
     this.metricsSummaryWriter.start();
 
-    // The local dashboard shares the collector lifecycle and is non-fatal when
+    // The opt-in dashboard shares the collector lifecycle and is non-fatal when
     // its loopback port is unavailable. It never opens the system browser.
-    this.dashboardServer = new DashboardServer({
-      dataDir: this.dataDir,
-      assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
-      port: this.config.dashboard.port,
-    });
-    await this.dashboardServer.start().catch(err => {
-      logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
-    });
+    if (this.config.dashboard.enabled) {
+      this.dashboardServer = new DashboardServer({
+        dataDir: this.dataDir,
+        assetPath: path.join(pilotDir, 'assets', 'dashboard', 'index.html'),
+        port: this.config.dashboard.port,
+      });
+      await this.dashboardServer.start().catch(err => {
+        logger.warn('dashboard start failed (non-fatal)', { error: String(err) });
+      });
+    }
 
     // Interceptor HTTP shares this process. A bind failure leaves hooks fail-open
     // and must not keep the collector from collecting.
@@ -498,7 +500,7 @@ export class Orchestrator extends EventEmitter {
       return null;
     });
 
-    // Only the native macOS menu bar app remains optional.
+    // The native macOS menu bar app has its own switch.
     if (this.config.statusBar.enabled) {
       if (process.platform === 'darwin') {
         this.statusBarAppManager = new StatusBarAppManager({ dataDir: this.dataDir, packageVersion });
@@ -1470,7 +1472,7 @@ export class Orchestrator extends EventEmitter {
     // --- Qoder Trace (sole Qoder collection path: merges hook JSONL, native
     // session segments and SQLite token usage into one turn-buffered trace) ---
     const qoderCliLogDir = path.join(this.dataDir, 'logs', 'qoder', 'history');
-    const qoderAgentCfg = this.config.agents.qoder ?? {};
+    const qoderAgentCfg = this.config.agents.qoder ?? { captureMessageContent: true };
     const qoderMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
@@ -1621,7 +1623,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Codex rollout transcript (completed and interrupted turns) ---
-    const codexAgentCfg = this.config.agents.codex ?? {};
+    const codexAgentCfg = this.config.agents.codex ?? { captureMessageContent: true };
     const codexMultimodalEnabled = !!this.multimodalProcessor
       && isAgentMultimodalEnabled('codex', codexAgentCfg);
     const codexWakeupDir = path.join(this.dataDir, 'state', 'codex', 'transcript-wakeups');

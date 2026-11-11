@@ -340,7 +340,7 @@ Use `config.json` when you need to enable or disable individual agents:
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, and `qwen-work-cn`).
+Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, and `qwen-work-cn`).
 
 Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 

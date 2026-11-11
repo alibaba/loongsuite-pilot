@@ -201,6 +201,30 @@ describe('opencode plugin session turnSeq persistence', () => {
     expect(requests[1]['gen_ai.input.messages_delta']).toBeTruthy();
   });
 
+  it('omits message and tool bodies from plugin JSONL when configured off', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-opencode-policy-'));
+    const previous = process.env.LOONGSUITE_PILOT_DATA_DIR;
+    fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+      agents: { opencode: { captureMessageContent: false } },
+    }));
+    process.env.LOONGSUITE_PILOT_DATA_DIR = dataDir;
+    try {
+      const records = await replayPluginFixture();
+      expect(records.filter(record => record['event.name'] === 'llm.request')).toHaveLength(5);
+      for (const record of records) {
+        for (const field of ['gen_ai.input.messages', 'gen_ai.input.messages_delta',
+          'gen_ai.output.messages', 'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result',
+          'gen_ai.system_instructions', 'error.message']) {
+          expect(record).not.toHaveProperty(field);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
+      else process.env.LOONGSUITE_PILOT_DATA_DIR = previous;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts invocation-scoped GenAI identity from env', async () => {
     process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES =
       'gen_ai.session.id=env-session,gen_ai.user.id=env-user,gen_ai.agent.name=blocked';

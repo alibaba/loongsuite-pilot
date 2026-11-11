@@ -47,26 +47,6 @@ import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../intercep
 
 const logger = createLogger('ConfigLoader');
 
-function warnIgnoredCaptureMessageContentConfig(file: ConfigFile): void {
-  const locations: string[] = [];
-  if (file.otlpTrace && Object.prototype.hasOwnProperty.call(file.otlpTrace, 'captureMessageContent')) {
-    locations.push('otlpTrace.captureMessageContent');
-  }
-  if (file.agents && typeof file.agents === 'object') {
-    for (const [agentType, policy] of Object.entries(file.agents)) {
-      if (policy && typeof policy === 'object'
-        && Object.prototype.hasOwnProperty.call(policy, 'captureMessageContent')) {
-        locations.push(`agents.${agentType}.captureMessageContent`);
-      }
-    }
-  }
-  if (locations.length > 0) {
-    logger.warn('captureMessageContent is deprecated and ignored; message content capture is always enabled', {
-      locations,
-    });
-  }
-}
-
 export interface SlsEndpointEntry {
   name?: string;
   endpoint: string;
@@ -217,7 +197,6 @@ export interface ConfigFile {
     resourceAttributes?: Record<string, string>;
     serviceName?: string;
     debug?: boolean;
-    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
@@ -226,7 +205,6 @@ export interface ConfigFile {
 
   agents?: Record<string, {
     enabled?: boolean;
-    /** @deprecated Ignored. Message content capture is always enabled. */
     captureMessageContent?: boolean | string;
     multimodal?: {
       uploadMode?: string;
@@ -254,6 +232,7 @@ export interface ConfigFile {
   enableStatusBarApp?: boolean | string;
 
   dashboard?: {
+    enabled?: boolean;
     port?: number;
   };
 
@@ -304,7 +283,6 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
   if (file) {
     logger.info('loaded config file', { path: configPath });
-    warnIgnoredCaptureMessageContentConfig(file);
   } else {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
@@ -635,8 +613,16 @@ function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, st
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
   if (!file?.otlpTrace) return undefined;
-  const { captureMessageContent: _ignored, ...config } = file.otlpTrace;
-  return config;
+  return { ...file.otlpTrace };
+}
+
+function parseOptionalBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return undefined;
 }
 
 function buildCmsConfig(file: ConfigFile | null): CmsConfig {
@@ -690,7 +676,7 @@ function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataCo
           logger.warn('Ignoring unsupported managed agent fields', { agentType, ignoredFields });
         }
       }
-      // Only user agent policies may supply enabled. Content capture is unconditional.
+      // Only user agent policies may supply enabled and captureMessageContent.
       const acceptedPolicy = managed ? { multimodal } : policy;
       const previous = policies[agentType];
       policies[agentType] = {
@@ -705,9 +691,11 @@ function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataCo
 
   const result: AgentsConfig = {};
   for (const [agentType, policy] of Object.entries(policies)) {
+    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
     const multimodal = buildAgentMultimodalConfig(agentType, policy.multimodal);
     result[agentType] = {
-      ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
+      enabled: policy.enabled,
+      captureMessageContent,
       ...(multimodal ? { multimodal } : {}),
     };
   }
@@ -929,7 +917,7 @@ function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
 }
 
 function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
-  // Accepts both '0' and 'false' to disable the status bar.
+  // Intentionally accepts '0' as false (differs from parseOptionalBool which only handles 'true'/'false').
   // This matches AI Trace's resolveStatusBarAppEnabled() semantics for cross-product consistency.
   const rawEnabled = file?.enableStatusBarApp;
   const fallback = typeof rawEnabled === 'string'
@@ -947,6 +935,7 @@ const DEFAULT_DASHBOARD_PORT = 8_765;
 function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
   const port = file?.dashboard?.port;
   return {
+    enabled: file?.dashboard?.enabled === true,
     port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
       ? port
       : DEFAULT_DASHBOARD_PORT,
@@ -976,7 +965,7 @@ function buildFlushersConfig(
  *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
  * Endpoints are deduped by normalized URL + license-key + project. Conversion
- * happens once; serviceName and resourceAttributes are
+ * happens once; serviceName / resourceAttributes / captureMessageContent are
  * therefore shared across all backends. Requires collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
@@ -1052,6 +1041,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   if (deduped.length === 0) return undefined;
 
   const otlp = config.otlpTrace;
+  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
   const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
@@ -1062,6 +1052,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     serviceName,
     appendAgentTypeToServiceName: config.serviceName ? false : undefined,
     resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
+    captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
@@ -1176,6 +1167,12 @@ function extractArmsProject(endpoint: string): string {
   } catch {
     return '';
   }
+}
+
+function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
+  const values = Object.values(agents);
+  if (values.length === 0) return true;
+  return values.every(a => a.captureMessageContent !== false);
 }
 
 function inferSlsMode(args: {
