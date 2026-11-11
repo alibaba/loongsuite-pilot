@@ -209,6 +209,31 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "statistic"):
             publisher.validate_node(value)
 
+    def test_fixed_qoder_cadence_and_drain_are_preserved(self):
+        directory = Path(__file__).resolve().parents[2] / "tests/performance_native"
+        method_id = publisher.QODER_FIXED_30S_METHOD
+        method = json.loads((directory / publisher.METHOD_FILES[method_id]).read_text())
+        value = node(version="v1.14.0")
+        value["method_id"] = method_id
+        for sample in value["workloads"].values():
+            sample.update(poll_interval_ms=30_000,
+                          cpu_peak_percent={"median": 4, "min": 3, "max": 5},
+                          rss_average_mib={"median": 19, "min": 18, "max": 20},
+                          raw_input_bytes_per_second=dict.fromkeys(("median", "min", "max"), 0),
+                          jsonl_output_bytes_per_second=dict.fromkeys(("median", "min", "max"), 0))
+        high = value["workloads"]["high"]
+        high["quality"] = {"passed": False, "validated_prefix": True, "missing": 20, "duplicates": 0}
+        high["capacity"] = {"drain_seconds": 45, "rounds": [{
+            "repeat": 1, "produced_turns": 6000, "completed_turns": 5990,
+            "missing_responses": 20, "backlog": {"pending_notices": 10},
+        }]}
+        data = history()
+        self.assertTrue(publisher.merge_method(data, method, value))
+        self.assertEqual(data["other_methods"][method_id]["nodes"][0]["workloads"]["high"]["poll_interval_ms"], 30_000)
+        high["capacity"]["drain_seconds"] = 15
+        with self.assertRaisesRegex(ValueError, "high-load drain evidence"):
+            publisher.validate_node(value)
+
     def test_trusted_codex_method_keeps_both_metrics_in_its_own_series(self):
         descriptor = Path(__file__).resolve().parents[2] / "tests/performance_native"
         method_id = publisher.CODEX_STANDARD_METHOD

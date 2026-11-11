@@ -57,6 +57,7 @@
   const LOADS = [{id:"idle",name:"空闲"},{id:"low",name:"低负载"},{id:"high",name:"高负载"}];
   const CPU = {id:"cpu_percent",name:"CPU",averageName:"CPU 平均",peakId:"cpu_peak_percent",peakName:"CPU 峰值",unit:"%",digits:2};
   const RSS_AVERAGE = {id:"rss_average_mib",name:"内存",averageName:"平均内存",peakId:"rss_mib",peakName:"峰值内存",unit:"MiB",digits:1};
+  const QODER_FIXED_30S = "github-full-pilot-qoder-stop-30s-v1";
   const SUBJECT_METHODS = {
     qoder: ["github-full-pilot-qoder-native-v2","github-full-pilot-qoder-native-10s-v1"],
     codex: ["github-full-pilot-codex-rollout-v2","github-full-pilot-codex-rollout-10s-v1"],
@@ -202,7 +203,16 @@
     if(valid && !node._preview && Number.isInteger(n)) tip.append(text("div",n+"轮 · 范围 "+valueText(s.min,metric)+" — "+valueText(s.max,metric),"tip-sub"));
     if (peak) tip.append(text("div", "峰值范围 " + valueText(peak.min, metric)
       + " — " + valueText(peak.max, metric), "tip-sub"));
-    const q=node.workloads?.[load.id]?.quality, limit=capacity(node,load.id);
+    const workload = node.workloads?.[load.id];
+    if (node.method_id === QODER_FIXED_30S) {
+      tip.append(text("div","旧版轮询 30 秒 · 排空 45 秒","tip-sub"));
+      const input = bytesPerSecond(workload?.raw_input_bytes_per_second?.median);
+      const output = bytesPerSecond(workload?.jsonl_output_bytes_per_second?.median);
+      if (input !== null && output !== null) {
+        tip.append(text("div","原始 transcript " + input + " · 采集 JSONL " + output,"tip-sub"));
+      }
+    }
+    const q=workload?.quality, limit=capacity(node,load.id);
     if(valid && limit) {
       tip.append(text("div","超出承载能力 · "+limit.rounds.length+"/"+n+" 轮","tip-sub capacity-label"));
       const completed=limit.rounds.reduce((total,round)=>total+round.completed_turns,0);
@@ -254,16 +264,18 @@
       plot.append(svg("line",{x1:left,y1:at,x2:W-right,y2:at,class:"gridline"}));
       svgText(axisPlot,number(value,Number.isInteger(value)?0:Number.isInteger(value*10)?1:2),{x:left-10,y:at+3,"text-anchor":"end",class:"axis"});
     }
-    let path="", connected=false;
-    nodes.forEach((node,index) => {
-      if(!usable(node,load.id,metric)) return;
-      path+=(connected?" L ":" M ")+x(index)+" "+y(stats(node,load.id,metric).median); connected=true;
-    });
-    let peakPath = "";
-    nodes.forEach((node, index) => {
-      const peak = peakStats(node, load.id, metric);
-      if (peak) peakPath += (peakPath ? " L " : " M ") + x(index) + " " + y(peak.median);
-    });
+    const pathFor = read => {
+      let path="", previousMethod=null;
+      nodes.forEach((node,index) => {
+        const values = read(node);
+        if (!values) return;
+        path += (previousMethod === node.method_id ? " L " : " M ") + x(index) + " " + y(values.median);
+        previousMethod = node.method_id;
+      });
+      return path;
+    };
+    const path = pathFor(node => usable(node,load.id,metric) && stats(node,load.id,metric));
+    const peakPath = pathFor(node => peakStats(node,load.id,metric));
     if (peakPath) plot.append(svg("path", {d: peakPath, class: "peak-series"}));
     if(path) plot.append(svg("path",{d:path,class:"series"}));
     const targets=[];
@@ -290,6 +302,9 @@
         svgText(group,node.status === "failed"?"未通过":node.status === "passed"?"无有效数据":"待测试",{x:at,y:bottom+35,"text-anchor":"middle",class:"status-text"});
       }
       svgText(plot,label(node),{x:at,y:237,"text-anchor":"middle",class:"version-label"+(node.kind !== "release"?" active-version":"")});
+      if (node.method_id === QODER_FIXED_30S) {
+        svgText(plot,"轮询 30 秒",{x:at,y:252,"text-anchor":"middle",class:"axis"});
+      }
       group.addEventListener("pointerenter",() => showTip(group,index,load,metric));
       group.addEventListener("click",() => { group.focus(); showTip(group,index,load,metric); });
       group.addEventListener("pointerleave",() => scheduleHide(group));
@@ -310,7 +325,9 @@
     axis.append(axisPlot); scroll.append(plot); const row=text("div","","plot-row"); row.append(axis,scroll); card.append(row);
     if (!usingPreview) {
       const metricNote = peakPath ? "实线为平均值，虚线为峰值。变化按平均值计算。" : "";
-      card.append(text("p", metricNote + "变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。", "chart-note"));
+      const historicalNote = nodes.some(node => node.method_id === QODER_FIXED_30S)
+        ? "旧版按原有 30 秒轮询和 45 秒排空测试。曲线和变化百分比限同一口径。" : "";
+      card.append(text("p", metricNote + historicalNote + "变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。", "chart-note"));
     }
     return card;
   }
@@ -382,13 +399,15 @@
       const candidates = methods.map(id => payload.method?.id === id ? payload : payload.other_methods?.[id]);
       const series = candidates.find(value => value?.nodes.some(node => node.status === "passed"))
         ?? candidates.find(Boolean);
-      if (series === payload) {
+      const older = select.value === "qoder" ? payload.other_methods?.[QODER_FIXED_30S] : null;
+      if (series === payload && !older?.nodes.length) {
         render(payload, source);
         return;
       }
       render({
         schema: payload.schema, repository: payload.repository, configuration: payload.configuration,
-        method: series?.method, nodes: series?.nodes ?? [], updated_at: series?.updated_at,
+        method: series?.method ?? older?.method, nodes: [...(older?.nodes ?? []), ...(series?.nodes ?? [])],
+        updated_at: [series?.updated_at, older?.updated_at].filter(Boolean).sort().at(-1),
       }, source);
     };
     select.value = "qoder";

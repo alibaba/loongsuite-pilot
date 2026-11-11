@@ -16,7 +16,7 @@ on:
       benchmark_method:
         description: Full Pilot benchmark method (Codex requires an explicit Rust source or release)
         type: choice
-        options: [github-full-pilot-qoder-native-v2, github-full-pilot-codex-rollout-v2]
+        options: [github-full-pilot-qoder-native-v2, github-full-pilot-codex-rollout-v2, github-full-pilot-qoder-stop-30s-v1]
         default: github-full-pilot-qoder-native-v2
       public_repository:
         description: Public source repository; formal releases use official upstream

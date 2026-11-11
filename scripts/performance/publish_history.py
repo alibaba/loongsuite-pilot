@@ -17,21 +17,29 @@ import sys
 import time
 import urllib.parse
 
-from prepare_public import CODEX_MIXED_METHOD, CODEX_STANDARD_METHOD, QODER_MIXED_METHOD
+from prepare_public import (
+    CODEX_MIXED_METHOD, CODEX_STANDARD_METHOD, QODER_FIXED_30S_DRAIN_SECONDS,
+    QODER_FIXED_30S_METHOD, QODER_FIXED_30S_POLL_MS, QODER_MIXED_METHOD,
+)
 
 LOADS = ("idle", "low", "high")
 HIGH_TURNS = 6000
 DRAIN_SECONDS = 15
 LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
 STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
-MIXED_METHODS = {QODER_MIXED_METHOD, CODEX_MIXED_METHOD}
-PEAK_METHODS = {STANDARD_METHOD, CODEX_STANDARD_METHOD} | MIXED_METHODS
 POLL_BY_LOAD = {"idle": 10_000, "low": 10_000, "high": 100}
+POLL_BY_METHOD = {
+    QODER_MIXED_METHOD: POLL_BY_LOAD,
+    CODEX_MIXED_METHOD: POLL_BY_LOAD,
+    QODER_FIXED_30S_METHOD: dict.fromkeys(LOADS, QODER_FIXED_30S_POLL_MS),
+}
+PEAK_METHODS = {STANDARD_METHOD, CODEX_STANDARD_METHOD, *POLL_BY_METHOD}
 THROUGHPUT_METRICS = ("raw_input_bytes_per_second", "jsonl_output_bytes_per_second")
 METHOD_FILES = {
     STANDARD_METHOD: "pilot-history-method-10s.json",
     CODEX_STANDARD_METHOD: "pilot-history-method-codex-10s.json",
     QODER_MIXED_METHOD: "pilot-history-method-qoder-v2.json",
+    QODER_FIXED_30S_METHOD: "pilot-history-method-qoder-30s.json",
     CODEX_MIXED_METHOD: "pilot-history-method-codex-v2.json",
 }
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -65,8 +73,9 @@ def count(value, name):
 
 def validate_capacity(sample, quality, method_id=LEGACY_METHOD):
     capacity = sample["capacity"]
+    drain = QODER_FIXED_30S_DRAIN_SECONDS if method_id == QODER_FIXED_30S_METHOD else DRAIN_SECONDS
     if (not isinstance(capacity, dict) or set(capacity) != {"drain_seconds", "rounds"}
-            or capacity["drain_seconds"] != DRAIN_SECONDS):
+            or capacity["drain_seconds"] != drain):
         raise ValueError("invalid high-load drain evidence")
     rounds = capacity["rounds"]
     if not isinstance(rounds, list) or not 1 <= len(rounds) <= 3:
@@ -175,8 +184,9 @@ def validate_node(node):
             metrics.append("cpu_peak_percent")
         if node["method_id"] in PEAK_METHODS or "rss_average_mib" in sample:
             metrics.append("rss_average_mib")
-        if node["method_id"] in MIXED_METHODS:
-            if sample.get("poll_interval_ms") != POLL_BY_LOAD[name]:
+        polling = POLL_BY_METHOD.get(node["method_id"])
+        if polling is not None:
+            if sample.get("poll_interval_ms") != polling[name]:
                 raise ValueError("invalid workload polling interval")
             metrics.extend(THROUGHPUT_METRICS)
         for field in metrics:
@@ -237,14 +247,17 @@ def validate_history(history):
         method = series["method"]
         if method_id in PEAK_METHODS:
             expected = {"session_count": 64, "window_seconds": 30, "cpu_sample_ms": 100, "rss_sample_ms": 100}
-            if method_id not in MIXED_METHODS:
+            if method_id not in POLL_BY_METHOD:
                 expected["poll_interval_ms"] = 10_000
+            if method_id == QODER_FIXED_30S_METHOD:
+                expected["drain_seconds"] = QODER_FIXED_30S_DRAIN_SECONDS
             if any(method.get(key) != value for key, value in expected.items()):
                 raise ValueError("invalid standard measurement settings")
-        if method_id in MIXED_METHODS:
+        if method_id in POLL_BY_METHOD:
             loads = method.get("loads")
             if not isinstance(loads, dict) or any(not isinstance(loads.get(load), dict)
-                    or loads[load].get("poll_interval_ms") != interval for load, interval in POLL_BY_LOAD.items()):
+                    or loads[load].get("poll_interval_ms") != interval
+                    for load, interval in POLL_BY_METHOD[method_id].items()):
                 raise ValueError("invalid workload measurement settings")
         validate_node_slots(series["nodes"], method_id)
     compatibility = history.get("compatibility")

@@ -25,7 +25,7 @@ import uuid
 
 from native_qoder_fixture import Fixture, compact, monotonic_ns
 from legacy_qoder_fixture import LegacyFixture
-from prepare_public import QODER_MIXED_METHOD
+from prepare_public import QODER_FIXED_30S_DRAIN_SECONDS, QODER_FIXED_30S_METHOD, QODER_FIXED_30S_POLL_MS, QODER_MIXED_METHOD
 from linux_cgroup import cpu_usage_ns, locate as locate_cgroup
 from runtime_layout import resolve as resolve_layout
 
@@ -387,9 +387,16 @@ def wait_for_legacy_input(fixture, deadline):
 def run_round(args, directory, load, rate, repeat, smoke=False):
     directory.mkdir(parents=True)
     legacy = args.layout.get("collection") == "legacy-stop"
-    standard = args.benchmark_method in (STANDARD_METHOD, QODER_MIXED_METHOD)
-    mixed = args.benchmark_method == QODER_MIXED_METHOD
-    poll_ms = LEGACY_POLL_MS if not standard or (mixed and load == "high") else STANDARD_POLL_MS
+    fixed_cadence = args.benchmark_method == QODER_FIXED_30S_METHOD
+    if fixed_cadence and (args.runtime != "js" or not legacy):
+        raise RuntimeError("fixed 30s Qoder measurement requires the shipped legacy Stop Hook")
+    measured_throughput = args.benchmark_method in (QODER_MIXED_METHOD, QODER_FIXED_30S_METHOD)
+    standard = measured_throughput or args.benchmark_method == STANDARD_METHOD
+    poll_ms = LEGACY_POLL_MS if not standard or (measured_throughput and load == "high") else STANDARD_POLL_MS
+    if fixed_cadence:
+        poll_ms = QODER_FIXED_30S_POLL_MS
+    warm_seconds = QODER_FIXED_30S_DRAIN_SECONDS if fixed_cadence else 25
+    drain_seconds = QODER_FIXED_30S_DRAIN_SECONDS if fixed_cadence else DRAIN_SECONDS
     fixture = (LegacyFixture if legacy else Fixture)(directory, sessions=SESSION_COUNT)
     output = Output(directory / "output")
     configure(fixture, output.directory, poll_ms)
@@ -421,7 +428,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             if not mapping:
                 raise RuntimeError("infrastructure: native shell did not map the exact staged SDK inode")
             write_json(directory / "mapped-sdk.json", {"sha256": file_sha(library), "mappings": mapping})
-        warm_deadline = time.monotonic() + 25
+        warm_deadline = time.monotonic() + warm_seconds
         if legacy:
             wait_for_legacy_input(fixture, warm_deadline)
             fixture.start(container)
@@ -431,7 +438,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             identifier = "warm-%02d" % session
             fixture.append_turn(session, identifier, True)
         warm.update(fixture.expected)
-        deadline = warm_deadline if legacy else time.monotonic() + 25
+        deadline = warm_deadline if legacy else time.monotonic() + warm_seconds
         warm_responses = set(response_catalog(warm))
         while True:
             if legacy:
@@ -460,7 +467,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
         first = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(first)
         raw_start = fixture.raw_bytes
-        output_start = output.bytes_written() if mixed else 0
+        output_start = output.bytes_written() if measured_throughput else 0
         start = time.monotonic(); end = start + WINDOW_SECONDS
         produced, next_sample = 0, start + SAMPLE_INTERVAL if standard else start
         while time.monotonic() < end:
@@ -477,13 +484,13 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                 output.read()
                 next_sample = now + SAMPLE_INTERVAL
             time.sleep(.001 if rate else .02)
-        output_end = output.bytes_written() if mixed else 0
+        output_end = output.bytes_written() if measured_throughput else 0
         active_end = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(active_end)
         active_sampling = standard_resource_sampling(samples) if standard else {}
         if produced != rate * WINDOW_SECONDS or len(fixture.expected) != produced:
             raise RuntimeError("producer could not maintain the fixed rate")
-        deadline = time.monotonic() + DRAIN_SECONDS
+        deadline = time.monotonic() + drain_seconds
         catalog = set(response_catalog(fixture.expected))
         capacity = None
         while True:
@@ -540,7 +547,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             result["capacity"] = capacity
         if standard:
             result.update(active_sampling, prewarmed_sessions=len(warm))
-        if mixed:
+        if measured_throughput:
             result.update(throughput(fixture.raw_bytes - raw_start, output_end - output_start,
                                      active_wall, poll_ms))
         return result
@@ -590,7 +597,7 @@ def throughput(raw_bytes, output_bytes, active_wall, poll_ms):
             "jsonl_output_bytes_per_second": output_bytes / active_wall, "poll_interval_ms": poll_ms}
 
 
-def summarize_workload(rounds, load):
+def summarize_workload(rounds, load, drain_seconds=DRAIN_SECONDS):
     capacity_rounds = [round_["capacity"] for round_ in rounds if "capacity" in round_]
     quality = {"passed": not capacity_rounds,
                "missing": sum(round_["quality"]["missing"] for round_ in rounds),
@@ -603,7 +610,7 @@ def summarize_workload(rounds, load):
                         summary([round_["quality"]["p95_ms"] for round_ in rounds])}
     if capacity_rounds:
         quality["validated_prefix"] = True
-        result["capacity"] = {"drain_seconds": DRAIN_SECONDS, "rounds": capacity_rounds}
+        result["capacity"] = {"drain_seconds": drain_seconds, "rounds": capacity_rounds}
     if rounds and all("cpu_peak_percent" in round_ for round_ in rounds):
         result["cpu_peak_percent"] = summary([round_["cpu_peak_percent"] for round_ in rounds])
     if rounds and all("rss_average_mib" in round_ for round_ in rounds):
@@ -642,7 +649,7 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--source-repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--source-ref", default="main")
-    parser.add_argument("--benchmark-method", choices=(METHOD, STANDARD_METHOD, QODER_MIXED_METHOD), default=QODER_MIXED_METHOD)
+    parser.add_argument("--benchmark-method", choices=(METHOD, STANDARD_METHOD, QODER_MIXED_METHOD, QODER_FIXED_30S_METHOD), default=QODER_MIXED_METHOD)
     parser.add_argument("--smoke-only", action="store_true", help="Functional64-source check only; never emits node.json")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -713,7 +720,8 @@ def main():
                 write_json(args.output / "node.json", node)
         for load in LOADS:
             rounds = [value for value in node["rounds"] if value["load"] == load]
-            node["workloads"][load] = summarize_workload(rounds, load)
+            drain = QODER_FIXED_30S_DRAIN_SECONDS if args.benchmark_method == QODER_FIXED_30S_METHOD else DRAIN_SECONDS
+            node["workloads"][load] = summarize_workload(rounds, load, drain)
         node["status"] = "passed"
     except Exception as error:
         node["status"] = "failed"; node["error"] = "%s: %s" % (type(error).__name__, error); code = 1

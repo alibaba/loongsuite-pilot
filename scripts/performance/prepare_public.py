@@ -117,6 +117,9 @@ def stable_releases(repository):
 QODER_STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
 CODEX_STANDARD_METHOD = "github-full-pilot-codex-rollout-10s-v1"
 QODER_MIXED_METHOD = "github-full-pilot-qoder-native-v2"
+QODER_FIXED_30S_METHOD = "github-full-pilot-qoder-stop-30s-v1"
+QODER_FIXED_30S_POLL_MS = 30_000
+QODER_FIXED_30S_DRAIN_SECONDS = 45
 CODEX_MIXED_METHOD = "github-full-pilot-codex-rollout-v2"
 
 
@@ -195,12 +198,16 @@ def main():
     parser.add_argument("--repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--mode", choices=("main", "dev", "release", "backfill"), required=True)
     parser.add_argument("--ref", default="main")
-    parser.add_argument("--benchmark-method", choices=(QODER_MIXED_METHOD, CODEX_MIXED_METHOD),
+    parser.add_argument("--benchmark-method", choices=(QODER_MIXED_METHOD, CODEX_MIXED_METHOD, QODER_FIXED_30S_METHOD),
                         default=QODER_MIXED_METHOD)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-repository", default="alibaba/loongsuite-pilot")
     args = parser.parse_args()
+    if args.benchmark_method == QODER_FIXED_30S_METHOD and (
+            args.mode != "release" or not STABLE.fullmatch(args.ref)
+            or not (1, 10, 0) <= key(args.ref) <= (1, 14, 0)):
+        parser.error("the fixed 30s Qoder method is for the verified v1.10.0–v1.14.0 stable releases")
     if args.benchmark_method == CODEX_MIXED_METHOD and args.mode == "backfill":
         parser.error("Codex requires an explicit public Rust ref or release; historical backfill is not enabled")
     args.output.mkdir(parents=True, exist_ok=True)
