@@ -128,7 +128,7 @@ pub(super) async fn run_with_retirement(
                                     validate_runtime(&paths.source_dir, &manifest.version,
                                         build_target(), build_edition())?;
                                 }
-                                preflight(&paths, &manifest, prepared.as_ref()).await?;
+                                let qoder_direct_hooks = preflight(&paths, &manifest, prepared.as_ref()).await?;
                                 check_service_owner(
                                     &destination,
                                     &paths.cache_dir,
@@ -161,7 +161,9 @@ pub(super) async fn run_with_retirement(
                                 } else { None };
                                 let mut transaction =
                                     ActivationTransaction::begin(&paths.cache_dir, targets)?;
-                                if operation == "rollback-package" {
+                                if operation == "rollback-package"
+                                    || (operation == "publish-package" && !qoder_direct_hooks)
+                                {
                                     super::native_qoder_rollback::restore_legacy_hooks(
                                         &paths.source_dir, &manifest, &paths.cache_dir, &paths.data_dir,
                                     ).await.context("恢复旧版本 Qoder Hook 失败；保留当前版本")?;
@@ -186,8 +188,9 @@ pub(super) async fn run_with_retirement(
                                     )
                                     .await
                                     .context("Hook 部署失败；恢复配置和版本入口")?;
-                                    serde_json::from_str::<super::hook_install_service::HookInstallReport>(&report)
-                                        .ok()
+                                    qoder_direct_hooks.then(|| {
+                                        serde_json::from_str::<super::hook_install_service::HookInstallReport>(&report).ok()
+                                    }).flatten()
                                         .and_then(|report| report.agents.into_iter().find(|agent| {
                                             agent.id == "qoder" && matches!(agent.status.as_str(), "ok" | "up-to-date")
                                         }))
@@ -505,7 +508,7 @@ async fn preflight(
     paths: &InstallPaths,
     manifest: &RuntimeManifest,
     prepared: Option<&PreparedConfig>,
-) -> Result<()> {
+) -> Result<bool> {
     let mut preview = None;
     if let Some(prepared) = prepared {
         let mut temporary = tempfile::NamedTempFile::new()?;
@@ -536,7 +539,11 @@ async fn preflight(
         "候选预检报告与安装包不匹配"
     );
     check_container_candidate(&paths.cache_dir, &paths.data_dir, &report)?;
-    Ok(())
+    Ok(supports_qoder_direct_hooks(&report))
+}
+
+fn supports_qoder_direct_hooks(report: &Value) -> bool {
+    report["check"]["details"]["runtimeCapabilities"]["qoderDirectHooks"].as_u64() == Some(1)
 }
 
 pub(crate) fn check_container_candidate(cache: &Path, data: &Path, report: &Value) -> Result<()> {
@@ -793,6 +800,21 @@ mod tests {
         ] {
             assert!(require_container_runtime_capabilities(&missing).is_err());
         }
+    }
+
+    #[test]
+    fn old_candidate_without_explicit_qoder_argv_capability_keeps_legacy_hooks() {
+        let mut report = json!({
+            "check":{"details":{"runtimeCapabilities":{
+                "containerServiceHelper":1,"containerHookPin":1
+            }}}
+        });
+        assert!(!supports_qoder_direct_hooks(&report));
+        let capabilities = &mut report["check"]["details"]["runtimeCapabilities"];
+        capabilities["qoderDirectHooks"] = json!("1");
+        assert!(!supports_qoder_direct_hooks(&report));
+        report["check"]["details"]["runtimeCapabilities"]["qoderDirectHooks"] = json!(1);
+        assert!(supports_qoder_direct_hooks(&report));
     }
 
     #[cfg(unix)]

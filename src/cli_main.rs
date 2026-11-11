@@ -277,6 +277,7 @@ async fn run_check(args: &clap::ArgMatches) -> i32 {
             "runtimeCapabilities": {
                 "containerServiceHelper": if cfg!(target_os = "linux") { 1 } else { 0 },
                 "containerHookPin": if cfg!(target_os = "linux") { 1 } else { 0 },
+                "qoderDirectHooks": 1,
             },
             "agentDefinitions": agents,
             "configValid": true,
