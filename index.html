@@ -148,7 +148,7 @@
     const node=nodes[index]; let previous=null;
     for (let before = index - 1; before >= 0; before--) {
       const candidate = nodes[before];
-      if (candidate.method_id === node.method_id && usable(candidate, load, metric)) {
+      if (usable(candidate, load, metric)) {
         previous = candidate;
         break;
       }
@@ -159,7 +159,8 @@
     if (!(before > 0)) return fail();
     const delta=(current-before)/before*100;
     if (!Number.isFinite(delta)) return fail();
-    return {ok:true,previous,before,current,delta,capacity:!!(capacity(node,load)||capacity(previous,load))};
+    return {ok:true,previous,before,current,delta,capacity:!!(capacity(node,load)||capacity(previous,load)),
+      crossMethod:previous.method_id !== node.method_id};
   }
   function deltaText(delta) {
     if (Math.abs(delta)<0.05) return "0.0%";
@@ -198,8 +199,9 @@
     } else {
       tip.append(text("div", "待测试", "tip-value"));
     }
-    const change=c.ok?(c.delta<0?"降低 "+number(Math.abs(c.delta),1)+"%"+(c.capacity?"":"（提升）"):c.delta>0?"增加 "+number(c.delta,1)+"%"+(c.capacity?"":"（回退）"):"持平"):"—";
-    tip.append(text("div",c.ok?"资源值较 "+label(c.previous)+" "+change:"—","tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
+    const qualifyChange = c.capacity || c.crossMethod;
+    const change=c.ok?(c.delta<0?"降低 "+number(Math.abs(c.delta),1)+"%"+(qualifyChange?"":"（提升）"):c.delta>0?"增加 "+number(c.delta,1)+"%"+(qualifyChange?"":"（回退）"):"持平"):"—";
+    tip.append(text("div",c.ok?"资源值较 "+label(c.previous)+" "+change+(c.crossMethod?"（跨轮询口径）":""):"—","tip-delta "+(c.ok?(c.delta<0?"down":c.delta>0?"up":"muted"):"muted")));
     if(valid && !node._preview && Number.isInteger(n)) tip.append(text("div",n+"轮 · 范围 "+valueText(s.min,metric)+" — "+valueText(s.max,metric),"tip-sub"));
     if (peak) tip.append(text("div", "峰值范围 " + valueText(peak.min, metric)
       + " — " + valueText(peak.max, metric), "tip-sub"));
@@ -325,7 +327,7 @@
     if (!usingPreview) {
       const metricNote = peakPath ? "实线为平均值，虚线为峰值。变化按平均值计算。" : "";
       const historicalNote = nodes.some(node => node.method_id === QODER_FIXED_30S)
-        ? "旧版按原有 30 秒轮询和 45 秒排空测试。变化百分比限同一口径。" : "";
+        ? "旧版按原有 30 秒轮询和 45 秒排空测试。" : "";
       card.append(text("p", metricNote + historicalNote + "变化以前一有数据节点为参照；不可比较时显示 —。可横向滚动查看全部版本。", "chart-note"));
     }
     return card;
