@@ -10,8 +10,9 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
-from linux_cgroup import locate
-from pilot_history import resources
+from linux_cgroup import cpu_usage_ns, locate
+from pilot_history import (LEGACY_POLL_MS, LOADS, SAMPLE_INTERVAL, SESSION_COUNT, STANDARD_METHOD,
+                           STANDARD_POLL_MS, WINDOW_SECONDS, configure, resources, standard_resource_sampling)
 from prepare_public import download_release, is_target_dev, load_history, select_backfill, source_runtime, stable_releases
 from runtime_layout import resolve
 from native_qoder_fixture import Fixture, atomic_json, begin_notice_transaction
@@ -48,6 +49,63 @@ class FakeNoticeConnection:
 
 
 class Helpers(unittest.TestCase):
+    def test_standard_method_definition_matches_fixture_poll_warm_and_resource_settings(self):
+        method_path = Path(__file__).resolve().parents[2] / "tests/performance_native/pilot-history-method-10s.json"
+        method = json.loads(method_path.read_text())
+        self.assertEqual(method["id"], STANDARD_METHOD)
+        self.assertEqual(method["session_count"], SESSION_COUNT)
+        self.assertEqual(method["window_seconds"], WINDOW_SECONDS)
+        self.assertEqual(method["poll_interval_ms"], STANDARD_POLL_MS)
+        self.assertEqual(method["cpu_sample_ms"], SAMPLE_INTERVAL * 1_000)
+        self.assertEqual(method["rss_sample_ms"], SAMPLE_INTERVAL * 1_000)
+        self.assertEqual({name: load["turns_per_second"] for name, load in method["loads"].items()}, LOADS)
+        for poll_ms in (LEGACY_POLL_MS, STANDARD_POLL_MS):
+            with tempfile.TemporaryDirectory() as temporary:
+                fixture = Fixture(temporary)
+                configure(fixture, Path(temporary) / "output", poll_ms)
+                self.assertEqual(fixture.session_count, SESSION_COUNT)
+                config = json.loads((fixture.data / "config.json").read_text())
+                self.assertEqual(config["listeners"]["qoder-trace"]["pollInterval"], poll_ms)
+
+    def test_standard_resource_statistics_use_actual_adjacent_elapsed_time(self):
+        mib = 1_048_576
+        samples = [
+            {"at_ns": 0, "cpu_ns": 0, "rss_bytes": 10 * mib},
+            {"at_ns": 80_000_000, "cpu_ns": 40_000_000, "rss_bytes": 30 * mib},
+            {"at_ns": 200_000_000, "cpu_ns": 160_000_000, "rss_bytes": 50 * mib},
+        ]
+        result = standard_resource_sampling(samples)
+        self.assertEqual(result["cpu_peak_percent"], 100)
+        self.assertEqual(result["active_sample_count"], 3)
+        self.assertEqual(result["active_sample_median_ms"], 100)
+        self.assertEqual(result["rss_average_mib"], 32)
+        self.assertEqual(result["rss_mib"], 50)
+        with self.assertRaisesRegex(RuntimeError, "not monotonic"):
+            standard_resource_sampling(samples[:2] + [{**samples[-1], "cpu_ns": 0}])
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            standard_resource_sampling(samples[:2])
+
+    def test_standard_cpu_sampling_reads_local_cgroup_without_docker_stats(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            counter = root / "cpu.stat"
+            counter.write_text("usage_usec 24\nuser_usec 19\nsystem_usec 5\n")
+            processes = root / "cgroup.procs"
+            processes.write_text("101\n")
+            group = {"version": "v2", "cpu_usage": counter, "processes": processes, "memory_usage": None}
+            self.assertEqual(cpu_usage_ns(group), 24_000)
+            with patch("pilot_history.docker_json") as docker, patch("pilot_history.Path") as process_path:
+                process_path.return_value.read_text.return_value = "VmRSS:\t2048 kB\n"
+                sample = resources("collector", group, cpu=True, direct_cpu=True)
+            self.assertEqual(sample["cpu_ns"], 24_000)
+            self.assertEqual(sample["rss_bytes"], 2048 * 1024)
+            docker.assert_not_called()
+            counter.write_text("75000\n")
+            self.assertEqual(cpu_usage_ns({**group, "version": "v1"}), 75_000)
+            counter.write_text("user_usec 12\n")
+            with self.assertRaisesRegex(RuntimeError, "invalid owned cgroup CPU counter"):
+                cpu_usage_ns(group)
+
     def test_resource_sampler_skips_exited_pids_and_counts_live_rss(self):
         with tempfile.TemporaryDirectory() as temporary:
             processes = Path(temporary) / "cgroup.procs"
@@ -139,6 +197,7 @@ class Helpers(unittest.TestCase):
             self.assertEqual(observed["version"], "v2")
             self.assertEqual(observed["processes"], owned / "cgroup.procs")
             self.assertEqual(observed["memory_peak"], owned / "memory.peak")
+            self.assertEqual(observed["cpu_usage"], owned / "cpu.stat")
 
     def test_v1_memory_and_combined_cpu_mounts(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,6 +218,7 @@ class Helpers(unittest.TestCase):
             self.assertEqual(observed["version"], "v1")
             self.assertEqual(observed["processes"], memory / "docker/owned/cgroup.procs")
             self.assertEqual(observed["memory_peak"], memory / "docker/owned/memory.max_usage_in_bytes")
+            self.assertEqual(observed["cpu_usage"], cpu / "docker/owned/cpuacct.usage")
 
     def test_public_js_declared_entry_nested_archive(self):
         with tempfile.TemporaryDirectory() as temporary:

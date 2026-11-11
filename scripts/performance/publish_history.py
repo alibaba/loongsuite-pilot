@@ -20,6 +20,13 @@ import urllib.parse
 LOADS = ("idle", "low", "high")
 HIGH_TURNS = 6000
 DRAIN_SECONDS = 15
+LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
+STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
+PEAK_METHODS = {STANDARD_METHOD, "github-full-pilot-codex-rollout-10s-v1"}
+METHOD_FILES = {
+    LEGACY_METHOD: "pilot-history-method.json",
+    STANDARD_METHOD: "pilot-history-method-10s.json",
+}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -148,7 +155,12 @@ def validate_node(node):
             validate_capacity(sample, quality)
         elif quality.get("passed") is not True or quality["missing"] or quality["duplicates"]:
             raise ValueError("quality failure cannot be a passed node")
-        for field in ("cpu_percent", "rss_mib"):
+        metrics = ["cpu_percent", "rss_mib"]
+        if node["method_id"] in PEAK_METHODS or "cpu_peak_percent" in sample:
+            metrics.append("cpu_peak_percent")
+        if node["method_id"] in PEAK_METHODS or "rss_average_mib" in sample:
+            metrics.append("rss_average_mib")
+        for field in metrics:
             summary = sample.get(field, {})
             if not isinstance(summary, dict):
                 raise ValueError("resource statistics must be an object")
@@ -158,25 +170,56 @@ def validate_node(node):
                     raise ValueError("invalid finite resource statistic")
             if not summary["min"] <= summary["median"] <= summary["max"]:
                 raise ValueError("invalid resource range")
-            if field == "rss_mib" and summary["min"] <= 0:
+            if field in ("rss_mib", "rss_average_mib") and summary["min"] <= 0:
                 raise ValueError("RSS must be measured and positive")
+        peak = sample.get("cpu_peak_percent")
+        if peak and any(peak[statistic] + 1e-9 < sample["cpu_percent"][statistic]
+                        for statistic in ("min", "median", "max")):
+            raise ValueError("peak CPU must be at least the average over the same window")
+        average_rss = sample.get("rss_average_mib")
+        if average_rss and any(sample["rss_mib"][statistic] + 1e-9 < average_rss[statistic]
+                               for statistic in ("min", "median", "max")):
+            raise ValueError("peak RSS must be at least the average over the same window")
 
 
 def node_order(node):
     return (0, version_key(node["version"])) if node["kind"] == "release" else (1 if node["kind"] == "main" else 2, ())
 
 
-def validate_history(history):
-    if not isinstance(history, dict) or history.get("schema") != 1 or history.get("repository") != OFFICIAL or not isinstance(history.get("nodes"), list):
-        raise ValueError("invalid generated history identity")
-    if len(history["nodes"]) > 512:
+def validate_node_slots(nodes, method_id=None):
+    if not isinstance(nodes, list) or len(nodes) > 512:
         raise ValueError("unexpected history node count")
     identities = set()
-    for node in history["nodes"]:
+    for node in nodes:
         validate_node(node)
         if node["id"] in identities:
             raise ValueError("duplicate node slot in history")
+        if method_id is not None and node["method_id"] != method_id:
+            raise ValueError("measurement belongs to another test method")
         identities.add(node["id"])
+
+
+def validate_history(history):
+    if not isinstance(history, dict) or history.get("schema") != 1 or history.get("repository") != OFFICIAL:
+        raise ValueError("invalid generated history identity")
+    validate_node_slots(history.get("nodes"))
+    methods = history.get("other_methods", {})
+    if not isinstance(methods, dict):
+        raise ValueError("invalid additional test methods")
+    primary = history.get("method") or {}
+    if not isinstance(primary, dict):
+        raise ValueError("invalid primary test method")
+    for method_id, series in methods.items():
+        if (not isinstance(method_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", method_id)
+                or not isinstance(series, dict) or set(series) != {"method", "nodes", "updated_at"}
+                or not isinstance(series["method"], dict) or series["method"].get("id") != method_id
+                or method_id == primary.get("id")):
+            raise ValueError("invalid additional test method identity")
+        if method_id == STANDARD_METHOD and any(series["method"].get(key) != value for key, value in (
+                ("session_count", 64), ("window_seconds", 30), ("poll_interval_ms", 10_000),
+                ("cpu_sample_ms", 100), ("rss_sample_ms", 100))):
+            raise ValueError("invalid standard Qoder measurement settings")
+        validate_node_slots(series["nodes"], method_id)
     compatibility = history.get("compatibility")
     if compatibility is not None and not isinstance(compatibility, dict):
         raise ValueError("invalid compatibility boundary")
@@ -245,7 +288,12 @@ def compact(node, publication=None, asset_sha256=None):
         if not isinstance(sample, dict):
             continue
         kept = {key: sample[key] for key in ("repeats", "p95_ms") if key in sample}
-        for key in ("cpu_percent", "rss_mib"):
+        metrics = ["cpu_percent", "rss_mib"]
+        if "cpu_peak_percent" in sample:
+            metrics.append("cpu_peak_percent")
+        if "rss_average_mib" in sample:
+            metrics.append("rss_average_mib")
+        for key in metrics:
             summary = sample.get(key)
             kept[key] = {name: summary[name] for name in ("median", "min", "max") if name in summary} if isinstance(summary, dict) else None
         quality = sample.get("quality")
@@ -318,6 +366,32 @@ def merge(history, node, current_main=None, current_dev=None, source_repo=None, 
             del old["dev"]
     history["nodes"] = sorted(old.values(), key=node_order)
     history["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    return True
+
+
+def merge_method(history, method, node, *, current_main=None, current_dev=None, source_repo=None,
+                 merged_dev=None, publication=None):
+    """Merge a measured node into its own method's release/main/dev slots."""
+    validate_history(history)
+    method_id = method.get("id") if isinstance(method, dict) else None
+    if not isinstance(method_id, str) or not isinstance(node, dict) or node.get("method_id") != method_id:
+        raise ValueError("measurement method differs from the trusted method")
+    arguments = dict(current_main=current_main, current_dev=current_dev, source_repo=source_repo,
+                     merged_dev=merged_dev, publication=publication)
+    if method_id == (history.get("method") or {}).get("id"):
+        return merge(history, node, **arguments)
+
+    methods = history.get("other_methods", {})
+    previous = methods.get(method_id)
+    if previous and previous["method"] != method:
+        raise ValueError("test parameters changed for the existing method ID")
+    series = {"schema": 1, "repository": OFFICIAL, "nodes": previous["nodes"] if previous else []}
+    if not merge(series, node, **arguments):
+        return False
+    changed = {"method": copy.deepcopy(method), "nodes": series["nodes"], "updated_at": series["updated_at"]}
+    updated = {**methods, method_id: changed}
+    validate_history({**history, "other_methods": updated})
+    history["other_methods"] = updated
     return True
 
 
@@ -440,7 +514,15 @@ def github_publish():
     if not SHA.fullmatch(commit) or expected.get("kind") not in ("release", "main", "dev"):
         raise ValueError("invalid trusted selector identity")
     artifact = Path(os.environ["PUBLICATION_INPUT"])
-    method = read_json(trusted / "tests/performance_native/pilot-history-method.json")
+    method_id = expected.get("method_id") or LEGACY_METHOD
+    if method_id not in METHOD_FILES:
+        raise ValueError("unrecognized benchmark method from the trusted selector")
+    method_dir = trusted / "tests/performance_native"
+    method = read_json(method_dir / METHOD_FILES[method_id])
+    if method.get("id") != method_id:
+        raise ValueError("trusted benchmark method file has the wrong identity")
+    primary = method_id == LEGACY_METHOD
+    legacy_method = method if primary else read_json(method_dir / METHOD_FILES[LEGACY_METHOD])
     template = (trusted / "scripts/performance/pilot-history.html").read_text(encoding="utf-8")
     number = int(os.environ["GITHUB_RUN_NUMBER"])
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -451,7 +533,7 @@ def github_publish():
     node, cutoff = None, None
     confirm_tag = os.environ.get("CONFIRMED_INCOMPATIBLE_TAG", "")
     if confirm_tag:
-        if expected.get("mode") != "backfill" or expected["version"] != confirm_tag:
+        if not primary or expected.get("mode") != "backfill" or expected["version"] != confirm_tag:
             raise ValueError("cutoff confirmation must target the selected official backfill release")
         cutoff = {"excluded_at_or_before": confirm_tag, "classification": "collection_incompatible", "confirmed": True,
                   "source_repository": repository, "source_commit": commit,
@@ -537,8 +619,10 @@ def github_publish():
         history_path = history_root / "history.json"
         history = read_json(history_path) if history_path.exists() else {
             "schema": 1, "repository": OFFICIAL, "updated_at": None,
-            "method": method, "compatibility": None, "nodes": []}
+            "method": legacy_method, "compatibility": None, "nodes": []}
         validate_history(history)
+        if (history.get("method") or legacy_method).get("id") != LEGACY_METHOD:
+            raise ValueError("primary Qoder history has an unexpected method")
         # Check after EVERY fresh fetch. A configuration switch creates a new
         # results commit: an in-flight old branch either fails this gate, or its
         # ordinary push conflicts and the next CAS retry rejects it.
@@ -550,19 +634,21 @@ def github_publish():
         # Resolve on EVERY CAS retry, not just once before a slow publication.
         current_main = resolve(OFFICIAL, "main")
         ensure_public_commit(OFFICIAL, current_main)
-        initial_main = ensure_main_slot(history, current_main, method["id"])
+        initial_main = ensure_main_slot(history, current_main, LEGACY_METHOD)
         try:
             current_dev = resolve(repository, ref) if expected["kind"] == "dev" else None
         except urllib.error.HTTPError as error:
             if error.code != 404:
                 raise
             current_dev = ""  # deleted dev ref is stale, never publishable
-        for old in history.get("nodes", []):
+        series = history if primary else history.get("other_methods", {}).get(method_id, {})
+        series_nodes = series.get("nodes", [])
+        for old in series_nodes:
             source = old.get("source") or {}
             if old.get("kind") in ("main", "dev") and source.get("repository"):
                 ensure_public_commit(source["repository"], old["commit"])
         merged_dev = None
-        dev = next((value for value in history.get("nodes", []) if value["kind"] == "dev"), None)
+        dev = next((value for value in series_nodes if value["kind"] == "dev"), None)
         if node and node["kind"] == "main" and node["commit"] == current_main and dev:
             ensure_public_commit((dev.get("source") or {}).get("repository", OFFICIAL), dev["commit"])
             # Direct ancestry handles ordinary merges. Exact head + merged PR +
@@ -582,11 +668,15 @@ def github_publish():
                         if contains(trusted, merge_sha, current_main):
                             merged_dev = dev["commit"]
                             break
-        changed = (merge(history, node, current_main, current_dev, trusted, merged_dev, publication) if node else False) or initial_main
+        changed = initial_main
+        if node:
+            changed = merge_method(history, method, node, current_main=current_main,
+                                   current_dev=current_dev, source_repo=trusted,
+                                   merged_dev=merged_dev, publication=publication) or changed
         if cutoff:
             changed = apply_cutoff(history, cutoff) or changed
-        if changed:
-            history["method"] = method
+        if changed and (primary or initial_main):
+            history["method"] = legacy_method
             history["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         encoded_html = render(template, history)
         history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -609,12 +699,14 @@ def github_publish():
     # A continuation always selects the next not-yet-passed release from CURRENT
     # history; release events remain independent and cannot be discarded by a
     # global concurrency slot. Infra/failure/cutoff never auto-retries forever.
-    accepted = node and any(old["id"] == node["id"] and old["commit"] == node["commit"] and old["status"] == "passed" for old in final_history["nodes"])
-    if expected.get("mode") == "backfill" and node and node["status"] == "passed" and accepted and os.environ.get("CONTINUE_BACKFILL") == "true" and select_backfill(OFFICIAL, final_history):
+    final_series = final_history if primary else final_history.get("other_methods", {}).get(method_id, {})
+    accepted = node and any(old["id"] == node["id"] and old["commit"] == node["commit"] and old["status"] == "passed"
+                            for old in final_series.get("nodes", []))
+    if expected.get("mode") == "backfill" and node and node["status"] == "passed" and accepted and os.environ.get("CONTINUE_BACKFILL") == "true" and select_backfill(OFFICIAL, final_history, method_id):
         workflow_ref = os.environ["GITHUB_WORKFLOW_REF"].split("@", 1)[1]
         ref_name = workflow_ref[len("refs/heads/"):] if workflow_ref.startswith("refs/heads/") else workflow_ref
         body = json.dumps({"ref": ref_name, "inputs": {"mode": "backfill", "public_repository": OFFICIAL,
-                           "public_ref": "main", "continue_backfill": "true"}}).encode()
+                           "public_ref": "main", "continue_backfill": "true", "benchmark_method": method_id}}).encode()
         request = urllib.request.Request("https://api.github.com/repos/" + OFFICIAL + "/actions/workflows/sdk-performance.yml/dispatches", data=body,
             headers={"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json", "Content-Type": "application/json"}, method="POST")
         try:
@@ -661,7 +753,12 @@ def main():
     if args.merged_dev and not SHA.fullmatch(args.merged_dev):
         raise ValueError("invalid merged-dev proof")
     publication = {"run_number": args.run_number, "run_id": args.run_id} if args.run_number else None
-    changed = ensure_main_slot(history, args.current_main, method["id"])
+    primary_method = history.get("method") or method
+    alternate = primary_method["id"] != method["id"]
+    if alternate and args.cutoff:
+        raise ValueError("compatibility cutoff requires the primary history method")
+    initial_main = ensure_main_slot(history, args.current_main, primary_method["id"])
+    changed = initial_main
     node = None
     if args.node:
         node = read_json(args.node)
@@ -677,11 +774,17 @@ def main():
         if node["method_id"] != method["id"]:
             raise ValueError("measurement method differs from the trusted method")
         node = compact(node, asset_sha256=args.asset_sha256)
-        changed = merge(history, node, args.current_main, args.current_dev, args.source_repo, args.merged_dev, publication) or changed
+        if alternate:
+            changed = merge_method(history, method, node, current_main=args.current_main,
+                                   current_dev=args.current_dev, source_repo=args.source_repo,
+                                   merged_dev=args.merged_dev, publication=publication) or changed
+        else:
+            changed = merge(history, node, args.current_main, args.current_dev, args.source_repo,
+                            args.merged_dev, publication) or changed
     if args.cutoff:
         changed = apply_cutoff(history, read_json(args.cutoff)) or changed
-    if changed:
-        history["method"] = method
+    if changed and (not alternate or initial_main):
+        history["method"] = primary_method
         history["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     # Generate the HTML before replacing either file, so invalid input/template
     # cannot leave a partial in-memory update committed by the publication job.

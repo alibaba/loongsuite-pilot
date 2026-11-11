@@ -13,6 +13,11 @@ on:
         type: choice
         options: [main, dev, release, backfill]
         default: dev
+      benchmark_method:
+        description: Full Pilot Qoder benchmark method
+        type: choice
+        options: [github-full-pilot-qoder-native-10s-v1, github-full-pilot-qoder-native-v1]
+        default: github-full-pilot-qoder-native-10s-v1
       public_repository:
         description: Public source repository; formal releases use official upstream
         default: alibaba/loongsuite-pilot
@@ -44,7 +49,7 @@ permissions:
 # Unrelated branches cannot evict the designated dev branch's pending request. Backfill requests all mean
 # "select the next untested release" and can safely coalesce without skipping a tag.
 concurrency:
-  group: pilot-performance-${{ github.repository }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || format('dev-{0}-{1}', inputs.public_repository || github.repository, inputs.public_ref || github.ref_name) }}
+  group: pilot-performance-${{ github.repository }}-${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-10s-v1' }}-${{ github.event_name == 'release' && format('release-{0}', github.event.release.tag_name) || inputs.mode == 'release' && format('release-{0}', inputs.public_ref) || inputs.confirmed_incompatible_tag && format('compatibility-{0}', inputs.confirmed_incompatible_tag) || inputs.mode == 'backfill' && 'backfill' || github.event_name == 'pull_request' && format('readonly-pr-{0}', github.event.pull_request.number) || inputs.mode == 'main' && 'main' || github.ref == 'refs/heads/main' && 'main' || format('dev-{0}-{1}', inputs.public_repository || github.repository, inputs.public_ref || github.ref_name) }}
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +60,7 @@ jobs:
     outputs:
       node_ready: ${{ steps.result.outputs.node_ready }}
       mode: ${{ steps.select.outputs.mode }}
+      method_id: ${{ steps.select.outputs.method_id }}
       repository: ${{ steps.select.outputs.repository }}
       ref: ${{ steps.select.outputs.ref }}
       commit: ${{ steps.select.outputs.commit }}
@@ -71,6 +77,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.99.1
       CARGO_TERM_COLOR: always
       PERF_IMAGE: node:22-bookworm-slim
+      BENCHMARK_METHOD: ${{ inputs.benchmark_method || 'github-full-pilot-qoder-native-10s-v1' }}
     steps:
       # PR/fork code runs only in this read-token job. The publication job never
       # checks out or executes a candidate. No pull_request_target is used.
@@ -97,11 +104,14 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, subprocess, sys, urllib.parse
           sys.path.insert(0, 'scripts/performance')
-          from prepare_public import api, public_repository, resolve, STABLE
+          from prepare_public import api, public_repository, resolve, STABLE, QODER_LEGACY_METHOD
           mode=os.environ['MODE']; repository=os.environ['PUBLIC_REPOSITORY']; ref=os.environ['PUBLIC_REF']
+          method=os.environ['BENCHMARK_METHOD']
           if mode=='main': repository='alibaba/loongsuite-pilot'; ref='main'
           out=pathlib.Path(os.environ['RUNNER_TEMP'],'selection'); confirm=os.environ.get('CONFIRMED_TAG','')
           if confirm:
+              if method != QODER_LEGACY_METHOD:
+                  raise ValueError('choose the method tested by the compatibility evidence')
               if mode!='backfill' or repository!='alibaba/loongsuite-pilot' or not STABLE.fullmatch(confirm):
                   raise ValueError('explicit cutoff requires an official stable backfill release')
               public_repository(repository)
@@ -109,11 +119,11 @@ jobs:
               if release['draft'] or release['prerelease']: raise ValueError('not a published stable release')
               out.mkdir()
               value={'complete':False,'repository':repository,'ref':confirm,'commit':resolve(repository,confirm),
-                     'kind':'release','version':confirm,'runtime':'none','confirmation_only':True}
+                     'kind':'release','version':confirm,'runtime':'none','confirmation_only':True,'method_id':method}
           else:
               subprocess.run(['python3','scripts/performance/prepare_public.py','--mode',mode,'--repository',repository,
                   '--ref',ref,'--history',str(pathlib.Path(os.environ['RUNNER_TEMP'],'history-before.json')),
-                  '--output',str(out)],check=True)
+                  '--output',str(out),'--benchmark-method',method],check=True)
               value=json.loads((out/'selection.json').read_text())
           value['mode']=mode
           (out/'selection.json').write_text(json.dumps(value,indent=2)+'\n')
@@ -123,7 +133,7 @@ jobs:
               with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as report:
                   report.write('### Measured public source\n<pre>'+html.escape(json.dumps(summary,indent=2))+'</pre>\n')
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:
-              for key in ('complete','confirmation_only','mode','repository','ref','commit','runtime','kind','version','is_target_dev','package','native_entry','asset_sha256','asset_id','asset_name','asset_size_bytes','asset_url','checksum_source'):
+              for key in ('complete','confirmation_only','mode','method_id','repository','ref','commit','runtime','kind','version','is_target_dev','package','native_entry','asset_sha256','asset_id','asset_name','asset_size_bytes','asset_url','checksum_source'):
                   item=value.get(key,False if key in ('confirmation_only','is_target_dev') else '')
                   text=str(item).lower() if isinstance(item,bool) else str(item)
                   if any(c in text for c in '\r\n\0'): raise ValueError('invalid workflow output')
@@ -213,7 +223,8 @@ jobs:
           args=['python3','scripts/performance/pilot_history.py','--package',package,'--image',os.environ['PERF_IMAGE'],
               '--runtime',os.environ['RUNTIME'],'--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'smoke')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
-              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],'--smoke-only']
+              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],
+              '--benchmark-method',os.environ['BENCHMARK_METHOD'],'--smoke-only']
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)
@@ -238,7 +249,8 @@ jobs:
           args=['python3','scripts/performance/pilot_history.py','--package',package,'--image',os.environ['PERF_IMAGE'],
               '--runtime',os.environ['RUNTIME'],'--output',str(pathlib.Path(os.environ['RUNNER_TEMP'],'performance')),
               '--kind',os.environ['KIND'],'--version',os.environ['VERSION'],'--commit',os.environ['COMMIT'],
-              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF']]
+              '--source-repository',os.environ['SOURCE_REPOSITORY'],'--source-ref',os.environ['SOURCE_REF'],
+              '--benchmark-method',os.environ['BENCHMARK_METHOD']]
           entry=os.environ.get('NATIVE_ENTRY','')
           if entry: args+=['--native-entry',entry]
           subprocess.run(args,check=True)
@@ -262,11 +274,11 @@ jobs:
               else:
                   # A failed identity record has no invented resource values.
                   # Startup/build/infra failures never become a compatibility cutoff.
-                  method=json.load(open('tests/performance_native/pilot-history-method.json'))
+                  method=value['method_id']
                   failed={'id':'v'+value['version'].lstrip('v') if value['kind']=='release' else value['kind'],
                       'kind':value['kind'],'version':value['version'],'commit':value['commit'],'status':'failed',
                       'recorded_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'method_id':method['id'],'environment_id':'unavailable','environment':{},'workloads':{},
+                      'method_id':method,'environment_id':'unavailable','environment':{},'workloads':{},
                       'run_url':'https://github.com/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs/'+os.environ['GITHUB_RUN_ID'],
                       'source':{'repository':value['repository'],'ref':value['ref']},'failure_category':'infrastructure'}
                   (out/'node.json').write_text(json.dumps(failed)+'\n')

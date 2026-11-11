@@ -95,6 +95,67 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publisher.validate_history(data)
 
+    def test_additional_method_uses_independent_release_and_dev_slots(self):
+        data = history()
+        data["method"] = {"id": "test-method"}
+        primary = node("dev", commit="a" * 40)
+        self.assertTrue(publisher.merge(data, primary, current_dev=primary["commit"]))
+        original = copy.deepcopy(data["nodes"])
+        method = {"id": "codex-method", "display_name": "Codex"}
+        alternate = node("dev", commit="b" * 40)
+        alternate["method_id"] = method["id"]
+        self.assertFalse(publisher.merge_method(data, method, alternate, current_dev="c" * 40))
+        self.assertNotIn("other_methods", data)
+        self.assertTrue(publisher.merge_method(data, method, alternate, current_dev=alternate["commit"]))
+        release = node("release", commit="d" * 40)
+        release["method_id"] = method["id"]
+        self.assertTrue(publisher.merge_method(data, method, release))
+        self.assertEqual(data["nodes"], original)
+        series = data["other_methods"][method["id"]]
+        self.assertEqual(series["method"], method)
+        self.assertEqual([item["id"] for item in series["nodes"]], ["v1.16.0", "dev"])
+        publisher.validate_history(data)
+
+    def test_additional_method_rejects_cross_method_nodes_and_changed_parameters(self):
+        data = history()
+        data["method"] = {"id": "test-method"}
+        method = {"id": "codex-method", "window_seconds": 30}
+        value = node()
+        with self.assertRaisesRegex(ValueError, "differs from the trusted method"):
+            publisher.merge_method(data, method, value)
+        value["method_id"] = method["id"]
+        self.assertTrue(publisher.merge_method(data, method, value))
+        with self.assertRaisesRegex(ValueError, "test parameters changed"):
+            publisher.merge_method(data, {**method, "window_seconds": 60}, value)
+        data["other_methods"][method["id"]]["nodes"][0]["method_id"] = data["method"]["id"]
+        with self.assertRaisesRegex(ValueError, "another test method"):
+            publisher.validate_history(data)
+
+    def test_standard_method_requires_average_and_peak_without_changing_legacy_nodes(self):
+        legacy = node("dev")
+        old_sample = publisher.compact(legacy)["workloads"]["idle"]
+        self.assertNotIn("cpu_peak_percent", old_sample)
+        self.assertNotIn("rss_average_mib", old_sample)
+        value = node("dev")
+        value["method_id"] = publisher.STANDARD_METHOD
+        with self.assertRaisesRegex(ValueError, "finite resource statistic"):
+            publisher.validate_node(value)
+        for sample in value["workloads"].values():
+            sample["cpu_peak_percent"] = {"median": 5, "min": 4, "max": 6}
+            sample["rss_average_mib"] = {"median": 16, "min": 15, "max": 17}
+        publisher.validate_node(value)
+        self.assertEqual(publisher.compact(value)["workloads"]["idle"]["cpu_peak_percent"],
+                         {"median": 5, "min": 4, "max": 6})
+        self.assertEqual(publisher.compact(value)["workloads"]["idle"]["rss_average_mib"],
+                         {"median": 16, "min": 15, "max": 17})
+        value["workloads"]["low"]["cpu_peak_percent"] = {"median": 1, "min": .5, "max": 2}
+        with self.assertRaisesRegex(ValueError, "peak CPU"):
+            publisher.validate_node(value)
+        value["workloads"]["low"]["cpu_peak_percent"] = {"median": 5, "min": 4, "max": 6}
+        value["workloads"]["low"]["rss_average_mib"] = {"median": 25, "min": 24, "max": 26}
+        with self.assertRaisesRegex(ValueError, "peak RSS"):
+            publisher.validate_node(value)
+
     def test_first_release_success_is_immutable_and_releases_sort_before_mutable_slots(self):
         data = history()
         publisher.merge(data, node("release", "1.16.0"))

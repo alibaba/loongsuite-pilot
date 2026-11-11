@@ -35,7 +35,8 @@ def locate(pid, proc_root=Path("/proc")):
             path = directory(membership, mount)
             if path is not None and (path / "cgroup.procs").is_file():
                 return {"version": "v2", "processes": path / "cgroup.procs",
-                        "memory_peak": path / "memory.peak", "memory_usage": path / "memory.current"}
+                        "memory_peak": path / "memory.peak", "memory_usage": path / "memory.current",
+                        "cpu_usage": path / "cpu.stat"}
     found = {}
     for controller in ("memory", "cpuacct", "cpu"):
         for membership in memberships:
@@ -51,6 +52,26 @@ def locate(pid, proc_root=Path("/proc")):
     if selected is None:
         raise RuntimeError("infrastructure: cannot locate owned v1/v2 cgroup process list")
     memory = found.get("memory")
+    cpu = found.get("cpuacct")
     return {"version": "v1", "processes": selected / "cgroup.procs",
             "memory_peak": memory / "memory.max_usage_in_bytes" if memory else None,
-            "memory_usage": memory / "memory.usage_in_bytes" if memory else None}
+            "memory_usage": memory / "memory.usage_in_bytes" if memory else None,
+            "cpu_usage": cpu / "cpuacct.usage" if cpu else None}
+
+
+def cpu_usage_ns(cgroup):
+    path = cgroup.get("cpu_usage")
+    if path is None:
+        raise RuntimeError("infrastructure: owned cgroup CPU counter unavailable")
+    try:
+        body = path.read_text()
+        if cgroup["version"] == "v2":
+            fields = dict(line.split() for line in body.splitlines())
+            usage = int(fields["usage_usec"]) * 1_000
+        else:
+            usage = int(body)
+        if usage < 0:
+            raise ValueError("negative CPU counter")
+    except (OSError, KeyError, ValueError) as error:
+        raise RuntimeError("infrastructure: invalid owned cgroup CPU counter") from error
+    return usage

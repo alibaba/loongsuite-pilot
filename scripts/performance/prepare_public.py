@@ -114,7 +114,18 @@ def stable_releases(repository):
     return releases
 
 
-def select_backfill(repository, history):
+QODER_LEGACY_METHOD = "github-full-pilot-qoder-native-v1"
+QODER_STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
+
+
+def history_for_method(history, method):
+    if method == QODER_LEGACY_METHOD:
+        return history
+    return history.get("other_methods", {}).get(method, {"nodes": []})
+
+
+def select_backfill(repository, history, method=QODER_LEGACY_METHOD):
+    history = history_for_method(history, method)
     done = {node["id"] for node in history.get("nodes", [])
             if node.get("kind") == "release" and node.get("status") == "passed"}
     cutoff = (history.get("compatibility") or {}).get("excluded_at_or_before")
@@ -182,6 +193,8 @@ def main():
     parser.add_argument("--repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--mode", choices=("main", "dev", "release", "backfill"), required=True)
     parser.add_argument("--ref", default="main")
+    parser.add_argument("--benchmark-method", choices=(QODER_LEGACY_METHOD, QODER_STANDARD_METHOD),
+                        default=QODER_LEGACY_METHOD)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--history-repository", default="alibaba/loongsuite-pilot")
@@ -191,9 +204,10 @@ def main():
     if args.mode in ("release", "backfill") and args.repository != "alibaba/loongsuite-pilot":
         raise ValueError("formal release history accepts only official public upstream releases")
     history = load_history(args.history, args.history_repository)
+    measured = history_for_method(history, args.benchmark_method)
     release = None
     if args.mode == "backfill":
-        release = select_backfill(args.repository, history)
+        release = select_backfill(args.repository, history, args.benchmark_method)
         if release is None:
             (args.output / "selection.json").write_text(json.dumps({"complete": True}) + "\n")
             return
@@ -205,12 +219,12 @@ def main():
             raise ValueError("draft/prerelease is not a formal history node")
     ref = release["tag_name"] if release else args.ref
     if release and any(node.get("kind") == "release" and node.get("status") == "passed"
-                       and key(node["version"]) == key(ref) for node in history["nodes"]):
+                       and key(node["version"]) == key(ref) for node in measured["nodes"]):
         (args.output / "selection.json").write_text(json.dumps({"complete": True}) + "\n")
         return
     result = {"complete": False, "repository": args.repository, "ref": ref,
               "commit": resolve(args.repository, ref), "kind": "release" if release else args.mode,
-              "version": ref if release else args.mode}
+              "version": ref if release else args.mode, "method_id": args.benchmark_method}
     result["is_target_dev"] = result["kind"] == "dev" and is_target_dev(args.repository, ref, history)
     if release:
         result.update(download_release(args.repository, release, args.output))

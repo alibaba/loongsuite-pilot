@@ -25,13 +25,18 @@ import uuid
 
 from native_qoder_fixture import Fixture, compact, monotonic_ns
 from legacy_qoder_fixture import LegacyFixture
-from linux_cgroup import locate as locate_cgroup
+from linux_cgroup import cpu_usage_ns, locate as locate_cgroup
 from runtime_layout import resolve as resolve_layout
 
 METHOD = "github-full-pilot-qoder-native-v1"
+STANDARD_METHOD = "github-full-pilot-qoder-native-10s-v1"
 LOADS = {"idle": 0, "low": 10, "high": 200}
 WINDOW_SECONDS = 30
 DRAIN_SECONDS = 15
+SESSION_COUNT = 64
+SAMPLE_INTERVAL = .1
+LEGACY_POLL_MS = 100
+STANDARD_POLL_MS = 10_000
 COMMON = ("event.id", "time_unix_nano", "user.id", "gen_ai.agent.type", "gen_ai.session.id", "gen_ai.step.id")
 REQUIRED = {
     "llm.request": COMMON + ("gen_ai.turn.id", "gen_ai.provider.name", "gen_ai.request.model", "gen_ai.input.messages_delta"),
@@ -83,11 +88,19 @@ def docker_json(path):
         connection.close()
 
 
-def resources(container, cgroup, cpu=False):
+def resources(container, cgroup, cpu=False, direct_cpu=False):
     # Old Docker can wait a full stats interval even with one-shot=true. Do not
     # put that API call into the 100ms RSS/producer loop. CPU is cumulative and
     # is requested only at interval boundaries on either cgroup version.
-    stats = docker_json("/containers/%s/stats?stream=false&one-shot=true" % container) if cpu else None
+    cpu_ns = None
+    cpu_at = None
+    if cpu:
+        if direct_cpu:
+            cpu_ns = cpu_usage_ns(cgroup)
+            cpu_at = monotonic_ns()
+        else:
+            stats = docker_json("/containers/%s/stats?stream=false&one-shot=true" % container)
+            cpu_ns = stats["cpu_stats"]["cpu_usage"]["total_usage"]
     pids = [int(value) for value in cgroup["processes"].read_text().split()]
     memory = 0
     for pid in pids:
@@ -101,7 +114,7 @@ def resources(container, cgroup, cpu=False):
     if not pids or memory <= 0:
         raise RuntimeError("actual process RSS unavailable")
     usage = cgroup["memory_usage"]
-    return {"at_ns": monotonic_ns(), "cpu_ns": stats["cpu_stats"]["cpu_usage"]["total_usage"] if stats else None,
+    return {"at_ns": cpu_at if cpu_at is not None else monotonic_ns(), "cpu_ns": cpu_ns,
             "rss_bytes": memory, "processes": len(pids),
             "cgroup_memory_bytes": int(usage.read_text()) if usage and usage.exists() else None}
 
@@ -322,14 +335,14 @@ def capacity_backlog(fixture, legacy, expected_turns):
     return {"pending_notices": pending}
 
 
-def configure(fixture, output):
+def configure(fixture, output, poll_ms=LEGACY_POLL_MS):
     # Only synthetic HOME/.qoder exists; real Agents/services are never installed.
     listeners = {name: {"enabled": False} for name in (
         "qoder", "qoder-work", "qoder-work-log", "qoder-work-sqlite", "qoder-work-cn-trace",
         "qoder-work-cn-hook", "qoder-work-cn-log", "qoder-work-cn-sqlite", "qwen-work-cn-trace",
         "qwen-work-cn-hook", "qwen-work-cn-sqlite", "cursor-hook", "claude-code-log", "grok-build-log",
         "codex-transcript", "copilot-log", "opencode-log", "pi-coding-agent-log", "workbuddy", "doubao-work", "hermes-agent-log")}
-    listeners["qoder-trace"] = {"enabled": True, "pollInterval": 100}
+    listeners["qoder-trace"] = {"enabled": True, "pollInterval": poll_ms}
     config = {"enabled": True, "dataDir": "/bench/home/.loongsuite-pilot", "userId": "ci-native-benchmark",
               "collectLog": False, "collectTrace": False, "listeners": listeners,
               "jsonl": {"enabled": True, "outputDir": "/bench/output", "rotateDaily": False, "maxFileSizeMb": 100},
@@ -363,9 +376,10 @@ def wait_for_legacy_input(fixture, deadline):
 def run_round(args, directory, load, rate, repeat, smoke=False):
     directory.mkdir(parents=True)
     legacy = args.layout.get("collection") == "legacy-stop"
-    fixture = LegacyFixture(directory) if legacy else Fixture(directory)
+    standard = args.benchmark_method == STANDARD_METHOD
+    fixture = (LegacyFixture if legacy else Fixture)(directory, sessions=SESSION_COUNT)
     output = Output(directory / "output")
-    configure(fixture, output.directory)
+    configure(fixture, output.directory, STANDARD_POLL_MS if standard else LEGACY_POLL_MS)
     if legacy:
         shutil.copytree(str(args.package / "assets/hooks"), str(fixture.data / "hooks"))
     name = "pilot-native-perf-" + uuid.uuid4().hex
@@ -400,7 +414,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             fixture.start(container)
         # One warm turn per source makes all64 native sessions active before idle.
         warm = {}
-        for session in range(64):
+        for session in range(SESSION_COUNT):
             identifier = "warm-%02d" % session
             fixture.append_turn(session, identifier, True)
         warm.update(fixture.expected)
@@ -419,7 +433,7 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             fixture.drain(timeout=max(0, deadline - time.monotonic()))
         validate(output.records, warm)
         if smoke:
-            observation = resources(container, cgroup, cpu=True)
+            observation = resources(container, cgroup, cpu=True, direct_cpu=standard)
             if legacy:
                 fixture.finish(timeout=15)
             stop_container(container)
@@ -430,10 +444,10 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                     "quality": quality, "cgroup_version": cgroup["version"], "resources": observation}
         fixture.expected.clear()
         time.sleep(1)
-        first = resources(container, cgroup, cpu=True)
+        first = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(first)
         start = time.monotonic(); end = start + WINDOW_SECONDS
-        produced, next_sample = 0, start
+        produced, next_sample = 0, start + SAMPLE_INTERVAL if standard else start
         while time.monotonic() < end:
             if legacy:
                 fixture.check()
@@ -441,13 +455,16 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
             due = min(int((now - start) * rate) + 1, rate * WINDOW_SECONDS) if rate else 0
             while produced < due:
                 late.append(max(0, time.monotonic() - (start + produced / rate)) * 1000)
-                fixture.append_turn(produced % 64, "turn-%06d" % produced)
+                fixture.append_turn(produced % SESSION_COUNT, "turn-%06d" % produced)
                 produced += 1
             if now >= next_sample:
-                samples.append(resources(container, cgroup)); output.read(); next_sample = now + .1
+                samples.append(resources(container, cgroup, cpu=standard, direct_cpu=standard))
+                output.read()
+                next_sample = now + SAMPLE_INTERVAL
             time.sleep(.001 if rate else .02)
-        active_end = resources(container, cgroup, cpu=True)
+        active_end = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(active_end)
+        active_sampling = standard_resource_sampling(samples) if standard else {}
         if produced != rate * WINDOW_SECONDS or len(fixture.expected) != produced:
             raise RuntimeError("producer could not maintain the fixed rate")
         deadline = time.monotonic() + DRAIN_SECONDS
@@ -472,10 +489,11 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                             "completed_turns": quality["turns"], "missing_responses": quality["missing"],
                             "backlog": capacity_backlog(fixture, legacy, len(warm) + produced)}
                 break
-            samples.append(resources(container, cgroup)); time.sleep(.1)
+            samples.append(resources(container, cgroup, cpu=standard, direct_cpu=standard))
+            time.sleep(SAMPLE_INTERVAL)
         if legacy and capacity is None:
             fixture.finish(timeout=max(0, deadline - time.monotonic()))
-        drained = resources(container, cgroup, cpu=True)
+        drained = resources(container, cgroup, cpu=True, direct_cpu=standard)
         samples.append(drained)
         peak_file = cgroup["memory_peak"]
         cgroup_peak = int(peak_file.read_text()) if peak_file and peak_file.exists() else None
@@ -504,6 +522,8 @@ def run_round(args, directory, load, rate, repeat, smoke=False):
                 "quality": quality}
         if capacity:
             result["capacity"] = capacity
+        if standard:
+            result.update(active_sampling, prewarmed_sessions=len(warm))
         return result
     finally:
         if legacy:
@@ -521,6 +541,28 @@ def summary(values):
     return {"median": statistics.median(values), "min": min(values), "max": max(values)}
 
 
+def standard_resource_sampling(samples):
+    if len(samples) < 3 or any(type(sample["cpu_ns"]) is not int
+                               or type(sample["rss_bytes"]) is not int
+                               or sample["rss_bytes"] <= 0 for sample in samples):
+        raise RuntimeError("infrastructure: standard benchmark resource sample series is incomplete")
+    intervals = []
+    usage = []
+    rss_bytes_twice = 0
+    for before, after in zip(samples, samples[1:]):
+        wall = after["at_ns"] - before["at_ns"]
+        cpu = after["cpu_ns"] - before["cpu_ns"]
+        if wall <= 0 or cpu < 0:
+            raise RuntimeError("infrastructure: standard benchmark CPU samples are not monotonic")
+        intervals.append(wall)
+        usage.append(cpu * 100.0 / wall)
+        rss_bytes_twice += (before["rss_bytes"] + after["rss_bytes"]) * wall
+    return {"cpu_peak_percent": max(usage), "active_sample_count": len(samples),
+            "active_sample_median_ms": statistics.median(intervals) / 1_000_000,
+            "rss_average_mib": rss_bytes_twice / (2 * sum(intervals) * 1_048_576),
+            "rss_mib": max(sample["rss_bytes"] for sample in samples) / 1_048_576}
+
+
 def summarize_workload(rounds, load):
     capacity_rounds = [round_["capacity"] for round_ in rounds if "capacity" in round_]
     quality = {"passed": not capacity_rounds,
@@ -535,6 +577,10 @@ def summarize_workload(rounds, load):
     if capacity_rounds:
         quality["validated_prefix"] = True
         result["capacity"] = {"drain_seconds": DRAIN_SECONDS, "rounds": capacity_rounds}
+    if rounds and all("cpu_peak_percent" in round_ for round_ in rounds):
+        result["cpu_peak_percent"] = summary([round_["cpu_peak_percent"] for round_ in rounds])
+    if rounds and all("rss_average_mib" in round_ for round_ in rounds):
+        result["rss_average_mib"] = summary([round_["rss_average_mib"] for round_ in rounds])
     return result
 
 
@@ -562,6 +608,7 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--source-repository", default="alibaba/loongsuite-pilot")
     parser.add_argument("--source-ref", default="main")
+    parser.add_argument("--benchmark-method", choices=(METHOD, STANDARD_METHOD), default=METHOD)
     parser.add_argument("--smoke-only", action="store_true", help="Functional64-source check only; never emits node.json")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -603,7 +650,7 @@ def main():
     node = {"id": "v" + args.version.lstrip("v") if args.kind == "release" else args.kind,
             "kind": args.kind, "version": args.version if args.kind == "release" else args.kind,
             "commit": args.commit, "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-            "status": "pending", "method_id": METHOD, "environment_id": environment_id, "environment": environment,
+            "status": "pending", "method_id": args.benchmark_method, "environment_id": environment_id, "environment": environment,
             "source": {"repository": args.source_repository, "ref": args.source_ref},
             "run_url": "%s/%s/actions/runs/%s" % (os.environ.get("GITHUB_SERVER_URL", "https://github.com"),
                 os.environ.get("GITHUB_REPOSITORY", "local"), os.environ.get("GITHUB_RUN_ID", "local")),
