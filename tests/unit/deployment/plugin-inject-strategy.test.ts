@@ -3,11 +3,15 @@ import * as fs from 'node:fs/promises';
 import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
 
 vi.mock('node:fs/promises', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
+}));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
 }));
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -92,6 +96,37 @@ describe('PluginInjectStrategy', () => {
     ]);
     if (process.platform !== 'win32') {
       expect((await fs.stat(settingsPath)).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('leaves an absent OpenClaw config usable by its owner when root cannot start the creation helper', async () => {
+    const stat = fs.stat;
+    vi.stubEnv('LOONGSUITE_PILOT_ROOT_TRIGGER', '1');
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    vi.spyOn(fs, 'stat').mockImplementation(async (...args) => {
+      const result = await Reflect.apply(stat, fs, args);
+      return args[0] === tmpDir ? Object.assign(result, { uid: 1000, gid: 1000 }) : result;
+    });
+    const spawn = vi.spyOn(childProcess, 'execFile').mockImplementation((...args: any[]) => {
+      args[args.length - 1](Object.assign(new Error('identity change denied'), { code: 'EPERM' }), '', '');
+      return {} as childProcess.ChildProcess;
+    });
+    const configPath = path.join(tmpDir, 'native', 'openclaw.json');
+    const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
+      detection: { paths: [], commands: [] }, pluginInject: { configPaths: [configPath], createIfMissing: true,
+        configShape: 'openclaw-nested', pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
+    const host = { executable: '/app/openclaw.mjs', source: '/app/package.json', binding: 'explicit-entry' as const,
+      version: '2026.6.10', adapter: 'modern' as const, conversationAccess: true };
+    try {
+      const result = await new PluginInjectStrategy(dataDir, tmpDir, async () => host).deploy(def);
+      expect(result.success).toBe(false);
+      expect(spawn).toHaveBeenCalledWith(process.execPath, expect.any(Array),
+        expect.objectContaining({ uid: 1000, gid: 1000, timeout: 5000,
+          env: expect.objectContaining({ NODE_OPTIONS: '', BUN_OPTIONS: '', NODE_PATH: '' }) }), expect.any(Function));
+      expect(await fs.access(path.dirname(configPath)).then(() => true, () => false)).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
     }
   });
 

@@ -58,6 +58,82 @@ describe('OpenClaw read-only version discovery and injection', () => {
     await pkg('app');
     expect(await resolveOpenClawHost({}, path.join(root, 'app'))).toMatchObject({ version: '2026.3.8' });
   });
+  describe('official container after root initialization outside the agent workdir', () => {
+    // Map only the official fixed path into this test's private filesystem.
+    // Never create /app on the developer host or execute the fake entry.
+    async function containerPackage(version = '2026.6.10') {
+      const entry = await pkg('container/app', version);
+      const map = (file: unknown) => typeof file === 'string' && (file === '/app' || file.startsWith('/app/'))
+        ? path.join(root, 'container', file.slice(1)) : file;
+      const open = probeFs.open, stat = probeFs.stat, realpath = probeFs.realpath;
+      vi.spyOn(probeFs, 'open').mockImplementation(async (...args) => Reflect.apply(open, probeFs, [map(args[0]), ...args.slice(1)]));
+      vi.spyOn(probeFs, 'stat').mockImplementation(async (...args) => Reflect.apply(stat, probeFs, [map(args[0]), ...args.slice(1)]));
+      vi.spyOn(probeFs, 'realpath').mockImplementation(async (...args) => Reflect.apply(realpath, probeFs, [map(args[0]), ...args.slice(1)]));
+      return entry;
+    }
+    afterEach(() => vi.restoreAllMocks());
+    it.each(['1', ' true '])('discovers the official package from / with restricted PATH (root trigger %s)', async value => {
+      const entry = await containerPackage();
+      expect(await resolveOpenClawHost({ HOME: root, PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LOONGSUITE_PILOT_ROOT_TRIGGER: value }, '/'))
+        .toMatchObject({ executable: '/app/openclaw.mjs', source: await fs.realpath(path.join(path.dirname(entry), 'package.json')), version: '2026.6.10', binding: 'auto-entry' });
+    });
+    it('leaves default home discovery unchanged without the root opt-in', async () => {
+      await containerPackage();
+      expect(await resolveOpenClawHost({ HOME: root, PATH: '' }, '/')).toBeNull();
+      const entry = await pkg('user-cli');
+      await fs.symlink(entry, path.join(root, 'user-cli/openclaw'));
+      expect(await resolveOpenClawHost({ HOME: root, PATH: path.dirname(entry) }, root))
+        .toMatchObject({ executable: path.join(root, 'user-cli/openclaw') });
+    });
+    it('does not override explicit or saved bindings to a different installation', async () => {
+      await containerPackage();
+      const entry = await pkg('selected', '2026.3.8');
+      const env = { HOME: root, PATH: '', LOONGSUITE_PILOT_ROOT_TRIGGER: '1' };
+      expect(await resolveOpenClawHost({ ...env, OPENCLAW_CLI_PATH: entry }, '/'))
+        .toMatchObject({ executable: entry, binding: 'explicit-entry' });
+      const config = path.join(root, 'pilot.json');
+      await fs.writeFile(config, JSON.stringify({ agents: { openclaw: { cliPath: entry } } }));
+      expect(await resolveOpenClawHost({ ...env, AGENT_DATA_COLLECTION_CONFIG: config }, '/'))
+        .toMatchObject({ executable: entry, binding: 'persisted-entry' });
+      await fs.unlink(entry);
+      expect(await resolveOpenClawHost({ ...env, OPENCLAW_CLI_PATH: entry }, '/')).toBeNull();
+      expect(await resolveOpenClawHost({ ...env, AGENT_DATA_COLLECTION_CONFIG: config }, '/')).toBeNull();
+    });
+    it.each(['cwd', 'path', 'bundle'])('refuses a conflicting %s installation and leaves customer config untouched', async source => {
+      await containerPackage();
+      const entry = await pkg(source === 'bundle' ? '.openclaw-bundle/openclaw/node_modules/openclaw' : 'other');
+      const env = { HOME: root, PATH: '', LOONGSUITE_PILOT_ROOT_TRIGGER: '1' };
+      if (source === 'path') {
+        await fs.symlink(entry, path.join(root, 'other/openclaw'));
+        env.PATH = path.dirname(entry);
+      }
+      const cwd = source === 'cwd' ? path.dirname(entry) : '/';
+      const file = path.join(root, 'openclaw.json');
+      const before = '{ "plugins": { "allow": ["feishu"], "entries": { "feishu": { "enabled": true } } } }\n';
+      await fs.writeFile(file, before);
+      const def: AgentDefinition = { id: 'openclaw', displayName: 'OpenClaw', deployMode: 'plugin-inject',
+        detection: { paths: [], commands: [] }, pluginInject: { configPaths: [file], configShape: 'openclaw-nested',
+          createIfMissing: true, pluginId: 'loongsuite-pilot-openclaw', pluginSpec: 'file://$PILOT_DATA/plugins/openclaw' } };
+      const strategy = new PluginInjectStrategy(root, root, () => resolveOpenClawHost(env, cwd));
+      expect(await strategy.detect(def)).toBe(false);
+      expect((await strategy.deploy(def)).success).toBe(false);
+      expect(await fs.readFile(file, 'utf8')).toBe(before);
+    });
+    it.each(['missing-entry', 'broken-metadata', 'unsupported-version', 'unrelated-package'])('fails closed for %s without changing config', async kind => {
+      const entry = await containerPackage(kind === 'unsupported-version' ? '2026.3.7' : '2026.6.10');
+      if (kind === 'missing-entry') await fs.unlink(entry);
+      if (kind === 'broken-metadata') await fs.writeFile(path.join(path.dirname(entry), 'package.json'), '{');
+      if (kind === 'unrelated-package') await fs.writeFile(path.join(path.dirname(entry), 'package.json'), JSON.stringify({ name: 'other-app', version: '2026.6.10' }));
+      expect(await resolveOpenClawHost({ HOME: root, PATH: '', LOONGSUITE_PILOT_ROOT_TRIGGER: '1' }, '/')).toBeNull();
+    });
+    it('rechecks package metadata after an upgrade instead of trusting a cached version', async () => {
+      const entry = await containerPackage();
+      const env = { HOME: root, PATH: '', LOONGSUITE_PILOT_ROOT_TRIGGER: '1' };
+      expect(await resolveOpenClawHost(env, '/')).toMatchObject({ version: '2026.6.10' });
+      await fs.writeFile(path.join(path.dirname(entry), 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.3.7' }));
+      expect(await resolveOpenClawHost(env, '/')).toBeNull();
+    });
+  });
   it.each(['2026.3.8', '2026.6.10'])('discovers a fixed openclaw child from its container workdir (%s)', async version => {
     const entry = await pkg('app/openclaw', version);
     await pkg('app', '1.0.0', 'customer-container');
