@@ -16,6 +16,8 @@ export interface TurnContext {
 
 interface TurnRecord extends TurnContext {
   type: 'turn';
+  /** Exact native gen_ai.turn.id; never a business request id. */
+  turnId?: string;
   contentHash?: string;
   contentPrefix?: string;
 }
@@ -43,6 +45,8 @@ interface SessionState {
   hashIndex: Map<string, number[]>;
   /** contentHash -> next bucket position to consider (skips consumed prefix). */
   hashCursor: Map<string, number>;
+  /** Exact native turn id -> records, separate from prompt FIFO matching. */
+  turnIndex: Map<string, number[]>;
   /** Wall-clock of the last access; used to evict idle sessions. */
   lastAccessMs: number;
 }
@@ -50,6 +54,7 @@ interface SessionState {
 function buildHashIndex(turns: TurnRecord[]): Map<string, number[]> {
   const index = new Map<string, number[]>();
   for (let i = 0; i < turns.length; i += 1) {
+    if (turns[i].turnId !== undefined) continue;
     const h = turns[i].contentHash;
     if (h === undefined) continue;
     const bucket = index.get(h);
@@ -59,6 +64,28 @@ function buildHashIndex(turns: TurnRecord[]): Map<string, number[]> {
   return index;
 }
 
+function buildTurnIndex(turns: TurnRecord[]): Map<string, number[]> {
+  const index = new Map<string, number[]>();
+  turns.forEach((record, i) => {
+    if (record.turnId === undefined) return;
+    const indices = index.get(record.turnId) ?? [];
+    indices.push(i);
+    index.set(record.turnId, indices);
+  });
+  return index;
+}
+
+function exactIdentity(record: TurnRecord): string {
+  return JSON.stringify({
+    turnId: record.turnId,
+    contentHash: record.contentHash,
+    contentPrefix: record.contentPrefix,
+    traceparent: record.traceparent,
+    attributes: record.attributes === undefined ? undefined
+      : Object.fromEntries(Object.keys(record.attributes).sort().map(key => [key, record.attributes![key]])),
+  });
+}
+
 function safeName(value: string): string {
   return path.basename(String(value)).replace(/[^a-zA-Z0-9_-]/g, '_') || 'unknown';
 }
@@ -66,7 +93,7 @@ function safeName(value: string): string {
 /**
  * Reads upstream-context correlation records written to
  * `${dataDir}/acp-correlate/<sessionId>.jsonl`:
- *   - `turn`    records (adapter, per prompt): matched by content, consume-once.
+ *   - `turn`    records (adapter): exact native turn id, otherwise prompt FIFO.
  *   - `session` records (env hook, first turn): applied to a session's first turn.
  *
  * State is per-session and lazily (re)loaded by mtime. Atomic disk claims keep
@@ -222,6 +249,15 @@ export class CorrelationStore {
           const hasAttributes = r.attributes !== null && typeof r.attributes === 'object'
             && !Array.isArray(r.attributes);
           if (!hasTrace && !hasAttributes) continue;
+          // Count all legacy-recognized trace records even when a new exact
+          // selector is invalid, preserving pre-extension claim indices.
+          const legacyIndex = hasTrace ? traceIndex++ : undefined;
+          if (r.turnId !== undefined && (typeof r.turnId !== 'string'
+            || r.turnId.length === 0 || r.turnId.length > 512
+            || r.turnId.trim() !== r.turnId || /[\u0000-\u001f\u007f]/.test(r.turnId))) {
+            logger.warn('invalid exact native turn selector; record skipped', { sessionId, lineIndex });
+            continue;
+          }
           const legacyRecord = {
             type: 'turn',
             contentHash: typeof r.contentHash === 'string' ? r.contentHash : undefined,
@@ -230,12 +266,17 @@ export class CorrelationStore {
           } as const;
           // Empty attributes are an explicit request placeholder, keeping FIFO
           // ownership aligned when a later request repeats the same input.
-          const record: TurnRecord = { ...legacyRecord, ...(hasAttributes ? { attributes } : {}) };
-          // Trace records retain the exact pre-extension index/digest, including
-          // when attributes are enabled later. Attribute-only records have a
-          // distinct namespace so toggles cannot resurrect an old trace claim.
-          this.identities.set(record, hasTrace
-            ? { index: traceIndex++, record: legacyRecord }
+          const record: TurnRecord = { ...legacyRecord,
+            ...(typeof r.turnId === 'string' ? { turnId: r.turnId } : {}),
+            ...(hasAttributes ? { attributes } : {}),
+          };
+          // Records without the new selector retain the pre-extension claim
+          // identity. Exact native turns include their selector in the digest;
+          // attribute-only records use a separate namespace from legacy traces.
+          this.identities.set(record, record.turnId !== undefined
+            ? { index: `attributes-${lineIndex}`, record: JSON.parse(exactIdentity(record)) }
+            : hasTrace
+            ? { index: legacyIndex!, record: legacyRecord }
             : { index: `attributes-${lineIndex}`, record: { ...legacyRecord, attributes } });
           turns.push(record);
         } else if (r.type === 'session' && typeof r.traceparent === 'string') {
@@ -258,6 +299,7 @@ export class CorrelationStore {
       // cursors re-derive from consumedTurns on first use, so a reset is safe.
       hashIndex: buildHashIndex(turns),
       hashCursor: new Map<string, number>(),
+      turnIndex: buildTurnIndex(turns),
       lastAccessMs: Date.now(),
     };
     this.states.set(sessionId, state);
@@ -265,8 +307,9 @@ export class CorrelationStore {
   }
 
   /**
-   * Resolve a per-turn upstream traceparent by matching the collected user text
-   * against turn records. Exact `contentHash` matches take precedence and are
+   * Resolve a per-turn upstream traceparent. Explicit native `turnId` records
+   * have priority and never participate in prompt FIFO. Otherwise collected
+   * user text matches turn records: exact `contentHash` matches are
    * looked up via a per-hash index (O(1) amortized, so a session with many
    * turns stays linear overall instead of O(turns^2)); `contentPrefix` is a
    * fallback used only when no exact record matches (covers agents that rewrite
@@ -283,6 +326,11 @@ export class CorrelationStore {
       this.options.attributesEnabled === true, this.options.traceEnabled !== false);
   }
 
+  /** Exact native ids can associate attributes even without a prompt event. */
+  hasExactTurn(sessionId: string, turnId: string): boolean {
+    return this.load(sessionId)?.turnIndex.has(turnId) ?? false;
+  }
+
   private resolveContext(sessionId: string, collectedText: string, turnId: string | undefined,
     collectedHash: string | undefined, attributesEnabled: boolean, traceEnabled: boolean): TurnContext | null {
     const state = this.load(sessionId);
@@ -297,6 +345,24 @@ export class CorrelationStore {
       };
       return Object.keys(context).length ? context : null;
     };
+    const exact = turnId ? state.turnIndex.get(turnId) : undefined;
+    if (exact?.length) {
+      const first = state.turns[exact[0]];
+      const identity = exactIdentity(first);
+      // Retried identical publications are harmless. Conflicting business
+      // identities for one native turn are not resolved by file order.
+      if (exact.some(index => exactIdentity(state.turns[index]) !== identity)) {
+        logger.warn('conflicting contexts for exact native turn; attribution skipped', { sessionId });
+        return null;
+      }
+      const context = project(first);
+      if (!context) return null;
+      const claim = this.claimTurnContext(sessionId, exact[0], first, turnId);
+      if (!claim.claimed) return null;
+      state.consumedTurns.add(exact[0]);
+      state.resolvedTurns.set(turnId!, exact[0]);
+      return context;
+    }
     const resolved = turnId ? state.resolvedTurns.get(turnId) : undefined;
     if (resolved !== undefined && state.turns[resolved]) return project(state.turns[resolved]);
 
@@ -329,6 +395,7 @@ export class CorrelationStore {
     for (let i = 0; i < state.turns.length; i += 1) {
       if (state.consumedTurns.has(i)) continue;
       const t = state.turns[i];
+      if (t.turnId !== undefined) continue;
       const context = project(t);
       if (!context) continue;
       if (t.contentPrefix !== undefined && t.contentPrefix.length > 0 && collectedText.startsWith(t.contentPrefix)) {

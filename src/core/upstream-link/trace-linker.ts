@@ -147,13 +147,15 @@ export class TraceLinker {
       return; // already resolved or already attempted (miss)
     }
 
-    // Other events may be metadata-only; their empty text is not a final miss.
-    if (entry['event.name'] !== 'other') return;
+    const exactTurn = this.store.hasExactTurn(sessionId, turnId);
+    // A caller-supplied exact native turn is already an unambiguous selector;
+    // prompt-only correlation retains its input-bearing `other` requirement.
+    if (entry['event.name'] !== 'other' && !exactTurn) return;
 
     const text = extractUserText(entry);
     const hash = extractInputHash(entry);
     // Metadata is not evidence of a user input, including for session fallback.
-    if (!text && !hash) return;
+    if (!text && !hash && !exactTurn) return;
     const isFirstTurn = this.firstTurnBySession.get(sessionId) === turnId;
     const context = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
 
@@ -183,7 +185,7 @@ export class TraceLinker {
     if (!this.store.hasSession(sessionId)) return null;
 
     // Text or a producer-supplied pre-truncation hash identifies a real input.
-    if (text || hash) {
+    if (text || hash || this.store.hasExactTurn(sessionId, turnId)) {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
         const turnContext: TurnContext | null = this.attributesEnabled
