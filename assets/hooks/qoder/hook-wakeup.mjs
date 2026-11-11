@@ -46,7 +46,7 @@ export function qoderSourceKey(sessionId, transcriptPath) {
   return crypto.createHash('sha256').update(JSON.stringify([sessionId, transcriptPath])).digest('hex');
 }
 
-function canonicalSourcePath(file) {
+export function canonicalSourcePath(file) {
   let candidate = path.resolve(file);
   const suffix = [];
   // realpath of the nearest existing ancestor also works before the native

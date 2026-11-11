@@ -10,7 +10,7 @@ import { CorrelationStore } from '../../src/core/upstream-link/correlation-store
 import { TraceLinker } from '../../src/core/upstream-link/trace-linker.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
-import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
+import { publishQoderWakeup, qoderSourceKey, qoderWakeupRoot } from '../../assets/hooks/qoder/hook-wakeup.mjs';
 import type { AgentActivityEntry } from '../../src/types/index.js';
 
 // Synthetic fixtures follow Qoder CLI 1.1.81's native sidechain protocol.
@@ -47,8 +47,8 @@ const end = (id: string, second: number, tokens = 11) => [
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
-async function harness(agentId: 'qoder', upstream = false) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-pipeline-'));
+async function harness(agentId: 'qoder', upstream = false, configureCollector?: (collector: any) => void) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-pipeline-')));
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }));
   const parent = path.join(root, `${session}.jsonl`);
   const child = (id: string) => path.join(root, session, 'subagents', `agent-${id}.jsonl`);
@@ -62,6 +62,7 @@ async function harness(agentId: 'qoder', upstream = false) {
     if (upstream) manager.setTraceLinker(new TraceLinker(new CorrelationStore(path.join(root, 'acp-correlate')), { retries: 0 }));
     input = new QoderTraceInput({ stateStore: state, dataDir: root, logDir: path.join(root, 'history'), pollIntervalMs: 60_000,
       resolveTraceContext: entries => manager.stampTraceContext(entries) });
+    configureCollector?.((input as any).transcriptSource.collector);
     vi.spyOn(input as any, 'readCliIntercept').mockResolvedValue({ systemPrompt: null, tokens: [] });
     vi.spyOn(input as any, 'readCliSegments').mockResolvedValue([]);
     vi.spyOn(input as any, 'readIdeSqliteTokens').mockResolvedValue({ rows: [], matchedDbPath: null });
@@ -95,6 +96,49 @@ async function spansFor(entries: AgentActivityEntry[]) {
 }
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
+  it.each([false, true])('exports the nested TOOL parent after delayed discovery and a durable restart (omit parent=%s)', async omitParent => {
+    let clock = Date.now();
+    let queue: string[] = [];
+    const h = await harness(agentId, false, collector => {
+      collector.now = () => clock; collector.stableMs = 0; collector.settleMs = 0;
+      let index = 0;
+      collector.discovery = { async read() { const name = queue[index++]; return name ? { name, isDirectory: () => true } : null; }, async close() {} };
+    });
+    await h.write(null, [prompt('parent', 0), ...dispatch('root-outer', 1, 'outer'), ...end('parent-end', 8)]);
+    await h.write('outer', [prompt('outer', 1.1, 'root-outer', 'outer', omitParent ? undefined : session),
+      ...dispatch('outer-inner', 2, 'inner'), ...end('outer-end', 6)]);
+    await h.write('inner', [prompt('inner', 2.1, 'outer-inner', 'inner', omitParent ? undefined : 'outer'), ...end('inner-end', 5)]);
+    const historical = path.join(h.root, 'historical.jsonl'); await fs.writeFile(historical, '');
+    const histories = [];
+    for (let i = 0; i < 420; i++) {
+      const sid = `history-${i}`; const key = qoderSourceKey(sid, historical);
+      const directory = path.join(qoderWakeupRoot(h.root, agentId), key);
+      await fs.mkdir(path.join(directory, 'events'), { recursive: true });
+      await fs.writeFile(path.join(directory, 'source.json'), JSON.stringify({ schema: 1, key, agentId,
+        sessionId: sid, transcriptPath: historical, observedSize: 0 }));
+      histories.push(key);
+    }
+    queue = [qoderSourceKey(session, h.child('inner')), ...histories,
+      qoderSourceKey(session, h.child('outer')), qoderSourceKey(session, h.parent)];
+    await h.start(); expect(h.entries()).toEqual([]); await h.stop(); clock += 61_000;
+    await h.start();
+    for (let i = 0; i < 5; i++) { await h.cycle(); clock += 10_000; }
+    await h.stop();
+    const entries = h.entries();
+    expect(entries.filter(entry => entry['gen_ai.agent.id'] === 'inner').every(entry => entry['gen_ai.agent.parent.id'] === 'outer')).toBe(true);
+    const spans = await spansFor(entries);
+    const agents = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT');
+    expect(agents).toHaveLength(3);
+    expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(1);
+    expect(new Set(spans.map(span => span.spanContext().spanId)).size).toBe(spans.length);
+    const inner = agents.find(span => span.attributes['gen_ai.agent.id'] === 'inner')!;
+    const owningTool = spans.find(span => span.spanContext().spanId === inner.parentSpanId)!;
+    expect(owningTool.attributes['gen_ai.span.kind']).toBe('TOOL');
+    expect(owningTool.attributes['gen_ai.tool.call.id']).toBe('outer-inner');
+    expect(owningTool.attributes['gen_ai.agent.id']).toBe('outer');
+    expect(JSON.stringify(spans.map(span => span.attributes))).not.toContain(secret);
+  });
+
   it.each([false, true])('keeps already published delegation in one trace when correlation arrives later (restart=%s)', async restart => {
     const h = await harness(agentId, true);
     await h.write(null, [prompt('published-parent', 0), ...dispatch('published-call', 1, 'published-child')]);

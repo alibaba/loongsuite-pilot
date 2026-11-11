@@ -45,6 +45,52 @@ beforeEach(async () => {
 afterEach(async () => { collector.stop(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('Qoder native delegation boundaries', () => {
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    'keeps nested work linked behind historical sources (restart=%s, omit parent agent=%s)', async (restart, omitParentAgent) => {
+      const inner = path.join(root, session, 'subagents/agent-grandchild.jsonl');
+      const delegated = (id, call, owner) => ({ ...user(id, call), agentId: id,
+        ...(!omitParentAgent ? { parent_agent_id: owner } : {}) });
+      const call = id => model(`dispatch-${id}`, [{ type: 'tool_use', id, name: 'Agent', input: { prompt: 'task' } }], 'tool_use');
+      const result = (id, agentId) => ({ type: 'user', timestamp: new Date(epoch + 200).toISOString(),
+        entrypoint: 'cli', toolUseResult: { kind: 'agent-result', state: 'completed', agentId },
+        message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'done' }] } });
+      await write(parent, [user('parent'), call('root-child'), result('root-child', 'child'),
+        model('parent-end', [{ type: 'text', text: 'done' }]), ...end]);
+      await write(child, [delegated('child', 'root-child', session),
+        ...(restart && omitParentAgent ? [{ type: 'progress', data: { detail: 'x'.repeat(192 * 1024) } }] : []), call('child-grandchild'),
+        result('child-grandchild', 'grandchild'), model('child-end', [{ type: 'text', text: 'done' }]), ...end]);
+      await write(inner, [delegated('grandchild', 'child-grandchild', 'child'),
+        model('inner-end', [{ type: 'text', text: 'done' }]), ...end]);
+      wake('grandchild', 'SubagentStop'); wake('child', 'SubagentStop');
+      await crowdedDiscovery();
+      const historical = path.join(root, 'historical.jsonl');
+      const reset = () => {
+        const queue = [qoderSourceKey(session, inner), ...Array.from({ length: 420 }, (_, i) => qoderSourceKey(`history-${i}`, historical)),
+          qoderSourceKey(session, child), qoderSourceKey(session, parent)];
+        let index = 0;
+        collector.discovery = { async read() { const name = queue[index++]; return name ? { name, isDirectory: () => true } : null; }, async close() {} };
+      };
+      const warnings = [];
+      collector.warn = (_message, fields) => warnings.push(fields);
+      reset();
+      expect((await collect()).records).toEqual([]);
+      state = JSON.parse(JSON.stringify(state)); clock += 61_000;
+      if (restart) {
+        collector.stop();
+        collector = new QoderTranscriptCollector({ dataDir: root, agentId: 'qoder', now: () => clock, stableMs: 0, settleMs: 0,
+          warn: (_message, fields) => warnings.push(fields) });
+        reset();
+      }
+      const records = [];
+      for (let i = 0; i < 20; i++) { records.push(...(await collect()).records); clock += 10_000; }
+      const nested = records.filter(row => row['agent.qoder.subagent_id'] === 'grandchild');
+      expect(nested.length).toBeGreaterThan(0);
+      expect(nested.every(row => row['gen_ai.agent.parent.id'] === 'child')).toBe(true);
+      expect(new Set(records.map(row => row.trace_id)).size).toBe(1);
+      expect(new Set(records.map(row => row['event.id'])).size).toBe(records.length);
+      expect(warnings.filter(row => row.reason === 'subagent-parent-unavailable-independent')).toEqual([]);
+    });
+
   it('retries a pending invoke after its context arrives and a scan validation fails', async () => {
     await fs.writeFile(parent, ''); wake(null, 'SubagentStart');
     await write(parent, [user('parent'), model('dispatch', [{ type: 'tool_use', id: 'delegate', name: 'Agent', input: { prompt: 'task' } }], 'tool_use')]);
@@ -61,6 +107,26 @@ describe('Qoder native delegation boundaries', () => {
     const accepted = (await collect()).records;
     expect(accepted.filter(record => record['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(1);
     expect((await collect()).records).toEqual([]);
+  });
+
+  it('bounds an unavailable ancestor without detaching the available nested parent', async () => {
+    const inner = path.join(root, session, 'subagents/agent-grandchild.jsonl');
+    await fs.writeFile(parent, '');
+    await write(child, [user('child', 'missing-root-call'),
+      model('outer-dispatch', [{ type: 'tool_use', id: 'outer-inner', name: 'Agent', input: { prompt: 'task' } }], 'tool_use'),
+      { type: 'user', timestamp: new Date(epoch + 200).toISOString(), toolUseResult: { kind: 'agent-result', state: 'completed', agentId: 'grandchild' },
+        message: { content: [{ type: 'tool_result', tool_use_id: 'outer-inner', content: 'done' }] } },
+      model('outer-end', [{ type: 'text', text: 'done' }]), ...end]);
+    await write(inner, [{ ...user('inner', 'outer-inner'), agentId: 'grandchild' },
+      model('inner-end', [{ type: 'text', text: 'done' }]), ...end]);
+    wake('grandchild', 'SubagentStop'); wake('child', 'SubagentStop');
+    const warnings = []; collector.warn = (_message, fields) => warnings.push(fields);
+    const records = [...(await collect()).records]; clock += 61_000;
+    for (let i = 0; i < 12; i++) { records.push(...(await collect()).records); clock += 10_000; }
+    const nested = records.filter(row => row['agent.qoder.subagent_id'] === 'grandchild');
+    expect(nested.length).toBeGreaterThan(0);
+    expect(nested.every(row => row['gen_ai.agent.parent.id'] === 'child')).toBe(true);
+    expect(warnings.filter(row => row.reason === 'subagent-parent-unavailable-independent')).toHaveLength(1);
   });
 
   it.each([false, true])('prioritizes an observed parent behind 420 historical sources (restart=%s)', async restart => {

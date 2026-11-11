@@ -11,7 +11,7 @@ import {
   hasQoderCnTerminalMarker,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
-import { qoderWakeupRoot, qoderSourceKey, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
+import { qoderWakeupRoot, qoderSourceKey, canonicalSourcePath, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
 import { QoderSubagentLinks, QODER_DELEGATIONS_KEY, qoderTurnId, qoderDigest, qoderTaskNotification } from './subagent-links.mjs';
 
 // Native background delivery starts a model turn without a new human prompt.
@@ -136,6 +136,11 @@ export class QoderTranscriptCollector {
     this.pendingSources = [];
     this.prioritySources = new Map();
     this.parentAttempts = new Map();
+    this.parentOwners = new Map();
+    this.parentProbes = new Map();
+    this.discoveryStartedAt = null;
+    this.completedDiscoveryStartedAt = null;
+    this.discoveryComplete = false;
     this.subagentParentFallbacks = 0;
     this.cleanupRotation = 0;
     this.stopped = false;
@@ -156,6 +161,9 @@ export class QoderTranscriptCollector {
     this.pendingSources = [];
     this.prioritySources.clear();
     this.parentAttempts.clear();
+    this.parentOwners.clear(); this.parentProbes.clear();
+    this.parentRequests?.clear();
+    this.discoveryStartedAt = null; this.completedDiscoveryStartedAt = null; this.discoveryComplete = false;
     if (directory) void directory.close().catch(() => {});
   }
 
@@ -169,14 +177,23 @@ export class QoderTranscriptCollector {
     { source: key, reason, ...fields });
   }
 
-  parentKey(source) {
+  parentKey(source, callId, parentAgentId) {
+    const owners = this.parentOwners.get(JSON.stringify([source.sessionId, callId]));
+    const matches = owners && [...owners.values()].filter(owner => !parentAgentId || owner.agentId === parentAgentId);
+    if (matches?.length === 1) return matches[0].key;
+    if (parentAgentId && parentAgentId !== source.sessionId) {
+      if (!/^[a-zA-Z0-9_-]{1,512}$/.test(parentAgentId) || parentAgentId === source.subagentId
+        || path.basename(source.transcriptPath) !== `agent-${source.subagentId}.jsonl`) return;
+      try { return qoderSourceKey(source.sessionId, canonicalSourcePath(path.join(path.dirname(source.transcriptPath), `agent-${parentAgentId}.jsonl`))); }
+      catch { return; }
+    }
     return source.subagentId && typeof source.parentTranscriptPath === 'string'
       && path.isAbsolute(source.parentTranscriptPath) && source.parentTranscriptPath !== source.transcriptPath
       ? qoderSourceKey(source.sessionId, source.parentTranscriptPath) : undefined;
   }
 
-  prioritizeParent(source) {
-    const parent = this.parentKey(source);
+  prioritizeParent(source, callId, parentAgentId) {
+    const parent = this.parentKey(source, callId, parentAgentId);
     if (!parent) return;
     for (const key of [parent, source.key]) {
       if (this.prioritySources.has(key)) continue;
@@ -188,9 +205,71 @@ export class QoderTranscriptCollector {
     }
   }
 
-  parentAttempted(source) {
-    const key = this.parentKey(source);
-    return !key || this.parentAttempts.has(key);
+  parentAttempted(source, checkpoint, callId, parentAgentId) {
+    const owners = this.parentOwners.get(JSON.stringify([source.sessionId, callId]));
+    // A root Hook path does not identify the immediate caller of a nested task.
+    if (parentAgentId || owners?.size === 1) {
+      const key = this.parentKey(source, callId, parentAgentId);
+      if (key) return this.parentAttempts.has(key);
+    }
+    return this.completedDiscoveryStartedAt !== null
+      && this.completedDiscoveryStartedAt >= checkpoint.parentPendingSince
+      && ![...this.parentProbes.values()].some(probe => probe.sessionId === source.sessionId && !probe.complete);
+  }
+
+  markParentAttempt(key) {
+    if (this.parentAttempts.size >= MAX_PRIORITY_SOURCES) this.parentAttempts.delete(this.parentAttempts.keys().next().value);
+    this.parentAttempts.set(key, this.now());
+  }
+
+  async probeParentOwners(source, stat) {
+    if (this.parentProbeBudget <= 0 || ![...this.parentRequests].some(([key, request]) => key !== source.key
+      && request.sessionId === source.sessionId && !this.links.find(request.sessionId, request.callId, request.parentAgentId))) return;
+    let probe = this.parentProbes.get(source.key);
+    if (!probe || probe.inode !== stat.ino || stat.size < probe.offset
+      || (probe.size === stat.size && probe.version !== fileVersion(stat))) {
+      if (!probe && this.parentProbes.size >= MAX_PRIORITY_SOURCES) {
+        const finished = [...this.parentProbes].find(([, value]) => value.complete);
+        if (!finished) { this.report(source.key, 'subagent-parent-probe-capacity'); return; }
+        this.parentProbes.delete(finished[0]);
+      }
+      probe = { sessionId: source.sessionId, inode: stat.ino, offset: 0 };
+      for (const [id, owners] of this.parentOwners) {
+        owners.delete(source.key);
+        if (!owners.size) this.parentOwners.delete(id);
+      }
+      this.parentProbes.set(source.key, probe);
+    }
+    if (probe.complete && probe.version === fileVersion(stat)) return;
+    this.parentProbeBudget--;
+    const budget = this.remainingBytes;
+    const limit = Math.min(budget, CHUNK_BYTES);
+    this.remainingBytes = limit;
+    try {
+      for await (const line of this.lines(source.transcriptPath, probe.offset, stat.size, { checkpoint: probe, allowFinal: true })) {
+        for (const block of this.links.calls(source, line.row)) {
+          const id = JSON.stringify([source.sessionId, block.id]);
+          if (!this.parentOwners.has(id) && this.parentOwners.size >= 4096) this.parentOwners.delete(this.parentOwners.keys().next().value);
+          const owners = this.parentOwners.get(id) ?? new Map();
+          // Two different sources are enough to retain an ambiguous hint.
+          if (owners.size < 2) owners.set(source.key, { key: source.key, agentId: source.subagentId ?? source.sessionId });
+          this.parentOwners.set(id, owners);
+        }
+        probe.offset = line.end;
+      }
+      probe.complete = probe.offset >= stat.size;
+      probe.size = stat.size; probe.version = fileVersion(stat);
+      if (!probe.complete && !this.prioritySources.has(source.key) && this.prioritySources.size < MAX_PRIORITY_SOURCES) {
+        this.prioritySources.set(source.key, { name: source.key });
+      }
+    } finally { this.remainingBytes = budget - (limit - this.remainingBytes); }
+  }
+
+  finishDiscovery() {
+    if (this.discoveryComplete && !this.pendingSources.length) {
+      this.completedDiscoveryStartedAt = this.discoveryStartedAt;
+      this.discoveryStartedAt = null; this.discoveryComplete = false;
+    }
   }
 
   collect(state = {}) {
@@ -205,15 +284,17 @@ export class QoderTranscriptCollector {
     if (this.pendingSources.length) return this.pendingSources;
     try {
       if (!this.discovery) this.discovery = await fs.opendir(this.root);
+      this.discoveryStartedAt ??= this.now();
       for (let count = 0; count < MAX_SOURCES_PER_CYCLE; count++) {
         const entry = await this.discovery.read();
         if (!entry) {
-          await this.discovery.close(); this.discovery = null; break;
+          await this.discovery.close(); this.discovery = null; this.discoveryComplete = true; break;
         }
         if (entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name)) this.pendingSources.push(entry);
       }
     } catch (error) {
       this.discovery = null;
+      this.discoveryStartedAt = null; this.discoveryComplete = false;
       if (error.code !== 'ENOENT' && !this.stopped) throw error;
     }
     return this.pendingSources;
@@ -246,6 +327,12 @@ export class QoderTranscriptCollector {
     let changed = false;
     this.metrics = { bytesRead: 0, recordsParsed: 0, sourceFilesOpened: 0, peakCachedBytes: this.cacheSize };
     this.remainingBytes = this.scanBytes;
+    this.parentProbeBudget = 1;
+    // Seed only the bounded scheduler queues; ordinary discovery adds pending
+    // requests as it visits them. Do not walk/copy all historical checkpoints.
+    this.parentRequests = new Map([...new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name)])]
+      .filter(key => state[key]?.parentPendingCall && state[key].parentPendingSessionId)
+      .map(key => [key, { sessionId: state[key].parentPendingSessionId, callId: state[key].parentPendingCall, parentAgentId: state[key].parentPendingAgent }]));
     this.ownerInspectionBudget = 1;
     this.promptInspectionBudget = 1;
     if (this.stopped) return { records, state: next, metrics: this.metrics, changed };
@@ -258,7 +345,7 @@ export class QoderTranscriptCollector {
     const priorityKeys = new Set(priority.map(entry => entry.name));
     for (const key of priorityKeys) this.prioritySources.delete(key);
     if (priority.length) entries = [...priority, ...entries.filter(entry => !priorityKeys.has(entry.name))];
-    if (!entries.length) return { records, state: next, metrics: this.metrics, changed };
+    if (!entries.length) { this.finishDiscovery(); return { records, state: next, metrics: this.metrics, changed }; }
     // One unavailable owner must not consume every cycle's shared DB budget.
     // Choose fairly from this bounded discovery batch, even if that source's
     // native file or legacy writer prevents its lookup from running today.
@@ -276,14 +363,13 @@ export class QoderTranscriptCollector {
       visited++;
       const key = entry.name;
       if (priorityKeys.has(key)) {
-        if (this.parentAttempts.size >= MAX_PRIORITY_SOURCES) this.parentAttempts.delete(this.parentAttempts.keys().next().value);
-        this.parentAttempts.set(key, this.now());
+        this.parentAttempts.delete(key);
       }
       const directory = path.join(this.root, key);
       let source;
       let observedContexts;
       try { ({ source, contexts: observedContexts } = await this.metadataFor(directory)); }
-      catch (error) { this.report(key, error.code ?? error.message); continue; }
+      catch (error) { if (priorityKeys.has(key)) this.markParentAttempt(key); this.report(key, error.code ?? error.message); continue; }
       if (!validSource(source, this.agentId, key)) { this.report(key, 'invalid-source'); continue; }
       const old = next[key];
       const previousLinks = this.links.state;
@@ -294,10 +380,12 @@ export class QoderTranscriptCollector {
         const stat = await fs.stat(source.transcriptPath);
         if (!stat.isFile()) continue;
         version = fileVersion(stat);
+        if (old?.parentPendingCall) this.parentRequests.set(key, { sessionId: source.sessionId, callId: old.parentPendingCall, parentAgentId: old.parentPendingAgent });
+        await this.probeParentOwners(source, stat);
         if (old?.parentPendingCall && old.parentPendingVersion === version
           && !this.links.find(source.sessionId, old.parentPendingCall, old.parentPendingAgent)) {
-          this.prioritizeParent(source);
-          if (this.now() - old.parentPendingSince < 60_000 || !this.parentAttempted(source)) continue;
+          this.prioritizeParent(source, old.parentPendingCall, old.parentPendingAgent);
+          if (this.now() - old.parentPendingSince < 60_000 || !this.parentAttempted(source, old, old.parentPendingCall, old.parentPendingAgent)) continue;
         }
         const deferred = this.deferredSources.get(key);
         if (deferred?.version === version) {
@@ -349,6 +437,7 @@ export class QoderTranscriptCollector {
               || context.observedSize < checkpoint.committedOffset))
         )).map(context => context.receipt);
         records.push(...batch);
+        if (priorityKeys.has(key) && checkpoint.offset >= stat.size) this.markParentAttempt(key);
         next[key] = checkpoint;
         if (Object.keys(this.links.state).length || state[QODER_DELEGATIONS_KEY]) {
           next[QODER_DELEGATIONS_KEY] = this.links.state;
@@ -357,10 +446,13 @@ export class QoderTranscriptCollector {
         changed ||= JSON.stringify(old) !== JSON.stringify(checkpoint);
       } catch (error) {
         this.links = new QoderSubagentLinks(previousLinks, this.now(), (key, reason) => this.report(key, reason));
-        if (error.message === 'subagent-parent-pending') this.prioritizeParent(source);
-        if (error.message === 'subagent-parent-pending' && beforeScan && !beforeScan.parentPendingSince) {
-          next[key] = { ...beforeScan, parentPendingSince: this.now(),
-            parentPendingCall: error.callId, parentPendingAgent: error.parentAgentId, parentPendingVersion: version };
+        if (error.message === 'subagent-parent-pending') {
+          this.parentRequests.set(key, { sessionId: source.sessionId, callId: error.callId, parentAgentId: error.parentAgentId });
+          this.prioritizeParent(source, error.callId, error.parentAgentId);
+        } else if (priorityKeys.has(key)) this.markParentAttempt(key);
+        if (error.message === 'subagent-parent-pending' && beforeScan) {
+          next[key] = { ...beforeScan, parentPendingSince: beforeScan.parentPendingSince ?? this.now(),
+            parentPendingSessionId: source.sessionId, parentPendingCall: error.callId, parentPendingAgent: error.parentAgentId, parentPendingVersion: version };
           changed = true;
         }
         this.dropCache(key);
@@ -374,6 +466,7 @@ export class QoderTranscriptCollector {
       }
     }
     this.pendingSources = entries.slice(visited);
+    this.finishDiscovery();
     return { records, state: next, metrics: this.metrics, changed };
   }
 
@@ -946,7 +1039,8 @@ export class QoderTranscriptCollector {
     // Parent and child directory observations can arrive in either order.
     // Keep the original cursor replayable until the parent call is indexed.
     if (source.subagentId && prompt.isDelegatedTask === true && prompt.parent_tool_use_id && !incoming
-      && (!checkpoint.parentPendingSince || this.now() - checkpoint.parentPendingSince < 60_000 || !this.parentAttempted(source))) {
+      && (!checkpoint.parentPendingSince || this.now() - checkpoint.parentPendingSince < 60_000
+        || !this.parentAttempted(source, checkpoint, prompt.parent_tool_use_id, prompt.parent_agent_id))) {
       const error = new Error('subagent-parent-pending');
       error.callId = prompt.parent_tool_use_id;
       error.parentAgentId = typeof prompt.parent_agent_id === 'string' ? prompt.parent_agent_id : undefined;
@@ -989,6 +1083,7 @@ export class QoderTranscriptCollector {
     delete checkpoint.traceContextLocked;
     delete checkpoint.incoming;
     delete checkpoint.parentPendingSince;
+    delete checkpoint.parentPendingSessionId;
     delete checkpoint.parentPendingCall;
     delete checkpoint.parentPendingAgent;
     delete checkpoint.parentPendingVersion;
