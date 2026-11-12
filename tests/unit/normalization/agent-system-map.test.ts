@@ -50,8 +50,8 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('qoder-cli-hook')).toBe('qoder');
   });
 
-  it('retains the Qoder family system for the App alias', () => {
-    expect(resolveAgentSystem('qoder-app')).toBe('qoder');
+  it('distinguishes Qoder App without changing existing Qoder family systems', () => {
+    expect(resolveAgentSystem('qoder-app')).toBe('qoder-app');
     expect(resolveAgentSystem('qoder-cli')).toBe('qoder');
     expect(resolveAgentSystem('qoder-cn')).toBe('qoder');
   });

@@ -214,7 +214,7 @@ describe('OtlpTraceFlusher - conversion', () => {
     const resource = (flusher as any).buildResource(agentType, 'test-pilot', {}, identity);
     expect(resource.attributes).toMatchObject({
       'gen_ai.agent.type': agentType,
-      'gen_ai.agent.system': 'qoder',
+      'gen_ai.agent.system': agentType === 'qoder-app' ? 'qoder-app' : 'qoder',
       'gen_ai.framework': agentType,
     });
   });

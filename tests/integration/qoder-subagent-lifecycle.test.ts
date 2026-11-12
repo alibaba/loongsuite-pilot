@@ -111,7 +111,7 @@ describe.each(['qoder'] as const)('%s independent native child work', agentId =>
     expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(2);
     expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(1);
     for (const span of spans) expect(span.resource.attributes).toMatchObject({
-      'gen_ai.agent.type': 'qoder-app', 'gen_ai.framework': 'qoder-app', 'gen_ai.agent.system': 'qoder',
+      'gen_ai.agent.type': 'qoder-app', 'gen_ai.framework': 'qoder-app', 'gen_ai.agent.system': 'qoder-app',
     });
     const ids = new Set(spans.map(span => span.spanContext().spanId));
     for (const span of spans) if (span.parentSpanId) expect(ids.has(span.parentSpanId)).toBe(true);
