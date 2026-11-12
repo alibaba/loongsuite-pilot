@@ -1,5 +1,6 @@
 //! Content-free checkpoints with branch-level copy on write.
 use super::types::{DoubaoLogEvent, DoubaoPendingTurn};
+use crate::types::DoubaoClient;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ops::Deref;
@@ -115,7 +116,11 @@ pub struct MutationActor {
 #[serde(rename_all = "camelCase")]
 pub struct Checkpoint {
     pub schema: u32,
+    #[serde(default)]
+    pub client: DoubaoClient,
     pub since_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_epoch: Option<i64>,
     pub files: CowMap<FileCursor>,
     pub pending: CowMap<DoubaoPendingTurn>,
     pub completed: CowMap<i64>,
@@ -144,7 +149,9 @@ impl Checkpoint {
     pub fn new(now: i64) -> Self {
         Self {
             schema: 1,
+            client: DoubaoClient::default(),
             since_ms: now,
+            recovery_epoch: None,
             files: Default::default(),
             pending: Default::default(),
             completed: Default::default(),
@@ -160,9 +167,15 @@ impl Checkpoint {
             native_mutation_actors: Default::default(),
         }
     }
+    pub fn source_epoch(&self) -> i64 {
+        self.recovery_epoch.unwrap_or(self.since_ms)
+    }
+
     pub fn unchanged(&self, base: &Self) -> bool {
         self.schema == base.schema
+            && self.client == base.client
             && self.since_ms == base.since_ms
+            && self.recovery_epoch == base.recovery_epoch
             && self.pending_scan_cursor == base.pending_scan_cursor
             && self.native_scan_cursor == base.native_scan_cursor
             && self.execution_scan_cursor == base.execution_scan_cursor

@@ -14,6 +14,7 @@ mod types;
 mod util;
 pub use budget::{DoubaoWorkBudgetOptions, DoubaoWorkError};
 pub use input::{DoubaoWorkBody, DoubaoWorkInput, DoubaoWorkInputOptions};
+pub(crate) use paths::{resolve_doubao_paths, resolve_doubao_paths_with, resolve_log_dir};
 pub use paths::{resolve_doubao_work_paths, resolve_doubao_work_paths_with, DoubaoWorkPaths};
 
 #[cfg(test)]

@@ -29,6 +29,12 @@ pub struct LocalTool {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct SandboxActor {
+    pub agent_id: String,
+    pub sandbox_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct DoubaoLogEvent {
     pub name: String,
     pub time_nano: String,
@@ -50,6 +56,8 @@ pub struct DoubaoLogEvent {
     pub first_output: Option<FirstOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Command>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<SandboxActor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<LocalTool>,
 }

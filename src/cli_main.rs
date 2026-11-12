@@ -583,6 +583,13 @@ async fn run_probe(args: &[String]) -> i32 {
         }
     };
     let builtin_dir = Path::new(&pilot_dir).join("agents.d");
+    let source_config =
+        crate::utils::read_json_file::<serde_json::Value>(&crate::utils::config_json_path()).await;
+    let doubao = crate::core::doubao_listener(
+        source_config
+            .as_ref()
+            .and_then(|config| config.pointer("/listeners/doubao-work")),
+    );
     let loader = AgentDefLoader::new(AgentDefLoaderOptions {
         builtin_dir: builtin_dir.to_string_lossy().into_owned(),
         local_dir: Path::new(&data_dir)
@@ -591,7 +598,8 @@ async fn run_probe(args: &[String]) -> i32 {
             .into_owned(),
         pilot_dir,
         data_dir,
-    });
+    })
+    .with_doubao_listener(Some(&doubao));
     let definitions = loader.load().await;
     if definitions.is_empty() {
         eprintln!("loongsuite-pilot probe: 没有有效的 Agent 声明");

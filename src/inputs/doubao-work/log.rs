@@ -76,7 +76,7 @@ fn source_time(line: &str, file_name: &str) -> Option<String> {
         Regex::new(r"^saman(_frontend)?_(\d{4})\.(\d{2})(\d{2})\.\d+\.log$").unwrap()
     });
     static FRONT: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^\[\d+:\d+:(\d{2})(\d{2})/(\d{2})(\d{2})(\d{2})\.(\d{6}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]").unwrap()
+        Regex::new(r"^\[\d+:\d+:(\d{2})(\d{2})/(\d{2})(\d{2})(\d{2})\.(\d{6}|\d{3}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]").unwrap()
     });
     static CONSOLE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^\[\d+:\d+:(\d{2})(\d{2})/(\d{2})(\d{2})(\d{2})\.(\d{3}):(?:INFO|WARNING|ERROR):CONSOLE\(0\)\]").unwrap()
@@ -94,7 +94,7 @@ fn source_time(line: &str, file_name: &str) -> Option<String> {
     if hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    let micros = parse(6)? * if front { 1 } else { 1000 };
+    let micros = parse(6)? * if header[6].len() == 3 { 1000 } else { 1 };
     let year = file[2].parse::<i32>().ok()?;
     let anchor =
         chrono::NaiveDate::from_ymd_opt(year, file[3].parse().ok()?, file[4].parse().ok()?)?
@@ -115,6 +115,46 @@ fn source_time(line: &str, file_name: &str) -> Option<String> {
     Some((i128::from(ms) * 1_000_000 + i128::from(micros % 1000) * 1000).to_string())
 }
 pub fn parse_doubao_log_line(line: &str, file_name: &str) -> Option<DoubaoLogEvent> {
+    if let Some(body) = line.split_once(']').and_then(|(_, body)| {
+        body.strip_prefix(r#" [neotix] "Event: agent_sandbox_toolcall_exec "#)
+    }) {
+        let (json, suffix) = body.rsplit_once(r#"", source:"#)?;
+        if !suffix.starts_with(char::is_whitespace) || suffix.trim_start() != "(0)" {
+            return None;
+        }
+        let data = parse_json(json).ok()?;
+        if text(data.get("status")) != Some("start")
+            || data.get("isNewSse").and_then(Value::as_bool) != Some(true)
+            || text(data.get("delivery")) != Some("dispatcher")
+        {
+            return None;
+        }
+        let agent_id = identifier(data.get("agentId"))?;
+        let sandbox_id = identifier(data.get("sandboxId"))?;
+        let id = identifier(data.get("toolCallID"))?;
+        let name = identifier(data.get("toolName"))?;
+        if is_doubao_presentation_inspection(&name, &id) {
+            return None;
+        }
+        return Some(DoubaoLogEvent {
+            name: "local_tool_started".into(),
+            time_nano: source_time(line, file_name)?,
+            turn_id: Some(agent_id.clone()),
+            conversation_id: Some(identifier(data.get("conversationId"))?),
+            actor: Some(SandboxActor {
+                agent_id,
+                sandbox_id: sandbox_id.clone(),
+            }),
+            tool: Some(LocalTool {
+                id,
+                name,
+                sandbox_id,
+                phase: "received".into(),
+                status: None,
+            }),
+            ..Default::default()
+        });
+    }
     if line.contains("[neotix] [agent-task]")
         && line.ends_with(", source: local-file-local-tools-sse-wiring.ts (0)")
     {

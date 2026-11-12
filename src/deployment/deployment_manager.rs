@@ -149,6 +149,9 @@ impl DeploymentManager {
 
     pub(crate) fn with_config_identity(mut self, config: &crate::types::AnalyticsConfig) -> Self {
         self.directory = self.directory.with_config_identity(config);
+        self.loader = self
+            .loader
+            .with_doubao_listener(config.listeners.get("doubao-work"));
         self
     }
 

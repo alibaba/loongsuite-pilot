@@ -975,24 +975,32 @@ fn build_http_config(file: Option<&Value>, sources: &ConfigSources<'_>) -> HttpF
     }
 }
 
-fn resolve_listener_log_dir(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
+pub(crate) fn doubao_listener(value: Option<&Value>) -> ListenerConfig {
+    let configured_client = value.and_then(|v| v.get("client"));
+    let client = configured_client.and_then(|v| v.as_str()?.parse().ok());
+    let valid = configured_client.is_none() || client.is_some();
+    if let Some(invalid) = configured_client.filter(|_| !valid) {
+        let value_type = match invalid {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        };
+        crate::utils::create_logger("ConfigLoader").warn(
+            "Invalid Doubao client; disabling this listener",
+            serde_json::json!({"valueType": value_type, "allowedValues": crate::types::DoubaoClient::ALL}).as_object(),
+        );
     }
-    let expanded = std::path::PathBuf::from(resolve_home(trimmed));
-    let absolute = std::path::absolute(&expanded).unwrap_or(expanded);
-    let mut normalized = std::path::PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
+    ListenerConfig {
+        enabled: valid && json_bool(value.and_then(|v| v.get("enabled"))).unwrap_or(true),
+        poll_interval: json_u64(value.and_then(|v| v.get("pollInterval")))
+            .unwrap_or(DEFAULT_POLL_INTERVAL_MS),
+        log_dir: json_str(value.and_then(|v| v.get("logDir")))
+            .and_then(crate::inputs::doubao_work::resolve_log_dir),
+        client,
     }
-    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn build_listeners(
@@ -1027,6 +1035,7 @@ fn build_listeners(
         result.insert(
             key.to_string(),
             ListenerConfig {
+                client: None,
                 log_dir: None,
                 enabled: true,
                 poll_interval: DEFAULT_POLL_INTERVAL_MS,
@@ -1038,13 +1047,16 @@ fn build_listeners(
         .and_then(Value::as_object)
     {
         for (key, value) in listeners {
+            if key == "doubao-work" {
+                result.insert(key.clone(), doubao_listener(Some(value)));
+                continue;
+            }
             let previous = result.get(key).cloned();
             result.insert(
                 key.clone(),
                 ListenerConfig {
-                    log_dir: (key == "doubao-work")
-                        .then(|| json_str(value.get("logDir")).and_then(resolve_listener_log_dir))
-                        .flatten(),
+                    log_dir: None,
+                    client: None,
                     enabled: json_bool(value.get("enabled"))
                         .or(previous.as_ref().map(|item| item.enabled))
                         .unwrap_or(true),
@@ -1063,6 +1075,7 @@ fn build_listeners(
                     .get("codex-transcript")
                     .cloned()
                     .unwrap_or(ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled: true,
                         poll_interval: DEFAULT_POLL_INTERVAL_MS,
@@ -1070,6 +1083,7 @@ fn build_listeners(
                 result.insert(
                     "codex-transcript".into(),
                     ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled: json_bool(legacy.get("enabled")).unwrap_or(defaults.enabled),
                         poll_interval: json_u64(legacy.get("pollInterval"))

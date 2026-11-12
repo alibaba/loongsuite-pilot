@@ -47,7 +47,9 @@
 
 本次需求必须在源请求窗口中唯一；复用时结合原生 user 分隔记录及精确工具 ID 选择本次输出。LLM 输入可以保留同一会话此前的可见历史作为上下文，但不会把历史 assistant 输出再次生成为本次 LLM。原始内容字段最多 64 KiB；每轮输入最多 64 KiB，超出时移除最早完整消息。每个所属请求 / 本地执行最多 64 个 assistant 轮次，展开内容合计最多 512 KiB，超限记录省略数量。相邻重复的无工具最终答复只保留一个可见轮次。
 
-原生 Skill 引用从 `skill://<name>?...` 展开为该客户端 `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` 的绝对路径时，以 Skill 标识和标签识别等价需求。其他指令文字仍须相同，歧义分隔记录拒绝匹配；不进行任意路径、链接或模糊文本匹配。实际消息内容不改写，也不重复追加原始需求和展开后的 user 消息。
+原生 Skill 引用从 `skill://<name>?...` 展开为该客户端 `.doubaowork/agent_mode/workspace/.skills/<name>/SKILL.md` 或 App 的 `.doubao/...` 绝对路径时，以 Skill 标识和标签识别等价需求。其他指令文字仍须相同，歧义分隔记录拒绝匹配；不进行任意路径、链接或模糊文本匹配。实际消息内容不改写，也不重复追加原始需求和展开后的 user 消息。
+
+复用时，只在需求与 user 记录的匹配键中归一化完整的原生 `system-reminder` 前缀及其空行分隔。独立提醒与唯一真实需求共用时间戳，且可见 user 分隔记录能匹配该需求时，才忽略该提醒。多条真实需求、用户自己提交的提醒形式消息、缺失复用分隔记录或不完整提醒仍拒绝重建。实际输入输出、源记录位置、round ID、工具归属和源时间不改写。
 
 缺少源结束事件的请求保留 pending，不以会话切换、首输出或采集时间补造结束。完成扫描有界轮转并保存游标；未收口请求及无效结束元数据不会阻塞后续已结束请求，collector 重启后仍继续公平扫描。
 
@@ -79,7 +81,19 @@
 
 Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留微秒，Windows 保留毫秒。`listeners.doubao-work.logDir` 可指定其他只读源目录；输出 `dataDir` 独立。
 
-`logDir` 只覆盖日志读取和监听目录；原生会话与 `coding/snapshot` 仍从平台默认的豆包数据目录读取，不从自定义日志目录向上推导。Agent 检测使用同一平台路径解析，Windows 同样遵循 `LOCALAPPDATA`。
+`saman_frontend_*` / `FRONTEND` 来源兼容已观察到的六位微秒及 Windows App 三位毫秒时间；`saman_*` / `CONSOLE` 仍使用三位毫秒时间。文件与 producer 不匹配或精度未获支持的记录继续拒绝。
+
+新版 Windows App 的 dispatcher 开始记录（`agent_sandbox_toolcall_exec`、`status: start`）提供明确的 actor、sandbox 与工具调用 ID，仍与原有 `execution_settled` 结果配对；遥测 success/error 重复记录不替代该结果。子执行关联继续校验原生图与 execution 身份。
+
+豆包 App 的工作模式复用同一 `doubao-work` 采集器，需显式设置 `listeners.doubao-work.client: "doubao"`；默认值 `"doubao-work"` 保持原来的豆包工作路径。一套 collector 配置只选择一个产品，不同时合并两个客户端。豆包 App 在 macOS 使用 `~/Library/Application Support/Doubao`，Windows 路径选择为 `%LOCALAPPDATA%/Doubao/User Data`，会话目录使用 `.doubao/agent_mode/workspace/.sessions`；豆包工作使用 `.doubaowork`。客户端选择同时绑定日志、会话和快照根，不通过日志目录推断。原 JavaScript 适配于 2026-10-30 在 macOS、Windows 豆包 App 上完成实机验证。Rust 回归测试覆盖对应的工作模式格式、数据源选择和 checkpoint 恢复。普通聊天和完整提供商遥测仍不在支持范围内。
+
+切换客户端前等待旧任务收口并重启 collector；切换后的 checkpoint 会重新基线化该产品的现有日志，只采集之后的新请求，不沿用另一产品的待配对记录或回放它的历史。旧版无客户端标记的 checkpoint 仍按豆包工作解释。普通“对话”模式不保证产生工作模式原生 trajectory，可能仅采到请求边界，无法据此生成 LLM 或补出输入输出。
+
+测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会在配置加载时禁用该 listener，警告包含合法取值及非法值类型。显式 Agent-control 强制启用可覆盖 listener 的 enabled 标记；此时非法 client 回退到默认 Work 数据源，不会自动切换 App。
+
+`logDir` 覆盖日志读取、监听及内置 Agent 定义的检测路径；原生会话与 `coding/snapshot` 仍从所选产品的默认数据目录读取，不从自定义日志目录向上推导。安装器 probe、`deploy --require doubao-work` 与 collector discovery 均使用所选数据源，Windows 同样遵循 `LOCALAPPDATA`。只安装豆包 App、使用默认 client 时，不会被检测成豆包工作；需先显式配置 `client: "doubao"` 再检测或部署。
+
+新增事件及其 OTLP Span 均包含 `loongsuite.doubao_work.client`：`doubao-work` 表示豆包工作，`doubao` 表示 App 工作模式。统一 Agent ID 仍为 `doubao-work`；历史记录没有此字段时保留未知，不根据 ID 猜测补标。多条真实需求即使文本或时间戳相同仍视为歧义，不能仅按文本去重后假定它们属于同一次 invocation。
 
 ```json
 {

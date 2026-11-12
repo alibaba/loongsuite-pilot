@@ -2011,14 +2011,18 @@ impl Orchestrator {
             || WorkBuddyInput::check_availability(None),
         )
         .await;
-        let doubao_log_dir = self
-            .config
-            .listeners
-            .get("doubao-work")
-            .and_then(|listener| listener.log_dir.clone());
-        let available_log_dir = doubao_log_dir.clone();
+        let doubao_listener = self.config.listeners.get("doubao-work");
+        let doubao_client = doubao_listener
+            .and_then(|listener| listener.client)
+            .unwrap_or_default();
+        let doubao_log_dir = doubao_listener.and_then(|listener| listener.log_dir.clone());
+        let available_log_dir = doubao_log_dir
+            .clone()
+            .or_else(|| crate::inputs::doubao_work::resolve_doubao_paths(doubao_client).log_dir);
+        let doubao_watch_paths = available_log_dir.iter().cloned().collect();
         let mut doubao_options = DoubaoWorkInputOptions::new(Arc::clone(state_store));
-        doubao_options.log_dir = doubao_log_dir.clone();
+        doubao_options.log_dir = doubao_log_dir;
+        doubao_options.client = doubao_client;
         doubao_options.poll_interval_ms = self.poll("doubao-work");
         self.add_hosted(
             &mut entries,
@@ -2029,10 +2033,15 @@ impl Orchestrator {
                 1,
             ),
             DoubaoWorkInput::new(doubao_options),
-            DoubaoWorkInput::watch_paths(doubao_log_dir.as_deref()),
+            doubao_watch_paths,
             move || {
                 let log_dir = available_log_dir.clone();
-                async move { DoubaoWorkInput::check_availability(log_dir.as_deref()).await }
+                async move {
+                    match log_dir {
+                        Some(dir) => DoubaoWorkInput::check_availability(Some(&dir)).await,
+                        None => false,
+                    }
+                }
             },
         )
         .await;
@@ -4158,6 +4167,7 @@ mod tests {
         config.listeners.insert(
             "fixture-listener".into(),
             crate::types::ListenerConfig {
+                client: None,
                 log_dir: None,
                 enabled: true,
                 poll_interval: 1234,
@@ -4481,6 +4491,7 @@ mod tests {
                 config.listeners.insert(
                     id.into(),
                     crate::types::ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled: false,
                         poll_interval: 30_000,
@@ -4503,6 +4514,7 @@ mod tests {
                 config.listeners.insert(
                     id.into(),
                     crate::types::ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled: false,
                         poll_interval: interval,
@@ -4513,6 +4525,7 @@ mod tests {
                 config.listeners.insert(
                     "fixture-listener".into(),
                     crate::types::ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled: false,
                         poll_interval: 300_000,
@@ -4899,6 +4912,7 @@ mod tests {
                 registration_config.listeners.insert(
                     listener.into(),
                     crate::types::ListenerConfig {
+                        client: None,
                         log_dir: None,
                         enabled,
                         poll_interval,

@@ -10,6 +10,7 @@ use loongsuite_pilot::inputs::base::InputBody;
 use loongsuite_pilot::inputs::doubao_work::{
     DoubaoWorkBudgetOptions, DoubaoWorkInput, DoubaoWorkInputOptions,
 };
+use loongsuite_pilot::types::DoubaoClient;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -42,7 +43,7 @@ struct Fixture {
     epoch: i64,
 }
 impl Fixture {
-    async fn new() -> Self {
+    async fn new(client: DoubaoClient) -> Self {
         let root = tempfile::tempdir().unwrap();
         let logs = root.path().join("source");
         tokio::fs::create_dir(&logs).await.unwrap();
@@ -57,6 +58,7 @@ impl Fixture {
         tokio::fs::write(&source, "").await.unwrap();
         let store = Arc::new(StateStore::new(root.path().join("state.json")));
         let input = Arc::new(DoubaoWorkInput::new(DoubaoWorkInputOptions {
+            client,
             log_dir: Some(logs.to_string_lossy().into_owned()),
             sessions_root: Some(root.path().join("native").to_string_lossy().into_owned()),
             snapshot_root: Some(root.path().join("snapshots").to_string_lossy().into_owned()),
@@ -206,7 +208,11 @@ struct Harness {
 }
 impl Harness {
     async fn new(service: &str) -> Self {
-        let fixture = Fixture::new().await;
+        Self::with_client(service, DoubaoClient::Work).await
+    }
+
+    async fn with_client(service: &str, client: DoubaoClient) -> Self {
+        let fixture = Fixture::new(client).await;
         let spans = Arc::new(Mutex::new(Vec::new()));
         let sink = spans.clone();
         let trace = Arc::new(
@@ -546,7 +552,7 @@ async fn native_pipeline_watched_metadata_keeps_configured_identity_masking_and_
 #[tokio::test]
 async fn native_pipeline_exact_current_io_and_decoded_tool_content_are_masked_before_jsonl_and_tool_span_projection(
 ) {
-    let h = Harness::new("doubao-content").await;
+    let h = Harness::with_client("doubao-content", DoubaoClient::App).await;
     let f = &h.fixture;
     let secret = format!("sk-{}", "x".repeat(24));
     f.native_actor("m_nativeMain",&[
@@ -563,6 +569,12 @@ async fn native_pipeline_exact_current_io_and_decoded_tool_content_are_masked_be
     h.stop().await;
     let rows = h.rows().await;
     let spans = h.spans.lock().unwrap().clone();
+    assert!(rows
+        .iter()
+        .all(|row| row["loongsuite.doubao_work.client"] == "doubao"));
+    assert!(spans
+        .iter()
+        .all(|span| span.attributes["loongsuite.doubao_work.client"] == "doubao"));
     let agent = spans.iter().find(|s| kind(s) == "AGENT").unwrap();
     assert!(agent.attributes["gen_ai.input.messages"]
         .as_str()

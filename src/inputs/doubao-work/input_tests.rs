@@ -1,5 +1,6 @@
 use super::*;
 use chrono::{Datelike, TimeZone};
+use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 struct Fixture {
     root: tempfile::TempDir,
@@ -2037,4 +2038,118 @@ async fn tiny_initial_budget_resumes_the_same_historical_floor_snapshot_then_col
         .files
         .values()
         .any(|cursor| cursor.offset == (history.len() + fresh.len()) as u64));
+}
+
+#[tokio::test]
+async fn doubao_app_pairs_windows_dispatcher_and_recovers_without_replay_on_switch_back() {
+    let f = Fixture::new().await;
+    let make = |client, store| {
+        DoubaoWorkInput::new(DoubaoWorkInputOptions {
+            client,
+            log_dir: Some(f.logs.clone()),
+            work_budget: Some(DoubaoWorkBudgetOptions {
+                milliseconds: u64::MAX,
+                ..Default::default()
+            }),
+            ..DoubaoWorkInputOptions::new(store)
+        })
+    };
+    let start = |id| json!({"chat_session_id":id});
+    // Existing Work state (including legacy state without a client tag) may
+    // share a log override with the App. Its pending request must not migrate.
+    f.append(&f.line("on_message_session_start", start("old-work"), 10))
+        .await;
+    assert!(f.poll().await.is_empty());
+    let mut legacy = serde_json::to_value(f.checkpoint().await).unwrap();
+    legacy.as_object_mut().unwrap().remove("client");
+    f.store.update(
+        "doubao-work",
+        crate::checkpoints::InputStatePatch {
+            extra: Some(json!({"doubaoWork":legacy})),
+            ..Default::default()
+        },
+    );
+    let app = make(DoubaoClient::App, f.store.clone());
+    assert!(poll(&app).await.is_empty());
+    assert!(f.checkpoint().await.pending.is_empty());
+    assert_eq!(f.checkpoint().await.client, DoubaoClient::App);
+
+    let windows = |s: String| {
+        Regex::new(r"(\.\d{3})\d{3}:INFO:FRONTEND")
+            .unwrap()
+            .replace_all(&s, "$1:INFO:FRONTEND")
+            .into_owned()
+    };
+    let header = chrono::Local.timestamp_millis_opt(f.epoch + 100).unwrap();
+    let dispatcher = |status| {
+        format!(
+            r#"[100:200:{}:INFO:FRONTEND(0)] [neotix] "Event: agent_sandbox_toolcall_exec {}", source:  (0)"#,
+            header.format("%m%d/%H%M%S.%3f"),
+            json!({"agentId":"synthetic-turn","sandboxId":"synthetic-sandbox","toolCallID":"synthetic-call",
+            "toolName":"Read","conversationId":"12345678","status":status,"delivery":"dispatcher",
+            "isNewSse":true,"arguments":"synthetic-private-argument"})
+        )
+    };
+    let file_name = f.file.file_name().unwrap().to_str().unwrap();
+    assert!(parse_doubao_log_line(&dispatcher("success"), file_name).is_none());
+    let event = parse_doubao_log_line(&dispatcher("start"), file_name).unwrap();
+    assert!(!serde_json::to_string(&event)
+        .unwrap()
+        .contains("synthetic-private-argument"));
+    assert_eq!(event.time_nano, ms_nanos(f.epoch + 100));
+    f.append(
+        &(windows(f.line("on_message_sending_start", json!({}), 20))
+            + &dispatcher("start")
+            + "\n"
+            + &dispatcher("start")
+            + "\n"
+            + &dispatcher("success")
+            + "\n"),
+    )
+    .await;
+    assert!(poll(&app).await.is_empty());
+    assert_eq!(
+        f.checkpoint().await.sandboxes["synthetic-sandbox"].actors,
+        ["synthetic-turn"]
+    );
+    f.store.save().await.unwrap();
+    let reopened = Arc::new(StateStore::new(f.root.path().join("state.json")));
+    reopened.load().await;
+    let resumed = make(DoubaoClient::App, reopened.clone());
+    f.append(&windows(
+        f.tool(
+            json!({"phase":"execution_settled","status":"success","toolCallID":"synthetic-call"}),
+            125,
+        ) + &f.line("on_message_session_end", json!({}), 3000),
+    ))
+    .await;
+    let entries = wire(&poll(&resumed).await);
+    let rows = entries.as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["event.name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["other", "tool.call", "tool.result", "other"]
+    );
+    assert!(rows
+        .iter()
+        .all(|row| row["loongsuite.doubao_work.client"] == "doubao"));
+    assert_eq!(rows[2]["gen_ai.tool.call.duration"].as_f64(), Some(25.0));
+    assert!(poll(&resumed).await.is_empty());
+    let work = make(DoubaoClient::Work, reopened);
+    assert!(poll(&work).await.is_empty());
+    assert!(poll(&work).await.is_empty());
+    // Same physical log and former Work ownership proof. Only this new turn
+    // should be collected; the App request must not be replayed as Work.
+    let next = json!({"chat_session_id":"new-work","query_send_timestamp":f.epoch+5000});
+    f.append(
+        &(f.line("on_message_session_start", next.clone(), 5010)
+            + &f.line("on_message_session_end", next, 6000)),
+    )
+    .await;
+    let entries = wire(&poll(&work).await);
+    let rows = entries.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r["gen_ai.turn.id"] == "new-work"
+        && r["loongsuite.doubao_work.client"] == "doubao-work"));
 }

@@ -8,7 +8,7 @@ use super::log::{
     build_doubao_task_events, is_doubao_presentation_inspection, parse_doubao_log_line,
 };
 use super::native::{build_native_tool_events, NativeGraph};
-use super::paths::resolve_doubao_work_paths;
+use super::paths::{resolve_doubao_paths, resolve_doubao_work_paths, resolve_log_dir};
 use super::reader::{DoubaoWorkNativeReader, NativeReaderOptions};
 use super::rounds::{NativeRoundReconstruction, NativeRoundSteps};
 use super::state::*;
@@ -18,13 +18,13 @@ use crate::checkpoints::StateStore;
 use crate::inputs::base::{
     CommittedInputBatch, HostedInput, InputBody, InputRuntime, InputRuntimeDelta, InputRuntimeInfo,
 };
-use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
+use crate::types::{AgentActivityEntry, ClientType, CollectionMethod, DoubaoClient};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::fs::File;
@@ -39,6 +39,7 @@ static MUTATION_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[os]_[a-zA-Z0-9]+$").unwrap());
 pub struct DoubaoWorkInputOptions {
     pub state_store: Arc<StateStore>,
+    pub client: DoubaoClient,
     pub log_dir: Option<String>,
     pub poll_interval_ms: Option<u64>,
     pub sessions_root: Option<String>,
@@ -50,6 +51,7 @@ impl DoubaoWorkInputOptions {
     pub fn new(state_store: Arc<StateStore>) -> Self {
         Self {
             state_store,
+            client: DoubaoClient::default(),
             log_dir: None,
             poll_interval_ms: None,
             sessions_root: None,
@@ -64,7 +66,8 @@ pub struct DoubaoWorkInput {
 }
 impl DoubaoWorkInput {
     pub fn new(options: DoubaoWorkInputOptions) -> Self {
-        Self::new_with_paths(options, resolve_doubao_work_paths())
+        let paths = resolve_doubao_paths(options.client);
+        Self::new_with_paths(options, paths)
     }
     fn new_with_paths(
         options: DoubaoWorkInputOptions,
@@ -72,15 +75,21 @@ impl DoubaoWorkInput {
     ) -> Self {
         let log_dir = options
             .log_dir
-            .filter(|s| !s.is_empty())
-            .map(|p| absolute_path(&p))
+            .as_deref()
+            .and_then(resolve_log_dir)
             .or(defaults.log_dir);
-        let scope = digest(log_dir.as_deref().unwrap_or("unsupported-platform"));
+        let directory = log_dir.as_deref().unwrap_or("unsupported-platform");
+        // Preserve Work event IDs and source ownership proofs created before App support.
+        let scope = match options.client {
+            DoubaoClient::Work => digest(directory),
+            DoubaoClient::App => digest(&encode(&json!([options.client, directory]))),
+        };
         let snapshot_root = options.snapshot_root.clone().or(defaults.snapshot_root);
         let has_snapshots = snapshot_root.is_some();
         let reader = DoubaoWorkNativeReader::new(NativeReaderOptions {
             sessions_root: options.sessions_root.clone(),
             user_data_root: defaults.user_data_root.clone(),
+            client: options.client,
             snapshot_root,
             diagnostic: Some(Arc::new(|reason| {
                 crate::utils::create_logger("DoubaoWorkInput").warn(
@@ -96,6 +105,7 @@ impl DoubaoWorkInput {
                 scope.clone(),
             ),
             log_dir,
+            client: options.client,
             scope,
             has_native: options.sessions_root.is_some() || defaults.user_data_root.is_some(),
             has_snapshots,
@@ -192,30 +202,9 @@ impl DoubaoWorkInput {
         false
     }
 }
-fn absolute_path(path: &str) -> String {
-    let path = Path::new(path);
-    let full = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    // path.resolve removes lexical dots without resolving symlinks.
-    let mut result = PathBuf::new();
-    for part in full.components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                result.pop();
-            }
-            _ => result.push(part.as_os_str()),
-        }
-    }
-    result.to_string_lossy().into_owned()
-}
 pub struct DoubaoWorkBody {
     log_dir: Option<String>,
+    client: DoubaoClient,
     scope: String,
     has_native: bool,
     has_snapshots: bool,
@@ -252,6 +241,7 @@ struct Shared {
     loaded: bool,
     revision: Option<u64>,
     recovery_epoch: Option<i64>,
+    switching_client: bool,
     unsupported: bool,
     baseline: Option<Baseline>,
     sweep: Option<Sweep>,
@@ -277,6 +267,7 @@ impl Shared {
             loaded: false,
             revision: None,
             recovery_epoch: None,
+            switching_client: false,
             unsupported: false,
             baseline: None,
             sweep: None,
@@ -410,13 +401,15 @@ impl InputBody for DoubaoWorkBody {
         if !shared.loaded || shared.revision != Some(observed_revision) {
             shared.committed = None;
             shared.unsupported = false;
+            shared.switching_client = false;
             let state = rt.state();
             if let Some(saved) = state.extra().as_ref().and_then(|v| v.get("doubaoWork")) {
                 if saved.get("schema").and_then(Value::as_u64) != Some(1) {
                     shared.unsupported = true;
                 } else {
-                    match serde_json::from_value(saved.clone()) {
-                        Ok(v) => shared.committed = Some(v),
+                    match serde_json::from_value::<Checkpoint>(saved.clone()) {
+                        Ok(v) if v.client == self.client => shared.committed = Some(v),
+                        Ok(_) => shared.switching_client = true,
                         Err(_) => shared.unsupported = true,
                     }
                 }
@@ -432,26 +425,37 @@ impl InputBody for DoubaoWorkBody {
             return Ok(vec![]);
         }
         if shared.recovery_epoch.is_none() {
-            let proposed = shared.committed.as_ref().map_or(now, |c| c.since_ms);
+            let proposed = shared
+                .committed
+                .as_ref()
+                .map_or(now, Checkpoint::source_epoch);
             let epoch = self.recovery.initial_epoch(proposed).await?;
             shared.recovery_epoch = Some(epoch);
         }
         if shared
             .committed
             .as_ref()
-            .is_some_and(|c| Some(c.since_ms) != shared.recovery_epoch)
+            .is_some_and(|c| Some(c.source_epoch()) != shared.recovery_epoch)
         {
             return Err(anyhow::anyhow!(
                 "Doubao checkpoint exclusion epoch differs from its durable source proof"
             ));
         }
         if shared.committed.is_none() {
-            let mut baseline = shared.baseline.take().unwrap_or_else(|| Baseline {
-                checkpoint: Checkpoint::new(
-                    shared.recovery_epoch.expect("initialized recovery epoch"),
-                ),
-                names: names.clone(),
-                index: 0,
+            let switching = shared.switching_client;
+            let mut baseline = shared.baseline.take().unwrap_or_else(|| {
+                let epoch = shared.recovery_epoch.expect("initialized recovery epoch");
+                let mut checkpoint =
+                    Checkpoint::new(if switching { now.max(epoch) } else { epoch });
+                checkpoint.client = self.client;
+                if checkpoint.since_ms != epoch {
+                    checkpoint.recovery_epoch = Some(epoch);
+                }
+                Baseline {
+                    checkpoint,
+                    names: names.clone(),
+                    index: 0,
+                }
             });
             while baseline.index < baseline.names.len() {
                 if budget.exhausted() {
@@ -464,7 +468,7 @@ impl InputBody for DoubaoWorkBody {
                     let path = Path::new(dir).join(&name);
                     let mut file = super::source_ownership::open_source(path.clone()).await?;
                     self.recovery
-                        .historical(&path, &mut file, &mut budget)
+                        .historical(&path, &mut file, &mut budget, switching)
                         .await
                 }
                 .await;
@@ -690,7 +694,14 @@ impl InputBody for DoubaoWorkBody {
         }
         entries
             .into_iter()
-            .map(|v| serde_json::from_value(Value::Object(v)).map_err(Into::into))
+            .map(|mut entry| {
+                set(
+                    &mut entry,
+                    "loongsuite.doubao_work.client",
+                    json!(self.client),
+                );
+                serde_json::from_value(Value::Object(entry)).map_err(Into::into)
+            })
             .collect()
     }
 }
@@ -940,25 +951,33 @@ fn consume(state: &mut Checkpoint, event: &DoubaoLogEvent, now: i64) {
         state.pending.set(key, pending);
         return;
     }
-    if let Some(command) = &event.command {
+    let actor = event
+        .command
+        .as_ref()
+        .map(|command| (&command.agent_id, &command.sandbox_id))
+        .or_else(|| {
+            event
+                .actor
+                .as_ref()
+                .map(|actor| (&actor.agent_id, &actor.sandbox_id))
+        });
+    if let Some((agent_id, sandbox_id)) = actor {
         if nanos(&event.time_nano).unwrap_or(0) < i128::from(state.since_ms) * 1_000_000 {
             return;
         }
-        let mut sandbox = state
-            .sandboxes
-            .get(&command.sandbox_id)
-            .cloned()
-            .unwrap_or_default();
-        if !sandbox.actors.contains(&command.agent_id) {
+        let mut sandbox = state.sandboxes.get(sandbox_id).cloned().unwrap_or_default();
+        if !sandbox.actors.contains(agent_id) {
             if sandbox.actors.len() >= 64 {
                 sandbox.conflict = true
             } else {
-                sandbox.actors.push(command.agent_id.clone());
+                sandbox.actors.push(agent_id.clone());
             }
         }
         sandbox.updated_ms = now;
-        state.sandboxes.set(command.sandbox_id.clone(), sandbox);
-        return;
+        state.sandboxes.set(sandbox_id.clone(), sandbox);
+        if event.tool.is_none() {
+            return;
+        }
     }
     if let Some(tool) = &event.tool {
         if nanos(&event.time_nano).unwrap_or(0) < i128::from(state.since_ms) * 1_000_000 {

@@ -6,10 +6,11 @@ use std::fmt;
 use std::str::FromStr;
 
 macro_rules! str_enum {
-    ($name:ident { $($var:ident = $s:literal),* $(,)? }) => {
+    ($(#[$enum_attr:meta])* $name:ident { $($(#[$variant_attr:meta])* $var:ident = $s:literal),* $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        $(#[$enum_attr])*
         pub enum $name {
-            $(#[serde(rename = $s)] $var,)*
+            $($(#[$variant_attr])* #[serde(rename = $s)] $var,)*
         }
 
         impl $name {
@@ -41,6 +42,15 @@ macro_rules! str_enum {
     };
 }
 
+str_enum!(
+    #[derive(Default)]
+    DoubaoClient {
+        #[default]
+        Work = "doubao-work",
+        App = "doubao",
+    }
+);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerConfig {
@@ -49,6 +59,8 @@ pub struct ListenerConfig {
     /// Only the Doubao Work listener accepts a log-directory override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<DoubaoClient>,
 }
 
 str_enum!(CanaryPolicy {

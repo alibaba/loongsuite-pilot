@@ -7,6 +7,7 @@ use super::execution::{parse_native_execution, NativeExecution};
 use super::native::{append_native_graph_row, NativeEdge, NativeGraph};
 use super::rounds::native_demand_fingerprint;
 use super::util::{native_id, numeric_id, parse_time_ms, uuid};
+use crate::types::DoubaoClient;
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
@@ -25,6 +26,7 @@ type Diagnostic = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct NativeReaderOptions {
     pub sessions_root: Option<String>,
     pub user_data_root: Option<String>,
+    pub client: DoubaoClient,
     pub snapshot_root: Option<String>,
     pub max_cache_bytes: Option<usize>,
     pub max_files: Option<usize>,
@@ -488,9 +490,14 @@ impl DoubaoWorkNativeReader {
         }
         let mut matches = Vec::new();
         for profile in profiles {
+            let namespace = match self.options.client {
+                DoubaoClient::Work => ".doubaowork",
+                DoubaoClient::App => ".doubao",
+            };
             let sessions = root
                 .join(profile)
-                .join(".doubaowork/agent_mode/workspace/.sessions");
+                .join(namespace)
+                .join("agent_mode/workspace/.sessions");
             match safe_directory(&sessions.join(conversation), &root).await {
                 Ok(()) => matches.push(sessions),
                 Err(e) if missing(&e) => (),
@@ -1731,6 +1738,32 @@ mod tests {
             .is_none());
         assert_eq!(reader.stats().body_read_bytes, before.body_read_bytes);
     }
+    #[tokio::test]
+    async fn doubao_app_reads_only_its_native_session_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("Default");
+        for (namespace, marker) in [(".doubaowork", "WORK"), (".doubao", "APP")] {
+            save(
+                &profile
+                    .join(namespace)
+                    .join("agent_mode/workspace/.sessions"),
+                CID,
+                &[json!({"role":"assistant","content":marker})],
+            )
+            .await;
+        }
+        let mut reader = DoubaoWorkNativeReader::new(NativeReaderOptions {
+            client: DoubaoClient::App,
+            user_data_root: Some(temp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let graph = drain(&mut reader, CID, 256 * 1024).await;
+        assert_eq!(
+            graph.content.as_ref().unwrap().transcripts[ACTOR][0]["content"],
+            "APP"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn replaced_source_symlink_is_rejected_and_missing_source_recovers() {

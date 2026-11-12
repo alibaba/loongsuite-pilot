@@ -59,3 +59,47 @@ fn public_probe_reports_generic_detection_errors_but_list_only_remains_read_only
     assert_eq!(row["reason"], "");
     assert!(!root.join("synthetic-config.json").exists());
 }
+
+#[test]
+fn doubao_probe_uses_source_only_config_and_rejects_invalid_product() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let config = root.join("config.json");
+    std::fs::create_dir_all(root.join("sources/app")).unwrap();
+    let run = |listener: Value| {
+        std::fs::write(
+            &config,
+            json!({"listeners":{"doubao-work":listener},
+            "flushers":{"sls":{"enabled":true}}})
+            .to_string(),
+        )
+        .unwrap();
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"))
+            .arg("probe")
+            .env("LOONGSUITE_PILOT_DATA_DIR", root.join("data"))
+            .env("LOONGSUITE_PILOT_RESOURCE_ROOT", env!("CARGO_MANIFEST_DIR"))
+            .env("AGENT_DATA_COLLECTION_CONFIG", &config)
+            .env("HOME", &root)
+            .env("USERPROFILE", &root)
+            .env("LOCALAPPDATA", root.join("local"))
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let rows: Vec<Value> = serde_json::from_slice(&result.stdout).unwrap();
+        rows.into_iter()
+            .find(|row| row["id"] == "doubao-work")
+            .unwrap()["detected"]
+            == true
+    };
+    assert!(run(json!({"client":"doubao","logDir":"sources/app"})));
+    assert!(!run(json!({"client":"invalid","logDir":"sources/app"})));
+    assert!(!run(
+        json!({"client":"doubao","logDir":"sources/app","enabled":false})
+    ));
+    assert!(!run(json!({})));
+}

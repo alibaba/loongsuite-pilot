@@ -22,6 +22,7 @@ mod workspace_policy;
 pub use agent_control_manager::AgentControlManager;
 pub use agent_discovery_service::{AgentDiscoveryEvent, AgentDiscoveryService};
 pub use build_constants::PROPRIETARY_BUILD;
+pub(crate) use config_loader::doubao_listener;
 pub use config_loader::{
     assemble_config, build_otlp_trace_config, check_config, load_config, ConfigSources,
 };

@@ -24,11 +24,16 @@ pub struct AgentDefLoaderOptions {
 pub struct AgentDefLoader {
     opts: AgentDefLoaderOptions,
     env: Option<HashMap<String, String>>,
+    doubao_listener: Option<crate::types::ListenerConfig>,
 }
 
 impl AgentDefLoader {
     pub fn new(opts: AgentDefLoaderOptions) -> Self {
-        Self { opts, env: None }
+        Self {
+            opts,
+            env: None,
+            doubao_listener: None,
+        }
     }
 
     pub(crate) fn pilot_dir(&self) -> &str {
@@ -37,6 +42,14 @@ impl AgentDefLoader {
 
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
         self.env = Some(env);
+        self
+    }
+
+    pub(crate) fn with_doubao_listener(
+        mut self,
+        listener: Option<&crate::types::ListenerConfig>,
+    ) -> Self {
+        self.doubao_listener = listener.cloned();
         self
     }
 
@@ -302,15 +315,39 @@ impl AgentDefLoader {
         }
         .unwrap_or_else(|| resolve_home("~"));
         let local_app_data = self.env_get("LOCALAPPDATA");
-        let doubao_data = crate::inputs::doubao_work::resolve_doubao_work_paths_with(
+        let client = self
+            .doubao_listener
+            .as_ref()
+            .and_then(|listener| listener.client)
+            .unwrap_or_default();
+        let doubao_paths = crate::inputs::doubao_work::resolve_doubao_paths_with(
+            client,
             platform,
             &home,
             local_app_data.as_deref(),
-        )
-        .user_data_root
-        .unwrap_or_else(|| "$DOUBAO_WORK_DATA".into());
+        );
+        let enabled = self
+            .doubao_listener
+            .as_ref()
+            .is_none_or(|listener| listener.enabled);
+        let doubao_log = self
+            .doubao_listener
+            .as_ref()
+            .and_then(|listener| listener.log_dir.as_deref())
+            .or(doubao_paths.log_dir.as_deref());
         let mut result = input
-            .replace("$DOUBAO_WORK_DATA", &doubao_data)
+            .replace(
+                "$DOUBAO_LOG_DIR",
+                doubao_log.filter(|_| enabled).unwrap_or("$DOUBAO_LOG_DIR"),
+            )
+            .replace(
+                "$DOUBAO_WORK_DATA",
+                doubao_paths
+                    .user_data_root
+                    .as_deref()
+                    .filter(|_| enabled)
+                    .unwrap_or("$DOUBAO_WORK_DATA"),
+            )
             .replace("$PILOT_DIR", &self.opts.pilot_dir)
             .replace("$PILOT_DATA", &self.opts.data_dir)
             .replace("$HERMES_CLI", &hermes_cli)
@@ -510,7 +547,7 @@ mod tests {
             json,
             serde_json::json!({
                 "id":"doubao-work","displayName":"Doubao Work (experimental)",
-                "deployMode":"detection-only","detection":{"paths":["$DOUBAO_WORK_DATA/sdk_storage/log"],"commands":[]},
+                "deployMode":"detection-only","detection":{"paths":["$DOUBAO_LOG_DIR"],"commands":[]},
                 "input":{"type":"doubao-work-client-log"}
             })
         );
@@ -531,7 +568,7 @@ mod tests {
             ("LOCALAPPDATA".into(), local.clone()),
             ("HERMES_CLI".into(), "fixture-hermes".into()),
             // This marker is owned by the platform resolver, not a custom root override.
-            ("DOUBAO_WORK_DATA".into(), "/must-not-relocate".into()),
+            ("DOUBAO_LOG_DIR".into(), "/must-not-relocate".into()),
         ]);
         let loaded = loader(root.path()).with_env(env).load().await;
         assert_eq!(loaded.len(), 1);
@@ -549,7 +586,7 @@ mod tests {
         } else if cfg!(windows) {
             format!("{local}/DoubaoWork/User Data/sdk_storage/log").replace('\\', "/")
         } else {
-            "$DOUBAO_WORK_DATA/sdk_storage/log".into()
+            "$DOUBAO_LOG_DIR".into()
         };
         assert_eq!(def.detection.paths, [expected]);
         assert!(!root.path().join("synthetic-home").exists());

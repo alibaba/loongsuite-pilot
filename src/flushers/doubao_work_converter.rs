@@ -86,7 +86,9 @@ pub fn convert_doubao_work_turn(
     if objects.iter().any(|r| {
         get_str(r, &format!("{PREFIX}observation_scope")) == Some("native_sandbox_execution")
     }) {
-        return Ok(convert_local_execution(&objects));
+        let mut result = convert_local_execution(&objects);
+        label_doubao_client(&objects, &mut result.spans);
+        return Ok(result);
     }
     let boundaries: Vec<_> = objects
         .iter()
@@ -156,6 +158,7 @@ pub fn convert_doubao_work_turn(
     }
     enrich_client_request(&objects, &mut result.spans);
     enrich_work_spans(&objects, &mut result.spans);
+    label_doubao_client(&objects, &mut result.spans);
     result.warnings.push("Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable".into());
     result.span_count = result.spans.len();
     Ok(result)
@@ -655,6 +658,21 @@ fn enrich_client_request(records: &[Record], spans: &mut [ReadableSpan]) {
                 format!("{PREFIX}client_time_to_first_cot_ms"),
                 Value::from(value),
             );
+        }
+    }
+}
+
+fn label_doubao_client(records: &[Record], spans: &mut [ReadableSpan]) {
+    const KEY: &str = "loongsuite.doubao_work.client";
+    let mut clients = records
+        .iter()
+        .filter_map(|record| get_str(record, KEY))
+        .filter(|client| matches!(*client, "doubao" | "doubao-work"));
+    if let Some(client) = clients.next() {
+        if clients.all(|other| other == client) {
+            for span in spans {
+                span.attributes.insert(KEY.into(), client.into());
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 use super::budget::{DoubaoWorkError, Result};
+use super::rounds::{native_demand_fingerprint, native_demand_key, native_reminder_only};
 use super::types::DoubaoToolPair;
 use super::util::*;
 use indexmap::IndexMap;
@@ -271,6 +272,47 @@ pub fn append_native_content_row(
     }
     true
 }
+pub(super) fn native_current_assignment<'a>(
+    content: &'a NativeContent,
+    actor: &str,
+    query_ms: i64,
+    end_ms: i128,
+) -> Option<&'a NativeAssignment> {
+    let current: Vec<_> = content
+        .assignments
+        .get(actor)?
+        .iter()
+        .filter(|item| item.time_ms >= query_ms && i128::from(item.time_ms) <= end_ms)
+        .collect();
+    if let [only] = current.as_slice() {
+        return Some(only);
+    }
+    let mut demands = current
+        .iter()
+        .copied()
+        .filter(|item| !native_reminder_only(&item.text));
+    let demand = demands.next()?;
+    if demands.next().is_some() || current.iter().any(|item| item.time_ms != demand.time_ms) {
+        return None;
+    }
+    let has_user = |value| {
+        if let Some(indexed) = content.find_user_rows(actor, &native_demand_fingerprint(value)) {
+            return !indexed.is_empty();
+        }
+        let key = native_demand_key(value);
+        content.transcripts.get(actor).is_some_and(|rows| {
+            rows.iter().any(|row| {
+                text(row.get("role")) == Some("user")
+                    && text(row.get("content")).is_some_and(|body| {
+                        body.encode_utf16().count() <= MAX_CONTENT_BYTES
+                            && native_demand_key(body) == key
+                    })
+            })
+        })
+    };
+    (has_user(&demand.text) && !has_user("")).then_some(demand)
+}
+
 pub fn native_task_content(
     content: Option<&NativeContent>,
     actor: &str,
@@ -292,18 +334,9 @@ pub fn native_task_content(
     {
         return json!({});
     }
-    let mut bodies = Vec::new();
-    for assignment in assignments
-        .iter()
-        .filter(|item| item.time_ms >= query_ms && i128::from(item.time_ms) <= end)
-    {
-        if !bodies.contains(&assignment.text) {
-            bodies.push(assignment.text.clone());
-        }
-    }
-    if bodies.len() != 1 {
+    let Some(current) = native_current_assignment(content, actor, query_ms, end) else {
         return json!({});
-    }
+    };
     let answer = content.last_answers.get(actor);
     let results: Vec<_> = call_ids
         .iter()
@@ -319,7 +352,7 @@ pub fn native_task_content(
                 .all(|call| call.result_index.unwrap() < answer.index)
         })
     };
-    let mut out = object(json!({"input":bodies[0]}));
+    let mut out = object(json!({"input":current.text}));
     if let Some(answer) = answer.filter(|_| fresh_tail) {
         set(&mut out, "output", answer.text.clone());
     }
@@ -389,4 +422,53 @@ pub fn native_tool_observations(
         }
         Some(Value::Object(observation))
     }).collect()
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    #[test]
+    fn doubao_reminder_match_preserves_source_and_requires_the_unique_native_demand() {
+        let demand =
+            "<system-reminder>Mode</system-reminder>\r\n\r\n[Skill](skill://sample?menu=true) run";
+        let user =
+            r"[Skill](C:\Users\Test\.doubao\agent_mode\workspace\.skills\sample\SKILL.md) run";
+        let reminder = "<system-reminder>done</system-reminder>";
+        let assignments = vec![
+            NativeAssignment {
+                time_ms: 1,
+                text: demand.into(),
+            },
+            NativeAssignment {
+                time_ms: 1,
+                text: reminder.into(),
+            },
+        ];
+        let mut content = NativeContent::default();
+        content.assignments.insert("actor".into(), assignments);
+        content.transcripts.insert(
+            "actor".into(),
+            vec![Arc::new(json!({"role":"user","content":user}))],
+        );
+        assert_eq!(
+            native_current_assignment(&content, "actor", 0, 2)
+                .unwrap()
+                .text,
+            demand
+        );
+        assert_eq!(
+            native_task_content(Some(&content), "actor", 0, "2000000", &[])["input"],
+            demand
+        );
+        content.transcripts["actor"].push(Arc::new(json!({"role":"user","content":reminder})));
+        assert!(native_current_assignment(&content, "actor", 0, 2).is_none());
+        content.transcripts["actor"].pop();
+        content.assignments["actor"][1].time_ms = 2;
+        assert!(native_current_assignment(&content, "actor", 0, 2).is_none());
+        assert_ne!(
+            native_demand_key("<system-reminder>broken"),
+            native_demand_key("broken")
+        );
+    }
 }

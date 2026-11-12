@@ -9,6 +9,8 @@ description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime 
 
 ## 同步开源 main
 
+发现开源 `dev/v2.0.0` 落后于 `main` 时，直接开始原生适配和验证。
+
 逐项检查 main 自上次同步以来的产品行为、协议、修复及测试变化，并沿 Rust 的生产入口核对现状。对于 JS/TS 的运行时变更，按本 skill 的 Agent、性能和验证要求补齐原生 Rust 适配，保留已有二进制 Hook 与 SDK 行为。为正常路径、兼容性及恢复边界补验收。只合入提交历史或文档不算完成行为同步。开源验收通过后，再单向同步商业版。
 
 ## 按改动查阅

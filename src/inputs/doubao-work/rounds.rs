@@ -1,3 +1,4 @@
+use super::content::native_current_assignment;
 #[cfg(test)]
 use super::content::NativeContent;
 use super::native::NativeGraph;
@@ -49,7 +50,38 @@ pub struct NativeRoundReconstruction {
 fn message_json(message: &ObservedMessage) -> String {
     js_encode(&serde_json::to_value(message).unwrap())
 }
+fn without_native_reminder_prefix(value: &str) -> &str {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+    let mut remaining = value;
+    while let Some(body) = remaining
+        .trim_start_matches(char::is_whitespace)
+        .strip_prefix(OPEN)
+    {
+        let Some((body, tail)) = body.split_once(CLOSE) else {
+            return value;
+        };
+        if body.contains(OPEN) || tail.chars().next().is_some_and(|c| !c.is_whitespace()) {
+            return value;
+        }
+        remaining = tail;
+    }
+    remaining
+}
+
+pub(super) fn native_reminder_only(value: &str) -> bool {
+    let remaining = without_native_reminder_prefix(value);
+    remaining.len() != value.len() && remaining.trim().is_empty()
+}
+
 pub fn native_demand_key(value: &str) -> String {
+    let mut value = without_native_reminder_prefix(value);
+    while let Some(tail) = value
+        .strip_prefix("\r\n")
+        .or_else(|| value.strip_prefix('\n'))
+    {
+        value = tail;
+    }
     static LINK: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\[([^\]\r\n]*)\]\((?:<([^<>\r\n]+)>|([^\s()<>]+))\)").unwrap()
     });
@@ -57,7 +89,7 @@ pub fn native_demand_key(value: &str) -> String {
         Regex::new(r"^skill://([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})(?:\?[^\s<>]*)?$").unwrap()
     });
     static LOCAL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^(?:[a-zA-Z]:/|/)[^\r\n<>]*/\.doubaowork/agent_mode/workspace/\.skills/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})/SKILL\.md$").unwrap()
+        Regex::new(r"^(?:[a-zA-Z]:/|/)[^\r\n<>]*/\.doubao(?:work)?/agent_mode/workspace/\.skills/([a-zA-Z0-9][a-zA-Z0-9._-]{0,127})/SKILL\.md$").unwrap()
     });
     let mut parts = Vec::new();
     let mut cursor = 0;
@@ -201,14 +233,8 @@ impl NativeRoundSteps {
             .get(actor)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let current: Vec<_> = assignments
-            .iter()
-            .filter(|item| item.time_ms >= query_ms && i128::from(item.time_ms) <= end)
-            .collect();
-        if current.len() != 1 {
-            return None;
-        }
-        let body = &current[0].text;
+        let current = native_current_assignment(content, actor, query_ms, end)?;
+        let body = &current.text;
         let demand_key = native_demand_key(body);
         let matches = |value: Option<&Value>| {
             value.and_then(Value::as_str).is_some_and(|value| {

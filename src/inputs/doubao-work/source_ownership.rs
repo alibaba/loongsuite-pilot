@@ -257,10 +257,16 @@ impl SourceRecovery {
         path: &Path,
         file: &mut File,
         budget: &mut DoubaoWorkBudget<'_>,
+        rebaseline: bool,
     ) -> Result<FileCursor> {
         let before = identity(file).await?;
         let id = Identity::from(&before);
-        if let Some(proof) = self.read_proof(file, budget).await? {
+        let prior = if rebaseline {
+            None
+        } else {
+            self.read_proof(file, budget).await?
+        };
+        if let Some(proof) = prior {
             let offset = proof.floor.as_ref().map_or(0, |floor| floor.offset);
             let anchor = proof
                 .floor
@@ -369,7 +375,7 @@ mod tests {
         let mut file = open_source(source.clone()).await.unwrap();
         let mut first_budget = budget(512);
         let cursor = recovery
-            .historical(&source, &mut file, &mut first_budget)
+            .historical(&source, &mut file, &mut first_budget, false)
             .await
             .unwrap();
         assert_eq!(cursor.offset, history.len() as u64);
@@ -388,7 +394,7 @@ mod tests {
             .unwrap();
         let mut reopened = open_source(target.clone()).await.unwrap();
         let restored = recovery
-            .historical(&target, &mut reopened, &mut budget(512))
+            .historical(&target, &mut reopened, &mut budget(512), false)
             .await
             .unwrap();
         assert_eq!(restored.offset, cursor.offset);
@@ -422,7 +428,7 @@ mod tests {
             recovery.initial_epoch(1_792_897_200_000).await.unwrap();
             let mut file = open_source(source.clone()).await.unwrap();
             let first = recovery
-                .historical(&source, &mut file, &mut budget(512))
+                .historical(&source, &mut file, &mut budget(512), false)
                 .await
                 .unwrap();
             if changed_identity {
@@ -434,7 +440,7 @@ mod tests {
             tokio::fs::write(&source, &replacement).await.unwrap();
             let mut replaced = open_source(source.clone()).await.unwrap();
             let restored = recovery
-                .historical(&source, &mut replaced, &mut budget(512))
+                .historical(&source, &mut replaced, &mut budget(512), false)
                 .await
                 .unwrap();
             assert_eq!(restored.offset, replacement.len() as u64);
@@ -466,7 +472,7 @@ mod tests {
                 .unwrap();
             let mut reopened = open_source(source.clone()).await.unwrap();
             let cursor = recovery
-                .historical(&source, &mut reopened, &mut budget(512))
+                .historical(&source, &mut reopened, &mut budget(512), false)
                 .await
                 .unwrap();
             assert_eq!(cursor.offset, 0);
@@ -493,13 +499,13 @@ mod tests {
         let mut file = open_source(source.clone()).await.unwrap();
         let mut limited = budget(100);
         assert!(
-            matches!(recovery.historical(&source,&mut file,&mut limited).await,Err(DoubaoWorkError::Deferred(reason))if reason=="cycle_budget")
+            matches!(recovery.historical(&source,&mut file,&mut limited, false).await,Err(DoubaoWorkError::Deferred(reason))if reason=="cycle_budget")
         );
         assert_eq!(limited.remaining_bytes(), 36);
         let id = Identity::from(&identity(&file).await.unwrap());
         assert!(!recovery.directory.join(recovery.name(&id)).exists());
         let cursor = recovery
-            .historical(&source, &mut file, &mut budget(512))
+            .historical(&source, &mut file, &mut budget(512), false)
             .await
             .unwrap();
         assert_eq!(cursor.offset, 256);
@@ -513,7 +519,7 @@ mod tests {
         recovery.initial_epoch(1_792_897_200_000).await.unwrap();
         let mut file = open_source(source.clone()).await.unwrap();
         recovery
-            .historical(&source, &mut file, &mut budget(512))
+            .historical(&source, &mut file, &mut budget(512), false)
             .await
             .unwrap();
         let id = Identity::from(&identity(&file).await.unwrap());
@@ -521,7 +527,7 @@ mod tests {
             .await
             .unwrap();
         assert!(recovery
-            .historical(&source, &mut file, &mut budget(512))
+            .historical(&source, &mut file, &mut budget(512), false)
             .await
             .is_err());
         let blocked = tempfile::tempdir().unwrap();
