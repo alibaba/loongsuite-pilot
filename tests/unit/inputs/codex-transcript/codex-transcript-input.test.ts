@@ -2,6 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+const blockedReads = vi.hoisted(() => new Set<string>());
+vi.mock('node:fs/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  return {
+    ...actual,
+    readdir: (target: string, options: { withFileTypes: true }) => {
+      if (blockedReads.has(path.resolve(target))) {
+        return Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+      }
+      return actual.readdir(target, options);
+    },
+  };
+});
 import { DEFAULT_RESOURCE_ENV_FIELD_MAP } from '../../../../assets/hooks/shared/resource-context.mjs';
 import { AgentDiscoveryService } from '../../../../src/core/agent-discovery-service.js';
 import { WorkspacePolicy } from '../../../../src/core/workspace-policy.js';
@@ -34,6 +48,7 @@ const CHILD_FIXTURES = [
 ] as const;
 
 afterEach(async () => {
+  blockedReads.clear();
   await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -834,6 +849,82 @@ describe('CodexTranscriptInput', () => {
       expect(responsesForTurn(entries, 'turn-1').length).toBeGreaterThan(0);
     } finally {
       await svc.stop();
+    }
+  });
+
+  it('collects a session finished during upgrade when older checkpoints exist', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-upgrade-baseline-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    await fs.mkdir(sessionDir, { recursive: true });
+    const oldTranscript = await writeTranscript(sessionDir, completedTurn());
+    const stat = await fs.stat(oldTranscript);
+    const seeded = new StateStore(path.join(root, 'input-state.json'));
+    await seeded.load();
+    seeded.update(`codex-transcript:${oldTranscript}`, {
+      lastOffset: stat.size,
+      extra: {
+        codexTranscript: {
+          inode: stat.ino,
+          scanOffset: stat.size,
+          activeTurn: null,
+          pendingTerminal: null,
+          pendingFusion: null,
+          pendingSubagent: null,
+          ownerSessionMetaOffset: 0,
+        },
+      },
+    });
+    await seeded.save();
+    const dayDir = path.dirname(oldTranscript);
+    await fs.writeFile(
+      path.join(dayDir, 'rollout-session-upgrade.jsonl'),
+      completedTurn().replaceAll('turn-1', 'turn-upgrade'),
+      'utf8',
+    );
+    const { input, entries, stateStore } = await createDormantInput(root);
+    try {
+      await input.start();
+      await runInputCycle(input);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true
+        && entry['agent.codex.transcript_turn_id'] === 'turn-upgrade')).toBe(true);
+      expect(responsesForTurn(entries, 'turn-upgrade').length).toBeGreaterThan(0);
+      expect(responsesForTurn(entries, 'turn-1')).toEqual([]);
+    } finally {
+      await input.stop();
+    }
+  });
+
+  it('baselines history found after an incomplete first scan', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-partial-scan-'));
+    tempDirs.push(root);
+    const sessionDir = path.join(root, 'sessions');
+    const dayDir = path.join(sessionDir, '2026', '06', '24');
+    await fs.mkdir(dayDir, { recursive: true });
+    await fs.writeFile(path.join(dayDir, 'rollout-session-1.jsonl'), completedTurn().replaceAll('turn-1', 'turn-old'), 'utf8');
+    const { input, entries, stateStore } = await createDormantInput(root);
+    blockedReads.add(path.resolve(dayDir));
+    try {
+      await input.start();
+      expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+
+      blockedReads.clear();
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+      expect(stateStore.get(input.id).extra?.isBaselineInit).toBe(true);
+
+      await fs.writeFile(
+        path.join(dayDir, 'rollout-session-fresh.jsonl'),
+        completedTurn().replaceAll('turn-1', 'turn-fresh'),
+        'utf8',
+      );
+      await runInputCycle(input);
+      expect(entries.some(entry => entry['gen_ai.turn.end'] === true
+        && entry['agent.codex.transcript_turn_id'] === 'turn-fresh')).toBe(true);
+    } finally {
+      await input.stop();
     }
   });
 

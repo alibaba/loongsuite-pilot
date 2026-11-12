@@ -229,6 +229,8 @@ export class CodexTranscriptInput extends BaseInput {
   private wakeupDiscoveryPending = false;
   private wakeupDiscoveryRevision = 0;
   private lastFullScanAt = -Infinity;
+  private defaultScanComplete = false;
+  private baselinePending = false;
   private readonly wakeupPaths = new Map<string, Set<string>>();
   private readonly subagentLinker = new CodexSubagentLinker();
   private readonly reportedSubagentLinks = new Map<string, string>();
@@ -311,7 +313,16 @@ export class CodexTranscriptInput extends BaseInput {
     this.discardLegacyGlobalTurnRegistry();
     const discovered = await this.discoverSessionFiles();
     await this.indexDiscoveredTranscriptOwners(discovered);
-    const isBaselineInit = this.stateStore.get(this.id).extra?.isBaselineInit === true;
+    let isBaselineInit = this.stateStore.get(this.id).extra?.isBaselineInit === true;
+    if (!isBaselineInit) {
+      const prefix = `${this.id}:`;
+      const legacy = this.stateStore.keys().some(key =>
+        key.startsWith(prefix) && this.readCheckpoint(key) !== null);
+      if (legacy) {
+        this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+        isBaselineInit = true;
+      }
+    }
     for (const { filePath, baselineOnStart } of discovered) {
       const key = this.stateKey(filePath);
       const meta = this.transcriptMetaByPath.get(filePath);
@@ -327,8 +338,10 @@ export class CodexTranscriptInput extends BaseInput {
         }
       }
     }
-    if (!isBaselineInit) {
+    if (!isBaselineInit && this.defaultScanComplete) {
       this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+    } else if (!isBaselineInit) {
+      this.baselinePending = true;
     }
     await Promise.all([
       fs.mkdir(this.wakeupDir, { recursive: true }),
@@ -447,11 +460,29 @@ export class CodexTranscriptInput extends BaseInput {
       const rightDepth = this.transcriptMetaByPath.get(right.filePath)?.depth ?? 0;
       return leftDepth - rightDepth || left.filePath.localeCompare(right.filePath);
     });
-    for (const { filePath } of discovered) {
+    for (const { filePath, baselineOnStart } of discovered) {
       if (skipPaths.has(filePath)) continue;
+      if (baselineOnStart && this.baselinePending) {
+        const key = this.stateKey(filePath);
+        const meta = this.transcriptMetaByPath.get(filePath);
+        const neededByPendingFusion = meta?.depth === 1
+          && meta.parentThreadId !== undefined
+          && this.hasLegacyPendingFusionForParent(meta.parentThreadId);
+        if (!neededByPendingFusion && !this.readCheckpoint(key)) {
+          if (hasCopiedHistoryPrefix(meta)) await this.parkForkBaseline(filePath, key);
+          else await this.baselineFile(filePath, key);
+          continue;
+        }
+      }
       emittedCount += await this.processFile(filePath);
     }
-    if (fullScan) emittedCount += await this.retryPendingAgentResults();
+    if (fullScan) {
+      if (this.baselinePending && this.defaultScanComplete) {
+        this.stateStore.update(this.id, { extra: { isBaselineInit: true } });
+        this.baselinePending = false;
+      }
+      emittedCount += await this.retryPendingAgentResults();
+    }
     this.reportSubagentLinks();
     this.saveDelegationState();
     if (emittedCount > 0) {
@@ -539,13 +570,19 @@ export class CodexTranscriptInput extends BaseInput {
 
   private async listDefaultRolloutFiles(): Promise<string[]> {
     const cached = this.cachedDefaultRollout;
-    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) return cached.files;
+    if (cached && await this.rolloutDirsUnchanged(cached.dirMtimes)) {
+      this.defaultScanComplete = true;
+      return cached.files;
+    }
     const files: string[] = [];
     const dirMtimes = new Map<string, number>();
+    let rootMissing = false;
     const complete = await collectRolloutFiles(this.sessionDir, files, dirMtimes, (dir, error) => {
+      if (dir === this.sessionDir && (error as NodeJS.ErrnoException).code === 'ENOENT') rootMissing = true;
       this.logger.warn('Codex rollout directory scan failed; retrying next poll', { dir, error: String(error) });
     });
-    this.cachedDefaultRollout = complete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
+    this.defaultScanComplete = complete || rootMissing;
+    this.cachedDefaultRollout = this.defaultScanComplete && dirMtimes.size > 0 ? { dirMtimes, files } : null;
     return files;
   }
 
