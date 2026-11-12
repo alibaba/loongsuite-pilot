@@ -1459,7 +1459,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         try {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
-            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler, idGenerator)
             : { records: sanitized, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
