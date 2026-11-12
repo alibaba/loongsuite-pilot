@@ -58,7 +58,6 @@ param(
     [string]$CmsWorkspace,
     [string]$ServiceNamePrefix,
     [string]$Agents,
-    [switch]$AllAgents,
     [AllowEmptyString()]
     [string]$MultimodalMode,
     [string]$MaskMode,
@@ -71,6 +70,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$script:SELECTED_AGENTS = $Agents
+$script:AGENT_SELECTION_EXPLICIT = if ($PSBoundParameters.ContainsKey('Agents')) { '1' } else { '0' }
+if ($script:AGENT_SELECTION_EXPLICIT -eq '1' -and -not "$Agents".Trim()) {
+    throw "-Agents requires a list of Agent IDs or none"
+}
+$AllAgents = $script:AGENT_SELECTION_EXPLICIT -eq '0'
+
 
 # Resolve signed built-in modules by their exact PSHOME manifests. Short-name
 # autoload can stall in isolated Windows PowerShell 5.1 environments.
@@ -224,21 +231,6 @@ $LANG_MODE = Detect-Lang
 function Msg {
     param([string]$zh, [string]$en)
     if ($LANG_MODE -eq "zh") { Write-Host $zh } else { Write-Host $en }
-}
-
-function Test-CanPrompt {
-    # Each .NET call below throws under Constrained Language Mode (WDAC); guard every one
-    # and default to non-interactive (the safe degrade — irm|iex installs are non-interactive).
-    try {
-        $processArgs = [Environment]::GetCommandLineArgs()
-        if ($processArgs -contains "-NonInteractive") { return $false }
-    } catch {}
-    try {
-        if ([Console]::IsInputRedirected) { return $false }
-    } catch {}
-    try {
-        return [Environment]::UserInteractive -and $null -ne $Host.UI.RawUI
-    } catch { return $false }
 }
 
 # ============================================================
@@ -947,53 +939,11 @@ function Probe-Agents {
 # ============================================================
 # Agent selection
 # ============================================================
-$script:SELECTED_AGENTS = $Agents
-$script:AGENT_SELECTION_EXPLICIT = if ($Agents) { '1' } else { '0' }
-
 function Select-Agents {
-    # -AllAgents: collect every agent. Skip selection entirely and leave no gate
-    # in config (other agent settings survive), so pilot auto-detects all
-    # agents at runtime -- including ones installed after this run.
     if ($AllAgents) {
-        if ($script:SELECTED_AGENTS) {
-            Msg "    ⚠️  -AllAgents 已启用，忽略 -Agents 指定的列表" `
-                "    ⚠️  -AllAgents is set; ignoring the -Agents list"
-            $script:SELECTED_AGENTS = ""
-        }
-        Msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" `
-            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
-        Write-Host ""
-        return
-    }
-
-    if ($script:SELECTED_AGENTS) {
-        Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
-        Write-Host ""
-        return
-    }
-
-    $agentCount = Invoke-InstallerHelper -Operation "probe-count" -Json $script:PROBE_RESULT
-    if ($agentCount -eq "0") { return }
-
-    $isInteractive = Test-CanPrompt
-    if (-not $isInteractive) {
-        $script:SELECTED_AGENTS = Invoke-InstallerHelper -Operation "probe-detected" -Json $script:PROBE_RESULT
-        Msg "    (非交互模式) 自动选择已检测到的 Agent: $($script:SELECTED_AGENTS)" `
-            "    (non-interactive) Auto-selected detected agents: $($script:SELECTED_AGENTS)"
-        Write-Host ""
-        return
-    }
-
-    Invoke-InstallerHelper -Operation "probe-menu" -Json $script:PROBE_RESULT -ExtraArgs @('--lang', $LANG_MODE) | ForEach-Object { Write-Host $_ }
-    $rawSelection = Read-Host "    >"
-    $selectInput = if ($null -eq $rawSelection) { "" } else { $rawSelection.Trim() }
-    if ($selectInput) { $script:AGENT_SELECTION_EXPLICIT = '1' }
-    $script:SELECTED_AGENTS = Invoke-InstallerHelper -Operation "probe-select" -Json $script:PROBE_RESULT -ExtraArgs @('--selection', $selectInput)
-
-    if ($script:SELECTED_AGENTS) {
-        Msg "    已选择: $($script:SELECTED_AGENTS)" "    Selected: $($script:SELECTED_AGENTS)"
+        Msg "    运行时持续发现 Agent" "    Discovering agents continuously at runtime"
     } else {
-        Msg "    未选择任何 Agent" "    No agents selected"
+        Msg "    使用指定的 Agent: $($script:SELECTED_AGENTS)" "    Using specified agents: $($script:SELECTED_AGENTS)"
     }
     Write-Host ""
 }
@@ -1011,28 +961,6 @@ function Prompt-UserId {
     # callers must pass -UserId explicitly; this keeps scripted installs fully
     # non-interactive and avoids Read-Host failures in Windows PowerShell 5.1.
     if ($existingUid) {
-        $script:UserId = $existingUid
-        return
-    }
-
-    $isInteractive = Test-CanPrompt
-    if (-not $isInteractive) {
-        return
-    }
-
-    Write-Host ""
-    if ($existingUid) {
-        Msg "    当前 userId: $existingUid" "    Current userId: $existingUid"
-        Msg "    直接回车保留，或输入新值:" "    Press Enter to keep, or type a new value:"
-    } else {
-        Msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" `
-            "    Enter your userId (for data attribution, press Enter to skip):"
-    }
-    $rawInput = Read-Host "    >"
-    $input = if ($null -eq $rawInput) { "" } else { $rawInput.Trim() }
-    if ($input) {
-        $script:UserId = $input
-    } elseif ($existingUid) {
         $script:UserId = $existingUid
     }
 }
@@ -1052,18 +980,7 @@ function Confirm-ConfigOverwrite {
     Msg "⚠️  以下配置将被覆盖:" "⚠️  The following config will be overwritten:"
     $diffs | ForEach-Object { Write-Host "    $_" }
 
-    $isInteractive = Test-CanPrompt
-    if ($isInteractive) {
-        Write-Host ""
-        Msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
-        $answer = Read-Host "    >"
-        if ($answer -notin @("y", "Y", "yes", "YES")) {
-            Msg "已取消安装" "Installation cancelled"
-            exit 0
-        }
-    } else {
-        Msg "    (非交互模式) 继续覆盖" "    (non-interactive) Proceeding with overwrite"
-    }
+    Msg "    继续覆盖" "    Proceeding with overwrite"
 }
 
 # ============================================================

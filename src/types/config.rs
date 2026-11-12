@@ -666,6 +666,8 @@ pub struct StatusBarConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardConfig {
+    #[serde(default)]
+    pub enabled: bool,
     pub port: u16,
 }
 

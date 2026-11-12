@@ -151,13 +151,13 @@ msg() { :; }
 for name in SLS_ENDPOINT SLS_PROJECT SLS_LOGSTORE SLS_AK_ID SLS_AK_SECRET SLS_API_KEY LOG_LEVEL USER_ID COLLECT_LOG COLLECT_TRACE CMS_LICENSE_KEY CMS_ENDPOINT CMS_WORKSPACE SERVICE_NAME_PREFIX SELECTED_AGENTS ALL_AGENTS AGENT_SELECTION_EXPLICIT MULTIMODAL_MODE MULTIMODAL_SUPPORTED_AGENTS DASHBOARD_PORT ENABLE_STATUS_BAR_APP MASK_MODE MASK_TYPES MASK_REPLACEMENT_MODE INTERCEPTOR_MODE INTERCEPTOR_TYPES; do
     printf -v "$name" '%s' ''
 done
-ALL_AGENTS=0
+ALL_AGENTS=1
 EXCLUDE_WORKSPACES=()
 PROBE_RESULT=$(<"$TEST_PROBE_FILE")
 count=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-count)
 [ "$count" = 1 ]
 select_agents
-[ "$SELECTED_AGENTS" = cursor ]
+[ -z "$SELECTED_AGENTS" ]
 "#);
     if write {
         script.push_str("ENABLE_STATUS_BAR_APP=false\nwrite_config\n");
@@ -183,12 +183,12 @@ select_agents
 
 #[cfg(unix)]
 #[test]
-fn edr_original_probe_count_and_selection_stream_large_json_without_identity_in_argv() {
+fn edr_original_probe_count_streams_large_json_without_identity_in_argv() {
     let (f, argv, out) = captured_native_probe_chain(false);
     success(&out);
     let args: Vec<_> = argv.split(|b| *b == 0).filter(|v| !v.is_empty()).collect();
     assert!(args.contains(&b"probe-count".as_slice()));
-    assert!(args.contains(&b"probe-detected".as_slice()));
+    assert!(!args.contains(&b"probe-detected".as_slice()));
     assert!(!f.data.exists());
 }
 
@@ -201,7 +201,7 @@ fn edr_original_config_writer_streams_large_probe_and_keeps_selection_out_of_arg
     assert!(args.contains(&b"write-config".as_slice()));
     assert!(args.contains(&b"--from-env".as_slice()));
     assert!(!args.contains(&b"cursor".as_slice()));
-    assert_eq!(f.config()["agents"]["cursor"]["enabled"], true);
+    assert!(f.config()["agents"]["cursor"]["enabled"].is_null());
     assert_eq!(f.config()["enableStatusBarApp"], false);
 }
 

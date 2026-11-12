@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoongSuite Pilot</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; background: #f3f6fa; color: #14263c; }
+    main { max-width: 42rem; margin: 0 auto; padding: clamp(3rem, 11vh, 9rem) 1.5rem; }
+    h1 { font-size: clamp(2.25rem, 8vw, 4rem); letter-spacing: -.045em; line-height: 1.1; margin: 0; }
+    p { color: #435872; margin: 1rem 0 2rem; line-height: 1.65; }
+    nav { display: flex; flex-wrap: wrap; align-items: center; gap: 1.15rem; }
+    a { color: #214e88; text-underline-offset: .2em; }
+    .primary { background: #214e88; color: #fff; padding: .7rem 1.15rem; border-radius: .5rem; text-decoration: none; font-weight: 650; }
+    a:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #102034; color: #f0f5fc; }
+      p { color: #b8c8dc; }
+      a { color: #c0dcff; }
+      .primary { background: #b9d6ff; color: #102034; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LoongSuite Pilot</h1>
+    <p>面向 AI 编程助手的数据采集工具。</p>
+    <nav aria-label="项目入口">
+      <a class="primary" href="./performance/">性能历史</a>
+      <a href="https://github.com/alibaba/loongsuite-pilot">GitHub 仓库</a>
+    </nav>
+  </main>
+</body>
+</html>

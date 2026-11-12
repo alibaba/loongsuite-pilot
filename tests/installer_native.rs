@@ -1398,12 +1398,12 @@ try {
 
 #[cfg(windows)]
 #[test]
-fn windows_install_preflight_and_cancel_precede_task_and_service_operations() {
+fn windows_noninteractive_install_preflight_precede_task_and_service_operations() {
     for shell in windows_shells() {
         for constrained in [false, true] {
             for scenario in [
                 "new",
-                "cancel",
+                "reinstall",
                 "invalid-privacy",
                 "supported-enricher",
                 "bad-resource",
@@ -1412,7 +1412,7 @@ fn windows_install_preflight_and_cancel_precede_task_and_service_operations() {
                 fixture.package();
                 let data = fixture.root.path().join("Windows 安装主流程 🚀");
                 let original = match scenario {
-                    "cancel" => Some("{\"userId\":\"prior-user\"}"),
+                    "reinstall" => Some("{\"userId\":\"prior-user\"}"),
                     "invalid-privacy" => Some(r#"{"privacy":{"excludeWorkspaces":["relative"]}}"#),
                     "supported-enricher" => {
                         Some(r#"{"otlpTrace":{"spanEnrichers":["optional.mjs"]}}"#)
@@ -1448,8 +1448,7 @@ function Download-AndExtract { }
 function Probe-Agents { $script:PROBE_RESULT = '[{"id":"cursor-cli","detected":false}]' }
 function Select-Agents { $script:SELECTED_AGENTS = 'none'; $script:AGENT_SELECTION_EXPLICIT = '1' }
 function Prompt-UserId { $script:UserId = 'updated' }
-function Test-CanPrompt { return $env:TEST_SCENARIO -eq 'cancel' }
-function Read-Host { param($Prompt); if ($env:TEST_SCENARIO -ne 'cancel') { throw 'unexpected prompt' }; return 'n' }
+function Read-Host { throw 'unexpected prompt' }
 function Disable-PilotScheduledTasksDuringDeploy {
     'disabled' | Set-Content -LiteralPath $env:TEST_STOP -Encoding UTF8
     throw 'fixture-stop-before-system-actions'
@@ -1470,15 +1469,14 @@ Cmd-Install
                     .env("TEST_STOP", &stop)
                     .env("TEST_SCENARIO", scenario);
                 let output = bounded(command);
-                assert_eq!(
-                    output.status.success(),
-                    scenario == "cancel",
+                assert!(
+                    !output.status.success(),
                     "{scenario}: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 assert_eq!(
                     stop.exists(),
-                    matches!(scenario, "new" | "supported-enricher"),
+                    matches!(scenario, "new" | "reinstall" | "supported-enricher"),
                     "{scenario}: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
@@ -1492,7 +1490,7 @@ Cmd-Install
                 } else {
                     assert!(!data.exists());
                 }
-                if !matches!(scenario, "new" | "supported-enricher") {
+                if !matches!(scenario, "new" | "reinstall" | "supported-enricher") {
                     assert!(!fixture.root.path().join("cache").exists());
                 }
             }

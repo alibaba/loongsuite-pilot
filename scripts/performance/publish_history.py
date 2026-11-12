@@ -47,7 +47,9 @@ VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 OFFICIAL = "alibaba/loongsuite-pilot"
 SITE_WORKFLOW = ".github/workflows/performance-site.yml"
-RESULT_FILES = {"history.json", "index.html", ".nojekyll", SITE_WORKFLOW}
+SITE_HOME = "scripts/performance/site-home.html"
+PERFORMANCE_PAGE = "performance/index.html"
+RESULT_FILES = {"history.json", "index.html", PERFORMANCE_PAGE, ".nojekyll", SITE_WORKFLOW}
 
 
 def version_key(value):
@@ -521,6 +523,18 @@ def stage_site_workflow(destination, trusted):
         marker.touch()
 
 
+def stage_site(destination, trusted, template, history):
+    """Render the report under /performance/ and seed the project home."""
+    destination = Path(destination)
+    home = (Path(trusted) / SITE_HOME).read_text(encoding="utf-8")
+    report = render(template, history)
+    stage_site_workflow(destination, trusted)
+    page = destination / PERFORMANCE_PAGE
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(report, encoding="utf-8")
+    (destination / "index.html").write_text(home, encoding="utf-8")
+
+
 def release_provenance(release, selection):
     """Recheck the official asset identity; a downloaded hash is not a published hash."""
     checksum = selection.get("asset_sha256", "")
@@ -732,11 +746,9 @@ def github_publish():
         if changed and (primary or initial_main or migrated):
             history["method"] = standard_method
             history["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-        encoded_html = render(template, history)
         history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-        (history_root / "index.html").write_text(encoded_html, encoding="utf-8")
-        stage_site_workflow(history_root, trusted)
-        git(history_root, "add", "--", "history.json", "index.html", ".nojekyll", SITE_WORKFLOW)
+        stage_site(history_root, trusted, template, history)
+        git(history_root, "add", "--", "history.json", "index.html", PERFORMANCE_PAGE, ".nojekyll", SITE_WORKFLOW)
         if git(history_root, "diff", "--cached", "--quiet", check=False).returncode == 0:
             final_history = history
             break

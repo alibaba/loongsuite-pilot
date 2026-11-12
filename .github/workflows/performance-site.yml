@@ -46,8 +46,10 @@ jobs:
       - name: Stage generated files only
         if: steps.tip.outputs.current == 'true'
         run: |
-          mkdir -p "$RUNNER_TEMP/site"
+          mkdir -p "$RUNNER_TEMP/site/performance"
           cp index.html history.json "$RUNNER_TEMP/site/"
+          cp performance/index.html "$RUNNER_TEMP/site/performance/"
+          cp history.json "$RUNNER_TEMP/site/performance/"
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         if: steps.tip.outputs.current == 'true'
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

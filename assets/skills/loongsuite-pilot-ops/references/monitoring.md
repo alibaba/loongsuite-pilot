@@ -41,7 +41,7 @@ Dashboard 由采集主进程直接托管，不需要额外启动命令，也不�
 http://127.0.0.1:8765/
 ```
 
-服务固定监听 `127.0.0.1`，默认端口为 `8765`，可通过 `config.json` 的 `dashboard.port` 修改；不向局域网或公网暴露。
+Dashboard 默认关闭。需要使用时，在 `config.json` 中设 `dashboard.enabled` 为 `true` 并重启 Pilot。启用后，服务固定监听 `127.0.0.1`，默认端口为 `8765`，可通过 `config.json` 的 `dashboard.port` 修改；不向局域网或公网暴露。
 
 Dashboard 前端只请求 `GET /metrics-summary.json`，服务端会原样返回
 `logs/metrics-summary.json`。该汇总文件由 Pilot 主进程默认生成：启动约 5 秒后首次写入，

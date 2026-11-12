@@ -194,6 +194,8 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
 
 ## 快速入口
 
+- **我要开发 Rust Pilot 或 SDK** → [loongsuite-pilot-dev](assets/skills/loongsuite-pilot-dev/SKILL.md)
+
 - **我要理解整体架构** → [docs/zh-CN/overview.md](docs/zh-CN/overview.md)
 - **我要接入新 Agent** → [docs/zh-CN/agent-onboarding.md](docs/zh-CN/agent-onboarding.md)
 - **我要设计 transcript + Hook 混合采集、时间边界或 checkpoint** → [docs/zh-CN/agent-onboarding.md#可靠的混合采集](docs/zh-CN/agent-onboarding.md#可靠的混合采集)

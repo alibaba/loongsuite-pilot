@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 describe('public installer SLS config output', () => {
-  it('shell installer accepts SLS API Key without printing it in overwrite diff', async () => {
+  it('shell installer accepts SLS API Key and uses the native overwrite diff', async () => {
     const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.sh'), 'utf8');
 
     expect(content).toContain('SLS_API_KEY=""');
@@ -14,51 +14,31 @@ describe('public installer SLS config output', () => {
     expect(content).toContain('--sls-api-key=*)');
     expect(content).toContain('cannot be used with --sls-ak-id or --sls-ak-secret');
     expect(content).toContain('LP_SLS_API_KEY="$SLS_API_KEY"');
-    expect(content).toContain("label: 'sls.mode'");
-    expect(content).not.toContain("label: 'sls.apiKey'");
+    expect(content).toContain("config-diffs");
   });
 
-  it('PowerShell installer accepts SLS API Key without printing it in overwrite diff', async () => {
+  it('PowerShell installer accepts SLS API Key and uses the native overwrite diff', async () => {
     const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.ps1'), 'utf8');
 
     expect(content).toContain('[string]$SlsApiKey');
     expect(content).toContain('cannot be used with -SlsAkId or -SlsAkSecret');
     expect(content).toContain('slsApiKey');
-    expect(content).toContain("label: 'sls.mode'");
-    expect(content).not.toContain("label: 'sls.apiKey'");
+    expect(content).toContain("config-diffs");
   });
 
-  it.each(['deploy/installer-opensource.sh', 'deploy/installer-opensource.ps1'])('%s writes API Key mode and clears AK/SK fields', async (installer) => {
-    const content = await readFile(path.join(rootDir, installer), 'utf8');
-
-    expect(content).toContain("config.sls.mode = 'apiKey'");
-    expect(content).toContain('config.sls.apiKey');
-    expect(content).toContain('delete config.sls.accessKeyId');
-    expect(content).toContain('delete config.sls.accessKeySecret');
-    expect(content).toContain("config.sls.mode = 'ak'");
-    expect(content).toContain('delete config.sls.apiKey');
-  });
-
-  it('deploy/installer-opensource.sh supports --all-agents to collect every agent', async () => {
+  it('shell installer defaults to continuous discovery and rejects the retired flag', async () => {
     const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.sh'), 'utf8');
 
-    expect(content).toContain('ALL_AGENTS=0');
-    expect(content).toContain('--all-agents)');
-    expect(content).toContain('if [ "$ALL_AGENTS" = "1" ]; then');
-    expect(content).toContain("const allAgentsMode = '${ALL_AGENTS}';");
-    expect(content).toContain("if (allAgentsMode === '1') {");
-    expect(content).toContain('delete agent.enabled;');
-    expect(content).not.toContain('delete config.agents;');
+    expect(content).toMatch(/^ALL_AGENTS=1$/m);
+    expect(content).not.toContain('--all-agents)');
+    expect(content).toContain('LP_ALL_AGENTS="$ALL_AGENTS"');
   });
 
-  it('deploy/installer-opensource.ps1 supports -AllAgents to collect every agent', async () => {
+  it('PowerShell installer defaults to continuous discovery unless an allowlist is supplied', async () => {
     const content = await readFile(path.join(rootDir, 'deploy/installer-opensource.ps1'), 'utf8');
 
-    expect(content).toContain('[switch]$AllAgents');
-    expect(content).toContain('if ($AllAgents) {');
-    expect(content).toContain('allAgentsMode     = $(if ($AllAgents) { "1" } else { "" })');
-    expect(content).toContain("if (opts.allAgentsMode === '1') {");
-    expect(content).toContain('delete agent.enabled;');
-    expect(content).not.toContain('delete config.agents;');
+    expect(content).not.toContain('[switch]$AllAgents');
+    expect(content).toContain("$AllAgents = $script:AGENT_SELECTION_EXPLICIT -eq '0'");
+    expect(content).toMatch(/allAgentsMode\s*=.*\$AllAgents/);
   });
 });

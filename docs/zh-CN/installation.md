@@ -94,13 +94,12 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | 参数 | 说明 |
 |------|------|
 | `--version <ver>` | 安装指定版本，例如 `1.2.0`。 |
-| `--agents <list>` | 逗号分隔的 Agent 列表，跳过交互选择。 |
-| `--all-agents` | 采集全部 Agent。不写 `enabled` 门禁，缺省即开。与 `--agents` 同时出现时忽略 `--agents`。Windows：`-AllAgents`。 |
-| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`。与 `--all-agents` 同用且非 `none` 时，`codex`、`qoder` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
+| `--agents <list>` | 逗号分隔的 Agent 列表，指定允许采集的 Agent，`none` 表示不启用任何 Agent。省略时持续发现受支持的 Agent，包括运行后安装的 Agent。 |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`。已选的 `codex`、`qoder` 写该模式，其他已有 supported 写 `none`。省略 `--agents` 且该模式非 `none` 时，`codex`、`qoder` 都写该模式（没有条目则补上）。值为 `none` 则删除。不传不改。非 `none` 须带齐 SLS 四字段。 |
 | `--userId <id>` | 设置写入输出事件的用户标识。 |
 | `--data-dir <path>` | 覆盖数据目录，默认 `~/.loongsuite-pilot`。 |
-| `--enable-status-bar-app <true\|false>` | 在 `install` 时设置是否自动启动 macOS 菜单栏。未传时保留已有配置，首次安装默认启用。Windows 对应 `-EnableStatusBarApp <true\|false>`（保存配置，菜单栏仅支持 macOS）。 |
-| `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。 |
+| `--enable-status-bar-app <true\|false>` | 在 `install` 时设置是否自动启动 macOS 菜单栏。未传时保留已有配置，首次安装默认关闭。Windows 对应 `-EnableStatusBarApp <true\|false>`（保存配置，菜单栏仅支持 macOS）。 |
+| `--dashboard-port <port>` | 可选的 Dashboard 端口，取值为 `1–65535` 的整数。首次安装不指定时使用 `8765`；重新安装不指定时保留已有端口。Windows 对应 `-DashboardPort <port>`。此参数仅设置端口。 |
 | `--package-url <url>` | 从自定义 URL 或本地 `file://` 路径安装。 |
 | `--sls-endpoint <url>` | SLS endpoint。 |
 | `--sls-project <name>` | SLS project。 |
@@ -123,7 +122,9 @@ Linux/macOS 安装器使用 `--kebab-case` 参数；Windows PowerShell 安装器
 | `--prefer-system-node` | 旧版兼容参数；Rust 原生安装无需选择或下载 Node。 |
 | `--lang <lang>` | 输出语言：`zh` 或 `en`。 |
 
-例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。安装完成后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
+安装全程无需交互。参数缺失或无效时，安装器会报错退出。
+
+例如要使用 `9000` 端口，在 Linux/macOS 安装命令末尾加 `--dashboard-port 9000`（也支持 `--dashboard-port=9000`）；Windows 则加 `-DashboardPort 9000`。安装器会在启动服务前，将端口写入 `config.json` 的 `dashboard.port`。启用 Dashboard 后访问 `http://127.0.0.1:9000/`。传入非法端口或只写参数却没有提供值时，会在下载、修改服务之前报错退出。
 
 ## 运行时
 
@@ -166,7 +167,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-本地 Dashboard 会随采集服务一起启动和停止，默认地址如下；指定了其他端口时，请替换地址中的端口：
+本地 Dashboard 默认关闭。在 `config.json` 中设置 `"dashboard": {"enabled": true}` 并重启采集服务即可启用。启用后随采集服务启动和停止，默认地址如下。
 
 ```text
 http://127.0.0.1:8765/

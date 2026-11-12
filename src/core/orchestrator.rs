@@ -625,30 +625,33 @@ impl Orchestrator {
                 }
             }));
             *self.summary_writer.lock().expect("summary") = Some(summary);
-            let dashboard = dashboard::DashboardServer::new(dashboard::DashboardServerOptions {
-                data_dir: self.data_dir.clone(),
-                asset_path: Path::new(&pilot_dir)
-                    .join("assets")
-                    .join("dashboard")
-                    .join("index.html")
-                    .to_string_lossy()
-                    .into_owned(),
-                host: None,
-                port: Some(self.config.dashboard.port),
-            });
-            if let Err(err) = dashboard.start() {
-                logger("Orchestrator").warn(
-                    "dashboard start failed (non-fatal)",
-                    Some(&fields(serde_json::json!({ "error": err }))),
-                );
+            if self.config.dashboard.enabled {
+                let dashboard =
+                    dashboard::DashboardServer::new(dashboard::DashboardServerOptions {
+                        data_dir: self.data_dir.clone(),
+                        asset_path: Path::new(&pilot_dir)
+                            .join("assets")
+                            .join("dashboard")
+                            .join("index.html")
+                            .to_string_lossy()
+                            .into_owned(),
+                        host: None,
+                        port: Some(self.config.dashboard.port),
+                    });
+                if let Err(err) = dashboard.start() {
+                    logger("Orchestrator").warn(
+                        "dashboard start failed (non-fatal)",
+                        Some(&fields(serde_json::json!({ "error": err }))),
+                    );
+                }
+                if let Some(error) = dashboard.last_start_error() {
+                    self.emit(OrchestratorEvent::ComponentFailure {
+                        component: "dashboard".into(),
+                        error,
+                    });
+                }
+                *self.dashboard.lock().expect("dashboard") = Some(dashboard);
             }
-            if let Some(error) = dashboard.last_start_error() {
-                self.emit(OrchestratorEvent::ComponentFailure {
-                    component: "dashboard".into(),
-                    error,
-                });
-            }
-            *self.dashboard.lock().expect("dashboard") = Some(dashboard);
             let inputs_for_prompt = Arc::clone(&self.inputs);
             match self
                 .start_collector_interceptor(StartInterceptorServiceOptions {
@@ -4402,6 +4405,7 @@ mod tests {
             config.upstream_link.enabled = false;
             config.status_bar.enabled = false;
             config.dashboard.port = 0;
+            config.dashboard.enabled = mode != "dashboard-disabled";
             config.status_bar.runtime_refresh_interval_ms = 300_000;
             config.status_bar.metrics_summary_interval_ms = 300_000;
             if mode == "custom-output" {
@@ -4704,6 +4708,11 @@ mod tests {
             assert!(orchestrator.summary_writer.lock().unwrap().is_some());
             assert!(orchestrator.summary_task.lock().unwrap().is_some());
             assert!(orchestrator.metrics.lock().unwrap().is_some());
+            if mode == "dashboard-disabled" {
+                assert!(orchestrator.dashboard.lock().unwrap().is_none());
+                orchestrator.stop().await;
+                return;
+            }
             let bound = orchestrator
                 .dashboard
                 .lock()
@@ -5136,6 +5145,7 @@ mod tests {
         }
         for mode in [
             "success",
+            "dashboard-disabled",
             "dashboard-occupied",
             "poll-env",
             "opencode-home",

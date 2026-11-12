@@ -43,7 +43,28 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual((destination / "history.json").read_text(), "original history")
             self.assertEqual((destination / "index.html").read_text(), "original page")
             self.assertEqual((destination / ".nojekyll").read_text(), "preserved marker")
-            self.assertEqual(publisher.RESULT_FILES, {"history.json", "index.html", ".nojekyll", publisher.SITE_WORKFLOW})
+            self.assertEqual(publisher.RESULT_FILES, {"history.json", "index.html", "performance/index.html", ".nojekyll", publisher.SITE_WORKFLOW})
+
+    def test_report_updates_keep_the_homepage_and_nested_route(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted, destination = root / "trusted", root / "results"
+            for path, content in (
+                (publisher.SITE_WORKFLOW, "name: site"),
+                (publisher.SITE_HOME, '<a href="./performance/">性能历史</a>'),
+            ):
+                target = trusted / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            destination.mkdir()
+            (destination / "history.json").write_text("canonical history")
+            template = "<script>__PILOT_PERFORMANCE_DATA__</script>"
+            for name in ("old", "new"):
+                publisher.stage_site(destination, trusted, template, {"version": name})
+            self.assertIn('href="./performance/"', (destination / "index.html").read_text())
+            self.assertEqual((destination / "performance/index.html").read_text(),
+                             '<script>{"version":"new"}</script>')
+            self.assertEqual((destination / "history.json").read_text(), "canonical history")
 
     def test_missing_trusted_site_workflow_cannot_replace_generated_workflow(self):
         with tempfile.TemporaryDirectory() as temporary:

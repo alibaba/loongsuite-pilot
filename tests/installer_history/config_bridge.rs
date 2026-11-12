@@ -16,6 +16,8 @@ fn public_powershell_parameter_prelude(source: &str) -> String {
 #[test]
 fn original_public_parser_rejects_invalid_flags_before_installation_side_effects() {
     let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec!["--all-agents"], "Unknown option: --all-agents"),
+        (vec!["--agents", "--lang=en"], "--agents requires a value"),
         (
             vec!["--interceptor-mode", "audit"],
             "Unknown interceptor mode: audit",
@@ -93,7 +95,6 @@ fn original_public_parser_accepts_both_flag_styles_without_host_language_runtime
                 "all",
                 "--mask-replacement-mode",
                 "preview",
-                "--all-agents",
                 "--sls-api-key",
                 "synthetic-test-key",
                 "--multimodal-mode",
@@ -108,8 +109,9 @@ fn original_public_parser_accepts_both_flag_styles_without_host_language_runtime
                 "--mask-replacement-mode=placeholder",
                 "--sls-api-key=synthetic-test-key",
             ],
-            vec!["custom", "apiKey, privateKey", "placeholder", "0", ""],
+            vec!["custom", "apiKey, privateKey", "placeholder", "1", ""],
         ),
+        (vec!["--agents=qoder"], vec!["", "", "", "0", ""]),
     ] {
         let mut command = f.command(Path::new("/bin/bash"));
         command.arg(&script).args(args);
@@ -291,6 +293,8 @@ fn original_public_powershell_parser_checks_flags_before_resolving_packages_in_b
         let mut script = windows_prelude(false);
         script.push_str(r#"
 $cases=@(
+    @{ parameters=@{AllAgents=$true}; expected='AllAgents' },
+    @{ parameters=@{Agents=' '}; expected='requires a list of Agent IDs' },
     @{ parameters=@{InterceptorMode='audit'}; expected='Unknown interceptor mode' },
     @{ parameters=@{InterceptorMode='custom'}; expected='InterceptorTypes is required' },
     @{ parameters=@{InterceptorTypes='apiKey'}; expected='can only be used' },
@@ -304,7 +308,7 @@ foreach ($case in $cases) {
     try { & $env:TEST_PARAMETER_SCRIPT @arguments | Out-Null } catch { $caught="$_" }
     if (-not $caught -or $caught -notlike ('*'+$case.expected+'*')) { throw ('wrong parameter rejection: '+$case.expected) }
 }
-$accepted=& $env:TEST_PARAMETER_SCRIPT -InterceptorMode all -MaskReplacementMode preview -AllAgents -SlsApiKey synthetic-test-key -MultimodalMode none
+$accepted=& $env:TEST_PARAMETER_SCRIPT -InterceptorMode all -MaskReplacementMode preview -SlsApiKey synthetic-test-key -MultimodalMode none
 if ($accepted -ne 'PILOT_PARAMETER_PARSE_OK') { throw 'valid public flags were rejected' }
 "#);
         let mut command = windows_command(&f, &shell, &script);
@@ -495,7 +499,6 @@ fn original_multimodal_public_bash_writer_roundtrips_modes_and_stops_after_nativ
             .arg(&path)
             .args([
                 "install",
-                "--all-agents",
                 "--multimodal-mode",
                 if scenario == "none" { "none" } else { "all" },
                 "--sls-endpoint",
@@ -573,7 +576,7 @@ fn original_multimodal_public_powershell_writer_roundtrips_modes_and_aborts_nati
         script.push_str(r#"
 foreach ($mode in @('all','none')) {
     '{"agents":{"qoder":{"enabled":false,"multimodal":{"uploadMode":"output","allowedRootPaths":["~/workspace"]}},"cursor":{"enabled":true,"multimodal":{"uploadMode":"all"}}},"multimodal":{"extra":true,"storage":{"type":"oss","target":{"storageBasePath":"oss://bucket/prefix"}}}}' | Set-Content -LiteralPath (Join-Path $env:TEST_DATA 'config.json') -Encoding UTF8
-    $result=& $env:TEST_WRITER install -AllAgents -MultimodalMode $mode -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA
+    $result=& $env:TEST_WRITER install -MultimodalMode $mode -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA
     if ($result -ne 'NATIVE_WRITE_CONTINUED') {throw 'native write did not continue'}
     $config=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $env:TEST_DATA 'config.json') -Raw | ConvertFrom-Json
     if ($config.multimodal.extra -ne $true -or $config.agents.cursor.multimodal.uploadMode -ne 'all') {throw 'unrelated multimodal values were lost'}
@@ -588,7 +591,7 @@ foreach ($raw in @('{"sls":[{},{}]}','{broken')) {
     $before=Get-Content -Encoding UTF8 -LiteralPath $path -Raw
     $caught=$null
     try {
-        & $env:TEST_WRITER install -AllAgents -MultimodalMode all -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA | Out-Null
+        & $env:TEST_WRITER install -MultimodalMode all -SlsEndpoint cn-hangzhou.log.aliyuncs.com -SlsProject agentloop-example -SlsLogstore agent-event -SlsApiKey synthetic-multimodal-api-key -DataDir $env:TEST_DATA | Out-Null
     } catch {$caught="$_"}
     if (-not $caught -or $caught -notmatch 'exit=1') {throw 'Write-Config did not propagate native failure'}
     if ((Get-Content -Encoding UTF8 -LiteralPath $path -Raw) -ne $before) {throw 'failed native write changed the config'}

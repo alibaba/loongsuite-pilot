@@ -20,10 +20,10 @@ The fixture comes from the public Qoder transcript history tests and public
 identities require two requests, two responses, one tool call and one tool
 result per turn, including exact token enrichment and required fields.
 
-## Fixed method
+## Historical 100 ms method
 
 `tests/performance_native/pilot-history-method.json` defines the method ID.
-There are 64 native sessions and 100 ms collection polling. Each of idle
+The original method uses 64 native sessions and 100 ms collection polling. Current Qoder and Codex settings are described below. Each of idle
 (0 turns/s), low (10 turns/s, 低负载) and high (200 turns/s) runs for a 30-second
 input interval, three repeats, with a 2-CPU/1-GiB container. Warmup and drain are
 separate. The raw source producer is outside the measured container. Historical Hook
@@ -119,7 +119,9 @@ Old remote measurements must not be relabelled as this new method or subjected
 to an absolute cross-hardware 50%-of-JS gate.
 
 Workflow and publisher code live in source; generated history/HTML live on a
-separate results branch and Pages. Raw samples, fixtures and logs are Actions
+separate results branch and Pages. The root is the project homepage. The report
+lives at `/performance/` with a relative copy of `history.json`. Raw samples,
+fixtures and logs are Actions
 artifacts. The write job uses trusted workflow code and validates compact data;
 candidate execution receives no write credentials. Fork/PR runs do not publish.
 No generated result is committed to the source PR or main branch.

@@ -85,13 +85,12 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | Parameter | Description |
 |-----------|-------------|
 | `--version <ver>` | Install a specific version, for example `1.2.0`. |
-| `--agents <list>` | Comma-separated agent list. Skips interactive selection. |
-| `--all-agents` | Collect every agent. Does not write `enabled` gates; runtime treats missing `enabled` as on. Ignores `--agents`. Windows: `-AllAgents`. |
-| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. With `--all-agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
+| `--agents <list>` | Comma-separated allowlist. Use `none` to disable all agents. Omit to continuously discover supported agents, including agents installed later. |
+| `--multimodal-mode <mode>` | `none` / `input` / `output` / `all`. Writes that mode to selected `codex` and `qoder`; other existing supported agents get `none`. Without `--agents`, non-`none` writes that mode onto `codex` and `qoder` and creates missing entries. `none` deletes. Omit to leave unchanged. Non-`none` requires the four SLS flags. |
 | `--userId <id>` | Set user identity written to output events. |
 | `--data-dir <path>` | Override data directory. Default is `~/.loongsuite-pilot`. |
-| `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to enabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
-| `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. |
+| `--enable-status-bar-app <true\|false>` | Set automatic macOS menu bar startup during `install`. Omission preserves the existing setting; fresh installs default to disabled. Windows: `-EnableStatusBarApp <true\|false>` (stores the setting; the UI is macOS-only). |
+| `--dashboard-port <port>` | Optional Dashboard port, an integer from `1` to `65535`. Defaults to `8765` on first install; preserves the existing port on reinstall when omitted. Windows: `-DashboardPort <port>`. This setting only chooses the port. |
 | `--package-url <url>` | Install from a custom URL or local `file://` path. |
 | `--sls-endpoint <url>` | SLS endpoint URL. |
 | `--sls-project <name>` | SLS project name. |
@@ -112,6 +111,8 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 | `--service-name-prefix <name>` | Service name prefix used by reporting backends. |
 | `--system-service` | **Deprecated** — ignored. Init system is now auto-detected (systemd-user → systemd-system → init.d). |
 | `--lang <lang>` | Output language: `zh` or `en`. |
+
+Installation is non-interactive. The installer exits with an error when a required argument is missing or invalid.
 
 For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. Open `http://127.0.0.1:9000/` after installation. Invalid or missing port values stop installation before downloads or service changes.
 
@@ -146,7 +147,7 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open the default address below, or use your configured port:
+The local dashboard is off by default. Set `"dashboard": {"enabled": true}` in `config.json` and restart the collector to enable it. It then starts and stops with the collector at the default address below or your configured port.
 
 ```text
 http://127.0.0.1:8765/

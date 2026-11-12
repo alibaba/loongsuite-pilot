@@ -66,7 +66,7 @@ CMS_WORKSPACE=""
 SERVICE_NAME_PREFIX=""
 SELECTED_AGENTS=""
 AGENT_SELECTION_EXPLICIT=0
-ALL_AGENTS=0
+ALL_AGENTS=1
 MULTIMODAL_MODE=""
 MULTIMODAL_MODE_SET=0
 # Keep in sync with MULTIMODAL_SUPPORTED_AGENT_IDS.
@@ -95,23 +95,30 @@ else
     COMMAND="install"
 fi
 
+require_option_value() {
+    if [[ "$#" -lt 2 || "${2-}" == --* ]]; then
+        printf '%s requires a value\n' "$1" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --sls-endpoint)       SLS_ENDPOINT="$2"; shift 2 ;;
+        --sls-endpoint)       require_option_value "$@"; SLS_ENDPOINT="$2"; shift 2 ;;
         --sls-endpoint=*)     SLS_ENDPOINT="${1#*=}"; shift ;;
-        --sls-project)        SLS_PROJECT="$2"; shift 2 ;;
+        --sls-project)        require_option_value "$@"; SLS_PROJECT="$2"; shift 2 ;;
         --sls-project=*)      SLS_PROJECT="${1#*=}"; shift ;;
-        --sls-logstore)       SLS_LOGSTORE="$2"; shift 2 ;;
+        --sls-logstore)       require_option_value "$@"; SLS_LOGSTORE="$2"; shift 2 ;;
         --sls-logstore=*)     SLS_LOGSTORE="${1#*=}"; shift ;;
-        --sls-ak-id)          SLS_AK_ID="$2"; shift 2 ;;
+        --sls-ak-id)          require_option_value "$@"; SLS_AK_ID="$2"; shift 2 ;;
         --sls-ak-id=*)        SLS_AK_ID="${1#*=}"; shift ;;
-        --sls-ak-secret)      SLS_AK_SECRET="$2"; shift 2 ;;
+        --sls-ak-secret)      require_option_value "$@"; SLS_AK_SECRET="$2"; shift 2 ;;
         --sls-ak-secret=*)    SLS_AK_SECRET="${1#*=}"; shift ;;
-        --sls-api-key)        SLS_API_KEY="$2"; shift 2 ;;
+        --sls-api-key)        require_option_value "$@"; SLS_API_KEY="$2"; shift 2 ;;
         --sls-api-key=*)      SLS_API_KEY="${1#*=}"; shift ;;
-        --package-url)        PACKAGE_URL="$2"; shift 2 ;;
+        --package-url)        require_option_value "$@"; PACKAGE_URL="$2"; shift 2 ;;
         --package-url=*)      PACKAGE_URL="${1#--package-url=}"; shift ;;
-        --data-dir)           DATA_DIR="$2"; shift 2 ;;
+        --data-dir)           require_option_value "$@"; DATA_DIR="$2"; shift 2 ;;
         --data-dir=*)         DATA_DIR="${1#*=}"; shift ;;
         --dashboard-port)
             if [ "$#" -lt 2 ] || [[ "$2" == --* ]]; then
@@ -120,13 +127,13 @@ while [[ $# -gt 0 ]]; do
             fi
             DASHBOARD_PORT="$2"; DASHBOARD_PORT_SET=1; shift 2 ;;
         --dashboard-port=*)   DASHBOARD_PORT="${1#*=}"; DASHBOARD_PORT_SET=1; shift ;;
-        --log-level)          LOG_LEVEL="$2"; shift 2 ;;
+        --log-level)          require_option_value "$@"; LOG_LEVEL="$2"; shift 2 ;;
         --log-level=*)        LOG_LEVEL="${1#*=}"; shift ;;
-        --userId|--user.id)   USER_ID="$2"; shift 2 ;;
+        --userId|--user.id)   require_option_value "$@"; USER_ID="$2"; shift 2 ;;
         --userId=*|--user.id=*) USER_ID="${1#*=}"; shift ;;
-        --lang)               export LOONGSUITE_PILOT_LANG="$2"; shift 2 ;;
+        --lang)               require_option_value "$@"; export LOONGSUITE_PILOT_LANG="$2"; shift 2 ;;
         --lang=*)             export LOONGSUITE_PILOT_LANG="${1#--lang=}"; shift ;;
-        --version)            INSTALL_VERSION="$2"; shift 2 ;;
+        --version)            require_option_value "$@"; INSTALL_VERSION="$2"; shift 2 ;;
         --version=*)          INSTALL_VERSION="${1#*=}"; shift ;;
         --exclude-workspace)
             if [ "$#" -lt 2 ] || [[ "$2" != /* ]]; then
@@ -141,9 +148,9 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             EXCLUDE_WORKSPACES+=("$excluded_workspace"); shift ;;
-        --collect-log)        COLLECT_LOG="$2"; shift 2 ;;
+        --collect-log)        require_option_value "$@"; COLLECT_LOG="$2"; shift 2 ;;
         --collect-log=*)      COLLECT_LOG="${1#*=}"; shift ;;
-        --collect-trace)      COLLECT_TRACE="$2"; shift 2 ;;
+        --collect-trace)      require_option_value "$@"; COLLECT_TRACE="$2"; shift 2 ;;
         --collect-trace=*)    COLLECT_TRACE="${1#*=}"; shift ;;
         --enable-status-bar-app|--enable-status-bar-app=*)
             if [[ "$1" == *=* ]]; then
@@ -159,28 +166,28 @@ while [[ $# -gt 0 ]]; do
                 true|false) ;;
                 *) echo "--enable-status-bar-app requires true or false" >&2; exit 1 ;;
             esac ;;
-        --cms-license-key)    CMS_LICENSE_KEY="$2"; shift 2 ;;
+        --cms-license-key)    require_option_value "$@"; CMS_LICENSE_KEY="$2"; shift 2 ;;
         --cms-license-key=*)  CMS_LICENSE_KEY="${1#*=}"; shift ;;
-        --cms-endpoint)       CMS_ENDPOINT="$2"; shift 2 ;;
+        --cms-endpoint)       require_option_value "$@"; CMS_ENDPOINT="$2"; shift 2 ;;
         --cms-endpoint=*)     CMS_ENDPOINT="${1#*=}"; shift ;;
-        --cms-workspace)      CMS_WORKSPACE="$2"; shift 2 ;;
+        --cms-workspace)      require_option_value "$@"; CMS_WORKSPACE="$2"; shift 2 ;;
         --cms-workspace=*)    CMS_WORKSPACE="${1#*=}"; shift ;;
-        --service-name-prefix) SERVICE_NAME_PREFIX="$2"; shift 2 ;;
+        --service-name-prefix) require_option_value "$@"; SERVICE_NAME_PREFIX="$2"; shift 2 ;;
         --service-name-prefix=*) SERVICE_NAME_PREFIX="${1#*=}"; shift ;;
-        --agents)             SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; shift 2 ;;
-        --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; shift ;;
-        --all-agents)         ALL_AGENTS=1; shift ;;
-        --multimodal-mode)    MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
+        --agents)             require_option_value "$@"; SELECTED_AGENTS="$2"; AGENT_SELECTION_EXPLICIT=1; ALL_AGENTS=0; shift 2 ;;
+        --agents=*)           SELECTED_AGENTS="${1#*=}"; AGENT_SELECTION_EXPLICIT=1; ALL_AGENTS=0; shift ;;
+
+        --multimodal-mode)    require_option_value "$@"; MULTIMODAL_MODE="${2-}"; MULTIMODAL_MODE_SET=1; shift 2 || shift ;;
         --multimodal-mode=*)  MULTIMODAL_MODE="${1#*=}"; MULTIMODAL_MODE_SET=1; shift ;;
-        --mask-mode)          MASK_MODE="$2"; shift 2 ;;
+        --mask-mode)          require_option_value "$@"; MASK_MODE="$2"; shift 2 ;;
         --mask-mode=*)        MASK_MODE="${1#*=}"; shift ;;
-        --mask-types)         MASK_TYPES="$2"; shift 2 ;;
+        --mask-types)         require_option_value "$@"; MASK_TYPES="$2"; shift 2 ;;
         --mask-types=*)       MASK_TYPES="${1#*=}"; shift ;;
-        --mask-replacement-mode) MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
+        --mask-replacement-mode) require_option_value "$@"; MASK_REPLACEMENT_MODE="$2"; shift 2 ;;
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
-        --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
+        --interceptor-mode)   require_option_value "$@"; INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
-        --interceptor-types)  INTERCEPTOR_TYPES="$2"; shift 2 ;;
+        --interceptor-types)  require_option_value "$@"; INTERCEPTOR_TYPES="$2"; shift 2 ;;
         --interceptor-types=*) INTERCEPTOR_TYPES="${1#*=}"; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
@@ -193,6 +200,11 @@ while [[ $# -gt 0 ]]; do
             exit 1 ;;
     esac
 done
+
+if [ "$AGENT_SELECTION_EXPLICIT" -eq 1 ] && [[ "$SELECTED_AGENTS" != *[![:space:]]* ]]; then
+    echo "--agents requires a list of Agent IDs or none" >&2
+    exit 1
+fi
 
 if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
     echo "--enable-status-bar-app is only supported with install" >&2
@@ -470,96 +482,19 @@ probe_agents() {
 }
 
 # ============================================================
-# Agent selection: interactive menu or --agents flag
+# Agent selection: continuous discovery or an explicit allowlist
 # ============================================================
 select_agents() {
-    # --all-agents: collect every agent. Skip selection entirely and leave no
-    # enabled gate in config (other agent settings survive), so pilot auto-detects
-    # all agents at runtime — including ones installed after this run.
-    if [ "$ALL_AGENTS" = "1" ]; then
-        if [ -n "$SELECTED_AGENTS" ]; then
-            msg "    ⚠️  --all-agents 已启用，忽略 --agents 指定的列表" \
-                "    ⚠️  --all-agents is set; ignoring the --agents list"
-            SELECTED_AGENTS=""
-        fi
-        msg "    采集全部 Agent (不写入选择，由 pilot 运行时自动探测)" \
-            "    Collecting all agents (no selection written; pilot auto-detects at runtime)"
-        echo ""
-        return 0
-    fi
-
-    if [ -n "$SELECTED_AGENTS" ]; then
+    if [ "$ALL_AGENTS" -eq 1 ]; then
+        msg "    运行时持续发现 Agent" "    Discovering agents continuously at runtime"
+    else
         msg "    使用指定的 Agent: $SELECTED_AGENTS" "    Using specified agents: $SELECTED_AGENTS"
-        echo ""
-        return 0
-    fi
-
-    local agent_count
-    agent_count=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-count) || return 1
-    if [ "$agent_count" = "0" ]; then
-        return 0
-    fi
-
-    # Non-interactive: auto-select all detected agents
-    if [ ! -t 0 ]; then
-        SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-detected) || return 1
-        msg "    (非交互模式) 自动选择已检测到的 Agent: $SELECTED_AGENTS" \
-            "    (non-interactive) Auto-selected detected agents: $SELECTED_AGENTS"
-        echo ""
-        return 0
-    fi
-
-    printf '%s' "$PROBE_RESULT" | native_installer_helper probe-menu --lang "$LANG_MODE" || return 1
-    local select_input
-    printf "    > " >&2
-    read -r select_input || return 1
-    if [ -n "${select_input//[[:space:]]/}" ]; then AGENT_SELECTION_EXPLICIT=1; fi
-    SELECTED_AGENTS=$(printf '%s' "$PROBE_RESULT" | native_installer_helper probe-select --selection "$select_input") || return 1
-
-    if [ -n "$SELECTED_AGENTS" ]; then
-        msg "    已选择: $SELECTED_AGENTS" "    Selected: $SELECTED_AGENTS"
-    else
-        msg "    未选择任何 Agent" "    No agents selected"
     fi
     echo ""
 }
 
 # ============================================================
-# Interactive: prompt for userId (skipped when --userId given or non-interactive)
-# ============================================================
-prompt_user_id() {
-    if [ -n "$USER_ID" ]; then return 0; fi
-    if [ ! -t 0 ]; then return 0; fi
-
-    local existing_uid=""
-    local config_file="$DATA_DIR/config.json"
-    if [ -f "$config_file" ]; then
-        existing_uid=$(native_installer_helper read-user-id --config "$config_file") || return 1
-    fi
-
-    echo ""
-    if [ -n "$existing_uid" ]; then
-        msg "    当前 userId: $existing_uid" \
-            "    Current userId: $existing_uid"
-        msg "    直接回车保留，或输入新值:" \
-            "    Press Enter to keep, or type a new value:"
-    else
-        msg "    请输入你的 userId（用于数据归属，可直接回车跳过）:" \
-            "    Enter your userId (for data attribution, press Enter to skip):"
-    fi
-    printf "    > "
-    local input
-    read -r input
-    input=$(echo "$input" | tr -d '[:space:]')
-    if [ -n "$input" ]; then
-        USER_ID="$input"
-    elif [ -n "$existing_uid" ]; then
-        USER_ID="$existing_uid"
-    fi
-}
-
-# ============================================================
-# Interactive: confirm config overwrite when key fields differ
+# Report requested configuration changes
 # ============================================================
 confirm_config_overwrite() {
     local config_file="$DATA_DIR/config.json"
@@ -576,23 +511,7 @@ confirm_config_overwrite() {
         echo "    $line"
     done
 
-    if [ -t 0 ]; then
-        echo ""
-        msg "    确认覆盖? (y/N):" "    Confirm overwrite? (y/N):"
-        printf "    > "
-        local answer
-        read -r answer
-        case "$answer" in
-            y|Y|yes|YES) ;;
-            *)
-                msg "已取消安装" "Installation cancelled"
-                exit 0
-                ;;
-        esac
-    else
-        msg "    (非交互模式) 继续覆盖" \
-            "    (non-interactive) Proceeding with overwrite"
-    fi
+    msg "    继续覆盖" "    Proceeding with overwrite"
 }
 
 # ============================================================
@@ -1365,7 +1284,6 @@ cmd_install() {
     reject_multi_sls_config
     probe_agents
     select_agents
-    prompt_user_id
     installer_config_operation validate-config
     confirm_config_overwrite
     prepare_package "$INSTALL_SRC"

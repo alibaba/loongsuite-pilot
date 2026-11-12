@@ -1213,7 +1213,7 @@ fn build_status_bar(file: Option<&Value>, sources: &ConfigSources<'_>) -> Status
             trimmed != "false" && text.trim() != "0"
         }
         Some(Value::Bool(value)) => *value,
-        _ => true,
+        _ => false,
     };
     StatusBarConfig {
         enabled: env_bool(sources, "LOONGSUITE_PILOT_ENABLE_STATUS_BAR_APP", fallback),
@@ -1224,6 +1224,8 @@ fn build_status_bar(file: Option<&Value>, sources: &ConfigSources<'_>) -> Status
 
 fn build_dashboard(file: Option<&Value>) -> DashboardConfig {
     DashboardConfig {
+        enabled: json_bool(file.and_then(|value| value.pointer("/dashboard/enabled")))
+            .unwrap_or(false),
         port: crate::dashboard::configured_port(
             file.and_then(|value| value.pointer("/dashboard/port")),
         ),
@@ -2291,6 +2293,22 @@ mod tests {
         assert_eq!(config.retention.output_days, 3);
         assert!(config.pipeline.enabled);
         assert_eq!(config.upstream_link.ttl_ms, DEFAULT_UPSTREAM_TTL_MS);
+    }
+
+    #[test]
+    fn local_observation_requires_opt_in() {
+        let defaults = assemble_config(None, None, &sources(&empty())).unwrap();
+        assert!(!defaults.dashboard.enabled);
+        assert!(!defaults.status_bar.enabled);
+
+        let file = serde_json::json!({
+            "dashboard": { "enabled": true, "port": 9000 },
+            "enableStatusBarApp": true
+        });
+        let enabled = assemble_config(Some(&file), None, &sources(&empty())).unwrap();
+        assert!(enabled.dashboard.enabled);
+        assert_eq!(enabled.dashboard.port, 9000);
+        assert!(enabled.status_bar.enabled);
     }
 
     #[test]
