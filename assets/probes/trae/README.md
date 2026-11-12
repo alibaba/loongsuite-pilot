@@ -9,7 +9,7 @@ loongsuite-pilot's `BaseHookInput` pipeline.
 ## Layout
 
 ```
-assets/plugins/trae/
+assets/probes/trae/
 ├── probe.mjs              # Standalone ESM preload (NODE_OPTIONS --import)
 ├── package.json           # Trae 3.4.17 baseline + pilot metadata
 ├── scripts/

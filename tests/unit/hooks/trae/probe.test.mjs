@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 
 const PROBE_PATH = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
-  '../../../../assets/plugins/trae/probe.mjs',
+  '../../../../assets/probes/trae/probe.mjs',
 );
 
 // Fixture ground truth: researcher fx-1~fx-5 from AGE-2836 attachment

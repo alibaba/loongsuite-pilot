@@ -18,7 +18,7 @@
   "pluginProbe": {
     "source": {
       "type": "builtin",
-      "sourceDir": "$PILOT_DIR/assets/plugins/trae",
+      "sourceDir": "$PILOT_DIR/assets/probes/trae",
       "destDir": "$PILOT_DATA/plugins/trae"
     },
     "mountType": "env-inject"
