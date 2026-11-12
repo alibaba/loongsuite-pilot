@@ -1,6 +1,6 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { statSync, type Stats } from 'node:fs';
+import { existsSync, readFileSync, statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -15,6 +15,28 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
+
+async function versionCandidateInProgress(pilotDir: string): Promise<boolean> {
+  let entries;
+  try {
+    entries = await fs.readdir(path.dirname(pilotDir), { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return true;
+  }
+  return entries.some(entry => entry.name.endsWith('.candidate') && !entry.isSymbolicLink() && entry.isDirectory());
+}
+
+export function readActiveVersionDir(dataDir: string): string | null {
+  try {
+    const versionName = readFileSync(path.join(dataDir, 'current'), 'utf8').trim();
+    if (!versionName) return null;
+    const versionDir = path.join(dataDir, 'versions', versionName);
+    return existsSync(versionDir) ? versionDir : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface PluginCheckTarget {
   agentId: string;
@@ -346,7 +368,20 @@ export class HookWatchdog {
     }
     this.assetCheckInFlight = true;
     try {
-      await this.restoreDeployedHookAssets(this.assetRoots.pilotDir, this.assetRoots.dataDir);
+      const { pilotDir, dataDir } = this.assetRoots;
+      // postinstall writes the new hooks while versions/<new>.candidate still
+      // exists, and before `current` moves. Once `current` names another
+      // version, this process must not put its own assets back.
+      if (await versionCandidateInProgress(pilotDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'version-candidate' });
+        return;
+      }
+      const active = readActiveVersionDir(dataDir);
+      if (active && path.resolve(active) !== path.resolve(pilotDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'pilot-dir-changed', active });
+        return;
+      }
+      await this.restoreDeployedHookAssets(pilotDir, dataDir);
     } finally {
       this.assetCheckInFlight = false;
     }

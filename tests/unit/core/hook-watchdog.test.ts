@@ -842,5 +842,32 @@ describe('HookWatchdog', () => {
       expect(await fs.readFile(path.join(outsideDir, 'decode-payload.mjs'), 'utf8')).toBe('outside\n');
       expect((await fs.lstat(shared)).isSymbolicLink()).toBe(true);
     });
+
+    it('leaves hooks alone while a version candidate is present', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      await fs.mkdir(path.join(path.dirname(pilotDir), '1.2.0_abc.candidate'));
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+    });
+
+    it('does not roll hooks back after current moves to another version', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const deployed = path.join(dataDir, 'hooks', 'claude-code-loongsuite-pilot-hook.sh');
+      await fs.mkdir(path.dirname(deployed), { recursive: true });
+      await fs.writeFile(deployed, 'tampered\n');
+      await fs.mkdir(path.join(dataDir, 'versions', 'v2'), { recursive: true });
+      await fs.writeFile(path.join(dataDir, 'current'), 'v2\n');
+      const wd = new HookWatchdog(makeConfig(), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      expect(await fs.readFile(deployed, 'utf8')).toBe('tampered\n');
+    });
   });
 });
