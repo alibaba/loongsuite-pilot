@@ -501,6 +501,26 @@ function getRun(runId, event, ctx) {
     runs.delete(runId);
   }
   runs.set(runId, r);
+  const receiverSession = event?.sessionId || ctx?.sessionId || r.sessionId;
+  if (!r.announcedWork && receiverSession && runId.startsWith('announce:v1:')
+    && (r.announcementCheckedAt === undefined || Date.now() - r.announcementCheckedAt >= 25)) {
+    r.announcementCheckedAt = Date.now();
+    const candidates = childContexts.list().filter(work => work.invocationId
+      && work.sessionId === receiverSession
+      && runId === `announce:v1:${work.childSessionKey}:${work.runId}`);
+    if (candidates.length === 1) {
+      r.announcedWork = candidates[0];
+      // A descendant announcement can replace its waiting coordinator's
+      // native run id. Its exact submitting parent run is already persisted;
+      // follow that causal edge, never the latest work in the same session.
+      const incoming = candidates[0].parentRunId && childContexts.read(candidates[0].parentRunId);
+      if (!r.auditParentContext && incoming?.invocationId && incoming.childSessionId === receiverSession) {
+        r.auditParentContext = { ...incoming, runId };
+        if (!incoming.auditOnly && !r.childUnlinked) r.parentContext = r.auditParentContext;
+        childContexts.write(runId, r.auditParentContext);
+      }
+    }
+  }
   observeSessionKey(r, event, ctx);
   const sessionKey = event?.sessionKey || ctx?.sessionKey || r.sessionKey;
   if (sessionKey && !r.completed) {
@@ -1038,6 +1058,14 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   if (event?.sessionId) run.sessionId = run.sessionId || event.sessionId;
   if (event?.sessionKey) run.sessionKey = run.sessionKey || event.sessionKey;
 
+  if (run.announcedWork) {
+    // New OpenClaw can suppress the persisted user prompt for internal events.
+    // The native announcement's first model call proves actual consumption.
+    // Prefer the earlier before_message_write payload when it was available.
+    recordAgentDelivery(run, run.announcedWork,
+      { content: run.llmInputStash?.prompt ?? run.userPromptText }, userId, emit);
+  }
+
   const common = buildCommonFields(run, run.sessionId, userId);
   setBounded(run.modelCallStartedAtNanos, callId, common.time_unix_nano);
 
@@ -1219,11 +1247,17 @@ function handleAfterToolCall(event, ctx, userId, emit) {
         traceId: run.parentContext?.traceId || run.traceId,
         parentSpanId: run.toolSpanIds.get(event.toolCallId),
         sessionId: run.sessionId, turnId: run.turnId || run.runId,
+        parentRunId: run.runId,
         toolCallId: event.toolCallId, userId: run.parentContext?.userId || run.userId || userId,
         invocationId: run.delegations.get(event.toolCallId)?.invocationId,
         childSessionKey: details.childSessionKey || details.sessionKey || run.delegations.get(event.toolCallId)?.childSessionKey,
         auditOnly: event.toolName === "sessions_send",
       };
+      const retained = childContexts.read(details.runId);
+      if (retained?.invocationId === parent.invocationId) {
+        parent.childSessionId = retained.childSessionId;
+        parent.resultIds = retained.resultIds;
+      }
       childContexts.write(details.runId, parent);
       const child = runs.get(details.runId);
       if (child) {
@@ -1327,6 +1361,19 @@ function buildAssistantOutputMessagesFromOpenClawMessage(message) {
   return [{ role: "assistant", parts }];
 }
 
+function recordAgentDelivery(receiver, work, message, userId, emit) {
+  const retained = childContexts.read(work.runId);
+  if (retained?.invocationId === work.invocationId) work = retained;
+  // One native child-run completion is one logical result, including when
+  // both persistence and model-consumption hooks observe the same receipt.
+  if (work.resultIds?.length) return;
+  const audit = auditRecord(buildCommonFields(receiver, receiver.sessionId, userId), work,
+    'result', textMessages(deliveredText(message), 'assistant'), work.childSessionId);
+  if (emit(audit) === false) return;
+  work.resultIds = [audit['event.id']];
+  childContexts.write(work.runId, work);
+}
+
 function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = true) {
   const message = event?.message;
   const role = message?.role;
@@ -1351,13 +1398,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       && work.sessionId === receiver.sessionId);
     // Older delivery paths lack this work key. Retain only unique provenance.
     if (matches.length !== 1) return;
-    const work = matches[0];
-    const audit = auditRecord(buildCommonFields(receiver, receiver.sessionId, userId), work,
-      "result", textMessages(deliveredText(message), "assistant"), work.childSessionId);
-    if (work.resultIds?.includes(audit["event.id"])) return;
-    if (emit(audit) === false) return;
-    work.resultIds = [...(work.resultIds || []), audit["event.id"]].slice(-32);
-    childContexts.write(work.runId, work);
+    recordAgentDelivery(receiver, matches[0], message, userId, emit);
     return;
   }
 

@@ -1502,6 +1502,46 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it('keeps nested work through native announcement run replacement without binding autonomous session reuse', async () => {
+    let h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'child-work', sessionId: 'child-session', sessionKey: 'agent:main:subagent:coordinator' };
+    const grandchild = { runId: 'grandchild-work', sessionId: 'grandchild-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'outer', params: { task: 'coordinate' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'outer', result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'inner', params: { task: 'read' } }, child);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'inner', result: { details: { status: 'accepted', runId: grandchild.runId, childSessionKey: grandchild.sessionKey } } }, child);
+    await h.before_agent_run({}, grandchild);
+    await h.llm_output({}, child);
+    await h.llm_output({}, grandchild);
+    expect(readOutputRecords().filter(row => row['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    h = registerPlugin(await loadPlugin());
+    const resumed = { ...child, runId: `announce:v1:${grandchild.sessionKey}:${grandchild.runId}` };
+    await h.before_agent_run({ prompt: 'actual grandchild result' }, resumed);
+    await h.model_call_started({ callId: 'resume-call', model: 'model', provider: 'test' }, resumed);
+    const receiver = { ...parent, runId: `announce:v1:${child.sessionKey}:${resumed.runId}` };
+    await h.before_agent_run({ prompt: 'actual coordinator result' }, receiver);
+    await h.model_call_started({ callId: 'parent-receive-call', model: 'model', provider: 'test' }, receiver);
+    const rows = readOutputRecords();
+    const invokes = rows.filter(row => row['event.name'] === 'gen_ai.agent.invoke');
+    const results = rows.filter(row => row['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(2);
+    expect(results.map(row => row['gen_ai.agent.invocation.id'])).toEqual(invokes.toReversed().map(row => row['gen_ai.agent.invocation.id']));
+    expect(results[0]['gen_ai.agent.parent.invocation.id']).toBe(invokes[0]['gen_ai.agent.invocation.id']);
+    expect(results[0]['gen_ai.turn.id']).toBe(resumed.runId);
+    expect(results[1]['gen_ai.turn.id']).toBe(receiver.runId);
+    const continuation = rows.filter(row => row['gen_ai.turn.id'] === resumed.runId);
+    expect(continuation.every(row => row['gen_ai.agent.parent.invocation.id'] === invokes[0]['gen_ai.agent.invocation.id'])).toBe(true);
+    const outerTool = rows.find(row => row['event.name'] === 'tool.call' && row['gen_ai.tool.call.id'] === 'outer');
+    expect(continuation.every(row => row.parent_span_id === outerTool.span_id)).toBe(true);
+    vi.useFakeTimers();
+    await h.before_agent_run({ prompt: 'independent work' }, { ...child, runId: 'autonomous-work' });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(readOutputRecords().find(row => row['gen_ai.turn.id'] === 'autonomous-work')['gen_ai.agent.parent.invocation.id']).toBeUndefined();
+  });
+
   it('retains one producer-owned start across collector restart and repeated native setup hooks', async () => {
     const h = registerPlugin(await loadPlugin());
     const ctx = { runId: 'ongoing-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
