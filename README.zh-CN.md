@@ -49,56 +49,52 @@ Pilot 主要帮助回答这些问题：
 | 隐私控制 | 支持按 Agent 控制内容采集，并在输出前进行密钥脱敏。 |
 | 本地运维 | 提供状态查看、重启、回滚和内置本地 Dashboard。 |
 
-## 支持的 Agent
+## Rust 版本的 Agent 支持状态
+
+当前 Rust 版声明支持 Qoder IDE 和 Qoder CLI。其他 Agent 和 Qoder 变体先标为 `No`，由各自维护者完成真实 Agent 的安装态验收后，按验证过的能力和平台更新。
 
 | Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 |
 |-------|----------|------------|----------|------------|----------------|
-| Claude Code | Hook | Yes | Yes | Yes | Yes |
-| Codex | Hook | Yes | Yes | Yes | Yes |
-| Cursor | Hook | Yes | Yes | Yes | Yes |
-| Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
-| DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes |
-| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
-| Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
-| Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
-| MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
-| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
-| OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
-| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
+| Claude Code | Hook | No | No | No | No |
+| Codex | Hook | No | No | No | No |
+| GitHub Copilot CLI | 原生插件 + transcript / 原生 OTel | No | No | No | No |
+| Cursor | Hook | No | No | No | No |
+| Cursor CLI | 复用 Cursor Hook | No | No | No | No |
+| DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | No | No | No | No |
+| Grok Build | Hook + 本地 session 日志 | No | No | No | No |
+| Hermes Agent | 原生目录插件 | No | No | No | No |
+| Kiro CLI | Hook / session 轮询 | No | No | No | No |
+| MiMo Code | 插件注入 | No | No | No | No |
+| OpenClaw | 插件注入 | No | No | No | No |
+| OpenCode | 插件注入 | No | No | No | No |
+| Pi Coding Agent | Extension 注入 | No | No | No | No |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
-| Qoder CN | Hook | Yes | Yes | Yes | Yes |
-| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
+| Qoder CN | Hook | No | No | No | No |
+| Qoder for JetBrains | 自动检测 | No | No | No | No |
 | Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
-| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
-| Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
-| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
-| [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | 客户端轮次、本地工具与原生 sandbox 执行 | 仅元数据 | No | No |
+| Qoder Work | Hook / 本地数据轮询 | No | No | No | No |
+| Qoder Work CN | Hook / 本地数据轮询 | No | No | No | No |
+| Qwen Code CLI | Hook | No | No | No | No |
+| Qwen Work CN | Hook / 本地数据轮询 | No | No | No | No |
+| Wukong | CLI API 轮询 | No | No | No | No |
+| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | No | No | No | No |
+| [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | No | No | No | No |
 
-OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定，详见[兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)。
+维护者可参考 [OpenClaw 兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)、[DeepSeek Harness 采集与生命周期](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)及[GitHub Copilot CLI 遥测说明](docs/zh-CN/copilot-native-telemetry.md)。
 
-DeepSeek Harness（`dsh`）通过用户级 `cordis.patch.yml` 加载 Pilot
-可观测插件，采集原生 LLM、reasoning、工具、Token 和首 Token
-延迟数据。启用、原始日志、禁用和卸载行为见
-[《Agent 配置》](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)。
-
-### Windows Agent 明确支持情况
-
-上表描述 Pilot 的总体接入能力，不代表每个 Agent 在所有操作系统上均受支持。目前文档明确说明支持 Windows 的 Agent 如下：
+### Windows 支持状态
 
 | Agent | Windows 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 使用条件 |
 |-------|------------------|------------|----------|------------|-----------------|----------|
-| Claude Code | Hook | 支持 | 支持 | 支持 | 支持 | — |
-| Cursor | Hook | 支持 | 支持 | 支持 | 支持 | — |
-| Qoder Work | Hook / 本地数据源 | 支持 | 支持 | 不支持 | 支持 | User 版本 |
-| Qoder CLI | Hook | 支持 | 支持 | 不支持 | 支持 | — |
-| Qoder IDE | Hook / 本地数据源 | 支持 | 支持 | 支持 | 支持 | Qoder 1.10.0 及以上 User 版本 |
-| OpenCode | 插件注入 | 支持 | 支持 | 支持 | 支持 | — |
-| WorkBuddy | Hook 唤醒 + 本地 transcript | 支持 | 支持 | 支持 | 支持 | WorkBuddy Desktop 5.3.5.0；Windows 11 安装态 E2E |
+| Claude Code | Hook | No | No | No | No | — |
+| Cursor | Hook | No | No | No | No | — |
+| Qoder Work | Hook / 本地数据源 | No | No | No | No | User 版本 |
+| Qoder CLI | Hook | Yes | Yes | No | Yes | — |
+| Qoder IDE | Hook / 本地数据源 | Yes | Yes | Yes | Yes | Qoder 1.10.0 及以上 User 版本 |
+| OpenCode | 插件注入 | No | No | No | No | — |
+| WorkBuddy | Hook 唤醒 + 本地 transcript | No | No | No | No | — |
 
-未列入 Windows 表格的 Agent，表示当前没有明确的 Windows 支持声明，并不一定代表无法在 Windows 上运行。支持矩阵参考[阿里云 AI Coding Agent 接入文档](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/)，Windows 环境要求与安装方法见[安装指南](docs/zh-CN/installation.md)。
+Windows 环境要求和安装方法见[安装指南](docs/zh-CN/installation.md)。
 
 Agent 定义位于 `agents.d/`。如需接入新的 Agent，请参考 [新 Agent 接入](docs/zh-CN/agent-onboarding.md)。
 
