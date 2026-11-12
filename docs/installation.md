@@ -114,7 +114,7 @@ The Linux/macOS installer uses `--kebab-case` options. The Windows PowerShell in
 
 Installation is non-interactive. The installer exits with an error when a required argument is missing or invalid.
 
-For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. Open `http://127.0.0.1:9000/` after installation. Invalid or missing port values stop installation before downloads or service changes.
+For example, use port `9000` by appending `--dashboard-port 9000` (or `--dashboard-port=9000`) to the Linux/macOS install command, or `-DashboardPort 9000` to the Windows command. The installer writes `dashboard.port` to `config.json` before starting the service. After enabling the dashboard, open `http://127.0.0.1:9000/`. Invalid or missing port values stop installation before downloads or service changes.
 
 ## Verify Installation
 

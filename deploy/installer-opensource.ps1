@@ -72,8 +72,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $script:SELECTED_AGENTS = $Agents
-$script:AGENT_SELECTION_EXPLICIT = if ($PSBoundParameters.ContainsKey('Agents')) { '1' } else { '0' }
-if ($script:AGENT_SELECTION_EXPLICIT -eq '1' -and -not "$Agents".Trim()) {
+$script:AGENT_SELECTION_EXPLICIT = if ($PSBoundParameters.Keys -contains 'Agents') { '1' } else { '0' }
+if ($script:AGENT_SELECTION_EXPLICIT -eq '1' -and -not ($Agents -match '\S')) {
     throw "-Agents requires a list of Agent IDs or none"
 }
 $AllAgents = $script:AGENT_SELECTION_EXPLICIT -eq '0'
