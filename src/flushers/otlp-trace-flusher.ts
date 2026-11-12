@@ -21,7 +21,7 @@ import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
-import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
@@ -731,7 +731,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agent_type: agentType,
         pending_buffers: 0,
         pending_records: 0,
-        ...(agentType === 'codex' && this.codexJournal ? {
+        ...(this.codexJournal?.acceptsAgent(agentType) ? {
           resident_records: 0, resident_payload_bytes: 0,
           spilled_buffers: 0, spilled_records: 0,
         } : {}),
@@ -894,7 +894,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         buf.hasHermesNativeRunObserver = true;
       }
     }
-    const durable = !!this.codexJournal && isJournaledCodexEntry(entry);
+    const durable = this.codexJournal?.accepts(entry) === true;
     const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
     if (durable) {
       buf.journalKey ??= codexTurnJournalGroupKey(entry);
@@ -906,9 +906,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
       buf.spillable = false;
     }
-    // Copilot-only duplicate merge: preserve known fields on partial replay.
-    // Other agents retain the main branch's append/update behavior.
+    // Preserve known fields when a retained delegated prefix is delivered
+    // again. Audit records never enter these buffers or their journal.
     const eventId = entry['gen_ai.agent.type'] === 'copilot'
+      || (durable && (agentType === 'hermes' || agentType === 'openclaw'))
       ? (entry['event.id'] as string | undefined) : undefined;
     if (typeof eventId === 'string' && eventId.length > 0) {
       const existingIdx = buf.recordIndex.get(eventId);
@@ -982,7 +983,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
       .slice(0, overflow);
     for (const buf of candidates) {
-      if (buf.agentType === 'codex' && this.codexJournal) {
+      if (this.codexJournal?.acceptsAgent(buf.agentType)) {
         // The durable prefix can be rehydrated when this native turn resumes.
         this.turnBuffers.delete(buf.key);
         this.recordBufferRemoval(buf);
@@ -995,7 +996,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
-      if (buf.agentType === 'codex' && this.codexJournal && !buf.completed) continue;
+      if (this.codexJournal?.acceptsAgent(buf.agentType) && !buf.completed) continue;
       buf.completed = true;
     }
     await this.flushCompleted();
@@ -1052,7 +1053,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   /** Release only payloads whose durable journal already owns every event. */
   private spillCodexPayloads(): void {
     const candidates = [...this.turnBuffers.values()].filter(buf =>
-      buf.agentType === 'codex' && buf.spillable && !buf.spilledRecords);
+      this.codexJournal?.acceptsAgent(buf.agentType) && buf.spillable && !buf.spilledRecords);
     let resident = candidates.reduce((sum, buf) => sum + (buf.residentBytes ?? 0), 0);
     for (const buf of candidates.sort((a, b) => (b.residentBytes ?? 0) - (a.residentBytes ?? 0))) {
       if ((buf.residentBytes ?? 0) <= MAX_CODEX_TURN_RESIDENT_BYTES && resident <= MAX_CODEX_RESIDENT_BYTES) continue;
@@ -1092,8 +1093,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
     if (!this.codexJournal) return;
     try {
-      const codex = entries.filter(entry => normalizeAgentType(String(entry['gen_ai.agent.type'])) === 'codex'
-        && !isAgentAuditEvent(entry));
+      const codex = entries.filter(entry => this.codexJournal!.accepts(entry));
       const checked = new Set<string>();
       for (const entry of codex) {
         const key = this.resolveGroupKey(entry).key;
@@ -1301,7 +1301,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private flushSingleTurn(buf: TurnBuffer): Promise<void> {
-    if (buf.agentType !== 'codex' || !this.codexJournal) return this.flushSingleTurnReady(buf);
+    if (!this.codexJournal?.acceptsAgent(buf.agentType)) return this.flushSingleTurnReady(buf);
     // Rehydrate/convert one durable turn at a time. Otherwise a terminal burst
     // could materialize every large spooled turn before converter locks run.
     const next = this.codexFlushTail.then(() => this.flushSingleTurnReady(buf));
@@ -1320,7 +1320,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     const exported = await this.convertAndExport(buf.agentType, buf.records);
-    if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
+    if (exported && this.codexJournal?.acceptsAgent(buf.agentType) && buf.completed) {
       await this.codexJournal.acknowledge(buf.records);
     }
   }
@@ -2646,7 +2646,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
             turnIdleTimeoutMs: timeout,
           });
         }
-        if (buf.agentType === 'codex' && this.codexJournal) {
+        if (this.codexJournal?.acceptsAgent(buf.agentType)) {
           this.turnBuffers.delete(buf.key);
           this.recordBufferRemoval(buf);
           continue;
