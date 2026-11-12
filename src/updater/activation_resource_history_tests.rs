@@ -154,8 +154,9 @@ mod resource_history_tests {
             let target = root.path().join(relative);
             assert_eq!(registry.get(&role), cfg!(unix).then_some(&target));
         }
+        // Match the packaged skill scope in xtask/src/package.rs.
         let actual:std::collections::BTreeSet<_>=walkdir::WalkDir::new(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/skills"))
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/skills/loongsuite-pilot-ops"))
             .into_iter().map(Result::unwrap).filter(|entry|entry.file_type().is_file())
             .map(|entry|entry.path().strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/skills"))
                 .unwrap().to_str().unwrap().replace('\\',"/")).collect();
