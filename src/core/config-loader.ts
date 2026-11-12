@@ -1041,7 +1041,9 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   if (deduped.length === 0) return undefined;
 
   const otlp = config.otlpTrace;
-  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
+  // The global Trace switch is independent of per-agent policies. InputManager
+  // applies those policies before records reach this shared flusher.
+  const captureMessageContent = otlp?.captureMessageContent ?? true;
   const serviceName = userServiceName;
   const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
@@ -1167,12 +1169,6 @@ function extractArmsProject(endpoint: string): string {
   } catch {
     return '';
   }
-}
-
-function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
-  const values = Object.values(agents);
-  if (values.length === 0) return true;
-  return values.every(a => a.captureMessageContent !== false);
 }
 
 function inferSlsMode(args: {

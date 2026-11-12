@@ -698,10 +698,16 @@ export class OtlpTraceFlusher extends BaseFlusher {
       .map(prefix => prefix.trim())
       .filter(prefix => prefix.length > 0);
 
-    if (cfg.captureMessageContent !== false) {
-      process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental';
-      process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT ??= 'SPAN_ONLY';
+    // The converter reads these process-wide settings at conversion time.
+    // Keep inherited SDK opt-outs from removing content when capture is enabled.
+    // captureMessageContent=false is enforced at the input and final Span boundaries.
+    const semconvOptIns = (process.env.OTEL_SEMCONV_STABILITY_OPT_IN ?? '')
+      .split(',').map(value => value.trim()).filter(Boolean);
+    if (!semconvOptIns.some(value => value.toLowerCase() === 'gen_ai_latest_experimental')) {
+      semconvOptIns.push('gen_ai_latest_experimental');
     }
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = semconvOptIns.join(',');
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
 
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
       this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);

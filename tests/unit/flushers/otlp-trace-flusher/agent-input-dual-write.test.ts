@@ -4,6 +4,7 @@ import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import type { TraceExporterLike } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { InputManager } from '../../../../src/core/input-manager.js';
 import { expandAgentInputEvents } from '../../../../src/normalization/agent-input-dual-write.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
@@ -111,6 +112,75 @@ function semanticSnapshot(spans: CapturedSpan[]) {
 }
 
 describe('OtlpTraceFlusher agent.input compatibility dual-write', () => {
+  it.each([
+    ['default', undefined, 'NO_CONTENT'],
+    ['explicit true', true, 'EVENT_ONLY'],
+    ['explicit true', true, ''],
+  ] as const)('preserves content with inherited OTel opt-outs: %s / %s', async (_label, policy, inheritedCapture) => {
+    const stability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const capture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'http';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = inheritedCapture;
+    try {
+      const spans = await convert(makeLegacyTurn(), policy);
+      expect(spans.some(span => (JSON.stringify(span.attributes['gen_ai.input.messages']) ?? '').includes('hello'))).toBe(true);
+      expect(spans.some(span => (JSON.stringify(span.attributes['gen_ai.output.messages']) ?? '').includes('world'))).toBe(true);
+      expect(process.env.OTEL_SEMCONV_STABILITY_OPT_IN).toBe('http,gen_ai_latest_experimental');
+      expect(process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT).toBe('SPAN_ONLY');
+    } finally {
+      if (stability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = stability;
+      if (capture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = capture;
+    }
+  });
+
+  it('keeps one agent private while another agent retains Trace content', async () => {
+    const captured: CapturedSpan[] = [];
+    const flusher = new OtlpTraceFlusher(
+      { ...makeConfig(), captureMessageContent: true },
+      undefined,
+      () => makeCapturingExporter(captured),
+    );
+    const manager = new InputManager();
+    manager.setFlusher(flusher);
+    manager.setAgentsConfig({ 'claude-code': { captureMessageContent: false } });
+    const privateTurn = makeLegacyTurn().map(entry => ({
+      ...entry,
+      'gen_ai.input.messages_delta': entry['gen_ai.input.messages_delta']
+        ? [{ role: 'user', parts: [{ type: 'text', content: 'private-claude' }] }]
+        : undefined,
+      'gen_ai.output.messages': entry['gen_ai.output.messages']
+        ? [{ role: 'assistant', parts: [{ type: 'text', content: 'private-reply' }] }]
+        : undefined,
+    })) as AgentActivityEntry[];
+    const publicTurn = makeLegacyTurn().map(entry => ({
+      ...entry,
+      'event.id': `cursor-${entry['event.id']}`,
+      'gen_ai.agent.type': 'cursor',
+      'gen_ai.session.id': 'session-cursor',
+      'gen_ai.turn.id': 'turn-cursor',
+      'gen_ai.step.id': entry['gen_ai.step.id'] ? 'step-cursor' : undefined,
+      'gen_ai.response.id': entry['gen_ai.response.id'] ? 'response-cursor' : undefined,
+      'gen_ai.input.messages_delta': entry['gen_ai.input.messages_delta']
+        ? [{ role: 'user', parts: [{ type: 'text', content: 'public-cursor' }] }]
+        : undefined,
+      'gen_ai.output.messages': entry['gen_ai.output.messages']
+        ? [{ role: 'assistant', parts: [{ type: 'text', content: 'public-reply' }] }]
+        : undefined,
+    })) as AgentActivityEntry[];
+
+    await manager.flushPreparedEntries([...privateTurn, ...publicTurn]);
+    await flusher.shutdown();
+
+    const attributes = JSON.stringify(captured.map(span => span.attributes));
+    expect(captured.length).toBeGreaterThan(0);
+    expect(attributes).not.toContain('private-claude');
+    expect(attributes).not.toContain('private-reply');
+    expect(captured.some(span => (JSON.stringify(span.attributes['gen_ai.input.messages']) ?? '').includes('public-cursor'))).toBe(true);
+    expect(captured.some(span => (JSON.stringify(span.attributes['gen_ai.output.messages']) ?? '').includes('public-reply'))).toBe(true);
+  });
+
   it('honors captureMessageContent=false despite pre-existing OTel capture environment', async () => {
     const stability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
     const capture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;

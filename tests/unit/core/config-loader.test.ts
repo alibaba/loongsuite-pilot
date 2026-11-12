@@ -1852,6 +1852,27 @@ describe('ConfigLoader', () => {
       expect(result!.resourceAttributeKeys).toEqual([]);
     });
 
+    it('does not turn a per-agent content policy into a global Trace policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        agents: { 'claude-code': { captureMessageContent: false }, cursor: {} },
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents['claude-code'].captureMessageContent).toBe(false);
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    });
+
+    it('keeps an explicit global Trace content policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318', captureMessageContent: false },
+      });
+      expect(buildOtlpTraceConfig(await loadConfig())?.captureMessageContent).toBe(false);
+    });
+
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
