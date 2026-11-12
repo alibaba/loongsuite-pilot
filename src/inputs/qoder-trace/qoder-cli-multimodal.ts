@@ -4,11 +4,13 @@ import {
   multimodalUploadIncludesOutput,
 } from '../../types/index.js';
 import {
+  asRecord,
   attachMultimodalMetadataForEntry,
   matchAll,
-  resolveImagePath,
   takeUniqueExtractedPaths,
+  timeUnixNanoToMillis,
   MAX_MULTIMODAL_PATH_CHARS,
+  convertPathsToUriParts,
   type PathToUriFn,
   type UriPart,
 } from '../../multimodal/index.js';
@@ -16,17 +18,17 @@ import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('QoderCliMultimodal');
 
-const IMAGE_EXT = 'png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff';
+const MEDIA_EXT = 'png|jpe?g|gif|webp|bmp|svg|ico|tif|tiff|mp4|mov|m4v|3gp|3g2|webm|mkv|avi';
 const IMAGE_SOURCE_RE = new RegExp(
   `\\[Image:\\s*source:\\s*([^\\]]{1,${MAX_MULTIMODAL_PATH_CHARS}})\\]`,
   'gi',
 );
 const AT_IMAGE_RE = new RegExp(
-  `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+  `@([^\\s@]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${MEDIA_EXT}))\\b`,
   'gi',
 );
-const FILE_CITATION_IMAGE_RE = new RegExp(
-  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${IMAGE_EXT}))\\b`,
+const FILE_CITATION_RE = new RegExp(
+  `文件[:：]\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}}\\.(?:${MEDIA_EXT}))\\b`,
   'gi',
 );
 const READ_IMAGE_RE = new RegExp(`Read image:\\s*([^\\n\\r]{1,${MAX_MULTIMODAL_PATH_CHARS}})`, 'gi');
@@ -52,7 +54,7 @@ export interface EnrichCliMultimodalOptions {
 /**
  * CLI-only multimodal enrichment. Mutates entries in place.
  * Input: union of `agent.qoder.attachments[].filename`, `[Image: source:]`,
- * `@path`, and `文件：<image path>`, then unique-resolve.
+ * `@path`, and `文件：<image or video path>`, then unique-resolve.
  * Tool result: Read/ImageGen. Tool call: Read `file_path` (output mode).
  * Assistant finals do not embed images. Fail-open.
  */
@@ -76,22 +78,31 @@ async function enrichCliMultimodalInner(
   if (entries.length === 0) return;
   if (opts.uploadMode === 'none') return;
 
-  const touched = new Set<AgentActivityEntry>();
   const stats: EnrichStats = { inputUri: 0, toolUri: 0, outputUri: 0, skipped: 0 };
+  const includeInput = multimodalUploadIncludesInput(opts.uploadMode);
+  const includeOutput = multimodalUploadIncludesOutput(opts.uploadMode);
+  let touchedEntries = 0;
 
-  if (multimodalUploadIncludesInput(opts.uploadMode)) {
-    await enrichInputImages(entries, opts.pathToUri, touched, stats);
-    await enrichToolResultImages(entries, opts.pathToUri, touched, stats);
-  }
-  if (multimodalUploadIncludesOutput(opts.uploadMode)) {
-    await enrichToolCallImages(entries, opts.pathToUri, touched, stats);
-  }
-
-  for (const entry of touched) {
-    try {
-      attachMultimodalMetadataForEntry(entry);
-    } catch (err) {
-      logger.debug('attach multimodal metadata failed', { error: String(err) });
+  for (const entry of entries) {
+    const name = entry['event.name'];
+    let n = 0;
+    if (includeInput && (name === 'llm.request' || name === 'other')) {
+      n = await enrichInputImages(entry, opts.pathToUri, stats);
+      stats.inputUri += n;
+    } else if (includeInput && name === 'tool.result') {
+      n = await enrichToolResultImages(entry, opts.pathToUri, stats);
+      stats.toolUri += n;
+    } else if (includeOutput && name === 'tool.call') {
+      n = await enrichToolCallImages(entry, opts.pathToUri, stats);
+      stats.outputUri += n;
+    }
+    if (n > 0) {
+      touchedEntries += 1;
+      try {
+        attachMultimodalMetadataForEntry(entry);
+      } catch (err) {
+        logger.debug('attach multimodal metadata failed', { error: String(err) });
+      }
     }
   }
 
@@ -100,93 +111,59 @@ async function enrichCliMultimodalInner(
       uploadMode: opts.uploadMode,
       sessionId: sessionIdOf(entries),
       ...stats,
-      touchedEntries: touched.size,
+      touchedEntries,
     });
   }
 }
 
 async function enrichInputImages(
-  entries: AgentActivityEntry[],
+  entry: AgentActivityEntry,
   pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
   stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    const name = entry['event.name'];
-    if (name !== 'llm.request' && name !== 'other') continue;
-    if (!Array.isArray(entry['gen_ai.input.messages_delta'])) continue;
-    const cwd = cwdOf(entry);
-    const paths = extractInputImagePaths(entry, cwd);
-    if (paths.length === 0) continue;
-    const n = await appendUriPartsToMessagesDelta(
-      entry,
-      paths,
-      pathToUri,
-      entryTimeMs(entry),
-      stats,
-    );
-    if (n > 0) {
-      stats.inputUri += n;
-      touched.add(entry);
-    }
-  }
+): Promise<number> {
+  if (!Array.isArray(entry['gen_ai.input.messages_delta'])) return 0;
+  const paths = extractInputImagePaths(entry, cwdOf(entry));
+  if (paths.length === 0) return 0;
+  return appendUriPartsToMessagesDelta(entry, paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats);
 }
 
 async function enrichToolResultImages(
-  entries: AgentActivityEntry[],
+  entry: AgentActivityEntry,
   pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
   stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    if (entry['event.name'] !== 'tool.result') continue;
-    const raw = entry['gen_ai.tool.call.result'];
-    if (typeof raw !== 'string' || !raw) continue;
-
-    const cwd = cwdOf(entry);
-    const paths = extractToolImagePaths(raw, cwd);
-    if (paths.length === 0) continue;
-
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
-    if (uriParts.length === 0) continue;
-
-    entry['gen_ai.tool.call.result'] = [
-      { type: 'text', content: raw },
-      ...uriParts,
-    ] as unknown as JsonValue;
-    stats.toolUri += uriParts.length;
-    touched.add(entry);
-  }
+): Promise<number> {
+  const raw = entry['gen_ai.tool.call.result'];
+  if (typeof raw !== 'string' || !raw) return 0;
+  const paths = extractToolImagePaths(raw, cwdOf(entry));
+  if (paths.length === 0) return 0;
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
+  if (uriParts.length === 0) return 0;
+  entry['gen_ai.tool.call.result'] = [
+    { type: 'text', content: raw },
+    ...uriParts,
+  ] as unknown as JsonValue;
+  return uriParts.length;
 }
 
 async function enrichToolCallImages(
-  entries: AgentActivityEntry[],
+  entry: AgentActivityEntry,
   pathToUri: PathToUriFn,
-  touched: Set<AgentActivityEntry>,
   stats: EnrichStats,
-): Promise<void> {
-  for (const entry of entries) {
-    if (entry['event.name'] !== 'tool.call') continue;
-    if (entry['gen_ai.tool.name'] !== 'Read') continue;
-    const raw = entry['gen_ai.tool.call.arguments'];
-    if (raw === undefined || raw === null || raw === '') continue;
-    if (Array.isArray(raw)) continue;
-
-    const cwd = cwdOf(entry);
-    const paths = extractToolCallImagePaths(raw, cwd);
-    if (paths.length === 0) continue;
-
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, entryTimeMs(entry), stats);
-    if (uriParts.length === 0) continue;
-
-    const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
-    entry['gen_ai.tool.call.arguments'] = [
-      { type: 'text', content: original },
-      ...uriParts,
-    ] as unknown as JsonValue;
-    stats.outputUri += uriParts.length;
-    touched.add(entry);
-  }
+): Promise<number> {
+  if (entry['gen_ai.tool.name'] !== 'Read') return 0;
+  const raw = entry['gen_ai.tool.call.arguments'];
+  if (raw === undefined || raw === null || raw === '') return 0;
+  if (Array.isArray(raw)) return 0;
+  const paths = extractToolCallImagePaths(raw, cwdOf(entry));
+  if (paths.length === 0) return 0;
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeUnixNanoToMillis(entry.time_unix_nano), stats, logger);
+  if (uriParts.length === 0) return 0;
+  const original = typeof raw === 'string' ? raw : JSON.stringify(raw);
+  entry['gen_ai.tool.call.arguments'] = [
+    { type: 'text', content: original },
+    ...uriParts,
+  ] as unknown as JsonValue;
+  return uriParts.length;
 }
 
 async function appendUriPartsToMessagesDelta(
@@ -198,7 +175,7 @@ async function appendUriPartsToMessagesDelta(
 ): Promise<number> {
   const messages = entry['gen_ai.input.messages_delta'];
   if (!Array.isArray(messages) || messages.length === 0) {
-    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+    const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats, logger);
     if (uriParts.length === 0) return 0;
     entry['gen_ai.input.messages_delta'] = [
       { role: 'user', parts: uriParts },
@@ -211,45 +188,10 @@ async function appendUriPartsToMessagesDelta(
   const record = first as Record<string, unknown>;
   const parts: unknown[] = Array.isArray(record.parts) ? record.parts : [];
   record.parts = parts;
-  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats);
+  const uriParts = await convertPathsToUriParts(paths, pathToUri, timeMs, stats, logger);
   if (uriParts.length === 0) return 0;
   parts.push(...uriParts);
   return uriParts.length;
-}
-
-async function convertPathsToUriParts(
-  paths: string[],
-  pathToUri: PathToUriFn,
-  timeMs: number,
-  stats: EnrichStats,
-): Promise<UriPart[]> {
-  const parts: UriPart[] = [];
-  for (const filePath of paths) {
-    const trimmed = filePath.trim();
-    let result;
-    try {
-      result = await pathToUri(trimmed, timeMs);
-    } catch (err) {
-      stats.skipped += 1;
-      logger.warn('qoder cli multimodal pathToUri threw; skipping image', {
-        error: String(err),
-        path: trimmed,
-      });
-      continue;
-    }
-    if (!result) {
-      stats.skipped += 1;
-      logger.warn('qoder cli multimodal path skipped', { path: trimmed });
-      continue;
-    }
-    parts.push({
-      type: 'uri',
-      mime_type: result.mime_type,
-      modality: 'image',
-      uri: result.uri,
-    });
-  }
-  return parts;
 }
 
 export function extractInputImagePaths(
@@ -261,8 +203,8 @@ export function extractInputImagePaths(
     ...(typeof source === 'string' ? [] : attachmentImageFilenames(source)),
     ...matchAll(IMAGE_SOURCE_RE, text).map(stripImageSourcePath),
     ...matchAll(AT_IMAGE_RE, text),
-    ...matchAll(FILE_CITATION_IMAGE_RE, text),
-  ], raw => resolveImagePath(raw, cwd));
+    ...matchAll(FILE_CITATION_RE, text),
+  ], cwd);
 }
 
 export function attachmentImageFilenames(entry: AgentActivityEntry): string[] {
@@ -285,26 +227,14 @@ export function extractToolImagePaths(text: string, cwd?: string): string[] {
     ...matchAll(READ_IMAGE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_FILE_RE, text).map(stripSizeSuffix),
     ...matchAll(IMAGE_GEN_PATH_RE, text),
-  ], raw => resolveImagePath(raw, cwd));
+  ], cwd);
 }
 
 export function extractToolCallImagePaths(args: unknown, cwd?: string): string[] {
-  let record: Record<string, unknown> | null = null;
-  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
-    record = args as Record<string, unknown>;
-  } else if (typeof args === 'string' && args) {
-    try {
-      const parsed = JSON.parse(args) as unknown;
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        record = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // hook writes JSON.stringify; ignore non-JSON argument strings
-    }
-  }
+  const record = asRecord(args);
   const filePath = typeof record?.file_path === 'string' ? record.file_path.trim() : '';
   if (!filePath) return [];
-  return takeUniqueExtractedPaths([filePath], cwd ? p => resolveImagePath(p, cwd) : undefined);
+  return takeUniqueExtractedPaths([filePath], cwd);
 }
 
 function stripSizeSuffix(raw: string): string {
@@ -343,19 +273,4 @@ function sessionIdOf(entries: AgentActivityEntry[]): string | undefined {
     if (typeof sid === 'string' && sid.trim()) return sid.trim();
   }
   return undefined;
-}
-
-function entryTimeMs(entry: AgentActivityEntry): number {
-  const nano = entry.time_unix_nano;
-  if (typeof nano === 'string' && /^\d+$/.test(nano)) {
-    try {
-      return Number(BigInt(nano) / 1_000_000n);
-    } catch {
-      // fall through
-    }
-  }
-  if (typeof nano === 'number' && Number.isFinite(nano)) {
-    return Math.floor(nano / 1_000_000);
-  }
-  return Date.now();
 }

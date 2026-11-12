@@ -46,6 +46,24 @@ function extractUserText(entry: AgentActivityEntry): string {
   return text;
 }
 
+function extractInputHash(entry: AgentActivityEntry): string | undefined {
+  const value = entry['agent.pilot.correlation.content_hash'];
+  return typeof value === 'string' && /^[0-9a-f]{16}$/.test(value) ? value : undefined;
+}
+
+function hasDelegatedParent(entry: AgentActivityEntry): boolean {
+  return entry['gen_ai.agent.scope'] === 'subagent'
+    && typeof entry.trace_id === 'string' && /^[0-9a-f]{32}$/.test(entry.trace_id)
+    && entry.trace_id !== ZERO_TRACE
+    && typeof entry.parent_span_id === 'string' && /^[0-9a-f]{16}$/.test(entry.parent_span_id)
+    && entry.parent_span_id !== ZERO_SPAN;
+}
+
+function hasLockedQoderContext(entry: AgentActivityEntry): boolean {
+  return entry['agent.qoder.trace_context_locked'] === true
+    && typeof entry.trace_id === 'string' && /^[0-9a-f]{32}$/.test(entry.trace_id) && entry.trace_id !== ZERO_TRACE;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -55,12 +73,15 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  *
  * Stateful across collect batches: a turn's events may arrive in separate
  * batches, so the resolved context is cached by (sessionId, turnId). The
- * `other` (user-input) event — always the first event of a turn — triggers
- * resolution; later events of the same turn reuse the cache.
+ * `other` event carrying user input triggers resolution. Metadata-only events
+ * can precede it: resolve input-bearing events first within each batch, then
+ * stamp the whole batch without changing source order. Empty-text misses stay
+ * unresolved so a later batch can still supply the input.
  *
  * Precedence: turn-level record (adapter) > session-level record (env, first
  * turn only) > existing value. On hit the record's value overrides whatever
  * trace_id the collection side generated. `gen_ai.turn.id` is never changed.
+ * Valid native subagent parent contexts take precedence over file correlation.
  * Fully fail-open.
  */
 export class TraceLinker {
@@ -77,47 +98,74 @@ export class TraceLinker {
     this.retryDelayMs = opts.retryDelayMs ?? 100;
   }
 
-  async stamp(entries: AgentActivityEntry[]): Promise<void> {
+  /** Pre-publication probes may leave misses open; normal output keeps the
+   * established per-turn negative cache. Published native work stays pinned. */
+  async stamp(entries: AgentActivityEntry[], { cacheMisses = true }: { cacheMisses?: boolean } = {}): Promise<void> {
+    // Establish the first turn from source order, before the input-first pass.
+    // Otherwise a later turn with text could consume the first-turn env fallback.
     for (const entry of entries) {
-      try {
-        await this.stampEntry(entry);
-      } catch (err) {
-        logger.warn('stamp entry failed (skipped)', { error: String(err) });
+      const sessionId = entry['gen_ai.session.id'] as string | undefined;
+      const turnId = entry['gen_ai.turn.id'] as string | undefined;
+      if (!sessionId || !turnId || hasDelegatedParent(entry)) continue;
+      this.sessionLastAccess.set(sessionId, Date.now());
+      if (!this.firstTurnBySession.has(sessionId)) {
+        this.firstTurnBySession.set(sessionId, turnId);
       }
+    }
+
+    // Resolve before applying, so leading metadata/LLM events in this batch
+    // cannot escape with the local trace id or prematurely claim an env fallback.
+    const inputEntries = new Set<AgentActivityEntry>();
+    for (const entry of entries) {
+      if (entry['event.name'] !== 'other' || (!extractUserText(entry) && !extractInputHash(entry))) continue;
+      inputEntries.add(entry);
+      await this.tryStampEntry(entry, cacheMisses);
+    }
+    for (const entry of entries) {
+      if (inputEntries.has(entry)) continue;
+      await this.tryStampEntry(entry, cacheMisses);
     }
   }
 
-  private async stampEntry(entry: AgentActivityEntry): Promise<void> {
+  private async tryStampEntry(entry: AgentActivityEntry, cacheMisses: boolean): Promise<void> {
+    try {
+      await this.stampEntry(entry, cacheMisses);
+    } catch (err) {
+      logger.warn('stamp entry failed (skipped)', { error: String(err) });
+    }
+  }
+
+  private async stampEntry(entry: AgentActivityEntry, cacheMisses: boolean): Promise<void> {
     const sessionId = entry['gen_ai.session.id'] as string | undefined;
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
-    if (!sessionId || !turnId) return;
-
-    this.sessionLastAccess.set(sessionId, Date.now());
-    if (!this.firstTurnBySession.has(sessionId)) {
-      this.firstTurnBySession.set(sessionId, turnId);
-    }
+    // Native delegation already identifies the real parent TOOL in its trace.
+    // A separate correlation file must not detach the child or consume a claim.
+    if (!sessionId || !turnId || hasDelegatedParent(entry) || hasLockedQoderContext(entry)) return;
 
     const key = `${sessionId}|${turnId}`;
     const cached = this.cache.get(key);
-    if (cached) {
+    if (cached && (cached.resolved || cacheMisses)) {
       if (cached.resolved) this.apply(entry, cached);
       return; // already resolved or already attempted (miss)
     }
 
-    // Only the `other` (user-input) event carries the text needed to resolve.
+    // Other events may be metadata-only; their empty text is not a final miss.
     if (entry['event.name'] !== 'other') return;
 
     const text = extractUserText(entry);
+    const hash = extractInputHash(entry);
+    // Metadata is not evidence of a user input, including for session fallback.
+    if (!text && !hash) return;
     const isFirstTurn = this.firstTurnBySession.get(sessionId) === turnId;
-    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn);
+    const tp = await this.resolveWithRetry(sessionId, text, isFirstTurn, turnId, hash);
 
     if (!tp) {
-      this.cache.set(key, { resolved: false });
+      if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
     const parsed = parseTraceparent(tp);
     if (!parsed) {
-      this.cache.set(key, { resolved: false });
+      if (cacheMisses) this.cache.set(key, { resolved: false });
       return;
     }
     const state: ResolveState = { resolved: true, traceId: parsed.traceId, parentSpanId: parsed.spanId };
@@ -125,19 +173,18 @@ export class TraceLinker {
     this.apply(entry, state);
   }
 
-  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean): Promise<string | null> {
+  private async resolveWithRetry(sessionId: string, text: string, isFirstTurn: boolean, turnId: string, hash?: string): Promise<string | null> {
     // No correlation file for this session → nothing was written for it, so there
     // is nothing to wait for. Short-circuit to avoid burning the retry budget
     // (retries × retryDelayMs) on the hot path — the common case when linking is
     // enabled but the adapter/env has not produced records.
     if (!this.store.hasSession(sessionId)) return null;
 
-    // Only retry when there is content to match; an empty `other` cannot match a
-    // turn record, so skip straight to the session-level fallback.
-    if (text) {
+    // Text or a producer-supplied pre-truncation hash identifies a real input.
+    if (text || hash) {
       // Turn-level record keeps priority through all retries (record may be slightly late).
       for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-        const turnTp = this.store.resolveTurn(sessionId, text);
+        const turnTp = this.store.resolveTurn(sessionId, text, turnId, hash);
         if (turnTp) {
           if (isFirstTurn) this.store.markSessionConsumed(sessionId);
           return turnTp;

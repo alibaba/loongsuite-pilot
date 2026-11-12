@@ -312,6 +312,76 @@ describe('MetricsWriter', () => {
     expect(flusher.out_entries).toBe('9');
   });
 
+  it('drains Hook timing spools into hook rows and their own mirror file', async () => {
+    const spoolDir = path.join(tmpDir, 'state', 'hook-metrics');
+    fs.mkdirSync(spoolDir, { recursive: true });
+    fs.writeFileSync(path.join(spoolDir, 'codex.jsonl'), [
+      { hook_event: 'stop', duration_ms: 40 },
+      { hook_event: 'stop', duration_ms: 120 },
+    ].map(sample => `${JSON.stringify(sample)}\n`).join(''));
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+
+    vi.useRealTimers();
+    await (writer as any).writeL2();
+
+    const rows = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline')
+      .map((c: unknown[]) => c[1] as Record<string, string>);
+    expect(rows.map(r => r.type)).toEqual(['agent', 'input', 'flusher', 'hook']);
+    expect(rows[3]).toMatchObject({
+      agent: 'codex',
+      hook_event: 'stop',
+      calls: '2',
+      total_duration_ms: '160',
+      max_duration_ms: '120',
+      user_id: 'u1',
+      hostname: os.hostname(),
+    });
+
+    const mirror = managedLogFile(path.join(tmpDir, 'logs', 'metric_alarm'), 'pilot-hook-metrics');
+    expect(JSON.parse(fs.readFileSync(mirror, 'utf-8').trim())).toMatchObject({
+      type: 'hook',
+      agent: 'codex',
+      hook_event: 'stop',
+      calls: '2',
+    });
+
+    // The spool was consumed, so the next window has no Hook calls to report.
+    mockSendStatus.mockClear();
+    await (writer as any).writeL2();
+    expect(mockSendStatus.mock.calls.map((c: unknown[]) => (c[1] as Record<string, string>).type))
+      .toEqual(['agent', 'input', 'flusher']);
+  });
+
+  it('reports hook call samples produced after startup on a clean shutdown', async () => {
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'u1',
+      getSnapshot: buildSnapshot,
+    });
+    vi.useRealTimers();
+    await writer.start();
+    mockSendStatus.mockClear();
+    const spoolDir = path.join(tmpDir, 'state', 'hook-metrics');
+    fs.mkdirSync(spoolDir, { recursive: true });
+    fs.writeFileSync(path.join(spoolDir, 'codex.jsonl'),
+      `${JSON.stringify({ hook_event: 'stop', duration_ms: 55 })}\n`);
+
+    await writer.stop();
+
+    const hooks = mockSendStatus.mock.calls
+      .filter((c: unknown[]) => c[0] === 'pilot_pipeline' && (c[1] as Record<string, string>).type === 'hook');
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0][1]).toMatchObject({ calls: '1', total_duration_ms: '55', max_duration_ms: '55' });
+    expect(fs.readdirSync(spoolDir)).toEqual([]);
+  });
+
   it('takes a fresh final snapshot after an in-flight dataflow cycle', async () => {
     const getSnapshot = vi.fn(buildSnapshot);
     writer = new MetricsWriter({
@@ -389,6 +459,7 @@ describe('MetricsWriter', () => {
     expect(hasManagedLogFile(metricDir, 'pilot-agent-metrics')).toBe(false);
     expect(hasManagedLogFile(metricDir, 'pilot-input-metrics')).toBe(false);
     expect(hasManagedLogFile(metricDir, 'pilot-flusher-metrics')).toBe(false);
+    expect(hasManagedLogFile(metricDir, 'pilot-hook-metrics')).toBe(false);
   });
 
   it('keeps capture_message_disabled_agents empty for compatibility', async () => {

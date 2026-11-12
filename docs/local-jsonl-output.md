@@ -14,8 +14,11 @@ Files are named by agent and date:
 
 ```text
 <agent-id>-YYYY-MM-DD.jsonl
+<agent-id>.part-<id>-YYYY-MM-DD.jsonl
 ```
 
+The first name is the active file; `part` files with unique IDs are closed size-based
+segments. Their date suffix remains compatible with Dashboard and retention.
 Each line is one normalized event.
 
 JSONL preserves native JSON types: token counts remain numbers, flags remain
@@ -30,7 +33,8 @@ backend boundary.
   "jsonl": {
     "enabled": true,
     "outputDir": "~/.loongsuite-pilot/logs/output",
-    "rotateDaily": true
+    "rotateDaily": true,
+    "maxFileSizeMb": 100
   }
 }
 ```
@@ -40,6 +44,12 @@ backend boundary.
 | `enabled` | Enables or disables local JSONL output. |
 | `outputDir` | Directory where output files are written. |
 | `rotateDaily` | Rotates output by date. |
+| `maxFileSizeMb` | Rotates before the next event would exceed this many MiB (default 100). Applies to Agent events and raw topics, including `rotateDaily=false`. Non-positive or non-finite values use the default. |
+
+A JSON event is never split or truncated to meet a file limit. A single event
+larger than the limit is written intact with a warning and rotated before the
+next append. An existing active file larger than 3 GiB is deleted with a warning
+before the next append. `rotateDaily=false` uses `all` in place of the date.
 
 ## Retention And Disk Protection
 
@@ -48,8 +58,31 @@ Local JSONL output follows the global retention policy in [Configuration Guide](
 Pilot also has fixed disk-protection cleanup for unusually large local output:
 
 - Output files larger than 512 MiB can be removed after they are older than 2 days.
-- If `logs/output` exceeds 2 GiB, older dated output files are removed until the directory is back under the limit.
-- Today's output file is never removed by retention cleanup. Size-pressure cleanup also keeps yesterday's output files.
+- If `logs/output` exceeds 2 GiB, periodic cleanup removes eligible old files and closed `part` segments, including today's closed segments, oldest first.
+- Files strictly larger than **3 GiB** (`3 × 1024³` bytes) are reclaimed regardless of date or active name, including legacy files whose Agent has stopped writing.
+- Smaller active and recent unsegmented files stay protected. Closed `all` segments participate using their modification date. Active files and single oversized events can keep the directory over target; this is periodic retention, not an instantaneous disk quota.
+- The first full cleanup runs about 30 seconds after startup; full retention still defaults to every 6 hours. A separate 60-second pressure sweep covers `output`, `otlp-debug`, and `otlp-failed`; a shorter full interval already provides that coverage. Append, rotation, and emergency unlink share a process-local path lock, and cleanup rechecks file type and size.
+
+`logs/otlp-debug` and `logs/otlp-failed` also rotate at 100 MiB. Debug mirrors use
+the 2 GiB directory target. Failed evidence keeps its 512 MiB target, with today's
+closed segments eligible under pressure; >3 GiB failed files are emergency
+reclaimed too. Discarding failed evidence emits a warning and **does not mean the
+backend accepted it or that replay is guaranteed**.
+
+JSONL is a local mirror sent in parallel with remote outputs, not a per-file ACK
+queue. Reclamation never removes Agent-owned transcripts, native telemetry, or
+checkpoints. A custom `jsonl.outputDir` still rotates, but periodic reclamation
+only manages the fixed `logs/output` and other managed directories under the
+data directory; custom-directory quotas remain the caller's responsibility.
+
+The Dashboard retains already-observed current-day totals by file identity,
+including rotation, replacement, truncation, deletion, and restart with cache.
+Replaced duplicate content is not deduplicated by event ID. A segment deleted
+before its first scan, or loss of the metrics cache, can only be rebuilt from
+files that still exist; removed data cannot be recovered from these mirrors.
+The Dashboard skips output files larger than 3 GiB instead of opening giant files
+that emergency retention will reclaim. Previously cached current-day totals stay
+available; unread data is not invented.
 
 Environment variables:
 

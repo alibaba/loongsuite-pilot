@@ -29,6 +29,14 @@ describe('MultiFlusher', () => {
       expect(send).toHaveBeenCalledWith(entries, sizes);
       expect(multi.getTraceRuntimeSnapshot()).toEqual([]);
     });
+    it('forwards an input cancellation signal to every destination', async () => {
+      const send = vi.spyOn(f1, 'sendBatch');
+      const controller = new AbortController();
+      const entries = [buildTestEntry()];
+      await multi.sendBatch(entries, undefined, controller.signal);
+      expect(send).toHaveBeenCalledWith(entries, undefined, controller.signal);
+    });
+
     it('dispatches to all child flushers in parallel', async () => {
       const entries = [buildTestEntry(), buildTestEntry()];
       await multi.sendBatch(entries);
@@ -61,6 +69,18 @@ describe('MultiFlusher', () => {
       expect(f1.sendCalls).toHaveLength(1);
       expect(f2.sendCalls).toHaveLength(1);
     });
+  });
+
+  it.each([
+    ['send', 'CodexTurnJournalError'], ['sendBatch', 'CodexTurnJournalError'],
+    ['send', 'CodexOutputDurabilityError'], ['sendBatch', 'CodexOutputDurabilityError'],
+  ] as const)('propagates %s %s after all outputs settle', async (method, name) => {
+    const failure = Object.assign(new Error('durable output failed'), { name });
+    vi.spyOn(f1, method).mockRejectedValue(failure);
+    const entry = buildTestEntry();
+    const sending = method === 'send' ? multi.send(entry) : multi.sendBatch([entry]);
+    await expect(sending).rejects.toBe(failure);
+    expect(method === 'send' ? f2.sendCalls : f2.batchCalls).toHaveLength(1);
   });
 
   describe('sendRaw forwarding (T023)', () => {

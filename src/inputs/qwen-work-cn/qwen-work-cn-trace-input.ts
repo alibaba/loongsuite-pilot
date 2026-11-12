@@ -2,13 +2,16 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
+import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
 import { directoryExists, ensureDir, getTodayDateString, resolveHome } from '../../utils/fs-utils.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { enrichQwenWorkCNMultimodal } from './qwen-work-cn-multimodal.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -18,6 +21,17 @@ const MAX_HOOK_READ_BYTES = 16 * 1024 * 1024;
 
 type HookOffsetMap = Record<string, number>;
 
+export function qwenWorkCNDefaultAllowedRootPaths(): string[] {
+  return [
+    resolveHome('~/.qwenworkcn/workspace'),
+    resolveHome('~/.qwenworkcn/tmp'),
+  ];
+}
+
+export function resolveQwenWorkCNAllowedRootPaths(userPaths?: string[]): string[] {
+  return mergeAllowedRootPaths(qwenWorkCNDefaultAllowedRootPaths(), userPaths);
+}
+
 export class QwenWorkCNTraceInput extends BaseInput {
   readonly id = 'qwen-work-cn-trace';
   readonly agentType = ClientType.QwenWorkCN;
@@ -25,6 +39,12 @@ export class QwenWorkCNTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly segmentsRoot: string;
+  private readonly multimodal: {
+    uploadMode: MultimodalUploadMode;
+    processor: MultimodalProcessor;
+    allowedRootPaths: string[];
+  } | null;
+  private multimodalStopped = false;
   private readonly segmentPairs = new Map<string, SegmentLlmPair[]>();
   private readonly segmentToolTimings = new Map<string, Map<string, SegmentToolTiming>>();
   private readonly subagentTurns = new Map<string, Map<string, number>>();
@@ -35,6 +55,20 @@ export class QwenWorkCNTraceInput extends BaseInput {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions');
+    const uploadMode = opts.multimodal?.uploadMode ?? 'none';
+    const processor = opts.multimodal?.processor;
+    this.multimodal = opts.multimodal?.enabled === true && processor && uploadMode !== 'none'
+      ? {
+          uploadMode,
+          processor,
+          allowedRootPaths: resolveQwenWorkCNAllowedRootPaths(opts.multimodal.allowedRootPaths),
+        }
+      : null;
+  }
+
+  override async stop(): Promise<void> {
+    this.multimodalStopped = true;
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -49,6 +83,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.multimodalStopped = false;
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -85,6 +120,24 @@ export class QwenWorkCNTraceInput extends BaseInput {
             entry as Record<string, unknown>,
             'qwen-work-cn',
           );
+        }
+        const multimodal = this.multimodal;
+        if (!this.multimodalStopped && multimodal) {
+          try {
+            await enrichQwenWorkCNMultimodal(turnEntries, {
+              uploadMode: multimodal.uploadMode,
+              pathToUri: async (filePath, timeUnixMs) => {
+                if (this.multimodalStopped) return null;
+                return multimodal.processor.pathToUri(filePath, timeUnixMs, {
+                  allowedRootPaths: multimodal.allowedRootPaths,
+                });
+              },
+            });
+          } catch (err) {
+            this.logger.warn('qwen-work-cn multimodal enrich failed; continuing without media', {
+              error: String(err),
+            });
+          }
         }
         output.push(...turnEntries);
       }
@@ -571,6 +624,13 @@ export class QwenWorkCNTraceInput extends BaseInput {
 export interface QwenWorkCNTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
+  /** Cached multimodal policy. Omitted means collection stays text-only. */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+    allowedRootPaths?: string[];
+  };
 }
 
 export type QwenWorkCNTraceWatchPaths = Pick<

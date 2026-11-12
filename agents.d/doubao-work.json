@@ -1,0 +1,14 @@
+{
+  "id": "doubao-work",
+  "displayName": "Doubao Work (experimental)",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": [
+      "$DOUBAO_WORK_DATA/sdk_storage/log"
+    ],
+    "commands": []
+  },
+  "input": {
+    "type": "doubao-work-client-log"
+  }
+}

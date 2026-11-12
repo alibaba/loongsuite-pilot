@@ -169,10 +169,10 @@ describe('MetricsCollector', () => {
       expect(typeof result.metric_json.open_fd).toBe('string');
 
       // flusher_runner is removed — per-flusher detail lives in pilot_pipeline now
-      expect((result as Record<string, unknown>).flusher_runner).toBeUndefined();
+      expect(result).not.toHaveProperty('flusher_runner');
 
       // updater events are NOT in status telemetry (local JSONL + alarms only)
-      expect((result as Record<string, unknown>).updater_event).toBeUndefined();
+      expect(result).not.toHaveProperty('updater_event');
 
       // __time__ is unix timestamp
       expect(result.__time__).toBeGreaterThan(1700000000);
@@ -336,7 +336,7 @@ describe('MetricsCollector', () => {
       // The total would be the exact sum of these rows over one window, and L1
       // already reports the same four axes plus agent_count for the instance.
       // Emitting it a third time is three chances for the numbers to disagree.
-      expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers', 'inputs']);
+      expect(Object.keys(l2).sort()).toEqual(['agents', 'flushers', 'hooks', 'inputs']);
       expect([...l2.agents, ...l2.inputs, ...l2.flushers].map(r => r.type).includes('pipeline' as never)).toBe(false);
 
       // Raw totals are recoverable only from Input rows, whose coverage and
@@ -581,6 +581,41 @@ describe('MetricsCollector', () => {
       expect(result.agents).toEqual([]);
       expect(result.inputs).toEqual([]);
       expect(result.flushers[0].out_entries).toBe('1');
+    });
+
+    it('reports one hook row per agent and event, sharing the cycle identity', () => {
+      const result = collector.collectL2(pipelineSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 3, totalDurationMs: 150.6, maxDurationMs: 90.4 },
+        { agent: 'codex', hookEvent: 'session-start', calls: 1, totalDurationMs: 42, maxDurationMs: 42 },
+      ])!;
+
+      expect(result.hooks).toHaveLength(2);
+      expect(result.hooks.find(row => row.hook_event === 'stop')).toMatchObject({
+        type: 'hook',
+        agent: 'codex',
+        hook_event: 'stop',
+        calls: '3',
+        total_duration_ms: '151',
+        max_duration_ms: '90',
+        user_id: 'test-user',
+      });
+      // Hook rows describe the same window as the rest of the cycle.
+      const windows = new Set([...result.agents, ...result.flushers, ...result.hooks].map(r => r.window_ms));
+      expect(windows.size).toBe(1);
+      expect(result.hooks[0].instance_id).toBe(result.agents[0].instance_id);
+    });
+
+    it('reports hook rows on their own and skips entries without calls', () => {
+      const result = collector.collectL2(buildSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 1, totalDurationMs: 30, maxDurationMs: 30 },
+        { agent: 'codex', hookEvent: 'session-start', calls: 0, totalDurationMs: 0, maxDurationMs: 0 },
+      ])!;
+
+      expect(result.agents).toEqual([]);
+      expect(result.hooks.map(row => row.hook_event)).toEqual(['stop']);
+      expect(collector.collectL2(buildSnapshot(), [
+        { agent: 'codex', hookEvent: 'stop', calls: 0, totalDurationMs: 0, maxDurationMs: 0 },
+      ])).toBeNull();
     });
   });
 

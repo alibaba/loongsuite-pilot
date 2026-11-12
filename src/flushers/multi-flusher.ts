@@ -34,11 +34,14 @@ export class MultiFlusher extends BaseFlusher {
         });
       }
     }
+    const durableFailure = results.find(result => result.status === 'rejected'
+      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
+    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
-  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+  async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void> {
     const results = await Promise.allSettled(
-      this.flushers.map(r => r.sendBatch(entries, logicalBytes)),
+      this.flushers.map(r => signal ? r.sendBatch(entries, logicalBytes, signal) : r.sendBatch(entries, logicalBytes)),
     );
     for (let i = 0; i < results.length; i++) {
       if (results[i].status === 'rejected') {
@@ -49,6 +52,9 @@ export class MultiFlusher extends BaseFlusher {
         });
       }
     }
+    const durableFailure = results.find(result => result.status === 'rejected'
+      && ['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes(result.reason?.name));
+    if (durableFailure?.status === 'rejected') throw durableFailure.reason;
   }
 
   async flush(): Promise<void> {

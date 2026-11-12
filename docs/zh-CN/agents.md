@@ -30,6 +30,7 @@
 |-------|----|------|
 | Claude Code | `claude-code` | Hook 集成。 |
 | Codex | `codex` | Hook 集成。 |
+| GitHub Copilot CLI | `copilot` | 原生插件与 transcript/native OTel 混合采集；单次调用的准确 Token 依赖 native OTel。自动部署支持 Unix shell，暂不支持 Windows 和子 Agent。详见[遥测说明](copilot-native-telemetry.md)。 |
 | Cursor | `cursor` | Hook 集成。 |
 | Cursor CLI | `cursor-cli` | 独立检测并输出为 `cursor-cli`，但复用 Cursor 已安装的 Hook/Input 链路，不会独立部署另一套 Hook。 |
 | DeepSeek Harness | `dsh` | 用户级 YAML patch 插件与本地 per-session JSONL 轮询；采集原生 LLM、reasoning、工具、Token 和 TTFT 数据。检测路径遵循 DSH 官方的 `DSH_HOME`（默认 `~/.dsh`）。 |
@@ -50,6 +51,7 @@
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
+| 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。
@@ -307,7 +309,7 @@ loongsuite-pilot restart
 | `multimodal.uploadMode` | **实验性。** 多模态上传策略。`none`（默认）关闭；`input` / `output` / `all` 控制转换表面。详见 [多模态采集](multimodal.md)。 |
 | `multimodal.allowedRootPaths` | 额外本地根目录，与 Agent 默认根合并后供 `pathToUri` 使用。`~` 会展开。工作区图片需要把项目目录写在这里。详见 [多模态采集](multimodal.md#allowedrootpaths)。 |
 
-消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（当前仅图像；已实现 `codex` 与 `qoder` IDE/CLI）。
+消息内容默认进入上报链路；历史 `captureMessageContent` 配置会被忽略。敏感环境请开启[数据脱敏](masking.md)。需要提取多模态数据时，见 [多模态采集](multimodal.md)（图像和本地视频；已实现 `codex`、`qoder` IDE/CLI 与 `qwen-work-cn`）。
 
 已有配置文件不会被改写。升级后需重启常驻的 OpenClaw、Pi、Hermes 进程，以加载新版插件。Agent 启停、工作区黑名单、脱敏和多模态上传配置仍各自生效。
 

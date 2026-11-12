@@ -14,7 +14,10 @@ Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，
 不会重复写出已经成功追加的事件。没有响应的请求保留请求记录，不合成成功响应。
 新版 lazy-forward streaming helper 与旧版方法签名均支持 TTFT 观测。
 
-增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`；回合结束记录为
+增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`。首条 `llm.request`
+落盘前会先追加一次 `event.name=other`、`agent.hermes.hook=turn_start` 的用户输入事件，
+用于逐轮上游 Trace 关联；它使用已确定的原生 turn/task ID，不参与 Token 统计，
+并与首个 API 请求共用观测到的请求起始时间。回合结束记录为
 `event.name=other`、`agent.hermes.hook=turn_end`、`gen_ai.turn.end=true`。
 collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
 旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
@@ -54,6 +57,10 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `llm.response` | 一次 LLM 响应，包含文本、reasoning、tool-call 意图、finish reason、token 用量和费用等可用信息。 |
 | `tool.call` | Agent 发起的一次实际工具执行。 |
 | `tool.result` | 工具执行返回的结果。 |
+| `gen_ai.model.request` / `gen_ai.model.response` | 标准模型事件名；与 `llm.request` / `llm.response` 同等识别，保留输入名称。 |
+| `gen_ai.tool.call` / `gen_ai.tool.result` | 标准工具事件名；与 `tool.call` / `tool.result` 同等识别，保留输入名称。 |
+| `gen_ai.agent.invoke` | 向另一个 Agent 提交一次逻辑工作；批量工作逐项记录。 |
+| `gen_ai.agent.result` | 实际收到的 Agent 结果或派发失败；工具受理回执不等于 Agent 完成。 |
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
 | `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
@@ -76,6 +83,15 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `tool.call` | `gen_ai.tool.call` |
 | `tool.result` | `gen_ai.tool.result` |
 
+六个标准名不会归为 `other`。已有四类短名输出不改名，也不因支持标准名而双写。
+OTLP 转换在入口适配名称并排除委派审计视角，避免重复 Span、STEP 和 token。
+
+Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多个 session。
+父 invoke/result 使用 `gen_ai.agent.invocation.id`，实际子工作使用相等的
+`gen_ai.agent.parent.invocation.id`。复用子 session 接受新工作时换新 invocation；
+嵌套事件同时保留 incoming 与 outgoing。父子会话定位以两侧事件的 invocation
+及自身 session/turn 为准；缺侧不猜测。详见[子 Agent 数据模型](subagent-data-model.md)。
+
 ## 字段说明
 
 必填程度与 OpenTelemetry 语义保持一致：
@@ -93,8 +109,8 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
-| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder IDE 使用 Stop hook 的 `extra.user.name`；Qoder CLI 使用 `qodercli status` 返回的 `username`。 |
-| `user.email` | string | 源 Agent 暴露时 Recommended | Agent 账号邮箱。Qoder IDE 使用 Stop hook 的 `extra.user.email`；Qoder CLI 使用 `qodercli status` 返回的 `email`。CLI 未登录、查询失败或没有可用值时，两个字段都不写。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名，独立于 `user.id`。Qoder 与 Qoder CN 相同，由 Stop 的 `product` 决定来源：`app` 只读桌面端账号文件；`cli` 用 `qodercli status` 或 `qoderclicn status`，这条没有数据时再用桌面端账号文件；没有 `product` 的 IDE 只读 hook 的 `extra.user`。选中的来源没有值时为空字符串。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | 与 `user.name` 同一账号、同一来源。该来源没有邮箱时为空字符串。手机号、登录名或账号 ID 不写成邮箱。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |
@@ -107,6 +123,10 @@ key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
 | `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder` 或 `qoder-work`。 |
 | `gen_ai.agent.id` | string | Recommended | Agent 运行实例 ID。 |
+| `gen_ai.agent.parent.id` | string | 有可靠来源时 Recommended | 当前工作的上游 Agent 身份，不替代 invocation。 |
+| `gen_ai.agent.peer.id` | string | 有可靠来源时 Recommended | 本次 invoke/result 的直接交互 Agent。 |
+| `gen_ai.agent.invocation.id` | string | 委派事件 Required | 当前向外逻辑委派的稳定 ID；批量逐工作唯一。 |
+| `gen_ai.agent.parent.invocation.id` | string | 已确认接受委派的工作 Required | 当前事件/轮次所接受的上游委派 ID；不是子 session 的永久属性。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
 | `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |
@@ -203,6 +223,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `gcp.gen_ai` | Google GenAI endpoint，具体后端未知时使用。 |
 | `deepseek` | DeepSeek。 |
 | `qwen` | 阿里云通义千问。 |
+| `bytedance.doubao` | 豆包工作原生服务；客户端轮次观测不表示已采集模型内部调用。 |
 | `groq` | Groq。 |
 | `mistral_ai` | Mistral AI。 |
 | `cohere` | Cohere。 |
@@ -211,6 +232,17 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `ibm.watsonx.ai` | IBM Watsonx AI。 |
 
 如果以上值都不适用，使用小写 dotted provider 名称，例如 `baidu.ernie` 或 `zhipu.chatglm`。
+
+## 豆包工作客户端轮次元数据
+
+实验性 `doubao-work` 事件与 OTLP Resource 包含 `loongsuite.doubao_work.observation_scope=client_message`、
+`loongsuite.doubao_work.business_outcome=unknown` 和 `loongsuite.doubao_work.client_outcome`
+（`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
+见[支持范围与配置](doubao-work.md)。
+
+本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
+
+缺少可用轨迹的工具仍直接归属 AGENT / TASK，使用 `genai.observed-tools.v1` 部分观测契约。完整原生 sandbox 执行在请求区间内映射为 TASK，内部轮次属于该本地片段，不充当完整子 Agent 生命周期；区间外后台执行仅保留日志，不拉长请求。内容在转换前统一脱敏，复用时只导出当前轮次，但 LLM 输入可以包含此前可见上下文。所选技能/伙伴只表示选择上下文。
 
 ## Finish Reasons
 
@@ -223,3 +255,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
 | `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
+
+### 逐轮关联原文 hash
+
+Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。

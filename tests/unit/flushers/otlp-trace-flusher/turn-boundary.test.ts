@@ -44,6 +44,27 @@ describe('OtlpTraceFlusher - turn boundary detection', () => {
     await flusher.shutdown();
   });
 
+  it('waits for V2 execution completion but preserves V1 stop behavior', async () => {
+    const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
+    const convert = vi.mocked(convertEventLogToTrace);
+    convert.mockClear();
+    const entry = (fields: Record<string, unknown>) => makeEntry({
+      'gen_ai.agent.type': 'opencode', 'agent.opencode.collection': 'v2', ...fields,
+    });
+    await flusher.send(entry({ 'event.name': 'llm.request' }));
+    await flusher.send(entry({ 'gen_ai.response.finish_reasons': ['error'] }));
+    await flusher.send(entry({ 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).not.toHaveBeenCalled();
+    await flusher.send(entry({ 'event.name': 'other', 'gen_ai.turn.end': true }));
+    expect(convert).toHaveBeenCalledOnce();
+    await flusher.shutdown();
+    flusher = new OtlpTraceFlusher(makeConfig());
+    convert.mockClear();
+    await flusher.send(makeEntry({ trace_id: '5bf92f3577b34da6a3ce929d0e0e4736', 'event.name': 'llm.request', 'gen_ai.agent.type': 'opencode' }));
+    await flusher.send(makeEntry({ trace_id: '5bf92f3577b34da6a3ce929d0e0e4736', 'gen_ai.agent.type': 'opencode', 'gen_ai.response.finish_reasons': ['stop'] }));
+    expect(convert).toHaveBeenCalledOnce();
+  });
+
   it('keeps incremental Hermes retries and overlapping same-session turns until their explicit ends', async () => {
     const { convertEventLogToTrace } = await import('@loongsuite/otel-util-genai');
     const convert = vi.mocked(convertEventLogToTrace);

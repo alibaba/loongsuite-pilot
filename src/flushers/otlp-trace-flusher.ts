@@ -1,9 +1,9 @@
 import { ExportResultCode, type ExportResult } from '@opentelemetry/core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { Resource } from '@opentelemetry/resources';
+import { SpanKind } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
-  InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -14,10 +14,17 @@ import {
   ExtendedTelemetryHandler,
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
-import { convertDelegatedTurn } from './delegated-turn-converter.js';
-import { isAgentAuditEvent } from '../normalization/agent-audit-event.js';
+import { planTurnStream } from './turn-stream.js';
+import { prepareCodexTurn } from './codex-turn-converter.js';
+import { prepareDelegatedTurn } from './delegated-turn-converter.js';
+import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
+import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
+import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
+import { CodexTurnJournal, codexTurnJournalGroupKey, isJournaledCodexEntry } from './codex-turn-journal.js';
 import { convertQwenSubagents } from './qwen-subagent-converter.js';
 import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js';
+import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -31,7 +38,8 @@ import {
   type GlobalAttributesProvider,
 } from '../normalization/global-attributes.js';
 import { createLogger } from '../utils/logger.js';
-import { appendLine, ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { ensureDir, getTodayDateString, readInstalledVersion } from '../utils/fs-utils.js';
+import { appendSegmentedJsonl, DEFAULT_JSONL_SEGMENT_BYTES } from '../utils/segmented-jsonl-writer.js';
 import { formatTime } from '../utils/time-utils.js';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
@@ -99,6 +107,9 @@ function prepareOpenClawCollectionRecords(records: AgentActivityEntry[]): AgentA
 // sends a same-session successor AND turnIdleTimeoutMs=0). Normal load
 // stays well under this; the cap is defense-in-depth, not a tuned limit.
 const MAX_TURN_BUFFERS = 64;
+// Payload budgets apply while turns wait for a native terminal, not conversion.
+const MAX_CODEX_TURN_RESIDENT_BYTES = 8 * 1024 * 1024;
+const MAX_CODEX_RESIDENT_BYTES = 32 * 1024 * 1024;
 // Bound diagnostics even if input supplies arbitrary agent names.
 const MAX_RUNTIME_AGENTS = 64;
 const SKILL_ATTRIBUTE_KEYS = [
@@ -106,6 +117,11 @@ const SKILL_ATTRIBUTE_KEYS = [
   'gen_ai.skill.id',
   'gen_ai.skill.description',
   'gen_ai.skill.version',
+] as const;
+const MULTIMODAL_METADATA_KEYS = [
+  'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
+  'gen_ai.output.multimodal_metadata',
 ] as const;
 
 interface TurnBuffer {
@@ -115,7 +131,19 @@ interface TurnBuffer {
   agentType: string;
   sessionId?: string;
   records: AgentActivityEntry[];
+  journalKey?: string;
+  spillable?: boolean;
+  spilledRecords?: number;
+  spilledEventIds?: Set<string>;
+  residentBytes?: number;
+  // Copilot source event IDs are stable across legacy replays. This index
+  // intentionally leaves other producers' update semantics unchanged.
+  recordIndex: Map<string, number>;
   completed: boolean;
+  /** All realtime producers can overlap turns in one session. */
+  isRealtimeHermes?: boolean;
+  /** Only a turn covered by the native observer may bypass idle flushing. */
+  hasHermesNativeRunObserver?: boolean;
   lastActivityMs: number;
   logicalBytes: number;
   unmeasuredRecords: number;
@@ -126,10 +154,18 @@ interface TurnBuffer {
 interface AgentConvertState {
   provider: BasicTracerProvider;
   handler: ExtendedTelemetryHandler;
-  inMem: InMemorySpanExporter;
+  inMem: DrainingInMemorySpanExporter;
   toolSpanIds: SpanIdReservations;
   llmSpanIds: SpanIdReservations;
+  idGenerator: ReservedSpanIdGenerator;
   active: number;
+}
+
+interface PreparedConversion {
+  records: EventLogRecord[];
+  handler: ExtendedTelemetryHandler;
+  readonly removedEntryCount: number;
+  cleanup?: () => void;
 }
 
 interface GrokConversionMetadata {
@@ -525,6 +561,61 @@ function nanoToHrTime(value: bigint): [number, number] {
   return [Number(value / 1_000_000_000n), Number(value % 1_000_000_000n)];
 }
 
+/**
+ * Deep-merge a new AgentActivityEntry into an existing one, preserving
+ * earlier non-empty values when the new record's field is empty. Earlier
+ * polls carry some fields (e.g. gen_ai.llm.reasoning.text on the first
+ * reasoning-event poll) that later polls lack — replace semantics (v7)
+ * silently dropped them, causing tester CP5 v6 to see reasoning.text=0/6
+ * and resolved_model missing from ENTRY spans. Deep merge keeps the
+ * first non-empty value per field; later non-empty values are ignored
+ * (first-write-wins to avoid flapping on transient field changes).
+ */
+function mergeRecordFields(
+  existing: AgentActivityEntry,
+  incoming: AgentActivityEntry,
+): AgentActivityEntry {
+  const merged = { ...existing } as Record<string, unknown>;
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.length === 0) continue;
+    const cur = merged[k];
+    if (cur === undefined || cur === null || (typeof cur === 'string' && cur.length === 0)) {
+      merged[k] = v;
+    }
+    // cur is non-empty → keep first-write value, ignore incoming
+  }
+  return merged as AgentActivityEntry;
+}
+
+function messageListAttribute(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function eventTimeMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.floor(value / 1_000_000);
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
+  return Number(BigInt(value) / 1_000_000n);
+}
+
+function spanStartTimeMs(span: ReadableSpan): number | undefined {
+  const start = span.startTime;
+  if (!start || start.length < 2) return undefined;
+  return start[0] * 1000 + Math.floor(start[1] / 1_000_000);
+}
+
+function turnStartKey(turnId: unknown, startMs: number | undefined): string | undefined {
+  if (typeof turnId !== 'string' || turnId.length === 0 || startMs === undefined) return undefined;
+  return JSON.stringify([turnId, startMs]);
+}
+
 export class OtlpTraceFlusher extends BaseFlusher {
   private readonly runtimeCounters = new Map<string, TraceRuntimeCounters>();
   readonly name = 'otlp-trace';
@@ -548,18 +639,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private idleTimer?: ReturnType<typeof setInterval>;
   private inFlightExports = new Set<Promise<void>>();
   private flushedTurnKeys = new Set<string>();
+  private warnedHermesIdleTimeout = false;
+  private warnedHermesLegacyIdleTimeout = false;
   private readonly convertLocks = new Map<string, Promise<void>>();
+  private journalRestore?: Promise<void>;
+  private codexFlushTail: Promise<void> = Promise.resolve();
 
-  // 批量模式标记：为 true 时 send() 中 Signal A（finish_reason=stop）只标记
-  // completed 不立即 flush，由 sendBatch() 在所有 entries 处理完后统一 flush。
+  // 批量调用计数：大于 0 时 send() 中 Signal A（finish_reason=stop）只标记
+  // completed，不立即 flush；最后一个批量调用完成 append 后统一 flush。
+  // 同时覆盖单条持久化、journal 恢复和不同 Input 的并发调用。
   // 解决的问题：Cursor subagent 的子 records 排在父 stop 之后，如果 Signal A
   // 即时 flush 会把 key 加入 flushedTurnKeys，导致后续同 key 的子 records 被丢弃。
-  private _deferSignalA = false;
+  private batchDepth = 0;
 
   constructor(
     cfg: OtlpTraceFlusherConfig,
     globalAttributesProvider?: GlobalAttributesProvider,
     exporterFactory?: OtlpExporterFactory,
+    private readonly codexJournal?: CodexTurnJournal,
+    private readonly prepareCodexReplay?: (entries: AgentActivityEntry[]) => AgentActivityEntry[],
   ) {
     super();
     if (!cfg.endpoints || cfg.endpoints.length === 0) {
@@ -633,6 +731,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agent_type: agentType,
         pending_buffers: 0,
         pending_records: 0,
+        ...(agentType === 'codex' && this.codexJournal ? {
+          resident_records: 0, resident_payload_bytes: 0,
+          spilled_buffers: 0, spilled_records: 0,
+        } : {}),
         pending_logical_bytes: 0,
         pending_unmeasured_records: 0,
         largest_buffer_logical_bytes: 0,
@@ -648,13 +750,19 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (!row) continue;
       const age = Math.max(0, Math.round(now - buf.openedAtMs));
       row.pending_buffers++;
-      row.pending_records += buf.records.length;
+      if (row.resident_records !== undefined) {
+        row.resident_records += buf.records.length;
+        row.resident_payload_bytes! += buf.residentBytes ?? 0;
+        row.spilled_buffers! += buf.spilledRecords ? 1 : 0;
+        row.spilled_records! += buf.spilledRecords ?? 0;
+      }
+      row.pending_records += buf.records.length + (buf.spilledRecords ?? 0);
       row.pending_logical_bytes += buf.logicalBytes;
       row.pending_unmeasured_records += buf.unmeasuredRecords;
       row.oldest_buffer_age_ms = Math.max(row.oldest_buffer_age_ms, age);
       if (row.pending_buffers === 1 || buf.logicalBytes > row.largest_buffer_logical_bytes) {
         row.largest_buffer_logical_bytes = buf.logicalBytes;
-        row.largest_buffer_records = buf.records.length;
+        row.largest_buffer_records = buf.records.length + (buf.spilledRecords ?? 0);
         row.largest_buffer_age_ms = age;
         row.largest_buffer_turn_id = buf.keySource === 'turn_id' ? buf.keyValue : undefined;
         row.largest_buffer_session_id = buf.sessionId;
@@ -688,7 +796,24 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   async send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    await this.start();
+    // A public call always owns durable acceptance, even while another call
+    // is replaying or appending. Keep its resident prefix until I/O completes.
+    this.batchDepth++;
+    try {
+      await this.persistCodexEntries([entry]);
+    } finally { this.batchDepth--; }
+    await this.appendEntry(entry, logicalBytes);
+    if (this.batchDepth === 0) await this.flushCompleted();
+  }
+
+  private async appendEntry(entry: AgentActivityEntry, logicalBytes?: number): Promise<void> {
+    // Audit delegation/result records describe an existing tool/work boundary.
+    // They must not create, close or reopen a model turn buffer.
     if (isAgentAuditEvent(entry)) return;
+    // Session summaries are log events, never an extra or reopened trace.
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.session_summary'] === true) return;
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.trace_role'] === 'log_only') return;
     const { source, value, key } = this.resolveGroupKey(entry);
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
@@ -725,30 +850,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // split its records and synthesize duplicate ENTRY/AGENT spans.
     const incomingSessionId = (entry['gen_ai.session.id'] as string | undefined) || undefined;
     for (const [bufKey, buf] of this.turnBuffers) {
+      // Native Codex task_complete/turn_aborted is authoritative. A second
+      // work item in the same thread must not truncate a still-running turn.
+      if (agentType === 'codex' || agentType === 'doubao-work') break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
       if (agentType === 'hermes'
-        && buf.records.some(record => record['agent.hermes.collection'] === 'realtime-v1')) continue;
+        && buf.isRealtimeHermes) continue;
       if (!incomingSessionId || !buf.sessionId || incomingSessionId !== buf.sessionId) continue;
       buf.completed = true;
       this.triggerFlush(buf, false);
     }
 
-    // Bounded cleanup: if buffers have accumulated past the hard cap (pathological
-    // case where neither Signal A, same-session successor, nor idle timeout ever
-    // fires for many turns), flush oldest incomplete buffers to bound memory.
-    if (this.turnBuffers.size > MAX_TURN_BUFFERS) {
-      const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
-      const candidates = [...this.turnBuffers.values()]
-        .filter((b) => !b.completed)
-        .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
-        .slice(0, overflow);
-      for (const b of candidates) {
-        b.completed = true;
-        this.triggerFlush(b, false);
-      }
-    }
+    // Preparation has already checked/restored this prefix. Do not evict it
+    // before appending the continuation, or evict a later turn in this batch.
+    if (this.batchDepth === 0) this.trimTurnBuffers(key);
 
     let buf = this.turnBuffers.get(key);
     if (!buf) {
@@ -759,6 +876,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         agentType,
         sessionId: incomingSessionId,
         records: [],
+        recordIndex: new Map(),
         completed: false,
         lastActivityMs: Date.now(),
         logicalBytes: 0,
@@ -770,7 +888,43 @@ export class OtlpTraceFlusher extends BaseFlusher {
     } else if (!buf.sessionId && incomingSessionId) {
       buf.sessionId = incomingSessionId;
     }
-    buf.records.push(entry);
+    if (agentType === 'hermes' && entry['agent.hermes.collection'] === 'realtime-v1') {
+      buf.isRealtimeHermes = true;
+      if (entry['agent.hermes.native_run_observer'] === true) {
+        buf.hasHermesNativeRunObserver = true;
+      }
+    }
+    const durable = !!this.codexJournal && isJournaledCodexEntry(entry);
+    const residentSize = durable ? Buffer.byteLength(JSON.stringify(entry)) : 0;
+    if (durable) {
+      buf.journalKey ??= codexTurnJournalGroupKey(entry);
+      buf.spillable ??= buf.records.length === 0;
+      // Restored records must use the same normalized logical size as new ones.
+      logicalBytes ??= residentSize;
+    } else {
+      // Malformed/unpersistable continuations must never be discarded by spill.
+      if (buf.spilledRecords) await this.rehydrateCodexTurn(buf);
+      buf.spillable = false;
+    }
+    // Copilot-only duplicate merge: preserve known fields on partial replay.
+    // Other agents retain the main branch's append/update behavior.
+    const eventId = entry['gen_ai.agent.type'] === 'copilot'
+      ? (entry['event.id'] as string | undefined) : undefined;
+    if (typeof eventId === 'string' && eventId.length > 0) {
+      const existingIdx = buf.recordIndex.get(eventId);
+      if (existingIdx !== undefined) {
+        buf.records[existingIdx] = mergeRecordFields(buf.records[existingIdx], entry);
+      } else {
+        buf.recordIndex.set(eventId, buf.records.length);
+        buf.records.push(entry);
+      }
+    } else if (buf.spilledRecords && durable) {
+      buf.spilledEventIds!.add(entry['event.id']);
+      buf.spilledRecords++;
+    } else {
+      buf.records.push(entry);
+    }
+    if (!buf.spilledRecords) buf.residentBytes = (buf.residentBytes ?? 0) + residentSize;
     buf.lastActivityMs = Date.now();
     if (typeof logicalBytes === 'number' && Number.isFinite(logicalBytes) && logicalBytes >= 0) {
       buf.logicalBytes += logicalBytes;
@@ -778,38 +932,70 @@ export class OtlpTraceFlusher extends BaseFlusher {
       buf.unmeasuredRecords++;
     }
 
+    this.spillCodexPayloads();
+
     // Signal A: terminal event detected → mark turn complete.
     // Default: gen_ai.response.finish_reasons ∈ {stop, end_turn, cancelled, error}.
     // OpenClaw has a dedicated run-level terminal hook because each ReAct
     // model call carries its own finish reason.
-    // 逐条模式下立即 flush；批量模式下（_deferSignalA=true）仅标记 completed，
+    // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
     if (this.isTerminalEvent(entry)) {
       buf.completed = true;
-      if (!this._deferSignalA) {
+      if (this.batchDepth === 0) {
         this.triggerFlush(buf);
       }
     }
   }
 
   async sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
-    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
-    // 批量模式：先 append 全部 entries，再统一 flush 已完成的 buffer。
-    // 避免 Signal A 即时 flush 导致同 batch 内排在 stop 之后的子 records 被丢弃。
-    this._deferSignalA = true;
+    await this.start();
+    this.batchDepth++;
     try {
-      for (let i = 0; i < entries.length; i++) {
-        await this.send(entries[i], sizes?.[i]);
-      }
-    } finally {
-      this._deferSignalA = false;
+      await this.persistCodexEntries(entries);
+      await this.appendBatch(entries, logicalBytes);
+    } finally { this.batchDepth--; }
+    await this.finishBatch();
+  }
+
+  private async appendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[]): Promise<void> {
+    const sizes = logicalBytes?.length === entries.length ? logicalBytes : undefined;
+    for (let i = 0; i < entries.length; i++) {
+      await this.appendEntry(entries[i], sizes?.[i]);
     }
-    // 统一 flush 所有在批量处理期间被 Signal A 标记为 completed 的 buffer
-    await this.flushCompleted();
+  }
+
+  private async finishBatch(): Promise<void> {
+    // Another caller may still be preparing a prefix or appending records.
+    if (this.batchDepth === 0) {
+      await this.flushCompleted();
+      // Another Input may begin a batch while completed exports are awaited.
+      if (this.batchDepth === 0) this.trimTurnBuffers();
+    }
+  }
+
+  private trimTurnBuffers(incomingKey?: string): void {
+    if (this.turnBuffers.size <= MAX_TURN_BUFFERS) return;
+    const overflow = this.turnBuffers.size - MAX_TURN_BUFFERS;
+    const candidates = [...this.turnBuffers.values()]
+      .filter((buf) => !buf.completed && buf.key !== incomingKey)
+      .sort((a, b) => a.lastActivityMs - b.lastActivityMs)
+      .slice(0, overflow);
+    for (const buf of candidates) {
+      if (buf.agentType === 'codex' && this.codexJournal) {
+        // The durable prefix can be rehydrated when this native turn resumes.
+        this.turnBuffers.delete(buf.key);
+        this.recordBufferRemoval(buf);
+      } else {
+        buf.completed = true;
+        this.triggerFlush(buf, false);
+      }
+    }
   }
 
   async flush(): Promise<void> {
     for (const buf of this.turnBuffers.values()) {
+      if (buf.agentType === 'codex' && this.codexJournal && !buf.completed) continue;
       buf.completed = true;
     }
     await this.flushCompleted();
@@ -818,6 +1004,113 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await Promise.allSettled(batch);
     }
     this.flushedTurnKeys.clear();
+  }
+
+  override async start(): Promise<void> {
+    if (!this.codexJournal) return;
+    this.journalRestore ??= this.replayCodexJournal(this.codexJournal.loadBatches()).catch(cause => {
+      const error = new Error('Codex pending trace could not be restored', { cause });
+      error.name = 'CodexTurnJournalError';
+      throw error;
+    });
+    await this.journalRestore;
+  }
+
+  private async replayCodexJournal(groups: ReturnType<CodexTurnJournal['loadBatches']>): Promise<void> {
+    let holding = false;
+    let accepted = false;
+    try {
+      for await (const batch of groups) {
+        if (this.prepareCodexReplay) {
+          // Workspace evidence may appear late in a turn. Prime policy for the
+          // whole group before accepting any earlier, metadata-poor records.
+          this.prepareCodexReplay(batch.entries);
+          if (!batch.last) continue;
+          this.batchDepth++; holding = true; accepted = false;
+          for await (const prepared of this.preparedJournalBatches(batch.key, false)) {
+            accepted ||= prepared.length > 0;
+            await this.appendBatch(prepared);
+          }
+          if (!accepted) await this.codexJournal!.remove(batch.key);
+          this.batchDepth--; holding = false;
+          await this.finishBatch();
+          continue;
+        }
+        if (!holding) { this.batchDepth++; holding = true; accepted = false; }
+        const prepared = batch.entries;
+        accepted ||= prepared.length > 0;
+        await this.appendBatch(prepared);
+        if (batch.last) {
+          if (!accepted) await this.codexJournal!.remove(batch.key);
+          this.batchDepth--; holding = false;
+          await this.finishBatch();
+        }
+      }
+    } finally { if (holding) this.batchDepth--; }
+  }
+
+  /** Release only payloads whose durable journal already owns every event. */
+  private spillCodexPayloads(): void {
+    const candidates = [...this.turnBuffers.values()].filter(buf =>
+      buf.agentType === 'codex' && buf.spillable && !buf.spilledRecords);
+    let resident = candidates.reduce((sum, buf) => sum + (buf.residentBytes ?? 0), 0);
+    for (const buf of candidates.sort((a, b) => (b.residentBytes ?? 0) - (a.residentBytes ?? 0))) {
+      if ((buf.residentBytes ?? 0) <= MAX_CODEX_TURN_RESIDENT_BYTES && resident <= MAX_CODEX_RESIDENT_BYTES) continue;
+      resident -= buf.residentBytes ?? 0;
+      buf.spilledRecords = buf.records.length;
+      buf.spilledEventIds = new Set(buf.records.map(entry => entry['event.id']));
+      buf.records = [];
+      buf.residentBytes = 0;
+      buf.recordIndex.clear();
+    }
+  }
+
+  private async *preparedJournalBatches(key: string, preflight = true): AsyncGenerator<AgentActivityEntry[]> {
+    if (preflight && this.prepareCodexReplay) {
+      for await (const batch of this.codexJournal!.loadBatches(key)) this.prepareCodexReplay(batch.entries);
+    }
+    for await (const batch of this.codexJournal!.loadBatches(key)) {
+      yield this.prepareCodexReplay ? this.prepareCodexReplay(batch.entries) : batch.entries;
+    }
+  }
+
+  private async rehydrateCodexTurn(buf: TurnBuffer): Promise<void> {
+    if (!buf.spilledRecords) return;
+    const restored: AgentActivityEntry[] = [];
+    for await (const entries of this.preparedJournalBatches(buf.journalKey!)) {
+      // A batch journals its whole suffix before appending. Do not pull a
+      // future suffix forward while materializing an unpersistable event.
+      restored.push(...entries.filter(entry => buf.spilledEventIds!.has(entry['event.id'])));
+    }
+    if (!restored.length) throw new Error('Retained Codex payload is unavailable; refusing to acknowledge its turn');
+    buf.records = restored;
+    buf.residentBytes = restored.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry)), 0);
+    buf.spilledRecords = 0;
+    buf.spilledEventIds = undefined;
+  }
+
+  private async persistCodexEntries(entries: AgentActivityEntry[]): Promise<void> {
+    if (!this.codexJournal) return;
+    try {
+      const codex = entries.filter(entry => normalizeAgentType(String(entry['gen_ai.agent.type'])) === 'codex'
+        && !isAgentAuditEvent(entry));
+      const checked = new Set<string>();
+      for (const entry of codex) {
+        const key = this.resolveGroupKey(entry).key;
+        if (checked.has(key) || this.turnBuffers.has(key) || this.flushedTurnKeys.has(key)) continue;
+        checked.add(key);
+        if (await this.codexJournal.isAcknowledged(entry)) {
+          this.flushedTurnKeys.add(key);
+          continue;
+        }
+        await this.replayCodexJournal(this.codexJournal.loadBatches(codexTurnJournalGroupKey(entry)));
+      }
+      await this.codexJournal.append(codex.filter(entry => !this.flushedTurnKeys.has(this.resolveGroupKey(entry).key)));
+    } catch (cause) {
+      const error = new Error('Codex pending trace could not be persisted', { cause });
+      error.name = 'CodexTurnJournalError';
+      throw error;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -862,6 +1155,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
   // --- Internal ---
 
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
+    if (entry['gen_ai.agent.type'] === 'copilot' && entry['gen_ai.copilot.source'] === 'hybrid-v2') return entry['gen_ai.turn.end'] === true;
+    // V2 step completion (including a failed/retried model request) is not
+    // execution completion. Preserve V1's existing finish-reason behavior.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'opencode'
+      && entry['agent.opencode.collection'] === 'v2') {
+      return entry['gen_ai.turn.end'] === true;
+    }
+    // The passive Doubao adapter observes client message completion, not a
+    // model finish reason. Only its explicit terminal boundary closes the turn.
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'doubao-work') {
+      if (entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution') {
+        return entry['event.name'] === 'other' && entry['loongsuite.doubao_work.local_execution_phase'] === 'end';
+      }
+      return entry['event.name'] === 'other' && entry['gen_ai.turn.end'] === true;
+    }
     // Incremental Hermes producers emit errors/stop per API invocation. Only
     // their explicit lifecycle marker closes a turn (which may retry or run
     // tools after a model completion). Keep old installed producers compatible.
@@ -873,10 +1181,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && entry['agent.qwen-code-cli.collection'] === 'foreground-v1') {
       return entry['gen_ai.agent.scope'] !== 'subagent' && entry['gen_ai.turn.end'] === true;
     }
-    // A fused child shares the parent's turn buffer. Its stop closes only the
-    // child lifecycle; the delayed root response remains the turn boundary.
+
     if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
-      if (entry['gen_ai.agent.scope'] === 'subagent') return false;
       // A `stop` closes one Codex model wave, not necessarily the surrounding
       // transcript turn. The transcript input stamps this status only when it
       // has observed task_complete / turn_aborted, which is the lifecycle
@@ -926,12 +1232,27 @@ export class OtlpTraceFlusher extends BaseFlusher {
     value: string;
     key: string;
   } {
+    const localExecution = entry['loongsuite.doubao_work.native_execution_id'];
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && entry['loongsuite.doubao_work.observation_scope'] === 'native_sandbox_execution'
+      && typeof localExecution === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(localExecution)) {
+      return { source: 'turn_id', value: localExecution, key: `doubao-local-execution:${localExecution}` };
+    }
+    const traceId = entry['trace_id'] as string | undefined;
+    // The client can reuse chat_session_id. The producer trace identity also
+    // includes queryMs, conversation and source scope; preserve that identity.
+    if (entry['gen_ai.agent.type'] === 'doubao-work' && traceId && VALID_TRACE_ID_RE.test(traceId)) {
+      return { source: 'trace_id', value: traceId, key: `doubao-request:${traceId}` };
+    }
     const turnId = entry['gen_ai.turn.id'] as string | undefined;
     if (turnId && turnId.length > 0) {
+      if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codex') {
+        return { source: 'turn_id', value: turnId,
+          key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
+            .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
       return { source: 'turn_id', value: turnId, key: `turn:${turnId}` };
     }
 
-    const traceId = entry['trace_id'] as string | undefined;
     if (traceId && VALID_TRACE_ID_RE.test(traceId)) {
       return { source: 'trace_id', value: traceId, key: `trace:${traceId}` };
     }
@@ -951,12 +1272,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     this.turnBuffers.delete(buf.key);
     this.recordBufferRemoval(buf);
+    void this.trackTurnExport(buf);
+  }
+
+  private trackTurnExport(buf: TurnBuffer): Promise<void> {
     const p = this.flushSingleTurn(buf).catch((err) => {
       logger.error(`Failed to flush turn ${buf.key}`, { err: String(err) });
     }).finally(() => {
       this.inFlightExports.delete(p);
     });
     this.inFlightExports.add(p);
+    return p;
   }
 
   private async flushCompleted(): Promise<void> {
@@ -970,11 +1296,21 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     await Promise.allSettled(
-      completed.map((buf) => this.flushSingleTurn(buf)),
+      completed.map((buf) => this.trackTurnExport(buf)),
     );
   }
 
-  private async flushSingleTurn(buf: TurnBuffer): Promise<void> {
+  private flushSingleTurn(buf: TurnBuffer): Promise<void> {
+    if (buf.agentType !== 'codex' || !this.codexJournal) return this.flushSingleTurnReady(buf);
+    // Rehydrate/convert one durable turn at a time. Otherwise a terminal burst
+    // could materialize every large spooled turn before converter locks run.
+    const next = this.codexFlushTail.then(() => this.flushSingleTurnReady(buf));
+    this.codexFlushTail = next.catch(() => {});
+    return next;
+  }
+
+  private async flushSingleTurnReady(buf: TurnBuffer): Promise<void> {
+    await this.rehydrateCodexTurn(buf);
     // Backfill gen_ai.turn.id if needed (D4)
     if (buf.keySource !== 'turn_id') {
       for (const record of buf.records) {
@@ -983,14 +1319,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    await this.convertAndExport(buf.agentType, buf.records);
+    const exported = await this.convertAndExport(buf.agentType, buf.records);
+    if (exported && buf.agentType === 'codex' && this.codexJournal && buf.completed) {
+      await this.codexJournal.acknowledge(buf.records);
+    }
   }
 
   private async convertAndExport(
     agentType: string,
     records: AgentActivityEntry[],
-  ): Promise<void> {
-    if (records.length === 0) return;
+  ): Promise<boolean> {
+    if (records.length === 0) return true;
     const projectedResourceAttributes = this.collectResourceAttributes(records);
     const resourceIdentity = this.resolveAgentResourceIdentity(agentType, records);
     // Convert once per distinct service.name (backends may split into user/inner
@@ -999,7 +1338,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const serviceNames = [...new Set(
       this.endpoints.map((endpoint) => this.resolveEndpointServiceName(endpoint, agentType)),
     )];
-    await Promise.all(
+    const results = await Promise.all(
       serviceNames.map((serviceName) => {
         const convertKey = this.buildConvertStateKey(agentType, serviceName, projectedResourceAttributes);
         const prev = this.convertLocks.get(convertKey) ?? Promise.resolve();
@@ -1011,10 +1350,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
           resourceIdentity,
           convertKey,
         ));
-        this.convertLocks.set(convertKey, current.catch(() => {}));
+        this.convertLocks.set(convertKey, current.then(() => undefined, () => undefined));
         return current;
       }),
     );
+    return results.every(Boolean);
   }
 
   private async doConvertAndExport(
@@ -1024,7 +1364,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     projectedResourceAttributes: Record<string, ResourceProjectionValue>,
     resourceIdentity: AgentResourceIdentity,
     convertKey: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const convertState = this.getOrCreateConvertState(
       agentType,
       serviceName,
@@ -1032,10 +1372,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
       resourceIdentity,
       convertKey,
     );
-    const { handler, provider, inMem, toolSpanIds, llmSpanIds } = convertState;
+    const { handler, provider, inMem, toolSpanIds, llmSpanIds, idGenerator } = convertState;
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
+    let streamedExportSucceeded: boolean | undefined;
 
     try {
       try {
@@ -1062,7 +1403,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
               ),
             )];
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
-          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS : [];
+          : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
+          : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
@@ -1096,9 +1439,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // Keep it in the normal OTLP flusher path, but exclude it at the
         // EventLog-to-Trace boundary so the converter does not emit an extra
         // empty STEP for the duplicate input boundary.
-        const traceConversionRecords = recordsForConversion.filter(
-          record => record['event.name'] !== 'agent.input',
-        );
+        const traceConversionRecords = prepareTraceEvents(recordsForConversion);
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
@@ -1112,22 +1453,74 @@ export class OtlpTraceFlusher extends BaseFlusher {
         let result;
         const counters = this.getRuntimeCounters(agentType);
         const convertStarted = performance.now();
+        let streamExportDurationMs = 0;
         let succeeded = false;
+        let cleanup: (() => void) | undefined;
         try {
-          const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
-            : (agentType === 'hermes' || agentType === 'openclaw') ? convertDelegatedTurn
-            : convertEventLogToTrace;
-          result = convert(
-            sanitized as unknown as EventLogRecord[],
-            { handler, strict: false, passthroughKeys },
-          );
+          const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(sanitized, { handler, idGenerator })
+            : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(sanitized, { handler, idGenerator })
+            : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(sanitized, handler)
+            : { records: sanitized, handler, removedEntryCount: 0 };
+          cleanup = prepared.cleanup;
+          const stream = planTurnStream(prepared.records, { handler: prepared.handler, passthroughKeys });
+          if (stream) {
+            streamedExportSucceeded = true;
+            const reasoning = { seen: false, total: 0 };
+            let pending: ReadableSpan[] = [];
+            let pendingBytes = 0;
+            let grokInstructionsApplied = false;
+            const limit = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
+            const exportPending = async () => {
+              if (!pending.length) return;
+              const batch = pending;
+              pending = [];
+              pendingBytes = 0;
+              const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
+              const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
+                metadata, openClawIdentity, reasoning);
+              if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
+              streamedExportSucceeded = exported && streamedExportSucceeded;
+            };
+            result = await stream(async final => {
+              const exportStarted = performance.now();
+              try {
+                await provider.forceFlush();
+                // Native forceFlush does not await InMemorySpanExporter's timer
+                // callbacks. Drain explicitly only for incremental execution.
+                await inMem.drain();
+                const spans = inMem.getFinishedSpans();
+                inMem.reset();
+                for (const span of spans) {
+                  const size = estimateSpanSize(span);
+                  if (pending.length && pendingBytes + size > limit) await exportPending();
+                  pending.push(span);
+                  pendingBytes += size;
+                  if (pendingBytes >= limit) await exportPending();
+                }
+                if (final) await exportPending();
+              } finally {
+                streamExportDurationMs += performance.now() - exportStarted;
+              }
+            });
+          } else {
+            const convert = agentType === 'qwen-code-cli' ? convertQwenSubagents
+              : agentType === 'doubao-work' ? convertDoubaoWorkTurn
+              : convertEventLogToTrace;
+            result = convert(
+              prepared.records,
+              { handler: prepared.handler, strict: false, passthroughKeys,
+                ...(agentType === 'doubao-work' ? { observationTracer: provider.getTracer('@loongsuite/pilot-doubao-local-observation') } : {}) },
+            );
+          }
+          result.spanCount -= prepared.removedEntryCount;
           succeeded = true;
         } finally {
+          cleanup?.();
           toolSpanIds.clear();
           llmSpanIds.clear();
           if (counters) {
             counters.converter_calls_total++;
-            counters.converter_duration_ms_total += performance.now() - convertStarted;
+            counters.converter_duration_ms_total += Math.max(0, performance.now() - convertStarted - streamExportDurationMs);
             if (!succeeded) counters.converter_failed_total++;
           }
         }
@@ -1144,42 +1537,102 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // not exported, pollutes subsequent sessions". Resetting here keeps
         // each convert attempt's span set isolated.
         inMem.reset();
-        return;
+        return false;
       }
 
+      if (streamedExportSucceeded !== undefined) return streamedExportSucceeded;
       await provider.forceFlush();
-      let spans = inMem.getFinishedSpans();
+      const spans = inMem.getFinishedSpans();
       inMem.reset();
-
-      if (spans.length === 0) return;
-      applyQoderWorkStepTiming(records, spans);
-      this.enrichToolSkillAttributes(records, spans);
-      if (agentType === 'openclaw') {
-        this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
-        this.enrichOpenClawSessionKey(records, spans);
-        this.enrichOpenClawToolAttributes(records, spans);
-        this.enrichOpenClawLlmAttributes(records, spans);
-      }
-      if (agentType === 'claude-code') {
-        this.enrichClaudeCodeLlmAttributes(records, spans);
-      }
-      if (agentType === 'grok-build') {
-        this.enrichGrokBuildSpans(records, spans, grokMetadata);
-      }
-
-      spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
-      const exportState = this.getOrCreateExportState(agentType, serviceName);
-
-      if (this.cfg.debug) {
-        await this.writeDebugLog(agentType, spans);
-      }
-
-      await this.exportInBatches(exportState, agentType, spans);
+      return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity);
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
+      return false;
     } finally {
       convertState.active -= 1;
       this.evictConvertStates();
+    }
+  }
+
+  /** The same enrichment and fan-out contract for batch and streamed spans. */
+  private async exportConvertedSpans(
+    agentType: string,
+    serviceName: string,
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+    grokMetadata: GrokConversionMetadata,
+    openClawIdentity: OpenClawIdentityMetadata,
+    reasoning?: { seen: boolean; total: number },
+  ): Promise<boolean> {
+    if (spans.length === 0) return true;
+    applyQoderWorkStepTiming(records, spans);
+    this.enrichToolSkillAttributes(records, spans);
+    this.enrichMultimodalAttributes(records, spans);
+    if (agentType === 'openclaw') {
+      this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
+      this.enrichOpenClawSessionKey(records, spans);
+      this.enrichOpenClawToolAttributes(records, spans);
+      this.enrichOpenClawLlmAttributes(records, spans);
+      if (reasoning) {
+        for (const span of spans) {
+          const value = span.attributes['gen_ai.usage.reasoning_tokens'];
+          if (span.attributes['gen_ai.span.kind'] === 'LLM' && typeof value === 'number') {
+            reasoning.seen = true;
+            reasoning.total += value;
+          }
+        }
+        if (reasoning.seen) {
+          for (const span of spans) {
+            if (span.attributes['gen_ai.span.kind'] === 'AGENT') span.attributes['gen_ai.usage.reasoning_tokens'] = reasoning.total;
+          }
+        }
+      }
+    }
+    if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
+    if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (agentType === 'doubao-work') {
+      this.enrichDoubaoWorkSpans(records, spans);
+      enrichDoubaoClientRequest(records, spans);
+    }
+
+    spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
+    this.patchCopilotCustomAttributes(spans, records);
+
+    const exportState = this.getOrCreateExportState(agentType, serviceName);
+
+    if (this.cfg.debug) await this.writeDebugLog(agentType, spans);
+
+    return this.exportInBatches(exportState, agentType, spans);
+  }
+
+  private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const terminal = [...records].reverse().find(record => record['gen_ai.turn.end'] === true);
+    const outcome = terminal?.['loongsuite.doubao_work.client_outcome'];
+    const hasUpstreamParent = records.some(record => record['event.name'] === 'other'
+      && typeof record.parent_span_id === 'string'
+      && /^[0-9a-f]{16}$/.test(record.parent_span_id)
+      && !/^0+$/.test(record.parent_span_id));
+    for (const span of spans) {
+      const kind = span.attributes['gen_ai.span.kind'];
+      if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
+      span.attributes['gen_ai.framework'] = 'doubao-work';
+      for (const key of ['loongsuite.doubao_work.selected_skills', 'loongsuite.doubao_work.selected_partners']) {
+        const values = terminal?.[key];
+        if (Array.isArray(values) && values.length <= 32 && values.every(value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,256}$/.test(value))) span.attributes[key] = values as string[];
+      }
+      // util beta.13 preserves trace_id via a virtual parent. A locally
+      // identified turn has no external parent; retain only explicit linking.
+      if (kind === 'ENTRY' && !hasUpstreamParent) {
+        Object.assign(span, { parentSpanId: undefined });
+      }
+      // A received reply (including capacity/entitlement notices) says nothing
+      // about business success. No native model finish reason is synthesized.
+      const failed = outcome === 'error' || outcome === 'cancelled';
+      Object.assign(span.status, { code: failed ? SpanStatusCode.ERROR : SpanStatusCode.UNSET });
+      if (failed) {
+        span.attributes['error.type'] = outcome === 'cancelled'
+          ? 'doubao.client_request_cancelled' : 'doubao.client_request_failed';
+      }
     }
   }
 
@@ -1187,7 +1640,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     exportState: AgentExportState,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const maxBytes = this.cfg.maxExportBatchBytes ?? DEFAULT_MAX_EXPORT_BATCH_BYTES;
     const batches: ReadableSpan[][] = [];
     let current: ReadableSpan[] = [];
@@ -1212,11 +1665,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // Fan out per-endpoint in parallel: each backend drains its own batches
     // sequentially, but backends run concurrently — so a slow/hung backend
     // only delays itself, not the healthy ones (no head-of-line blocking).
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       exportState.exporters.map(({ name, exporter }) =>
         this.exportBatchesToEndpoint(exporter, name, agentType, batches),
       ),
     );
+    return results.every(result => result.status === 'fulfilled' && result.value);
   }
 
   private async exportBatchesToEndpoint(
@@ -1224,10 +1678,12 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     batches: ReadableSpan[][],
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let succeeded = true;
     for (const batch of batches) {
-      await this.doExport(exporter, endpointName, agentType, batch);
+      if (!await this.doExport(exporter, endpointName, agentType, batch)) succeeded = false;
     }
+    return succeeded;
   }
 
   private doExport(
@@ -1235,7 +1691,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     endpointName: string,
     agentType: string,
     spans: ReadableSpan[],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const counter = this.endpointCounters.get(endpointName);
     const startMs = Date.now();
     // Sized once and reused on the success path: in and out must measure the
@@ -1248,29 +1704,180 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (!counter.startTime) counter.startTime = formatTime(new Date());
     }
     // Never rejects: a failing backend is isolated + persisted, not propagated.
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       exporter.export(spans, (result) => {
         if (counter) counter.totalDelayMs += Date.now() - startMs;
         if (result.code !== ExportResultCode.SUCCESS) {
           if (counter) counter.outFailed += spans.length;
           const errMsg = result.error?.message ?? 'unknown export error';
           logger.warn(`Export failed for ${agentType} → ${endpointName}: ${errMsg}`);
-          this.writeFailedLog(agentType, endpointName, spans, {
+          // Keep failed persistence within the same bounded batch lifetime.
+          // A fast-failing endpoint must not enqueue an entire turn of strings
+          // behind asynchronous file writes and recreate the memory spike.
+          void this.writeFailedLog(agentType, endpointName, spans, {
             code: result.code,
             message: errMsg,
-          }).catch(() => undefined);
+          }).catch(() => undefined).then(() => resolve(false));
+          return;
         } else if (counter) {
           counter.outSpans += spans.length;
           counter.outBytes += batchBytes;
           counter.lastFlushTime = formatTime(new Date());
         }
-        resolve();
+        resolve(result.code === ExportResultCode.SUCCESS);
       });
     });
   }
 
   getEndpointCounters(): Map<string, OtlpEndpointCounter> {
     return this.endpointCounters;
+  }
+
+  /**
+   * Copy Copilot-specific custom attributes from input records onto the
+   * auto-created ENTRY and LLM spans.
+   *
+   * The otel-util-genai converter creates ENTRY/AGENT/STEP/LLM/TOOL spans
+   * automatically from records, but `buildEntryInvocation` and
+   * `buildLlmInvocation` do not extract Copilot's session-level usage fields
+   * (`gen_ai.session.usage.*`, `gen_ai.session.abort.reason`,
+   * `gen_ai.session.total_premium_requests`, `gen_ai.session.code_changes.*`)
+   * or `gen_ai.llm.reasoning.text` from records — so they never reach the
+   * span attributes via the standard conversion path. Patch them here.
+   *
+   * ENTRY spans are matched by kind=SERVER + name="enter_ai_application_system".
+   * For multi-turn sessions the converter emits one ENTRY per turn group; we
+   * apply session-level fields to ALL of them (they share the same session).
+   *
+   * LLM spans are matched by `gen_ai.response.id` between record and span.
+   */
+  private patchCopilotCustomAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
+    records = records.filter(record => record['gen_ai.agent.type'] === 'copilot');
+    if (!records.length) return;
+    const interactionError = records.find(r => r['gen_ai.copilot.interaction.error'])?.['gen_ai.copilot.interaction.error'];
+    if (interactionError) for (const span of spans) {
+      if (span.attributes['gen_ai.operation.name'] === 'invoke_agent') {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = interactionError;
+      }
+    }
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response' || !record['error.type']) continue;
+      const span = spans.find(s => s.attributes['gen_ai.response.id'] === record['gen_ai.response.id']);
+      if (span) {
+        (span as any).status = { code: 2 };
+        (span.attributes as Record<string, unknown>)['error.type'] = record['error.type'];
+      }
+    }
+    const ENTRY_ATTR_KEYS = [
+      'gen_ai.session.usage.input_tokens',
+      'gen_ai.session.usage.output_tokens',
+      'gen_ai.session.usage.cache_read.input_tokens',
+      'gen_ai.session.usage.cache_creation.input_tokens',
+      'gen_ai.session.usage.reasoning_tokens',
+      'gen_ai.session.usage.total_api_duration_ms',
+      'gen_ai.session.abort.reason',
+      'gen_ai.session.total_premium_requests',
+      'gen_ai.session.conversation_tokens',
+      'gen_ai.session.code_changes.lines_added',
+      'gen_ai.session.code_changes.lines_removed',
+      'gen_ai.session.code_changes.files_modified',
+      'gen_ai.session.current_model',
+      'gen_ai.session.resolved_model',
+    ];
+
+    // Find the session-level carrier record (ENTRY record emitted by Copilot
+    // transcript-parser — event.name='other' with session-level fields).
+    const entryRecord = records.find(r =>
+      (r as Record<string, unknown>)['gen_ai.session.usage.input_tokens'] !== undefined
+      || (r as Record<string, unknown>)['gen_ai.session.abort.reason'] !== undefined
+    );
+
+    if (entryRecord) {
+      const entrySpans = spans.filter(s =>
+        s.kind === SpanKind.SERVER && s.name === 'enter_ai_application_system'
+      );
+      for (const span of entrySpans) {
+        for (const key of ENTRY_ATTR_KEYS) {
+          const v = (entryRecord as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
+
+    // LLM: copy gen_ai.llm.reasoning.text + gen_ai.input.messages from
+    // llm.response records onto the matching LLM span (matched by
+    // gen_ai.response.id). The converter passes output.messages through but
+    // drops input.messages on the standard LLM attribute path, so we reattach
+    // it here.
+    const llmRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'llm.response'
+      && (
+        typeof (r as Record<string, unknown>)['gen_ai.llm.reasoning.text'] === 'string'
+        || typeof (r as Record<string, unknown>)['gen_ai.input.messages'] === 'string'
+      )
+    );
+    if (llmRecords.length > 0) {
+      const llmSpans = spans.filter(s => s.kind === SpanKind.CLIENT);
+      for (const rec of llmRecords) {
+        const respId = (rec as Record<string, unknown>)['gen_ai.response.id'];
+        if (typeof respId !== 'string' || !respId) continue;
+        const span = llmSpans.find(s => s.attributes['gen_ai.response.id'] === respId);
+        if (!span) continue;
+        const reasoning = (rec as Record<string, unknown>)['gen_ai.llm.reasoning.text'];
+        if (typeof reasoning === 'string') {
+          (span.attributes as Record<string, unknown>)['gen_ai.llm.reasoning.text'] = reasoning;
+        }
+        const inputMsgs = (rec as Record<string, unknown>)['gen_ai.input.messages'];
+        if (typeof inputMsgs === 'string' && inputMsgs.length > 0) {
+          (span.attributes as Record<string, unknown>)['gen_ai.input.messages'] = inputMsgs;
+        }
+      }
+    }
+
+    // TOOL: copy gen_ai.tool.success / error.code / error.message /
+    // permission.* from tool.result records onto the matching TOOL span
+    // (matched by gen_ai.tool.call.id). The converter's
+    // applyExecuteToolFinishAttributes only sets standard fields
+    // (gen_ai.tool.call.id / gen_ai.tool.name / gen_ai.tool.call.arguments /
+    // gen_ai.tool.call.result) — it does not propagate Copilot's
+    // permission/denied-state fields. Without this patch, scenario B
+    // (permission denied) TOOL spans lose success/error context.
+    const toolResultRecords = records.filter(r =>
+      (r as Record<string, unknown>)['event.name'] === 'tool.result'
+    );
+    if (toolResultRecords.length > 0) {
+      const toolSpans = spans.filter(s => s.kind === SpanKind.INTERNAL
+        && typeof s.attributes['gen_ai.tool.call.id'] === 'string');
+      const TOOL_ATTR_KEYS = [
+        'gen_ai.tool.success',
+        'error.code',
+        'error.message',
+        'permission.result.kind',
+        'permission.decision_source',
+      ];
+      for (const rec of toolResultRecords) {
+        const callId = (rec as Record<string, unknown>)['gen_ai.tool.call.id'];
+        if (typeof callId !== 'string' || !callId) continue;
+        const span = toolSpans.find(s => s.attributes['gen_ai.tool.call.id'] === callId);
+        if (!span) continue;
+        if (rec['gen_ai.tool.success'] === false) {
+          (span as any).status = { code: 2 };
+          (span.attributes as Record<string, unknown>)['error.type'] = rec['error.type'] || rec['error.code'] || 'tool_error';
+        }
+        for (const key of TOOL_ATTR_KEYS) {
+          const v = (rec as Record<string, unknown>)[key];
+          if (v !== undefined && v !== null) {
+            (span.attributes as Record<string, unknown>)[key] = v;
+          }
+        }
+      }
+    }
   }
 
   private getOrCreateConvertState(
@@ -1291,7 +1898,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
 
     const resource = this.buildResource(agentType, serviceName, projectedResourceAttributes, resourceIdentity);
-    const inMem = new InMemorySpanExporter();
+    // All compatible event shapes can stream. Batch fallback retains native
+    // forceFlush scheduling; only the stream invokes the explicit drain barrier.
+    const inMem = new DrainingInMemorySpanExporter();
     const idGenerator = new ReservedSpanIdGenerator();
     const provider = new BasicTracerProvider({
       resource,
@@ -1302,7 +1911,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const toolSpanIds = attachReservedToolSpanIds(handler, idGenerator);
     const llmSpanIds = attachReservedLlmSpanIds(handler, idGenerator);
 
-    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, active: 0 };
+    state = { provider, handler, inMem, toolSpanIds, llmSpanIds, idGenerator, active: 0 };
     this.agentConvertStates.set(key, state);
     this.evictConvertStates();
     return state;
@@ -1332,6 +1941,93 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (typeof callId !== 'string') continue;
       const attributes = attributesByCallId.get(callId);
       if (attributes) Object.assign(span.attributes, attributes);
+    }
+  }
+
+  private enrichMultimodalAttributes(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const responseIdByStep = new Map<string, string>();
+    for (const record of records) {
+      if (record['event.name'] !== 'llm.response') continue;
+      const stepId = record['gen_ai.step.id'];
+      const responseId = record['gen_ai.response.id'];
+      if (typeof stepId !== 'string' || stepId.length === 0) continue;
+      if (typeof responseId !== 'string' || responseId.length === 0) continue;
+      const prior = responseIdByStep.get(stepId);
+      responseIdByStep.set(stepId, prior === undefined || prior === responseId ? responseId : '');
+    }
+
+    const attributesByCallId = new Map<string, Record<string, string>>();
+    const attributesByResponseId = new Map<string, Record<string, string>>();
+    const deltaByTurnStart = new Map<string, string>();
+    for (const record of records) {
+      const name = record['event.name'];
+      let target: Map<string, Record<string, string>> | undefined;
+      let id: string | undefined;
+      if (name === 'tool.call' || name === 'tool.result') {
+        const callId = record['gen_ai.tool.call.id'];
+        if (typeof callId === 'string' && callId.length > 0) {
+          target = attributesByCallId;
+          id = callId;
+        }
+      } else if (name === 'llm.request' || name === 'llm.response') {
+        const responseId = record['gen_ai.response.id'];
+        const resolved = typeof responseId === 'string' && responseId.length > 0
+          ? responseId
+          : name === 'llm.request' && typeof record['gen_ai.step.id'] === 'string'
+            ? responseIdByStep.get(record['gen_ai.step.id'])
+            : undefined;
+        if (resolved) {
+          target = attributesByResponseId;
+          id = resolved;
+        } else if (name === 'llm.request') {
+          const turnKey = turnStartKey(record['gen_ai.turn.id'], eventTimeMs(record.time_unix_nano));
+          const delta = record['gen_ai.input.multimodal_metadata_delta'];
+          if (turnKey && delta != null && typeof delta === 'object') {
+            deltaByTurnStart.set(turnKey, JSON.stringify(delta));
+          }
+        }
+      }
+      if (!target || !id) continue;
+
+      const attributes = target.get(id) ?? {};
+      for (const key of MULTIMODAL_METADATA_KEYS) {
+        const value = record[key];
+        if (value == null || typeof value !== 'object') continue;
+        attributes[key] = JSON.stringify(value);
+      }
+      if (Object.keys(attributes).length > 0) target.set(id, attributes);
+    }
+
+    for (const span of spans) {
+      const kind = span.attributes['gen_ai.span.kind'];
+      const id = kind === 'TOOL'
+        ? span.attributes['gen_ai.tool.call.id']
+        : kind === 'LLM'
+          ? span.attributes['gen_ai.response.id']
+          : undefined;
+      if (typeof id === 'string' && id.length > 0) {
+        const attributes = (kind === 'TOOL' ? attributesByCallId : attributesByResponseId).get(id);
+        if (attributes) Object.assign(span.attributes, attributes);
+      } else if (kind === 'LLM') {
+        const turnKey = turnStartKey(span.attributes['gen_ai.turn.id'], spanStartTimeMs(span));
+        const delta = turnKey && deltaByTurnStart.get(turnKey);
+        if (delta) span.attributes['gen_ai.input.multimodal_metadata_delta'] = delta;
+      }
+      if (kind !== 'LLM') continue;
+      // Span input.messages is the accumulated turn; the copied field is only this record.
+      for (const [messagesKey, metadataKey] of [
+        ['gen_ai.input.messages', 'gen_ai.input.multimodal_metadata'],
+        ['gen_ai.output.messages', 'gen_ai.output.multimodal_metadata'],
+      ] as const) {
+        const messages = messageListAttribute(span.attributes[messagesKey]);
+        if (!messages) continue;
+        const items = multimodalMetadataItemsFromMessages(messages);
+        if (items.length === 0) delete span.attributes[metadataKey];
+        else span.attributes[metadataKey] = JSON.stringify(items);
+      }
     }
   }
 
@@ -1887,7 +2583,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const filepath = path.join(dir, filename);
       const jsonLines = createReadableSpanToOtlpSpanJsonArray(spans);
       for (const line of jsonLines) {
-        await appendLine(filepath, line);
+        await appendSegmentedJsonl(filepath, line);
       }
     } catch (err) {
       logger.warn('Debug log write failed (non-blocking)', { err: String(err) });
@@ -1912,7 +2608,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       for (const line of jsonLines) {
         const obj = JSON.parse(line);
         obj._error = error;
-        await appendLine(filepath, JSON.stringify(obj));
+        await appendSegmentedJsonl(filepath, JSON.stringify(obj), DEFAULT_JSONL_SEGMENT_BYTES, 'failed');
       }
     } catch (err) {
       logger.warn('Failed-log write failed', { err: String(err) });
@@ -1921,10 +2617,36 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0) return;
+    if (timeout <= 0 || this.batchDepth > 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
       if (!buf.completed && now - buf.lastActivityMs > timeout) {
+        if (buf.hasHermesNativeRunObserver) {
+          // Idleness does not prove native completion. Sealing here puts the
+          // key in flushedTurnKeys and discards later tools/model responses.
+          // Retain this turn under the existing buffer cap and expose its age
+          // via the runtime snapshot. Diagnose this setting once per flusher.
+          if (!this.warnedHermesIdleTimeout) {
+            this.warnedHermesIdleTimeout = true;
+            logger.warn('Ignoring idle timeout for realtime Hermes turns; waiting for native completion', {
+              turnIdleTimeoutMs: timeout,
+              pendingRecords: buf.records.length,
+              bufferAgeMs: Math.max(0, performance.now() - buf.openedAtMs),
+            });
+          }
+          continue;
+        }
+        if (buf.isRealtimeHermes && !this.warnedHermesLegacyIdleTimeout) {
+          this.warnedHermesLegacyIdleTimeout = true;
+          logger.warn('Realtime Hermes turn lacks native completion capability; applying legacy idle timeout. Restart Hermes after updating the plugin', {
+            turnIdleTimeoutMs: timeout,
+          });
+        }
+        if (buf.agentType === 'codex' && this.codexJournal) {
+          this.turnBuffers.delete(buf.key);
+          this.recordBufferRemoval(buf);
+          continue;
+        }
         buf.completed = true;
         this.triggerFlush(buf);
       }

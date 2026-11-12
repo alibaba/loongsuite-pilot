@@ -1,5 +1,11 @@
 # Hermes / OpenClaw 子 Agent Trace
 
+完整的目标数据模型、各适配器现状及标准审计日志要求见[子 Agent 数据模型与采集设计](subagent-data-model.md)。
+本文记录 Hermes/OpenClaw 已有的 Trace 实现与历史验证，不代表标准 invoke/result 日志已经全部实现。
+
+Codex 现已在源码中采用独立子轮次与委派 invocation 模型；其关联来源、迁移与验证边界
+单独记录在[Codex 验证记录](codex-subagent-verification.md)，不外推为本文两个适配器已补齐标准审计日志。
+
 已确认派生关系的子 Agent 与发起工具使用同一 Trace，结构为
 `主 AGENT → 派生 TOOL → 子 AGENT → STEP → LLM/TOOL`。
 子运行保留自己的 `gen_ai.session.id` 和 `gen_ai.turn.id`，不额外生成 ENTRY。

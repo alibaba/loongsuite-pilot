@@ -4,6 +4,7 @@ import { createLogger } from '../utils/logger.js';
 import { flattenToStrings } from '../utils/record-utils.js';
 import { sendAlarm, sendRunningStatus, sendStatus } from '../internal/sender.js';
 import { MetricsCollector } from './metrics-collector.js';
+import { HookMetricsSpool } from './hook-metrics-spool.js';
 import { DISK_USAGE_STALE_MS, DiskUsageSampler } from './disk-usage-sampler.js';
 import type { DiskUsageSnapshot } from './disk-usage-sampler.js';
 import type { DataflowSnapshot, L1Metrics } from './metrics-collector.js';
@@ -53,6 +54,7 @@ export interface MetricsWriterOptions {
 export class MetricsWriter {
   private readonly logsDir: string;
   private readonly collector: MetricsCollector;
+  private readonly hookMetricsSpool: HookMetricsSpool;
   private readonly diskUsageSampler: DiskUsageSampler;
   private readonly getSnapshot: () => DataflowSnapshot;
   private readonly getTraceRuntimeSnapshot?: () => TraceRuntimeSnapshot[];
@@ -86,6 +88,7 @@ export class MetricsWriter {
       autoUpdateEnabled: opts.autoUpdateEnabled,
       updaterLiveness: opts.updaterLiveness,
     });
+    this.hookMetricsSpool = new HookMetricsSpool(opts.dataDir);
     this.getSnapshot = opts.getSnapshot;
     this.getTraceRuntimeSnapshot = opts.getTraceRuntimeSnapshot;
     this.alarmManager = opts.alarmManager ?? null;
@@ -456,15 +459,16 @@ export class MetricsWriter {
     try {
       const snapshot = sharedSnapshot ?? this.getSnapshot();
 
-      // One cycle, three row types on the same topic. They share one snapshot
-      // and one drain, so input maxima and flow deltas describe the same window.
-      const l2 = this.collector.collectL2(snapshot);
+      // Four detail types are produced in the same cycle; hook samples are merged by
+      // consumption cycle and leave the input window stats untouched.
+      const l2 = this.collector.collectL2(snapshot, this.hookMetricsSpool.drain());
       if (l2) {
         // Same as L1: the collect drained the counters, so send first and let the
         // local mirror be the thing that can fail.
         for (const row of l2.agents) sendStatus('pilot_pipeline', flattenToStrings(row));
         for (const row of l2.inputs) sendStatus('pilot_pipeline', flattenToStrings(row));
         for (const row of l2.flushers) sendStatus('pilot_pipeline', flattenToStrings(row));
+        for (const row of l2.hooks) sendStatus('pilot_pipeline', flattenToStrings(row));
 
         for (const row of l2.agents) {
           await appendLine(
@@ -481,6 +485,12 @@ export class MetricsWriter {
         for (const row of l2.flushers) {
           await appendLine(
             path.join(this.logsDir, `pilot-flusher-metrics-${getTodayDateString()}.jsonl`),
+            JSON.stringify(row),
+          );
+        }
+        for (const row of l2.hooks) {
+          await appendLine(
+            path.join(this.logsDir, `pilot-hook-metrics-${getTodayDateString()}.jsonl`),
             JSON.stringify(row),
           );
         }

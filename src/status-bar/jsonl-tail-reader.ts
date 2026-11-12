@@ -9,6 +9,7 @@ export interface JsonlTailScanResult {
 
 export interface JsonlTailScanOptions {
   chunkSizeBytes?: number;
+  expectedFileIdentity?: { dev: number; ino: number; birthtimeMs: number };
   onRecord: (record: Record<string, unknown>) => void;
 }
 
@@ -35,6 +36,13 @@ export async function scanJsonlTail(
   let carry = Buffer.alloc(0);
 
   try {
+    if (options.expectedFileIdentity) {
+      const actual = await handle.stat();
+      const expected = options.expectedFileIdentity;
+      if (actual.dev !== expected.dev || actual.ino !== expected.ino || actual.birthtimeMs !== expected.birthtimeMs) {
+        throw new Error('JSONL file identity changed before scan');
+      }
+    }
     while (readOffset < endOffset) {
       const requestedBytes = Math.min(chunkSize, endOffset - readOffset);
       const chunk = Buffer.allocUnsafe(requestedBytes);

@@ -4,7 +4,7 @@
 
 > **实验性。** 多模态配置与事件字段可能调整。
 
-LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图像：内联 base64 或本地路径读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留图像内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
+LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（图像的内联 base64 或本地路径，以及本地视频路径，读入后编码）在写时转为对象存储 `uri`，异步上传到 OSS 或 SLS PutObject，并在规范化事件中附带摘要字段。适用于需要保留媒体内容供下游分析，又不希望把巨大 base64 写进 JSONL 的场景。
 
 `agents.<id>.multimodal.uploadMode` 决定是否、以及在哪些表面上把多模态转为 `uri`。历史 `captureMessageContent` 配置不会关闭消息或多模态内容上报。
 
@@ -14,9 +14,19 @@ LoongSuite Pilot 可以把 Agent 消息/工具结果中的媒体（当前为图�
 
 | 项 | 现状 |
 |----|------|
-| 媒体类型 | **仅图像**。音频、视频等后续再支持。 |
-| 已实现 Agent | **`codex`**、**`qoder`（IDE 与 CLI）**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
-| 判定依据 | 因 Agent 而异：Codex 依赖 transcript 内联 base64；Qoder IDE 依赖 SQLite 附件路径与 transcript/工具结果中的图像路径；Qoder CLI 依赖 transcript 中的本地路径（粘贴/`@`/Read/ImageGen），读盘后转 `uri`。 |
+| 媒体类型 | **图像**和**视频**。音频后续再支持。 |
+| 已实现 Agent | **`codex`**、**`qoder`（IDE 与 CLI）**、**`qwen-work-cn`**。其他 Agent 即使配置了 `uploadMode` 也不会转换或上传。 |
+
+### 判定依据
+
+各 Agent 的图片从哪来。开启后实际采哪些表面，见 [各 Agent 采集内容](#各-agent-采集内容)。
+
+| Agent | 来源 | 形态 |
+|-------|------|------|
+| Codex | transcript | 内联 base64 data-URL |
+| Qoder IDE | SQLite 附件；transcript | 本地路径 |
+| Qoder CLI | transcript | 本地路径（粘贴 / `@` / Read / ImageGen），读盘后转 `uri` |
+| 千问办公 | transcript | 本地路径（粘贴标签、`Read`、`qwenwork_media_read`、生成与展示工具） |
 
 ## 如何开启
 
@@ -80,7 +90,7 @@ loongsuite-pilot restart
 
 ## allowedRootPaths
 
-`pathToUri` 只读取允许根内的文件。配置在 `agents.<id>.multimodal.allowedRootPaths`，与 **该 Agent 自己的默认根合并**（不是替换）。默认根写在各 Agent Input 上（`QoderTraceInput`、`CodexTranscriptInput`）；由 Input 自己合并用户配置并做一次规范化（`~` 展开、`realpath`），`multimodal` 只校验合并后的列表。
+`pathToUri` 只读取允许根内的文件。配置在 `agents.<id>.multimodal.allowedRootPaths`，与 **该 Agent 自己的默认根合并**（不是替换）。默认根写在各 Agent Input 上（`QoderTraceInput`、`CodexTranscriptInput`、`QwenWorkCNTraceInput`）；由 Input 自己合并用户配置并做一次规范化（`~` 展开、`realpath`），`multimodal` 只校验合并后的列表。
 
 提取器仍会用 `agent.qoder.cwd` 拼相对 `@` / Read 路径，但 **不会** 自动把 cwd 加进允许根。工作区或 `~/Documents` 等目录需要写进 `allowedRootPaths`。
 
@@ -88,8 +98,9 @@ loongsuite-pilot restart
 |-------|--------|
 | `qoder` | `~/.qoder/tmp`（CLI 粘贴）、`~/.qoder/vibe_images`（ImageGen），以及桌面 IDE 粘贴缓存 `…/Qoder/SharedClientCache/cache/images`（`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`；远端 Linux hashed profile 是 `<appRoot>/<hash>/SharedClientCache/cache/images`）。 |
 | `codex` | `~/.codex`（预留；Codex 目前走内联 base64，不读盘）。 |
+| `qwen-work-cn` | `~/.qwenworkcn/workspace`（剪贴板粘贴的 `uploads/`）、`~/.qwenworkcn/tmp`。 |
 
-UNC/设备路径、符号链接、非图片 magic 都会跳过。本地路径一律按文件系统路径处理；图片后缀后的 URL query（例如 markdown 里的 `a.png?x=1`）不会剥掉，`pathToUri` 不会回退到 `a.png`。
+UNC/设备路径、符号链接都会跳过。图片后缀只认图片文件头，认不出就跳过。视频后缀 `.mp4`、`.mov`、`.m4v`、`.3gp`、`.3g2` 要有偏移 4 处的 `ftyp`，且 major brand 不是 `M4A `、`M4B `、`M4P `；`.webm`、`.mkv` 要有 EBML 头；`.avi` 要有 `RIFF` 且偏移 8 为 `AVI `。后缀和文件头不是同一族就跳过。本地路径一律按文件系统路径处理；后缀后的 URL query（例如 markdown 里的 `a.png?x=1`）不会剥掉，`pathToUri` 不会回退到去掉 query 的路径。
 
 ## 各 Agent 采集内容
 
@@ -99,6 +110,7 @@ UNC/设备路径、符号链接、非图片 magic 都会跳过。本地路径一
 |-------|----------|----------|
 | `codex` | 是 | 见下方 [Codex](#codex)。 |
 | `qoder` | 是 | 见下方 [Qoder IDE](#qoder-ide) 与 [Qoder CLI](#qoder-cli)。 |
+| `qwen-work-cn` | 是 | 见下方 [千问办公](#千问办公)。 |
 | 其他 | 否 | 配置 `uploadMode` 目前无效，等待对应 extractor 落地。 |
 
 ### Codex
@@ -123,7 +135,7 @@ Qoder IDE（`qoder`）在 `qoder-trace` 采集路径上，于 IDE token 富化�
 | `uploadMode` | Qoder IDE 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | SQLite `chat_record.extra.attachedImagePaths`（及 context 中的 image）；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；Read 读图、ImageGen 生成图 |
+| `input` | 从 SQLite 读取；`tool.result` 文本中的 `Image file: <path>` 或 ImageGen `absolute path of the image is: <path>` | 粘贴 / @ 图像；引用视频文件；Read 读图、ImageGen 生成图 |
 | `output` | `llm.response` 的 `gen_ai.output.messages` 文本中的 `![...](path)`（图像扩展名）；`tool.call` 中的图片 `file_path` | 助手回复中嵌入已读/生成图；按路径 Read 读图 |
 | `all` | 以上全部 | 覆盖附件、工具读图/生成与输出展示 |
 
@@ -139,7 +151,7 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 | `uploadMode` | Qoder CLI 采集表面 | 典型用户操作 / 事件 |
 |--------------|--------------------|---------------------|
 | `none` | 不转换 | — |
-| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
+| `input` | 合并 `agent.qoder.attachments[].filename`、`[Image: source: <path>]`、`@path`（相对路径拼 `agent.qoder.cwd`）、`文件：<image 或 video path>`（CLI 1.1.61 粘贴引用），再按解析后路径去重；以及 `tool.result` 中的 `Read image: <path>`、`Image file: <path>`、ImageGen `absolute path of the image is: <path>` | 粘贴图像、`@` / `--attachment`；文本里给路径后由 Read 读图；ImageGen 生成后再 Read 预览 |
 | `output` | `tool.call` 中的图片 `file_path` | 文本里给路径后由 Read 读图；查找后再 Read |
 | `all` | 用户附件、工具结果图与工具调用路径 | 覆盖粘贴/`@` 与工具读图/生成 |
 
@@ -148,6 +160,25 @@ Qoder CLI（`qoder-cli`，配置键仍为 `agents.qoder.multimodal`）走同一�
 - 仅 Glob 列出、未实际 `Read`/`ImageGen` 的路径不会采集。
 - OSS 预签名/匿名 URL 不作为采集源；以本地路径 `pathToUri` 为准。
 - CLI（1.1.29）会在 transcript 写入 `type: "attachment"` / `image_file.filename`（本地绝对路径）。Hook 只把本轮 `image_file` 原样拷到 `agent.qoder.attachments`；Input 把它和 `[Image: source:]` / `@` 一起提取、解析后去重，出站前丢掉这个载体字段。
+
+### 千问办公
+
+千问办公（`qwen-work-cn`）在 `qwen-work-cn-trace` 上、turn 富化之后做写时转换。配置键为 `agents.qwen-work-cn.multimodal`。Hook 不改。用户粘贴和工具里的本地图片、视频路径转成 `uri`。失败 fail-open。
+
+| `uploadMode` | 千问办公采集表面 | 典型用户操作 / 事件 |
+|--------------|------------------|---------------------|
+| `none` | 不转换 | — |
+| `input` | 用户消息里的粘贴标签；`qwenwork_media_read` 结果的 `data.files[].source`（`kind` 为 `image` 或 `video`）；`qwenwork_media_task` 在 `status` 为 `completed` 时的 `files`；`qwenwork_file_present_files` 结果的 `artifacts[].filePath` | 粘贴、选择、拖入；模型找图或读视频；生成完成并展示 |
+| `output` | `Read` 的 `file_path`；`qwenwork_media_read` 调用的 `files`；`qwenwork_file_present_files` 调用的 `files[].file_path` | 消息里写路径后由 Read 读取；模型找图或读视频；把已生成文件交给界面 |
+| `all` | 以上全部 | 覆盖粘贴、读图和生成 |
+
+注意：
+
+- `qwenwork_image_generate` 或 `qwenwork_video_generate` 的 `pending` 结果、`qwenwork_media_task` 调用里的 `output_name`、`mcp_workspace_bash` 的命令文本、只写文件名且没有读取的文本，都不取。
+- `qwenwork_media_read` 结果里缺 `kind`，或 `kind` 不是 `image` / `video` 的项不取。
+- 展示结果里的 `uri` 和 `originalUri` 与 `filePath` 是同一路径，只取 `filePath`。
+- OSS URL 不作为采集源。
+- 会话目录里的选择、拖入、Read、找图和生成文件要能读盘，需要写进 `allowedRootPaths`。
 
 ## 输出形态（简述）
 

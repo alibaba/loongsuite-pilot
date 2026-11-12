@@ -13,9 +13,10 @@
       "~/.config/opencode/opencode.json",
       "~/.config/opencode/config.json"
     ],
-    "pluginSpec": "file://$PILOT_DATA/plugins/opencode/plugin.mjs",
+    "pluginSpec": "file://$PILOT_DATA/plugins/opencode",
     "pluginId": "loongsuite-pilot-opencode",
     "replaceSpecs": [
+      "file://$PILOT_DATA/plugins/opencode/plugin.mjs",
       "loongsuite-pilot-opencode",
       "loongsuite-pilot-opencode-smoke"
     ]

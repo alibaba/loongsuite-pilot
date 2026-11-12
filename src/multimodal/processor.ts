@@ -5,22 +5,27 @@ import {
   extFromMime,
   isRealPathInsideRoots,
   joinStorageUri,
-  lstatRegularImageFile,
-  normalizeLocalImagePath,
-  openNormalizedLocalImage,
+  lstatRegularFile,
+  modalityFromMime,
+  normalizeLocalMediaPath,
+  openNormalizedLocalMedia,
   yyyymmddFromUnixMs,
 } from './resolve.js';
+import type { BoundLogger } from '../utils/logger.js';
 import type {
   BlobToUriParams,
+  PathToUriFn,
   PathToUriOptions,
   StorageBaseResult,
   Uploader,
   UriConvertMeta,
+  UriPart,
   UriResult,
 } from './types.js';
 import {
   MAX_MULTIMODAL_BASE64_CHARS,
   MAX_MULTIMODAL_DATA_SIZE,
+  MAX_MULTIMODAL_PARTS,
   MAX_MULTIMODAL_PATH_INFLIGHT,
   MAX_MULTIMODAL_PENDING_BYTES,
   MAX_MULTIMODAL_PENDING_UPLOADS,
@@ -30,6 +35,59 @@ import {
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './uploader/lru-set.js';
 
 const logger = createLogger('MultimodalProcessor');
+
+/**
+ * Turn local paths into uri parts.
+ * The cap counts attempts, not successes. One pathToUri can block until its
+ * read deadline, so ten tries is the bound for a single carrier. Callers
+ * drop non-media paths first; those must not spend an attempt.
+ */
+export async function convertPathsToUriParts(
+  paths: string[],
+  pathToUri: PathToUriFn,
+  timeMs: number,
+  stats: { skipped: number },
+  log: Pick<BoundLogger, 'debug' | 'warn'> = logger,
+): Promise<UriPart[]> {
+  const parts: UriPart[] = [];
+  const seen = new Set<string>();
+  let attempted = 0;
+  for (let i = 0; i < paths.length; i++) {
+    const trimmed = paths[i]?.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    if (attempted >= MAX_MULTIMODAL_PARTS) {
+      const leftover = paths.length - i;
+      stats.skipped += leftover;
+      log.debug('multimodal attempt cap reached', { attempted, leftover });
+      break;
+    }
+    seen.add(trimmed);
+    attempted += 1;
+    let result: Awaited<ReturnType<PathToUriFn>>;
+    try {
+      result = await pathToUri(trimmed, timeMs);
+    } catch (err) {
+      stats.skipped += 1;
+      log.warn('multimodal pathToUri threw; skipping path', {
+        error: String(err),
+        path: trimmed,
+      });
+      continue;
+    }
+    if (!result) {
+      stats.skipped += 1;
+      continue;
+    }
+    parts.push({
+      type: 'uri',
+      mime_type: result.mime_type,
+      modality: result.modality,
+      uri: result.uri,
+    });
+  }
+  return parts;
+}
+
 const DELEGATED_OSS_RETRY_BASE_MS = 1_000;
 const DELEGATED_OSS_RETRY_MAX_MS = 60_000;
 const DELEGATED_OSS_MISMATCH_REDISCOVERY_INTERVAL_MS = 60_000;
@@ -155,7 +213,7 @@ export class MultimodalProcessor {
     token: { timedOut: boolean } = { timedOut: false },
     signal?: AbortSignal,
   ): Promise<UriResult | null> {
-    const key = normalizeLocalImagePath(filePath);
+    const key = normalizeLocalMediaPath(filePath);
     if (!key) return null;
 
     const roots = (opts?.allowedRootPaths ?? []).map(r => r.trim()).filter(Boolean);
@@ -164,7 +222,7 @@ export class MultimodalProcessor {
       return null;
     }
 
-    const stated = await lstatRegularImageFile(key, signal);
+    const stated = await lstatRegularFile(key, signal);
     if (!stated) {
       if (!signal?.aborted) logger.warn('multimodal file read failed', { path: key });
       return null;
@@ -198,7 +256,7 @@ export class MultimodalProcessor {
 
     const pending = (async (): Promise<UriResult | null> => {
       try {
-        const loaded = await openNormalizedLocalImage(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
+        const loaded = await openNormalizedLocalMedia(key, MAX_MULTIMODAL_DATA_SIZE, roots, signal);
         if (!loaded || token.timedOut) {
           if (!loaded && !token.timedOut) logger.warn('multimodal file read failed', { path: key });
           return null;
@@ -215,7 +273,7 @@ export class MultimodalProcessor {
 
         const result = this.bytesToUri(loaded.bytes, {
           mime_type: loaded.mime_type,
-          modality: 'image',
+          modality: modalityFromMime(loaded.mime_type),
           ...(typeof timeUnixMs === 'number' && Number.isFinite(timeUnixMs) && timeUnixMs > 0
             ? { time_unix_ms: timeUnixMs }
             : {}),

@@ -18,6 +18,7 @@ export enum ClientType {
   LingmaVscode = 'lingma-vscode',
   Wukong = 'wukong',
   WorkBuddy = 'workbuddy',
+  DoubaoWork = 'doubao-work',
 
   // CLI tools
   GeminiCli = 'gemini-cli',
@@ -42,6 +43,7 @@ export enum ClientType {
   GithubCopilotHook = 'github-copilot-hook',
   AoneCopilotHook = 'aone-copilot-hook',
   GrokBuildHook = 'grok-build',
+  CopilotCli = 'copilot',
   OpenCode = 'opencode',
   MimoCode = 'mimo-code',
   Hermes = 'hermes',

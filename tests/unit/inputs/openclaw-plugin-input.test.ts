@@ -180,10 +180,8 @@ describe('OpenClawPluginInput', () => {
     await input.start();
     await input.stop();
 
-    expect(entries).toHaveLength(2);
-    const modelResolve = entries.find(entry => entry['agent.openclaw.hook'] === 'before_model_resolve');
-    expect(modelResolve?.['gen_ai.input.messages']).toBeUndefined();
-    expect(modelResolve?.['gen_ai.input.messages_delta']).toBeUndefined();
+    expect(entries).toHaveLength(1);
+    expect(entries.some(entry => entry['agent.openclaw.hook'] === 'before_model_resolve')).toBe(false);
     const agentRun = entries.find(entry => entry['agent.openclaw.hook'] === 'before_agent_run');
     expect(agentRun?.['gen_ai.input.messages_delta']).toEqual(prompt);
     expect(agentRun?.['gen_ai.system_instructions']).toEqual([{ type: 'text', content: 'system prompt' }]);
