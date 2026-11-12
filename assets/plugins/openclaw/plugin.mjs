@@ -1258,8 +1258,11 @@ function handleAfterToolCall(event, ctx, userId, emit) {
         parent.childSessionId = retained.childSessionId;
         parent.resultIds = retained.resultIds;
       }
-      childContexts.write(details.runId, parent);
       const child = runs.get(details.runId);
+      if (child?.sessionId) parent.childSessionId = child.sessionId;
+      const work = run.delegations.get(event.toolCallId);
+      if (work && parent.childSessionId) work.childSessionId = parent.childSessionId;
+      childContexts.write(details.runId, parent);
       if (child) {
         child.auditParentContext = parent;
         if (!parent.auditOnly) releasePendingChild(child, parent);
@@ -1301,7 +1304,7 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   // A send may synchronously deliver a reply. Accepted/timeout is never success.
   if (work && ((event.toolName === "sessions_send" && details?.status === "ok" && typeof details.reply === "string")
     || isError || details?.status === "error" || details?.status === "forbidden")) {
-    const audit = auditRecord(common, work, "result", textMessages(details?.reply ?? errorMessage ?? details?.error, "assistant"));
+    const audit = auditRecord(common, work, "result", textMessages(details?.reply ?? errorMessage ?? details?.error, "assistant"), work.childSessionId);
     if (isError || ["error", "forbidden"].includes(details?.status)) audit["error.type"] = "agent_dispatch_error";
     if (!work.resultIds?.includes(audit["event.id"])) {
       if (emit(audit) !== false) work.resultIds = [...(work.resultIds || []), audit["event.id"]].slice(-32);

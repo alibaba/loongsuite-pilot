@@ -1502,6 +1502,25 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it('records the known peer when sessions_send returns after the child has already finished', async () => {
+    vi.useFakeTimers();
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'send-parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'send-child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:existing' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_send', toolCallId: 'send', params: { sessionKey: child.sessionKey, message: 'new work' } }, parent);
+    await h.before_agent_run({ prompt: 'new work' }, child);
+    await h.llm_output({}, child);
+    await h.after_tool_call({ toolName: 'sessions_send', toolCallId: 'send', result: { details: { status: 'ok', runId: child.runId, sessionKey: child.sessionKey, reply: 'delivered reply' } } }, parent);
+    const result = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.result');
+    expect(result['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    await vi.advanceTimersByTimeAsync(30_001);
+    const invoke = readOutputRecords().find(row => row['event.name'] === 'gen_ai.agent.invoke');
+    const childRows = readOutputRecords().filter(row => row['gen_ai.session.id'] === child.sessionId);
+    expect(childRows.length).toBeGreaterThan(0);
+    expect(childRows.every(row => row['gen_ai.agent.parent.invocation.id'] === invoke['gen_ai.agent.invocation.id'])).toBe(true);
+  });
+
   it('keeps nested work through native announcement run replacement without binding autonomous session reuse', async () => {
     let h = registerPlugin(await loadPlugin());
     const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
