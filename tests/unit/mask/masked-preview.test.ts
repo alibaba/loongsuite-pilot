@@ -90,6 +90,19 @@ describe('masked preview replacement mode', () => {
     );
   });
 
+  it.each([
+    'mysql://sk-1234567890abcdefghijklmnop:password@db.example/orders',
+    'mysql://user:password@db.example/sk-1234567890abcdefghijklmnop',
+  ])('falls back to a fixed marker when a database URL contains another detected secret', value => {
+    const defaultPlan = loadMaskPlan({ mode: 'all', types: [] });
+    for (const plan of [defaultPlan, previewPlan]) {
+      const masked = maskString(value, plan);
+      expect(masked).toBe('[DATABASEURL_MASKED]');
+      expect(masked).not.toContain(syntheticApiKey());
+      expect(maskString(masked, plan)).toBe(masked);
+    }
+  });
+
   it('builds previews for ID card, email, IPv4 and bank card', () => {
     const input = [
       '11010519491231002X',

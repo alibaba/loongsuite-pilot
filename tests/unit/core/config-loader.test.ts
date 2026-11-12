@@ -1634,6 +1634,23 @@ describe('ConfigLoader', () => {
       expect((await loadConfig()).mask.replacementMode).toBe('preview');
     });
 
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
     it('uses replacement mode env over config file', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {

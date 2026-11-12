@@ -606,7 +606,7 @@ describe('InputManager', () => {
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('configured-user');
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]{sk-1*********************mnop}' }] },
       ]);
       expect(dispatched['gen_ai.guardrail.action']).toBe('block');
       expect(dispatched.trace_id).toBeUndefined();
@@ -652,7 +652,7 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
       ]);
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });
@@ -676,7 +676,7 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['input.messages']).toEqual([
-        { role: 'user', content: '[APIKEY_MASKED]' },
+        { role: 'user', content: '[APIKEY_MASKED]{sk-1*********************mnop}' },
       ]);
       expect(JSON.stringify(dispatched)).toContain('[APIKEY_MASKED]');
       expect(JSON.stringify(dispatched)).not.toContain(apiKey);

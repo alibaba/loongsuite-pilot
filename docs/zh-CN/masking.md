@@ -125,6 +125,8 @@ export LOONGSUITE_PILOT_MASK_TYPES=apiKey,idCard,phone,email,ipAddress,bankCard
 
 手机号和银行卡会先去掉空格、横线等格式字符，再按固定数字位生成预览。同一号码的常见格式会得到相同结果。数据库 URL 会删除 query 和 fragment，数据库密码固定为 `****`；IPv4 主机使用 IP 预览规则。
 
+如果多条规则重叠命中，且预览会保留另一条规则识别出的完整敏感值，则该范围退回固定占位符。例如数据库 URL 的用户名或路径中含有已识别的 API Key 时，输出 `[DATABASEURL_MASKED]`。
+
 输出事件中不会保留原始完整值。
 
 ## 哪些字段会被扫描

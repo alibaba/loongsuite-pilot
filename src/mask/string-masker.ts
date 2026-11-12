@@ -101,7 +101,7 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
 }
 
 export function applyMaskRanges(value: string, ranges: readonly MaskRange[]): string {
-  const normalizedRanges = normalizeMaskRanges(value.length, ranges);
+  const normalizedRanges = normalizeMaskRanges(value, ranges);
   if (normalizedRanges.length === 0) return value;
 
   // Build the output once so many matches do not repeatedly copy the whole string.
@@ -116,11 +116,11 @@ export function applyMaskRanges(value: string, ranges: readonly MaskRange[]): st
 }
 
 function normalizeMaskRanges(
-  valueLength: number,
+  value: string,
   ranges: readonly MaskRange[],
 ): MaskRange[] {
   const sorted = ranges
-    .filter(range => range.start >= 0 && range.end > range.start && range.end <= valueLength)
+    .filter(range => range.start >= 0 && range.end > range.start && range.end <= value.length)
     .sort(
       (a, b) =>
         a.start - b.start ||
@@ -137,21 +137,30 @@ function normalizeMaskRanges(
       continue;
     }
 
-    const mergedEnd = Math.max(previous.end, candidate.end);
-    if (getMaskRangePriority(candidate) > getMaskRangePriority(previous)) {
-      result[result.length - 1] = {
-        ...candidate,
-        start: previous.start,
-        end: mergedEnd,
-      };
-    } else if (mergedEnd !== previous.end) {
-      result[result.length - 1] = {
-        ...previous,
-        end: mergedEnd,
-      };
-    }
+    const selected = getMaskRangePriority(candidate) > getMaskRangePriority(previous)
+      ? candidate
+      : previous;
+    const replacement = selected === candidate ||
+      selected.replacement.includes(value.slice(candidate.start, candidate.end))
+      ? stripMaskedPreview(selected.replacement)
+      : selected.replacement;
+    result[result.length - 1] = {
+      ...selected,
+      start: previous.start,
+      end: Math.max(previous.end, candidate.end),
+      // Keep a preview only when the overlapping value is already hidden.
+      // A newly selected range has no such guarantee for the earlier value.
+      replacement,
+    };
   }
   return result;
+}
+
+function stripMaskedPreview(replacement: string): string {
+  const previewStart = replacement.indexOf('{');
+  if (previewStart < 0) return replacement;
+  const marker = replacement.slice(0, previewStart);
+  return MASKED_TOKEN_PATTERN.test(marker) ? marker : replacement;
 }
 
 function getMaskRangePriority(range: MaskRange): number {

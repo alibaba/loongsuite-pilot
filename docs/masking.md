@@ -128,6 +128,8 @@ Preview examples:
 
 Phone and bank-card values are normalized before fixed-position masking so common formatting variants produce the same preview. Database URL query strings and fragments are removed, passwords always become `****`, and IPv4 hosts use the IP preview rule.
 
+When overlapping rules detect another complete sensitive value inside a preview, Pilot emits the fixed marker for that range instead. For example, a database URL containing a detected API key in its username or path becomes `[DATABASEURL_MASKED]`.
+
 The complete original value is not preserved in the emitted event.
 
 ## What Gets Masked
