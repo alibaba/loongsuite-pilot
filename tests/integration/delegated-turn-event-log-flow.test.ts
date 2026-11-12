@@ -72,6 +72,7 @@ describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', ag
       expect(new Set(spans.map(s => s.spanContext().spanId)).size).toBe(spans.length);
       expect(new Set(spans.map(s => s.spanContext().traceId))).toEqual(new Set([traceId]));
       expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')).toHaveLength(1);
+      expect(spans.find(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')?.parentSpanId).toBeUndefined();
       const children = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'AGENT' && s.attributes['gen_ai.agent.scope'] === 'subagent');
       expect(children).toHaveLength(2);
       expect(children.every(s => s.parentSpanId === toolSpanId)).toBe(true);
@@ -91,5 +92,21 @@ describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', ag
       await f.shutdown();
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it.each(['d'.repeat(16), '0000000000000001'])('preserves an explicit upstream parent %s', async parent => {
+    const spans: ReadableSpan[] = [];
+    const exporter: TraceExporterLike = { export(batch, cb) { spans.push(...batch); cb({ code: 0 }); }, shutdown: async () => {} };
+    const flusher = new OtlpTraceFlusher({ enabled: true, protocol: 'http/protobuf', serviceName: 'upstream-test', endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }] }, undefined, () => exporter);
+    try {
+      const records = turn(agent, 'upstream-turn', 0).map(record => ({ ...record,
+        ...(record['event.name'] === 'other' ? { parent_span_id: parent } : {}) }));
+      const entries = await Promise.all(records.map(record => transformHookRecord(record, agent === 'hermes' ? ClientType.Hermes : ClientType.OpenClaw, agent)));
+      await flusher.sendBatch(entries.filter(entry => entry !== null));
+      await flusher.flush();
+      const entry = spans.find(span => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(entry?.spanContext().traceId).toBe(traceId);
+      expect(entry?.parentSpanId).toBe(parent);
+    } finally { await flusher.shutdown(); }
   });
 });
