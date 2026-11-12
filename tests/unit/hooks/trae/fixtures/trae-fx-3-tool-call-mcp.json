@@ -1,0 +1,41 @@
+{
+  "_meta": {
+    "source": "AGE-2836 comment `fea9f34b` attachment `trae-fixture-candidates.json` fx-3",
+    "source_refs": [
+      "extension.js:2@3653464 (agentRunAPI='api/ide/v1/agents/runs')",
+      "extension.js:2@3653550 (agentRunResultAPI='api/ide/v1/agents/runs/:id/tool_call_outputs')",
+      "extension.js:2@793065~793793 (ToolCallName enum: run_mcp)",
+      "extension.js tool_call_status enum: pending/running/success/failed/canceled/interrupted"
+    ],
+    "note": "Ground-truth fixture. Request body is what Trae posts to /api/ide/v1/agents/runs/<run_id>/tool_call_outputs when a run_mcp tool call dispatches. Response body mirrors the tool_call_outputs reply with status+output+duration_ms."
+  },
+  "run_id": "run-fx3-0003",
+  "request": {
+    "conversation_id": "conv-fx3-0003",
+    "chat_session_id": "sess-fx3-0003",
+    "chat_message_id": "msg-fx3-0003",
+    "tool_call_key": "toolcall-fx3-run-mcp-0001",
+    "tool": {
+      "name": "run_mcp",
+      "mcp_server": "filesystem",
+      "tool_name": "read_file",
+      "arguments": { "path": "/workspace/App.tsx" }
+    }
+  },
+  "response": {
+    "conversation_id": "conv-fx3-0003",
+    "chat_session_id": "sess-fx3-0003",
+    "chat_message_id": "msg-fx3-0003",
+    "tool_call_key": "toolcall-fx3-run-mcp-0001",
+    "tool": {
+      "name": "run_mcp",
+      "mcp_server": "filesystem",
+      "tool_name": "read_file",
+      "arguments": { "path": "/workspace/App.tsx" },
+      "status": "success",
+      "output": "<file content>",
+      "duration_ms": 142
+    },
+    "telemetry_event": "icube_ai_agent_run_mcp_success"
+  }
+}

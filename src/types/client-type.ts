@@ -16,6 +16,7 @@ export enum ClientType {
   Antigravity = 'antigravity',
   Lingma = 'lingma',
   LingmaVscode = 'lingma-vscode',
+  Trae = 'trae',
   Wukong = 'wukong',
   WorkBuddy = 'workbuddy',
   DoubaoWork = 'doubao-work',

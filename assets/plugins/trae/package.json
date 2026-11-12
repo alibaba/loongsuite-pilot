@@ -1,0 +1,43 @@
+{
+  "name": "loongsuite-pilot-trae-probe",
+  "version": "0.1.0",
+  "description": "Loongsuite Pilot plugin-probe preload for Trae IDE. Loaded via NODE_OPTIONS --import; monkey-patches https.request to capture chatverse LLM/Tool traffic as event-log JSONL.",
+  "type": "module",
+  "main": "./probe.mjs",
+  "exports": {
+    ".": "./probe.mjs",
+    "./probe.mjs": "./probe.mjs"
+  },
+  "files": [
+    "probe.mjs",
+    "scripts/install.sh",
+    "scripts/uninstall.sh",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run tests/unit/hooks/trae/"
+  },
+  "author": "loongsuite-pilot",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "trae": {
+    "appVersion": "3.4.17",
+    "tronBuildVersion": "2.3.102035",
+    "commit": "d654d294a690adb43b5bb35d5b37adf9f292cee0",
+    "dataFolderName": ".trae-cn",
+    "chatverseHosts": [
+      "chatverse-prod.byteintl.net",
+      "chatverse-us-prod.byteintl.net",
+      "chatverse-us.byteintl.net",
+      "chatverse.byteintl.net"
+    ]
+  },
+  "pilot": {
+    "deployMode": "plugin-probe",
+    "mountType": "env-inject",
+    "logPrefix": "trae"
+  }
+}

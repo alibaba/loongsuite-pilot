@@ -1,0 +1,29 @@
+{
+  "id": "trae",
+  "displayName": "Trae",
+  "deployMode": "plugin-probe",
+  "detection": {
+    "paths": [
+      "/Applications/Trae.app",
+      "/opt/Trae",
+      "/opt/Trae/bin",
+      "/usr/share/trae",
+      "/usr/local/share/trae",
+      "~/trae-install",
+      "~/.trae-cn",
+      "~/.trae"
+    ],
+    "commands": ["trae", "trae-cn"]
+  },
+  "pluginProbe": {
+    "source": {
+      "type": "oss",
+      "destDir": "$PILOT_DATA/plugins/trae"
+    },
+    "mountType": "env-inject"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/trae"
+  }
+}

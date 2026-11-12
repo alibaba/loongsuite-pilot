@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "source": "AGE-2836 comment `fea9f34b` attachment `trae-fixture-candidates.json` fx-5",
+    "source_refs": [
+      "extension.js ToolCallName.AgentFinish='agent_finish'"
+    ],
+    "note": "Ground-truth fixture. agent_finish tool call posted to /api/ide/v1/agents/runs/<id>/tool_call_outputs. The plugin renames usage fields (prompt_tokens/completion_tokens/total_tokens) to gen_ai.usage.input_tokens/output_tokens/total_tokens and emits an llm.response event with finish_reason=stop."
+  },
+  "run_id": "run-fx5-0005",
+  "request": {
+    "conversation_id": "conv-fx5-0005",
+    "chat_session_id": "sess-fx5-0005",
+    "chat_message_id": "msg-fx5-0005",
+    "tool_call_key": "toolcall-fx5-agent-finish-0001",
+    "tool": {
+      "name": "agent_finish",
+      "agent": {
+        "agent_id": "",
+        "agent_name": "trae-builder",
+        "agent_type": "builder"
+      },
+      "finish_reason": "stop"
+    }
+  },
+  "response": {
+    "conversation_id": "conv-fx5-0005",
+    "chat_session_id": "sess-fx5-0005",
+    "chat_message_id": "msg-fx5-0005",
+    "tool_call_key": "toolcall-fx5-agent-finish-0001",
+    "tool": {
+      "name": "agent_finish",
+      "agent": {
+        "agent_id": "",
+        "agent_name": "trae-builder",
+        "agent_type": "builder"
+      },
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 1820,
+        "completion_tokens": 412,
+        "total_tokens": 2232
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "source": "AGE-2836 comment `fea9f34b` attachment `trae-fixture-candidates.json` fx-1",
+    "source_refs": [
+      "extension.js:2@336208 (httpClient.post call site)",
+      "extension.js:2@3653386 (chatAPI='api/ide/v1/chat')",
+      "extension.js:2@777424 (ChatSendMessageRequest, method='chat/send_message')"
+    ],
+    "note": "Ground-truth fixture extracted from Trae 3.4.17 source. Field names + value ranges from ai-completion/dist/extension.js HTTP constants map + ChatSendMessageRequest ProtocolRequestType. No payload invented."
+  },
+  "run_id": "run-fx1-0001",
+  "request": {
+    "conversation_id": "conv-fx1-0001",
+    "chat_session_id": "sess-fx1-0001",
+    "chat_message_id": "msg-fx1-0001",
+    "parent_message_id": "",
+    "query": "用 React 写一个 TodoList 组件",
+    "context": [
+      {
+        "type": "file",
+        "uri": "file:///workspace/App.tsx",
+        "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 40, "character": 0 } }
+      }
+    ],
+    "images": [],
+    "language": "typescript",
+    "model": "claude-3-7-sonnet",
+    "agent": {
+      "agent_id": "",
+      "agent_name": "trae-builder",
+      "agent_type": "builder",
+      "agent_source": "builtin",
+      "is_auto_accept": 1
+    },
+    "modeInfo": { "mode": "agent" },
+    "userSelectedTools": ["run_mcp", "web_search", "search_codebase", "todo_write"]
+  }
+}

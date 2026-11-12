@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "source": "AGE-2836 comment `fea9f34b` attachment `trae-fixture-candidates.json` fx-4",
+    "source_refs": [
+      "extension.js:2 webSearchAPI='api/ide/v1/web_search'",
+      "ToolCallName.WebSearch='web_search'"
+    ],
+    "note": "Ground-truth fixture. Request body matches Trae's POST to /api/ide/v1/web_search; response mirrors the search result envelope."
+  },
+  "run_id": "run-fx4-0004",
+  "request": {
+    "conversation_id": "conv-fx4-0004",
+    "chat_session_id": "sess-fx4-0004",
+    "chat_message_id": "msg-fx4-0004",
+    "tool_call_key": "toolcall-fx4-web-search-0001",
+    "tool": {
+      "name": "web_search",
+      "arguments": { "query": "React 19 hooks best practices" }
+    }
+  },
+  "response": {
+    "conversation_id": "conv-fx4-0004",
+    "chat_session_id": "sess-fx4-0004",
+    "chat_message_id": "msg-fx4-0004",
+    "tool_call_key": "toolcall-fx4-web-search-0001",
+    "tool": {
+      "name": "web_search",
+      "arguments": { "query": "React 19 hooks best practices" },
+      "status": "success",
+      "output": "<search results json>",
+      "duration_ms": 890
+    }
+  }
+}

@@ -66,6 +66,7 @@ import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
 import { OpenCodeLogInput } from '../inputs/opencode-log/opencode-log-input.js';
+import { TraePluginInput } from '../inputs/trae-plugin/trae-plugin-input.js';
 import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-coding-agent-log/pi-coding-agent-log-input.js';
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
@@ -152,6 +153,7 @@ export class Orchestrator extends EventEmitter {
     'kiro-cli-session': 'kiro-cli',
     'copilot-log': 'copilot',
     'opencode-log': 'opencode',
+    'trae-plugin': 'trae',
     'pi-coding-agent-log': 'pi-coding-agent',
     'mimo-code-log': 'mimo-code',
     'qwen-code-cli-log': 'qwen-code-cli',
@@ -1695,6 +1697,33 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['opencode-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['opencode-log']?.pollInterval,
+      }),
+    );
+
+    // --- Trae Plugin (plugin-probe NODE_OPTIONS preload JSONL) ---
+    // Plugin-probe agent (same input shape as opencode-log: hook JSONL tailed
+    // by BaseHookInput). The probe at $PILOT_DATA/plugins/trae/probe.mjs
+    // monkey-patches https.request inside the Trae Electron process and
+    // writes `trae-YYYY-MM-DD.jsonl` here. Pre-create the log dir so
+    // fs.watch in AgentDiscoveryService succeeds immediately after install.
+    const traePluginLogDir = path.join(this.dataDir, 'logs', 'trae');
+    await ensureDir(traePluginLogDir);
+    const traePluginInput = new TraePluginInput({
+      stateStore: this.stateStore,
+      logDir: traePluginLogDir,
+      pollIntervalMs: listenerCfg['trae-plugin']?.pollInterval,
+    });
+    this.inputManager.registerInput(traePluginInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(traePluginInput, {
+        watchPaths: [traePluginLogDir],
+        isAvailable: async () => directoryExists(traePluginLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-plugin']) &&
+          this.agentControlManager.resolveEnabled(
+            'trae-plugin',
+            listenerCfg['trae-plugin']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['trae-plugin']?.pollInterval,
       }),
     );
 
