@@ -55,6 +55,9 @@ describe('aborted Codex child turn batches', () => {
     });
     await flusher.start();
     await input.start();
+    // An empty start still saves isBaselineInit. start() returns while that
+    // save owns the cycle, so drain it before the transcript exists.
+    await (input as unknown as { runCycle(): Promise<void> }).runCycle();
     const session = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
     const turn = 'aborted-child';
     const transcript = path.join(sessionDir, `rollout-${session}.jsonl`);
