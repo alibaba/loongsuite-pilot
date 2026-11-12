@@ -1606,6 +1606,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
   }
 
   private enrichDoubaoWorkSpans(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const clients = new Set(records.map(record => record['loongsuite.doubao_work.client'])
+      .filter((client): client is 'doubao' | 'doubao-work' => client === 'doubao' || client === 'doubao-work'));
+    const client = clients.size === 1 ? [...clients][0] : undefined;
     const terminal = [...records].reverse().find(record => record['gen_ai.turn.end'] === true);
     const outcome = terminal?.['loongsuite.doubao_work.client_outcome'];
     const hasUpstreamParent = records.some(record => record['event.name'] === 'other'
@@ -1613,6 +1616,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && /^[0-9a-f]{16}$/.test(record.parent_span_id)
       && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
+      if (client) span.attributes['loongsuite.doubao_work.client'] = client;
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
       span.attributes['gen_ai.framework'] = 'doubao-work';
