@@ -103,6 +103,30 @@ describe('masked preview replacement mode', () => {
     }
   });
 
+  it.each(
+    ['mysql', 'postgres', 'redis', 'mongodb'].flatMap(scheme =>
+      ['alice.wang@example.com', 'alice.wang%40example.com', 'alice.wang%2540example.com'].map(username =>
+        `${scheme}://${username}:password@db.example/app`,
+      ),
+    ),
+  )('does not expose an email username after URL percent-encoding: %s', value => {
+    for (const plan of [loadMaskPlan({ mode: 'all', types: [] }), previewPlan]) {
+      const masked = maskString(value, plan);
+      expect(masked).toBe('[DATABASEURL_MASKED]');
+      expect(masked).not.toContain('alice.wang@example.com');
+      expect(masked).not.toContain('alice.wang%40example.com');
+      expect(maskString(masked, plan)).toBe(masked);
+    }
+  });
+
+  it.each([
+    'postgres://user:password@db.example/alice.wang%40example.com',
+    'jdbc:postgresql://db.example/alice.wang%40example.com?user=user&password=secret',
+  ])('falls back when a retained database path contains encoded sensitive text: %s', value => {
+    const plan = loadMaskPlan({ mode: 'all', types: [] });
+    expect(maskString(value, plan)).toBe('[DATABASEURL_MASKED]');
+  });
+
   it('builds previews for ID card, email, IPv4 and bank card', () => {
     const input = [
       '11010519491231002X',

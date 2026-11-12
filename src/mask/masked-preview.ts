@@ -146,6 +146,9 @@ function maskDatabaseUrl(value: string): string | null {
   try {
     const parsed = new URL(value);
     const username = parsed.username;
+    // Retained percent-encoded userinfo or path text can conceal a complete
+    // sensitive value from the detectors while remaining readable to callers.
+    if (username.includes('%') || parsed.pathname.includes('%')) return null;
     const userInfo = username || parsed.password
       ? `${username}:****@`
       : '';
@@ -160,6 +163,7 @@ function maskDatabaseUrl(value: string): string | null {
 function maskJdbcUrl(value: string): string | null {
   const parameterIndex = value.search(/[?;]/);
   const withoutParameters = parameterIndex === -1 ? value : value.slice(0, parameterIndex);
+  if (/%[0-9a-f]{2}/i.test(withoutParameters)) return null;
   const match = withoutParameters.match(/^(jdbc:(?:mysql|postgresql):\/\/)([^/]+)(\/.*)?$/i);
   if (!match) return null;
 

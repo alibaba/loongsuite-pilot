@@ -141,19 +141,33 @@ function normalizeMaskRanges(
       ? candidate
       : previous;
     const replacement = selected === candidate ||
-      selected.replacement.includes(value.slice(candidate.start, candidate.end))
+      !isSafeMaskedIpv4Overlap(previous, candidate, value)
       ? stripMaskedPreview(selected.replacement)
       : selected.replacement;
     result[result.length - 1] = {
       ...selected,
       start: previous.start,
       end: Math.max(previous.end, candidate.end),
-      // Keep a preview only when the overlapping value is already hidden.
-      // A newly selected range has no such guarantee for the earlier value.
+      // URL serialization can change raw bytes (for example @ to %40), so
+      // only a known-safe masked IPv4 host may retain an overlapping preview.
       replacement,
     };
   }
   return result;
+}
+
+function isSafeMaskedIpv4Overlap(
+  selected: MaskRange,
+  candidate: MaskRange,
+  value: string,
+): boolean {
+  if (selected.type !== 'databaseUrl' || candidate.type !== 'ipAddress') return false;
+  const maskedIp = candidate.replacement.match(/^\[IP_ADDRESS_MASKED\]\{([^{}]+)\}$/)?.[1];
+  return Boolean(
+    maskedIp &&
+    selected.replacement.includes(maskedIp) &&
+    !selected.replacement.includes(value.slice(candidate.start, candidate.end)),
+  );
 }
 
 function stripMaskedPreview(replacement: string): string {
