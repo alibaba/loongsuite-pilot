@@ -1408,6 +1408,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
           ...GEN_AI_HIERARCHY_PASSTHROUGH_KEYS,
+          ...(agentType === 'openclaw' || agentType === 'hermes' ? ['agent.pilot.request_context.truncated'] : []),
           ...agentSpecificKeys,
           ...customKeys,
           ...prefixKeys,

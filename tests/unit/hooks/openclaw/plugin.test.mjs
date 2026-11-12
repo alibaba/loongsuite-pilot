@@ -508,11 +508,12 @@ describe('OpenClaw plugin stateful pipeline', () => {
       .toEqual(requests[0]['gen_ai.system_instructions']);
     expect(Array.isArray(requests[0]['gen_ai.tool.definitions'])).toBe(true);
     expect(requests[0]['gen_ai.input.messages_delta'][0].role).toBe('user');
-    // Second request: the two prior parallel tool results are incremental input.
+    // Second request includes the observed assistant before its parallel results.
     expect(requests[1]['gen_ai.system_instructions']).toBeUndefined();
     expect(requests[1]['gen_ai.tool.definitions']).toBeUndefined();
-    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(2);
-    for (const message of requests[1]['gen_ai.input.messages_delta']) {
+    expect(requests[1]['gen_ai.input.messages_delta']).toHaveLength(3);
+    expect(requests[1]['gen_ai.input.messages_delta'][0].role).toBe('assistant');
+    for (const message of requests[1]['gen_ai.input.messages_delta'].slice(1)) {
       expect(message.role).toBe('tool');
       expect(message.parts[0].type).toBe('tool_call_response');
       expect(message.parts[0].id).toMatch(/^call_/);
@@ -1128,8 +1129,11 @@ describe('OpenClaw plugin stateful pipeline', () => {
       `${runId}:model:2`,
       `${runId}:model:3`,
     ]);
-    expect(requests[2]['gen_ai.input.messages_delta']).toHaveLength(1);
+    expect(requests[2]['gen_ai.input.messages_delta']).toHaveLength(2);
     expect(requests[2]['gen_ai.input.messages_delta'][0].parts[0]).toMatchObject({
+      type: 'tool_call', id: reusedToolCallId,
+    });
+    expect(requests[2]['gen_ai.input.messages_delta'][1].parts[0]).toMatchObject({
       id: reusedToolCallId,
       response: 'fresh-result',
     });
