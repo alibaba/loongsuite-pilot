@@ -21,6 +21,8 @@ export function auditRecord(common, work, kind, messages, peerId) {
   };
   delete record.span_id;
   delete record["gen_ai.step.id"];
+  delete record["gen_ai.turn.start"];
+  delete record["gen_ai.turn.end"];
   return record;
 }
 

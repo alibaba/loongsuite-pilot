@@ -1502,6 +1502,27 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it('retains one producer-owned start across collector restart and repeated native setup hooks', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'ongoing-run', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    await h.before_agent_run({ prompt: 'work' }, ctx);
+    await h.before_agent_run({ prompt: 'work' }, ctx);
+    await h.model_call_started({ callId: 'native-call', provider: 'test', model: 'model' }, ctx);
+    await h.model_call_ended({ callId: 'native-call', outcome: 'completed' }, ctx);
+    await h.before_message_write({ message: { role: 'assistant', content: [{ type: 'text', text: 'done' }], usage: { input: 1, output: 1 }, stopReason: 'stop' } }, ctx);
+    await h.llm_output({}, ctx);
+    const rows = readOutputRecords();
+    const { TurnBoundaryProcessor } = await import('../../../../src/normalization/turn-boundary-processor.ts');
+    // A fresh collector sees only a suffix; it must not invent another start.
+    const initial = rows.slice(0, 1);
+    const suffix = rows.slice(1);
+    new TurnBoundaryProcessor().enrich(initial);
+    new TurnBoundaryProcessor().enrich(suffix);
+    expect([...initial, ...suffix].filter(row => row['gen_ai.turn.start'] === true)).toHaveLength(1);
+    expect(suffix.find(row => row['event.name'] === 'llm.response')['gen_ai.turn.start']).toBe(false);
+    expect(rows.filter(row => row['gen_ai.turn.end'] === true)).toHaveLength(1);
+  });
+
   it('emits one invocation before acceptance and records the actual parent-side delivery in its receiving turn', async () => {
     const h = registerPlugin(await loadPlugin());
     const parent = { runId: 'invoke-turn', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
@@ -1527,6 +1548,10 @@ describe('subagent trace propagation', () => {
     await restarted.before_agent_run({ prompt: 'receive result' }, receiver);
     const delivery = { message: { role: 'user', content: [{ type: 'text', text: 'actual delivered result' }],
       provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: child.sessionKey } } };
+    const unrelated = { ...parent, runId: `announce:v1:${child.sessionKey}:unknown-work` };
+    await restarted.before_agent_run({ prompt: 'unrelated work' }, unrelated);
+    await restarted.before_message_write(delivery, unrelated);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
     const append = fs.appendFileSync;
     let failAuditOnce = true;
     vi.spyOn(fs, 'appendFileSync').mockImplementation((file, text, ...args) => {
@@ -1597,6 +1622,15 @@ describe('subagent trace propagation', () => {
     expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(2);
     expect(rows.filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
     const restarted = registerPlugin(await loadPlugin());
+    for (const index of [2, 1]) {
+      const receiver = { ...parent, runId: `announce:v1:${childKey}:child-work-${index}` };
+      await restarted.before_agent_run({ prompt: 'receive' }, receiver);
+      await restarted.before_message_write({ message: { role: 'user', content: `native delivered work ${index}`,
+        provenance: { kind: 'inter_session', sourceTool: 'subagent_announce', sourceSessionKey: childKey } } }, receiver);
+    }
+    const delivered = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(delivered.map(r => r['gen_ai.agent.invocation.id'])).toEqual(invokes.toReversed().map(r => r['gen_ai.agent.invocation.id']));
+    expect(delivered[0]['gen_ai.turn.id']).toBe(`announce:v1:${childKey}:child-work-2`);
     vi.useFakeTimers();
     for (const index of [1, 2]) {
       await restarted.before_agent_run({ prompt: 'continue' }, { runId: `child-work-${index}`, sessionId: 'same-child', sessionKey: childKey });

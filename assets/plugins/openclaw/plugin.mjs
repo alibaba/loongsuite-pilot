@@ -640,6 +640,9 @@ function buildCommonFields(run, sessionId, userId) {
   if (run) {
     base.trace_id = run.traceId;
     base["gen_ai.turn.id"] = run.turnId || run.runId;
+    // The producer owns the start even if the collector restarts mid-run.
+    // An explicit false keeps suffix responses from becoming a second start.
+    base["gen_ai.turn.start"] = false;
     if (run.turnId) base["agent.openclaw.run_id"] = run.runId;
     base["gen_ai.session.id"] = run.sessionId || sessionId || "";
     if (base["gen_ai.session.id"]) base["gen_ai.agent.id"] = base["gen_ai.session.id"];
@@ -965,6 +968,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "before_agent_run",
+    "gen_ai.turn.start": !run.turnStartEmitted,
     "gen_ai.input.messages_delta": run.userPromptText
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
@@ -973,6 +977,7 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
       : undefined,
   };
   emit(record);
+  run.turnStartEmitted = true;
 }
 
 function handleBeforeAgentReply(event, ctx, userId, emit) {
@@ -1334,10 +1339,17 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
     const receiver = resolveContextRun(event, ctx);
     const source = message.provenance.sourceSessionKey;
     if (!receiver?.sessionId || !isSessionKey(source)) return;
-    const matches = childContexts.list().filter(work => work.childSessionKey === source
+    // OpenClaw's native announce idempotency key is derived from the exact
+    // child session/run pair. This disambiguates reused sessions without
+    // parsing prompt text or selecting whichever invocation is newest.
+    const prefix = `announce:v1:${source}:`;
+    const nativeWork = receiver.runId?.startsWith(prefix)
+      ? childContexts.read(receiver.runId.slice(prefix.length)) : undefined;
+    const candidates = receiver.runId?.startsWith(prefix)
+      ? (nativeWork ? [nativeWork] : []) : childContexts.list();
+    const matches = candidates.filter(work => work.invocationId && work.childSessionKey === source
       && work.sessionId === receiver.sessionId);
-    // A reused session can have more than one originating invocation. Without
-    // a native work/run key this delivery is ambiguous, even if one is newer.
+    // Older delivery paths lack this work key. Retain only unique provenance.
     if (matches.length !== 1) return;
     const work = matches[0];
     const audit = auditRecord(buildCommonFields(receiver, receiver.sessionId, userId), work,
