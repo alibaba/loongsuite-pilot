@@ -8,41 +8,59 @@ import type { AgentActivityEntry } from '../types/index.js';
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 
 export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
-  return createHash('sha256').update(JSON.stringify([
+  const identity = [
     entry['user.id'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
-  ])).digest('hex');
+  ];
+  // Preserve existing Codex files/ACKs while separating other native Agents.
+  if (entry['gen_ai.agent.type'] !== 'codex') identity.unshift(entry['gen_ai.agent.type']);
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
 
-export function isJournaledCodexEntry(value: unknown): value is AgentActivityEntry {
+function hasJournalIdentity(value: unknown): value is AgentActivityEntry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entry = value as AgentActivityEntry;
-  return entry['gen_ai.agent.type'] === 'codex' && typeof entry['user.id'] === 'string'
+  return typeof entry['user.id'] === 'string'
     && ['gen_ai.session.id', 'gen_ai.turn.id', 'event.id'].every(
       key => typeof entry[key] === 'string' && entry[key]!.length > 0,
     );
 }
 
-/** Pending Codex turns and bounded export acknowledgements across collector restarts. */
+export function isJournaledCodexEntry(value: unknown): value is AgentActivityEntry {
+  return hasJournalIdentity(value) && value['gen_ai.agent.type'] === 'codex';
+}
+
+/** Pending native turns and bounded export acknowledgements. The legacy class,
+ * directory and Codex keys remain compatible with already installed versions. */
 export class CodexTurnJournal {
   private pending: Promise<void> = Promise.resolve();
   private readonly initialized = new Set<string>();
   private acknowledgements?: Promise<Map<string, number>>;
+  private readonly agentTypes: Set<string>;
 
   /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
   constructor(
     private readonly dir: string,
     private readonly acknowledgementLimit = MAX_ACKNOWLEDGED_TURNS,
+    agentTypes: readonly string[] = ['codex'],
   ) {
+    this.agentTypes = new Set(agentTypes);
     if (!Number.isSafeInteger(acknowledgementLimit) || acknowledgementLimit < 1) {
       throw new RangeError('acknowledgementLimit must be a positive safe integer');
     }
+  }
+
+  acceptsAgent(agent: string): boolean { return this.agentTypes.has(agent); }
+
+  accepts(value: unknown): value is AgentActivityEntry {
+    return hasJournalIdentity(value) && this.acceptsAgent(String(value['gen_ai.agent.type']))
+      && value['event.name'] !== 'gen_ai.agent.invoke' && value['event.name'] !== 'gen_ai.agent.result';
   }
 
   append(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
       const groups = new Map<string, AgentActivityEntry[]>();
-      for (const entry of entries.filter(isJournaledCodexEntry)) {
+      for (const entry of entries.filter(entry => this.accepts(entry))) {
         const key = codexTurnJournalGroupKey(entry);
         if (acknowledged.has(key)) continue;
         if (!groups.has(key)) groups.set(key, []);
@@ -103,7 +121,7 @@ export class CodexTurnJournal {
         for await (const line of lines) {
           let entry: unknown;
           try { entry = JSON.parse(line); } catch { continue; }
-          if (!isJournaledCodexEntry(entry) || codexTurnJournalGroupKey(entry) !== match[1]
+          if (!this.accepts(entry) || codexTurnJournalGroupKey(entry) !== match[1]
             || seen.has(entry['event.id'])) continue;
           seen.add(entry['event.id']);
           const size = Buffer.byteLength(line);
@@ -120,13 +138,13 @@ export class CodexTurnJournal {
 
   async isAcknowledged(entry: AgentActivityEntry): Promise<boolean> {
     await this.pending;
-    return isJournaledCodexEntry(entry) && (await this.loadAcknowledgements()).has(codexTurnJournalGroupKey(entry));
+    return this.accepts(entry) && (await this.loadAcknowledgements()).has(codexTurnJournalGroupKey(entry));
   }
 
   acknowledge(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
-      const keys = [...new Set(entries.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
+      const keys = [...new Set(entries.filter(entry => this.accepts(entry)).map(codexTurnJournalGroupKey))];
       if (!keys.length) return;
       await this.ensureDir();
       for (const key of keys) {
@@ -147,7 +165,7 @@ export class CodexTurnJournal {
   remove(entriesOrKey: AgentActivityEntry[] | string): Promise<void> {
     return this.enqueue(async () => {
       const keys = typeof entriesOrKey === 'string' ? [entriesOrKey]
-        : [...new Set(entriesOrKey.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
+        : [...new Set(entriesOrKey.filter(entry => this.accepts(entry)).map(codexTurnJournalGroupKey))];
       for (const key of keys) {
         if (!/^[a-f0-9]{64}$/.test(key)) continue;
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
