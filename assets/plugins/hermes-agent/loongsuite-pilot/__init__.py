@@ -187,6 +187,55 @@ def _install_notification_context() -> None:
         pass
     except Exception as error:
         _report_internal_error("notification_context", error)
+
+
+def _install_cli_delivery_context() -> None:
+    """The native CLI deliberately stringifies TimelineNotification after staging
+    it. Retain its structured event beside the exact staged row, never in model
+    content or the persisted transcript. Formatting alone is not consumption."""
+    try:
+        cls = importlib.import_module("hermes_cli.cli_chat_turn_mixin").CLIChatTurnMixin
+        original = cls._chat_stage_user_message
+        if getattr(original, "_pilot_audit", False):
+            return
+
+        @functools.wraps(original)
+        def staged(cli: Any, agent: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                agent._pilot_delegation_delivery = None
+            except Exception as error:
+                _report_internal_error("notification stage reset", error)
+            result = original(cli, agent, message, *args, **kwargs)
+            try:
+                delivery = getattr(message, "_pilot_delegation_event", None)
+                row = getattr(agent, "_pending_cli_user_message", None)
+                if isinstance(delivery, dict) and isinstance(row, dict):
+                    agent._pilot_delegation_delivery = (row, delivery)
+            except Exception as error:
+                _report_internal_error("notification stage", error)
+            return result
+
+        staged._pilot_audit = True
+        cls._chat_stage_user_message = staged
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("notification stage installation", error)
+
+
+def _native_delivery(agent: Any, arguments: Dict[str, Any]) -> Any:
+    pending = getattr(agent, "_pilot_delegation_delivery", None)
+    if pending is not None:
+        agent._pilot_delegation_delivery = None
+        row, delivery = pending
+        if row is getattr(agent, "_pending_cli_user_message", None):
+            return delivery
+    message = arguments.get("persist_user_message")
+    if message is None:
+        message = arguments.get("user_message")
+    return getattr(message, "_pilot_delegation_event", None)
+
+
 _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
 _NATIVE_RUN_OBSERVER_READY = False
 _NATIVE_RUN_OBSERVER_WARNED = False
@@ -251,6 +300,8 @@ def _install_run_completion_observer() -> bool:
         _NATIVE_RUN_OBSERVER_READY = True
         return True
 
+    signature = inspect.signature(original)
+
     @functools.wraps(original)
     def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
         context = observed._pilot_run_scope
@@ -260,6 +311,10 @@ def _install_run_completion_observer() -> bool:
             token = context.set(scope)
         except Exception:
             return original(agent, *args, **kwargs)
+        try:
+            scope["delivery"] = _native_delivery(agent, signature.bind(agent, *args, **kwargs).arguments)
+        except Exception as error:
+            _report_internal_error("native delivery context", error)
         result = None
         try:
             # No telemetry lock spans the application call. Native hooks run
@@ -278,6 +333,7 @@ def _install_run_completion_observer() -> bool:
                         scope["agent"] = None
                         scope["turns"].clear()
                         scope["sessions"].clear()
+                        scope.pop("delivery", None)
                 except Exception as error:
                     _report_internal_error("native run scope cleanup", error)
                 finally:
@@ -1758,9 +1814,15 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     _capture_turn_input(turn, messages)
     turn["initial_messages"] = _bounded_value(messages)
     _remember_turn(state, turn, payload)
-    # A structured native CLI delivery arrives as a str subclass. Its event
-    # was attached by for_delegation; ordinary strings cannot create results.
+    # Older paths retain the notification object. Current CLI/loop converts it
+    # to plain text; its exact staged-row identity travels in the native scope.
+    # Ordinary user strings and completed-but-unconsumed notifications do not
+    # establish a result or an invocation association.
     delivery = getattr(payload.get("user_message"), "_pilot_delegation_event", None)
+    scope = _NATIVE_RUN_SCOPE.get()
+    if delivery is None and scope and not scope["closed"] and (
+            session_id in scope["sessions"] or session_id == getattr(scope["agent"], "session_id", None)):
+        delivery = scope.get("delivery")
     if isinstance(delivery, dict) and delivery.get("parent_session_id") == session_id:
         directory = _parent_context_path("").parent
         files = list(itertools.islice(directory.glob("work-*.json"), 4097)) if directory.is_dir() else []
@@ -2124,6 +2186,7 @@ def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
     _install_notification_context()
+    _install_cli_delivery_context()
     _try_install_run_completion_observer()
     _purge_old_logs()
     for hook_name in HOOKS:

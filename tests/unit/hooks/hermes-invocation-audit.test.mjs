@@ -8,7 +8,7 @@ it('audits native batch work, nested incoming, actual sync/async delivery and au
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-audit-'));
   try {
     const code = `
-import importlib.util, json, types, sys, pathlib, concurrent.futures
+import importlib.util, json, types, sys, pathlib, concurrent.futures, contextvars
 spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
@@ -19,6 +19,22 @@ class Notification(str):
     @classmethod
     def for_delegation(cls, text, event): return cls(text)
 notifications.TimelineNotification = Notification
+cli_module = types.ModuleType('hermes_cli.cli_chat_turn_mixin')
+class CLIChatTurnMixin:
+    def _chat_stage_user_message(self, agent, message):
+        # Native CLI stages the row, then calls str(notification) before the
+        # agent thread. The original object never reaches pre_llm_call.
+        agent._pending_cli_user_message = {'role':'user','content':str(message)}
+cli_module.CLIChatTurnMixin = CLIChatTurnMixin
+native_loop = types.ModuleType('agent.conversation_loop')
+def run_conversation(agent, user_message):
+    plain = user_message.encode('utf-8', 'replace').decode('utf-8')
+    # Hooks execute in isolated copy_context workers in current Hermes.
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        pool.submit(contextvars.copy_context().run, hooks['pre_llm_call'],
+                    session_id=agent.session_id, turn_id='later-parent-turn', user_message=plain).result()
+    return {'final_response':'native return'}
+native_loop.run_conversation = run_conversation
 def build_child(task_index, goal, context, toolsets, model, max_iterations, task_count, parent_agent):
     if goal == 'raise': raise ValueError('native failure')
     return types.SimpleNamespace(session_id='child-' + str(task_index))
@@ -33,7 +49,8 @@ def run_child(task_index, goal, child=None, parent_agent=None):
 delegate._build_child_agent = build_child
 delegate._run_single_child = run_child
 tools.delegate_tool = delegate
-sys.modules.update({'tools':tools,'tools.delegate_tool':delegate,'tools.process_registry_notifications':notifications})
+sys.modules.update({'tools':tools,'tools.delegate_tool':delegate,'tools.process_registry_notifications':notifications,
+                    'hermes_cli.cli_chat_turn_mixin':cli_module,'agent.conversation_loop':native_loop})
 p.register(types.SimpleNamespace(register_hook=lambda n, cb: hooks.update({n:cb})))
 hooks['pre_llm_call'](session_id='parent', turn_id='parent-turn', sender_id='user-a')
 args = {'context':'shared context', 'tasks':[{'goal':'task one','context':'first-only context'},{'goal':'task two'}]}
@@ -57,8 +74,25 @@ hooks['pre_tool_call'](session_id='parent', turn_id='parent-turn', tool_name='de
 # Simulate collector/process state loss. Metadata on disk retains the binding.
 p._SESSIONS.clear()
 delivery = Notification.for_delegation('native formatted result',{'type':'async_delegation','delegation_id':'native-async','parent_session_id':'parent','results':[{'task_index':0,'status':'completed','summary':'late delivered result'}]})
-hooks['pre_llm_call'](session_id='parent',turn_id='later-parent-turn',user_message=delivery)
-hooks['pre_llm_call'](session_id='parent',turn_id='later-parent-turn',user_message=delivery)
+agent = types.SimpleNamespace(session_id='parent')
+cli = CLIChatTurnMixin()
+# Formatting/staging is not delivery: no result until the native run consumes it.
+cli._chat_stage_user_message(agent, delivery)
+assert not any(json.loads(line).get('gen_ai.output.messages', [{}])[0].get('parts', [{}])[0].get('content') == 'late delivered result'
+               for f in (pathlib.Path(sys.argv[2])/'logs/hermes-agent').glob('*.jsonl') for line in f.read_text().splitlines())
+# Staging another input, or replacing the staged row, invalidates an old
+# notification. A matching-looking ordinary string is never delivery proof.
+cli._chat_stage_user_message(agent, str(delivery))
+native_loop.run_conversation(agent, str(delivery))
+cli._chat_stage_user_message(agent, delivery)
+agent._pending_cli_user_message = dict(agent._pending_cli_user_message)
+native_loop.run_conversation(agent, str(delivery))
+assert sum(json.loads(line).get('event.name') == 'gen_ai.agent.result'
+           for f in (pathlib.Path(sys.argv[2])/'logs/hermes-agent').glob('*.jsonl') for line in f.read_text().splitlines()) == 2
+cli._chat_stage_user_message(agent, delivery)
+assert native_loop.run_conversation(agent, str(delivery)) == {'final_response':'native return'}
+cli._chat_stage_user_message(agent, delivery)
+native_loop.run_conversation(agent, str(delivery))
 rows = [json.loads(line) for f in (pathlib.Path(sys.argv[2])/'logs/hermes-agent').glob('*.jsonl') for line in f.read_text().splitlines()]
 print(json.dumps({'rows':rows,'children':fields}))
 `;
