@@ -75,11 +75,13 @@ async function harness(agentId: 'qoder', upstream = false, configureCollector?: 
   const stop = async () => { await manager?.stopAll(); await state?.save(); };
   cleanup.push(stop);
   const write = async (id: string | null, rows: object[], append = false) => {
+    if (hostProduct) rows = rows.map(row => (row as any).type === 'user' && (row as any).uuid
+      ? { ...row, businessIdentity: { product: hostProduct } } : row);
     const file = id ? child(id) : parent; await fs.mkdir(path.dirname(file), { recursive: true });
     await fs[append ? 'appendFile' : 'writeFile'](file, jsonl(rows));
     expect(publishQoderWakeup({ session_id: session, transcript_path: parent,
       hook_event_name: id ? 'SubagentStop' : 'Stop', cwd: root,
-      ...(hostProduct ? { parent_business_info: { product: hostProduct } } : {}),
+      ...(hostProduct && !id ? { parent_business_info: { product: hostProduct } } : {}),
       ...(id ? { agent_id: id, agent_type: 'synthetic-reader', agent_transcript_path: file } : {}),
     }, { dataDir: root, agentId })).toBe(true);
   };

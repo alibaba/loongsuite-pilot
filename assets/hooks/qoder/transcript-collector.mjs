@@ -1002,8 +1002,14 @@ export class QoderTranscriptCollector {
         && (item.event === 'UserPromptSubmit' || item.event === 'SessionStart'))));
   }
 
-  hostProductFor(context) {
-    return this.agentId === 'qoder' && context?.desktop === true ? 'app' : undefined;
+  hostProductFor(context, prompt) {
+    if (this.agentId !== 'qoder') return undefined;
+    // New desktop runtimes carry the owning product on the native prompt,
+    // including sidechains whose lifecycle Hooks omit parent_business_info.
+    const product = prompt?.businessIdentity?.product;
+    if (product === 'app') return 'app';
+    if (product === 'cli') return undefined;
+    return context?.desktop === true ? 'app' : undefined;
   }
 
   emitInvokes(source, contexts, checkpoint, value, records, endOffset, complete = false,
@@ -1012,7 +1018,7 @@ export class QoderTranscriptCollector {
     // A Hook may observe progress written after the tool line. Finish this
     // bounded scan before selecting its snapshot; never borrow a later turn's.
     if (!complete && !Number.isFinite(context?.observedSize)) return;
-    const hostProduct = this.hostProductFor(context);
+    const hostProduct = this.hostProductFor(context, value.rows.find(isRealUserPrompt));
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     for (const row of value.rows) {
       if (!Number.isFinite(Date.parse(row.timestamp))) continue;
@@ -1052,7 +1058,7 @@ export class QoderTranscriptCollector {
     // Only this Turn's observation can label a product. source.desktop belongs
     // to the first discovery and may describe an earlier App invocation.
     const productContext = context;
-    const hostProduct = this.hostProductFor(productContext);
+    const hostProduct = this.hostProductFor(productContext, value.rows.find(isRealUserPrompt));
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       hostProduct,

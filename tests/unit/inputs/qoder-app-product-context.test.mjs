@@ -7,9 +7,10 @@ import { publishQoderWakeup } from '../../../assets/hooks/qoder/hook-wakeup.mjs'
 
 let dataDir, transcript, collector, state;
 const epoch = Date.UTC(2026, 10, 1);
-function appendTurn(index, file = transcript) {
+function appendTurn(index, file = transcript, product) {
   const rows = [
     { type: 'user', uuid: `prompt-${index}`, promptId: `prompt-${index}`, entrypoint: 'cli',
+      ...(product === undefined ? {} : { businessIdentity: { product } }),
       timestamp: new Date(epoch + index * 10000).toISOString(), message: { role: 'user', content: `prompt ${index}` } },
     { type: 'assistant', timestamp: new Date(epoch + index * 10000 + 1000).toISOString(),
       message: { id: `response-${index}`, model: 'synthetic-model', role: 'assistant', stop_reason: 'end_turn',
@@ -39,6 +40,19 @@ beforeEach(() => {
 afterEach(() => { collector.stop(); fs.rmSync(dataDir, { recursive: true, force: true }); });
 
 describe('Qoder product identity follows the owning native Turn', () => {
+  it.each([['app', 'cli', 'qoder-app'], ['cli', 'app', 'qoder-cli']])(
+    'prefers native product %s over Hook product %s', async (native, hook, expected) => {
+      appendTurn(0, transcript, native); wake(hook);
+      expect(types(await collect())).toEqual([expected]);
+    },
+  );
+
+  it('uses a fresh native App prompt without borrowing an older CLI Hook', async () => {
+    appendTurn(0); wake('cli'); await collect();
+    appendTurn(1, transcript, 'app');
+    expect(types(await collect())).toEqual(['qoder-app']);
+  });
+
   it('uses the App Stop after native desktop metadata following last-prompt', async () => {
     appendTurn(0);
     fs.appendFileSync(transcript, [
