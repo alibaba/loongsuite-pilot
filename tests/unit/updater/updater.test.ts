@@ -524,6 +524,26 @@ describe('Updater', () => {
       );
     });
 
+    it('checks the actual node:sqlite runtime on RISC-V before switching versions', async () => {
+      setupForDownload();
+      const originalArch = process.arch;
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
+      Object.defineProperty(process, 'arch', { configurable: true, value: 'riscv64' });
+      try {
+        const updater = new Updater(makeConfig(), tmpDir);
+        await updater.check();
+        const probe = mockExecFile.mock.calls.find(([, args]) => args[0] === '-e' && args[1] === "require('node:sqlite')");
+        expect(probe).toBeDefined();
+        expect(probe![0]).toBe(process.execPath);
+        expect(mockExecFile.mock.calls.some(([command]) => command === 'npm')).toBe(true);
+        expect(mockFsRename).toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.stringContaining('/current'));
+      } finally {
+        Object.defineProperty(process, 'arch', { configurable: true, value: originalArch });
+        Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+      }
+    });
+
     it('runs the staged package postinstall, pointed at this install data dir', async () => {
       // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
       // plugins}, so this call is also how an install broken by the Windows fs.cpSync

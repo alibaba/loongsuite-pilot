@@ -205,7 +205,7 @@ describe('managed_node_platform mapping', () => {
     expect(res.err).toMatch(/win-arm64/);
   });
 
-  it('rejects unsupported architecture', () => {
+  it('uses the system runtime for riscv64 instead of requesting a nonexistent managed artifact', () => {
     const res = runBashFail('managed_node_platform', { env: { FAKE_OS: 'Linux', FAKE_ARCH: 'riscv64' } });
     expect(res.failed).toBe(true);
   });
