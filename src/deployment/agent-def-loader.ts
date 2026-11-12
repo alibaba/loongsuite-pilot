@@ -12,6 +12,22 @@ const logger = createLogger('AgentDefLoader');
 
 const REQUIRED_FIELDS: (keyof AgentDefinition)[] = ['id', 'displayName', 'deployMode', 'detection'];
 
+/** Locations supported by the bundled Hermes definition, in its existing priority order. */
+export function hermesCliCandidatePaths(hermesHome: string): string[] {
+  const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+  const bundledCli = resolveHome(path.join(
+    hermesHome,
+    'hermes-agent',
+    'venv',
+    process.platform === 'win32' ? 'Scripts' : 'bin',
+    executable,
+  ));
+  const homeDir = process.platform === 'win32'
+    ? process.env.USERPROFILE || resolveHome('~')
+    : process.env.HOME || resolveHome('~');
+  return [bundledCli, path.join(homeDir, '.local', 'bin', executable)];
+}
+
 export interface AgentDefLoaderOptions {
   builtinDir: string;
   localDir: string;
@@ -197,20 +213,9 @@ export class AgentDefLoader {
 
   private resolveHermesCli(hermesHome: string): string {
     if (process.env.HERMES_CLI) return process.env.HERMES_CLI;
-    const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
-    const bundledCli = resolveHome(path.join(
-      hermesHome,
-      'hermes-agent',
-      'venv',
-      process.platform === 'win32' ? 'Scripts' : 'bin',
-      executable,
-    ));
-    if (existsSync(bundledCli)) return bundledCli;
-    const homeDir = process.platform === 'win32'
-      ? process.env.USERPROFILE || resolveHome('~')
-      : process.env.HOME || resolveHome('~');
-    const userCli = path.join(homeDir, '.local', 'bin', executable);
-    if (existsSync(userCli)) return userCli;
-    return executable;
+    for (const candidate of hermesCliCandidatePaths(hermesHome)) {
+      if (existsSync(candidate)) return candidate;
+    }
+    return process.platform === 'win32' ? 'hermes.exe' : 'hermes';
   }
 }

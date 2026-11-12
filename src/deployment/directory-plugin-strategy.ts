@@ -13,6 +13,7 @@ import type {
   DirectoryPluginConfig,
 } from '../types/index.js';
 import { detectAgent } from './detect-utils.js';
+import { hermesCliCandidatePaths } from './agent-def-loader.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('DirectoryPluginStrategy');
@@ -53,10 +54,37 @@ export class DirectoryPluginStrategy implements DeployStrategy {
   }
 
   async detect(def: AgentDefinition): Promise<boolean> {
-    if (!(await detectAgent(def.detection))) return false;
     const command = def.directoryPlugin?.activation?.command;
-    if (!command) return true;
+    // Hermes may be installed under ~/.local/bin without a ~/.hermes directory
+    // or an entry on the collector service's PATH. Its CLI is the detection gate.
+    if (def.id === 'hermes-agent' && command) {
+      return (await this.resolveActivationCommand(def)) !== null;
+    }
+    if (!(await detectAgent(def.detection))) return false;
+    return !command || (await this.resolveActivationCommand(def)) !== null;
+  }
 
+  private async resolveActivationCommand(def: AgentDefinition): Promise<string | null> {
+    const command = def.directoryPlugin?.activation?.command;
+    if (!command) return null;
+
+    if (def.id === 'hermes-agent') {
+      const candidates = hermesCliCandidatePaths(def.detection.paths[0] ?? '~/.hermes');
+      const defaultName = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+      const explicitOverride = Boolean(process.env.HERMES_CLI);
+      const isDefaultCommand = command === defaultName
+        || candidates.some(candidate => path.normalize(candidate) === path.normalize(command));
+      if (!explicitOverride && isDefaultCommand) {
+        for (const candidate of [...candidates, defaultName]) {
+          if (await this.commandAvailable(candidate)) return candidate;
+        }
+        return null;
+      }
+    }
+    return await this.commandAvailable(command) ? command : null;
+  }
+
+  private async commandAvailable(command: string): Promise<boolean> {
     // A home directory can outlive the CLI. Check the command we will actually
     // spawn, without using the generic detection cache in a long-running agent.
     if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
@@ -175,7 +203,10 @@ export class DirectoryPluginStrategy implements DeployStrategy {
       const activationHash = this.hashActivation(config.activation);
       let activationStatus: DirectoryPluginMarker['activationStatus'];
       if (config.activation && activationHash) {
-        activationStatus = await this.activate(config.activation);
+        const command = await this.resolveActivationCommand(def);
+        activationStatus = await this.activate(command
+          ? { ...config.activation, command }
+          : config.activation);
         marker.activationHash = activationHash;
         marker.activationStatus = activationStatus;
         await this.writeMarker(targetDir, markerFile, marker);
@@ -220,7 +251,10 @@ export class DirectoryPluginStrategy implements DeployStrategy {
 
       if (config.activation?.disableArgs?.length) {
         try {
-          await this.deactivate(config.activation);
+          const command = await this.resolveActivationCommand(def);
+          await this.deactivate(command
+            ? { ...config.activation, command }
+            : config.activation);
         } catch (err) {
           logger.warn('failed to deactivate directory plugin before removal', {
             agentId: def.id,
