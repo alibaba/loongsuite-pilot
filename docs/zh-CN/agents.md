@@ -21,6 +21,34 @@
 用户身份、输入和模型/工具调用，避免相互覆盖。后台整理未提供原生 sender ID 时，
 仍使用配置身份或 hostname 兜底，不自动继承该 session 最近的 IM 用户。
 
+## OpenClaw / Hermes 请求上下文
+
+OpenClaw 的 `llm_input.historyMessages` 用于保留之前的对话，再追加本次 prompt。
+后续模型步骤按实际持久化顺序补入 assistant 消息和工具结果；system/tools 由 Trace
+转换器继承。不会把首步快照反复当成后续步骤的完整请求。此路径适用于提供这些 Hook
+的现代 OpenClaw；旧版本继续使用原有推定时序适配器。
+
+Hermes 的 LLM 输入优先使用原生 Chat `request_messages`，否则保留完整的
+`conversation_history`。用于匹配当前轮响应的历史窗口仍然独立，避免把旧回复归到新请求。
+Responses 项和提供商专用工具块保留归一化历史作为回退来源。
+
+Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.body`。对于提供兼容
+`_api_request_payload_for_hook(self, api_kwargs)` 的宿主，插件在该边界独立快照 system/tools，
+保持宿主原有返回值、异常和其他插件收到的载荷。快照按请求对象、session 和五秒有效期匹配，
+消费后释放；无此能力时仍读取原生系统字段或可见 body，不解析残缺 `preview`。
+
+采集仍有容量边界，不能将消息字符数直接当作模型计费 Token 的完整性证明：
+
+- OpenClaw 首步输入最多 1,024 条消息、约 2 MiB，超限优先保留当前 prompt 与较近历史；
+  原有每文本 part / 工具结果 64 Ki 字符上限保持有效。
+- Hermes 每个 LLM 请求最多 1,024 条消息、约 2 MiB，每文本 part 最多 256 Ki 字符。
+  当前轮生命周期窗口仍为 64 条；system/tools 保留原有每字符串 32 Ki 字符、128 项及深度限制，
+  额外元数据快照最多约 2 MiB。
+- 消息数量或总字节预算耗尽、或 Hermes 载荷被宿主整体裁剪而无法恢复时，事件和对应 Trace
+  保留 `agent.pilot.request_context.truncated=true`。单字段裁剪保留 `...[truncated]` 后缀。
+
+升级后需重启 OpenClaw / Hermes 宿主，使其重新加载插件。历史上已经丢失的内容不会自动补回。
+
 ## 支持的 Agent ID
 
 这些 ID 用于标识受支持的集成。大多数 ID 可直接用于安装参数、

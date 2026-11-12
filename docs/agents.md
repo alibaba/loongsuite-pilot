@@ -23,6 +23,46 @@ keeps their identity, input and model/tool calls separate by turn/task identity.
 Background reviews without a native sender ID retain the configured identity or
 hostname fallback; they do not inherit the last IM user in the session.
 
+## OpenClaw / Hermes request context
+
+Modern OpenClaw uses `llm_input.historyMessages` plus the submitted prompt to
+seed request history. Later steps append observed assistant messages and tool
+results in persistence order. The Trace converter inherits system instructions
+and tool definitions; it does not reuse the first snapshot as every later
+request. Older OpenClaw releases retain their existing inferred-timing adapter.
+
+Hermes prefers native Chat `request_messages`, falling back to the complete
+`conversation_history`. Its current-turn response window stays separate, so
+earlier assistant replies cannot consume a new request's response. Provider
+tool blocks and Responses items retain normalized conversation history as a
+fallback.
+
+Hermes 0.16.0 can discard the entire `request.body` at its 50,000-character Hook
+limit. On hosts exposing the compatible
+`_api_request_payload_for_hook(self, api_kwargs)` boundary, Pilot independently
+snapshots system/tool metadata while preserving the original return object,
+exceptions and payload seen by other plugins. Snapshots match the request
+object and session, expire after five seconds, and are consumed once. Without
+this capability Pilot uses native system fields or the visible body; it does
+not parse a truncated `preview`.
+
+Capture remains bounded; message character counts alone cannot prove complete
+coverage of billable model tokens:
+
+- OpenClaw seeds at most 1,024 messages and approximately 2 MiB, retaining the
+  current prompt and recent history on overflow. Existing 64 Ki-character text
+  part/tool-result limits still apply.
+- Hermes captures at most 1,024 messages and approximately 2 MiB per LLM request,
+  with 256 Ki characters per text part. The lifecycle window remains 64 messages.
+  System/tools retain their existing 32 Ki-character string, 128-item and depth
+  limits; the additional metadata snapshot is bounded to approximately 2 MiB.
+- Message/byte budget overflow, or an unrecoverable host-truncated Hermes payload,
+  sets `agent.pilot.request_context.truncated=true` on events and corresponding
+  traces. Individual field clipping retains the `...[truncated]` suffix.
+
+Restart the OpenClaw/Hermes host after updating the plugin. Previously lost
+historical content is not automatically recovered.
+
 ## Supported Agent IDs
 
 These IDs identify the supported integrations. Most can be used in installer

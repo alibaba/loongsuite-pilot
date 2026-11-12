@@ -39,6 +39,9 @@ MAX_TURN_MESSAGES = 64
 MAX_PARTS = 64
 MAX_COLLECTION_ITEMS = 128
 MAX_CONTENT_CHARS = 32 * 1024
+MAX_REQUEST_MESSAGES = 1024
+MAX_REQUEST_CONTENT_CHARS = 256 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_PENDING_INPUT_RECORDS = 128
 MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
@@ -66,6 +69,7 @@ _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=No
 _NATIVE_RUN_OBSERVER_READY = False
 _NATIVE_RUN_OBSERVER_WARNED = False
 _NATIVE_RUN_RETRY_AFTER = 0.0
+_REQUEST_METADATA = contextvars.ContextVar("pilot_hermes_request_metadata", default=None)
 
 
 def _bind_native_run(state: Dict[str, Any], turn: Dict[str, Any]) -> None:
@@ -501,28 +505,28 @@ def _worker_name() -> Optional[str]:
     return value
 
 
-def _truncate(value: str) -> str:
-    if len(value) <= MAX_CONTENT_CHARS:
+def _truncate(value: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
+    if len(value) <= max_chars:
         return value
-    return value[:MAX_CONTENT_CHARS] + "...[truncated]"
+    return value[:max_chars] + "...[truncated]"
 
 
-def _bounded_value(value: Any, depth: int = 0) -> Any:
+def _bounded_value(value: Any, depth: int = 0, max_chars: int = MAX_CONTENT_CHARS) -> Any:
     if depth >= MAX_VALUE_DEPTH:
         return "[max-depth]"
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return _truncate(value)
+        return _truncate(value, max_chars)
     if isinstance(value, (list, tuple)):
         return [
-            _bounded_value(item, depth + 1)
+            _bounded_value(item, depth + 1, max_chars)
             for item in list(value)[:MAX_COLLECTION_ITEMS]
         ]
     if isinstance(value, dict):
         output: Dict[str, Any] = {}
         for key, item in list(value.items())[:MAX_COLLECTION_ITEMS]:
-            output[_truncate(str(key))] = _bounded_value(item, depth + 1)
+            output[_truncate(str(key))] = _bounded_value(item, depth + 1, max_chars)
         return output
     return _truncate(str(value))
 
@@ -676,6 +680,73 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
         if len(parts) >= MAX_PARTS:
             break
     return parts[:MAX_PARTS]
+
+
+def _install_request_metadata_observer() -> bool:
+    """Observe provider metadata without changing Hermes' capped hook view."""
+    module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+    owner = getattr(module, "AIAgent", None)
+    original = getattr(owner, "_api_request_payload_for_hook", None)
+    if not callable(original) or inspect.iscoroutinefunction(original) or inspect.isgeneratorfunction(original):
+        return False
+    if getattr(original, "_pilot_request_observer", False):
+        original._pilot_request_metadata = _REQUEST_METADATA
+        original._pilot_request_extract = _request_metadata
+        return True
+    try:
+        parameters = list(inspect.signature(original).parameters)
+    except (TypeError, ValueError):
+        return False
+    if parameters != ["self", "api_kwargs"]:
+        return False
+
+    @functools.wraps(original)
+    def observed(self: Any, api_kwargs: Any) -> Any:
+        # Return the exact original object to all plugins. A request-identity
+        # match, session, TTL and shared single-use holder prevent stale or
+        # auxiliary-call metadata from decorating an unrelated request.
+        context = observed._pilot_request_metadata
+        context.set(None)
+        result = original(self, api_kwargs)
+        try:
+            if isinstance(result, dict):
+                metadata = observed._pilot_request_extract({"body": api_kwargs})
+                context.set({"request": result, "session_id": getattr(self, "session_id", None),
+                             "created": time.monotonic(), "metadata": metadata})
+        except Exception as error:
+            _report_internal_error("request metadata snapshot", error)
+        return result
+
+    observed._pilot_request_observer = True
+    observed._pilot_request_metadata = _REQUEST_METADATA
+    observed._pilot_request_extract = _request_metadata
+    owner._api_request_payload_for_hook = observed
+    return True
+
+
+def _request_metadata(request: Any) -> Dict[str, Any]:
+    output: Dict[str, Any] = {"system_instructions": [], "tool_definitions": []}
+    size = 2
+    for key, items in (("system_instructions", _system_instructions(request)),
+                       ("tool_definitions", _tool_definitions(request))):
+        for item in items:
+            size += len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 1
+            if size > MAX_REQUEST_BYTES:
+                output["truncated"] = True
+                break
+            output[key].append(item)
+    return output
+
+
+def _take_request_metadata(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = _REQUEST_METADATA.get()
+    if (not isinstance(snapshot, dict) or snapshot.get("request") is not payload.get("request")
+            or snapshot.get("session_id") != payload.get("session_id")
+            or time.monotonic() - snapshot.get("created", 0) > 5.0):
+        return {}
+    # Newer Hermes runs hooks in a copied context on a worker. Clearing the
+    # holder itself also consumes the snapshot in the caller's context.
+    return snapshot.pop("metadata", {})
 
 
 def _skill_attributes(
@@ -920,7 +991,7 @@ def _numeric(value: Any) -> Optional[int]:
     return None
 
 
-def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _tool_calls(message: Dict[str, Any], max_chars: int = MAX_CONTENT_CHARS) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     calls = message.get("tool_calls")
     if not isinstance(calls, list):
@@ -937,12 +1008,12 @@ def _tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": str(name),
         }
         if "arguments" in function:
-            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")))
+            part["arguments"] = _bounded_value(_decode_json(function.get("arguments")), max_chars=max_chars)
         output.append(part)
     return output
 
 
-def _message(message: Any) -> Optional[Dict[str, Any]]:
+def _message(message: Any, max_chars: int = MAX_CONTENT_CHARS) -> Optional[Dict[str, Any]]:
     if not isinstance(message, dict):
         return None
     role = str(message.get("role") or "unknown")
@@ -951,7 +1022,7 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
 
     if role == "tool":
         call_id = message.get("tool_call_id") or message.get("call_id")
-        response = _bounded_value(_decode_json(content))
+        response = _bounded_value(_decode_json(content), max_chars=max_chars)
         parts.append({
             "type": "tool_call_response",
             "id": str(call_id) if call_id else None,
@@ -960,21 +1031,21 @@ def _message(message: Any) -> Optional[Dict[str, Any]]:
     else:
         if isinstance(content, str):
             if content or not message.get("tool_calls"):
-                parts.append({"type": "text", "content": _truncate(content)})
+                parts.append({"type": "text", "content": _truncate(content, max_chars)})
         elif isinstance(content, list):
             for item in content[:MAX_PARTS]:
                 if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
                     text = item.get("text", item.get("content", ""))
                     parts.append({
                         "type": "text",
-                        "content": _truncate(str(text or "")),
+                        "content": _truncate(str(text or ""), max_chars),
                     })
         elif content is not None:
             parts.append({
                 "type": "text",
-                "content": _truncate(str(content)),
+                "content": _truncate(str(content), max_chars),
             })
-        parts.extend(_tool_calls(message))
+        parts.extend(_tool_calls(message, max_chars))
 
     if not parts:
         parts.append({"type": "text", "content": ""})
@@ -992,6 +1063,25 @@ def _messages(messages: List[Any]) -> List[Dict[str, Any]]:
         if converted is not None:
             output.append(converted)
     return output
+
+
+def _request_inputs(messages: List[Any]) -> tuple:
+    """Capture the request independently of the small lifecycle window."""
+    output: List[Dict[str, Any]] = []
+    size = 2
+    truncated = len(messages) > MAX_REQUEST_MESSAGES
+    for message in reversed(messages[-MAX_REQUEST_MESSAGES:]):
+        if isinstance(message, dict) and isinstance(message.get("content"), list) and len(message["content"]) > MAX_PARTS:
+            truncated = True
+        converted = _message(message, MAX_REQUEST_CONTENT_CHARS)
+        if converted is None:
+            continue
+        size += len(json.dumps(converted, ensure_ascii=False).encode("utf-8")) + 1
+        if size > MAX_REQUEST_BYTES:
+            truncated = True
+            break
+        output.append(converted)
+    return list(reversed(output)), truncated
 
 
 def _current_turn_messages(turn: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1244,8 +1334,23 @@ def _write_turn_input(turn: Dict[str, Any], request: Dict[str, Any]) -> None:
 
 
 def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if isinstance(payload.get("conversation_history"), list):
-        return _current_turn_messages(turn, payload)
+    native = payload.get("request_messages")
+    # Native Chat messages are closest to the provider input. Other APIs can
+    # expose Responses items or provider-specific tool blocks here; preserve
+    # their normalized conversation history until those shapes are supported.
+    native_chat = isinstance(native, list) and bool(native) and all(
+        isinstance(message, dict) and message.get("role") in ("system", "developer", "user", "assistant", "tool")
+        and (not isinstance(message.get("content"), list) or all(
+            isinstance(block, dict) and block.get("type") in ("text", "input_text", "output_text")
+            for block in message["content"]))
+        for message in native)
+    if native_chat:
+        return [message for message in native if isinstance(message, dict)
+                and message.get("role") not in ("system", "developer")]
+    if isinstance(payload.get("conversation_history"), list) and payload["conversation_history"]:
+        # This is LLM input, not the lifecycle/response window. Keep earlier
+        # turns without letting their assistants consume current API results.
+        return [message for message in payload["conversation_history"] if isinstance(message, dict)]
     # Older hooks omit request history. Retain only observed boundaries; never
     # invent response text. Tool hooks still supply their actual call/result.
     messages = list(turn.get("initial_messages") or [{"role": "user", "content": turn["user_message"]}])
@@ -1272,7 +1377,7 @@ def _request_messages(turn: Dict[str, Any], api: Dict[str, Any], payload: Dict[s
 def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, Any], payload: Dict[str, Any]) -> None:
     step_id, response_id = _api_ids(turn, api)
     messages = _request_messages(turn, api, payload)
-    _capture_turn_input(turn, messages)
+    _capture_turn_input(turn, _current_turn_messages(turn, payload))
     index = next(i for i, item in enumerate(turn["apis"]) if item is api)
     delta_start = 0
     if index:
@@ -1280,7 +1385,8 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         if positions:
             delta_start = positions[-1]
     pre = api.get("pre") or {}
-    inputs = _messages(messages)
+    inputs, truncated = _request_inputs(messages)
+    delta = inputs if delta_start == 0 else _request_inputs(messages[delta_start:])[0]
     record = _common_fields(turn, state, "llm.request", api["pre_ns"], step_id, api["span_id"])
     record.update({
         "gen_ai.provider.name": _provider_name(pre.get("provider")),
@@ -1288,11 +1394,13 @@ def _emit_request(turn: Dict[str, Any], state: Dict[str, Any], api: Dict[str, An
         "gen_ai.response.id": response_id,
         "gen_ai.request.model": pre.get("model") or turn.get("model") or "unknown",
         "gen_ai.input.messages": inputs,
-        "gen_ai.input.messages_delta": _messages(messages[delta_start:]),
+        "gen_ai.input.messages_delta": delta,
         "gen_ai.input.messages_hash": hashlib.sha256(
             json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "agent.hermes.hook": "pre_api_request",
     })
+    if truncated or pre.get("context_truncated"):
+        record["agent.pilot.request_context.truncated"] = True
     for key in ("tool_definitions", "system_instructions"):
         if pre.get(key):
             record["gen_ai.tool.definitions" if key == "tool_definitions" else "gen_ai.system_instructions"] = pre[key]
@@ -1600,6 +1708,8 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
     task_id = payload.get("task_id")
     state["model"] = payload.get("model") or state.get("model")
     state["platform"] = payload.get("platform") or state.get("platform")
+    metadata = _take_request_metadata(payload)
+    request = payload.get("request")
     api = {
         "session_id": session_id,
         "task_id": task_id,
@@ -1610,8 +1720,13 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
         "pre": {
             "provider": payload.get("provider"),
             "model": payload.get("model"),
-            "tool_definitions": _tool_definitions(payload.get("request")),
-            "system_instructions": _system_instructions(payload.get("request")),
+            "tool_definitions": metadata.get("tool_definitions") or _tool_definitions(payload.get("request")),
+            "system_instructions": metadata.get("system_instructions") or _system_instructions({"body": {
+                "messages": payload.get("request_messages"),
+                "system": payload.get("system_prompt"),
+            }}) or _system_instructions(payload.get("request")),
+            "context_truncated": bool(metadata.get("truncated") or
+                                      (isinstance(request, dict) and request.get("_truncated") and not metadata)),
         },
         "post": {},
     }
@@ -1875,6 +1990,7 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
         try:
             if hook_name == "pre_llm_call":
                 _retry_run_completion_observer()
+                _install_request_metadata_observer()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -1889,6 +2005,10 @@ def register(ctx: Any) -> None:
     """Register synchronous Hermes lifecycle callbacks."""
     _install_delegate_context()
     _try_install_run_completion_observer()
+    try:
+        _install_request_metadata_observer()
+    except Exception as error:
+        _report_internal_error("request metadata observer", error)
     _purge_old_logs()
     for hook_name in HOOKS:
         try:

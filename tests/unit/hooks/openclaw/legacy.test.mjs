@@ -115,7 +115,10 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     const responses = result.filter(r => r['event.name'] === 'llm.response');
     expect(requests).toHaveLength(2);
     expect(responses).toHaveLength(2);
-    expect(requests[1]['gen_ai.input.messages_delta'].map(m => m.parts[0].id)).toEqual(['t2', 't1']);
+    expect(requests[1]['gen_ai.input.messages_delta'][0]).toMatchObject({ role: 'assistant', parts: [
+      { type: 'tool_call', id: 't1' }, { type: 'tool_call', id: 't2' },
+    ] });
+    expect(requests[1]['gen_ai.input.messages_delta'].slice(1).map(m => m.parts[0].id)).toEqual(['t2', 't1']);
     expect(requests[1]['agent.openclaw.timing.source']).toBe('tool_result_persist');
     expect(result.filter(r => r['event.name'] === 'tool.result').map(r => r['gen_ai.tool.call.id'])).toEqual(['t2', 't1']);
     expect(result.at(-1)['agent.openclaw.per_call_usage.mismatch']).toBeUndefined();
