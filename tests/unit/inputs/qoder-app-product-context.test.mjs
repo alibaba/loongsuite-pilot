@@ -39,6 +39,27 @@ beforeEach(() => {
 afterEach(() => { collector.stop(); fs.rmSync(dataDir, { recursive: true, force: true }); });
 
 describe('Qoder product identity follows the owning native Turn', () => {
+  it('uses the App Stop after native desktop metadata following last-prompt', async () => {
+    appendTurn(0);
+    fs.appendFileSync(transcript, [
+      { type: 'workspace-directories', directories: ['/synthetic/workspace'] },
+      { type: 'runtime-config', timestamp: epoch + 1500 },
+      { type: 'active-leaf', uuid: 'response-0' },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    wake('app');
+    expect(types(await collect())).toEqual(['qoder-app']);
+  });
+
+  it('does not borrow an App Stop across the next prompt even with trailing metadata', async () => {
+    appendTurn(0); wake('cli'); await collect();
+    appendTurn(1);
+    fs.appendFileSync(transcript, JSON.stringify({ type: 'active-leaf', uuid: 'response-1' }) + '\n');
+    appendTurn(2); wake('app');
+    const responses = (await collect()).filter(record => record['event.name'] === 'llm.response');
+    expect(responses.map(record => [record['gen_ai.response.id'], record['gen_ai.agent.type']]))
+      .toEqual([['response-1', 'qoder-cli'], ['response-2', 'qoder-app']]);
+  });
+
   it('keeps different queued Stop products separate in one native session', async () => {
     appendTurn(0); wake('app'); appendTurn(1); wake('cli');
     const records = await collect();

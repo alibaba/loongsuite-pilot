@@ -34,6 +34,7 @@ const LEGACY_LOCK_GRACE_MS = 1000;
 const LEGACY_LOCK_AGE_MS = 60_000;
 const MAX_TRAILING_CONTROL_BYTES = 64 * 1024;
 const TERMINAL_CONTEXT_EVENTS = new Set(['Stop', 'SessionEnd']);
+const TERMINAL_CONTEXT_METADATA = new Set(['workspace-directories', 'runtime-config', 'active-leaf']);
 const DEFERRED_CONTENT_ERRORS = new Set([
   'record-byte-limit', 'turn-byte-limit', 'turn-record-limit',
   'bootstrap-record-byte-limit', 'invalid-json-line',
@@ -981,7 +982,8 @@ export class QoderTranscriptCollector {
       for (const line of lines) {
         if (!line) return null;
         const row = JSON.parse(line);
-        if (!isControlUserRow(row) && !TERMINAL_CONTEXT_EVENTS.has(eventOf(row))) return null;
+        if (!isControlUserRow(row) && !TERMINAL_CONTEXT_EVENTS.has(eventOf(row))
+          && !TERMINAL_CONTEXT_METADATA.has(row.type)) return null;
       }
       return candidate;
     } catch {
