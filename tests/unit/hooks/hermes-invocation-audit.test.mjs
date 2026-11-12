@@ -25,7 +25,6 @@ class CLIChatTurnMixin:
         # Native CLI stages the row, then calls str(notification) before the
         # agent thread. The original object never reaches pre_llm_call.
         agent._pending_cli_user_message = {'role':'user','content':str(message)}
-cli_module.CLIChatTurnMixin = CLIChatTurnMixin
 native_loop = types.ModuleType('agent.conversation_loop')
 def run_conversation(agent, user_message):
     plain = user_message.encode('utf-8', 'replace').decode('utf-8')
@@ -52,6 +51,8 @@ tools.delegate_tool = delegate
 sys.modules.update({'tools':tools,'tools.delegate_tool':delegate,'tools.process_registry_notifications':notifications,
                     'hermes_cli.cli_chat_turn_mixin':cli_module,'agent.conversation_loop':native_loop})
 p.register(types.SimpleNamespace(register_hook=lambda n, cb: hooks.update({n:cb})))
+# Native plugin discovery can occur while this CLI module is still importing.
+cli_module.CLIChatTurnMixin = CLIChatTurnMixin
 hooks['pre_llm_call'](session_id='parent', turn_id='parent-turn', sender_id='user-a')
 args = {'context':'shared context', 'tasks':[{'goal':'task one','context':'first-only context'},{'goal':'task two'}]}
 hooks['pre_tool_call'](session_id='parent', turn_id='parent-turn', tool_name='delegate_task', tool_call_id='batch', args=args)

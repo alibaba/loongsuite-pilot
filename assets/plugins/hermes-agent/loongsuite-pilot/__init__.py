@@ -189,14 +189,19 @@ def _install_notification_context() -> None:
         _report_internal_error("notification_context", error)
 
 
+_CLI_DELIVERY_READY = False
+
+
 def _install_cli_delivery_context() -> None:
     """The native CLI deliberately stringifies TimelineNotification after staging
     it. Retain its structured event beside the exact staged row, never in model
     content or the persisted transcript. Formatting alone is not consumption."""
+    global _CLI_DELIVERY_READY
     try:
         cls = importlib.import_module("hermes_cli.cli_chat_turn_mixin").CLIChatTurnMixin
         original = cls._chat_stage_user_message
         if getattr(original, "_pilot_audit", False):
+            _CLI_DELIVERY_READY = True
             return
 
         @functools.wraps(original)
@@ -217,6 +222,7 @@ def _install_cli_delivery_context() -> None:
 
         staged._pilot_audit = True
         cls._chat_stage_user_message = staged
+        _CLI_DELIVERY_READY = True
     except (ImportError, AttributeError):
         pass
     except Exception as error:
@@ -2172,6 +2178,11 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
         try:
             if hook_name == "pre_llm_call":
                 _retry_run_completion_observer()
+                # Discovery may run from cli_agent_setup_mixin's run_agent
+                # import, before CLIChatTurnMixin itself has been defined.
+                # Retry once the first native turn reaches lifecycle hooks.
+                if not _CLI_DELIVERY_READY:
+                    _install_cli_delivery_context()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
