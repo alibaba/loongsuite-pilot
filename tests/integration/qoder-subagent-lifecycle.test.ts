@@ -47,7 +47,7 @@ const end = (id: string, second: number, tokens = 11) => [
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 
-async function harness(agentId: 'qoder', upstream = false, configureCollector?: (collector: any) => void) {
+async function harness(agentId: 'qoder', upstream = false, configureCollector?: (collector: any) => void, hostProduct?: 'app') {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-child-pipeline-')));
   cleanup.push(() => fs.rm(root, { recursive: true, force: true }));
   const parent = path.join(root, `${session}.jsonl`);
@@ -75,10 +75,13 @@ async function harness(agentId: 'qoder', upstream = false, configureCollector?: 
   const stop = async () => { await manager?.stopAll(); await state?.save(); };
   cleanup.push(stop);
   const write = async (id: string | null, rows: object[], append = false) => {
+    if (hostProduct) rows = rows.map(row => (row as any).type === 'user' && (row as any).uuid
+      ? { ...row, businessIdentity: { product: hostProduct } } : row);
     const file = id ? child(id) : parent; await fs.mkdir(path.dirname(file), { recursive: true });
     await fs[append ? 'appendFile' : 'writeFile'](file, jsonl(rows));
     expect(publishQoderWakeup({ session_id: session, transcript_path: parent,
       hook_event_name: id ? 'SubagentStop' : 'Stop', cwd: root,
+      ...(hostProduct && !id ? { parent_business_info: { product: hostProduct } } : {}),
       ...(id ? { agent_id: id, agent_type: 'synthetic-reader', agent_transcript_path: file } : {}),
     }, { dataDir: root, agentId })).toBe(true);
   };
@@ -96,6 +99,26 @@ async function spansFor(entries: AgentActivityEntry[]) {
 }
 
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
+  it('keeps App identity on early delegation, child work and final exported resources', async () => {
+    const h = await harness(agentId, false, undefined, 'app');
+    await h.write(null, [prompt('app-parent', 0), ...dispatch('app-call', 1, 'app-child')]);
+    await h.start(); await h.cycle();
+    expect(h.entries().filter(entry => entry['event.name'] === 'gen_ai.agent.invoke')).toHaveLength(1);
+    expect(h.entries().every(entry => entry['gen_ai.agent.type'] === 'qoder-app')).toBe(true);
+    await h.write('app-child', [prompt('app-child', 1.1, 'app-call', 'app-child', session), ...end('app-child-end', 4)]);
+    await h.write(null, end('app-parent-end', 6), true);
+    await h.cycle(); await h.stop();
+    expect(h.entries().every(entry => entry['gen_ai.agent.type'] === 'qoder-app')).toBe(true);
+    const spans = await spansFor(h.entries());
+    expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(2);
+    expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(1);
+    for (const span of spans) expect(span.resource.attributes).toMatchObject({
+      'gen_ai.agent.type': 'qoder-app', 'gen_ai.framework': 'qoder-app', 'gen_ai.agent.system': 'qoder-app',
+    });
+    const ids = new Set(spans.map(span => span.spanContext().spanId));
+    for (const span of spans) if (span.parentSpanId) expect(ids.has(span.parentSpanId)).toBe(true);
+  });
+
   it.each([false, true])('exports the nested TOOL parent after delayed discovery and a durable restart (omit parent=%s)', async omitParent => {
     let clock = Date.now();
     let queue: string[] = [];
