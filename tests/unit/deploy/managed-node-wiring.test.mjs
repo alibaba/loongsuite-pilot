@@ -35,9 +35,9 @@ describe('sh installer variants wire the managed node runtime', () => {
       expect(sh).toContain('sha256 mismatch');
       expect(sh).toContain('xattr -dr com.apple.quarantine');
     });
-    it.skipIf(!present)(`${f} rejects musl and win-arm64 with explicit notices`, () => {
+    it.skipIf(!present)(`${f} rejects musl with an explicit notice`, () => {
       expect(sh).toContain('ld-musl-');
-      expect(sh).toContain('win-arm64');
+      expect(sh).toContain('linux-musl');
     });
     it.skipIf(!present)(`${f} check_deps prefers managed node by default with system fallback`, () => {
       const checkDeps = sh.slice(sh.indexOf('check_deps() {'));
@@ -88,10 +88,11 @@ describe('ps1 installer variants wire the managed node runtime', () => {
       expect(ps1).toContain('LOONGSUITE_PILOT_NODE_MODULES_URL');
       expect(ps1).toContain('[switch]$PreferSystemNode');
     });
-    it.skipIf(!present)(`${f} verifies SHASUMS256.txt via Get-FileHash and rejects win-arm64`, () => {
+    it.skipIf(!present)(`${f} verifies SHASUMS256.txt via Get-FileHash and accepts ARM64`, () => {
       expect(ps1).toContain('SHASUMS256.txt');
       expect(ps1).toContain('Get-FileHash -Algorithm SHA256');
       expect(ps1).toContain('ARM64');
+      expect(ps1).toContain('Arch = "arm64"');
     });
     it.skipIf(!present)(`${f} Check-Deps prefers managed node by default with system fallback`, () => {
       const checkDeps = ps1.slice(ps1.indexOf('function Check-Deps'));
