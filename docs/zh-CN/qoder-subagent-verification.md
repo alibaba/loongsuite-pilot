@@ -51,7 +51,7 @@ invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使
 
 未找到父工具时，按直接父 Agent 来源安排优先扫描，并在每轮最多 8 个优先来源、队列最多 128 项的预算内重试；历史目录的普通轮转继续推进。嵌套 Hook 的 `transcript_path` 可能仍是根会话路径，不代表直接父执行。优先使用原生 `parent_agent_id` 定位 sidechain；字段缺失时，只将同一原生 session 内、实际含对应 tool-call ID 的来源作为定位提示，真实关联仍由委派索引确认。
 
-父来源自身等待上一级时，不算已完成直接父扫描。未定位直接父级的 60 秒降级，还需完成一次开始时间不早于 pending 的来源轮转及相关定位读取；重启会重新建立这些扫描证明。定位每轮至多读取一个来源，64 KiB 扫描配额计入现有共享字节预算，跨块行重建沿用 tailer 的软预算；游标最多 128 项、调用提示最多 4096 个 ID，每个 ID 至多保留两个不同来源以识别歧义。提示仅保存标识，游标沿用 tailer 的偏移和有界校验片段，不复制整段消息或任务正文。定位可以增量继续，不每轮重读未变化的待关联正文；达到定位容量会输出诊断。
+Rust 优先安排已登记的父来源，并继续轮转全部原生来源。重启会重新建立轮转进度，父来源本身仍在等待时继续保留子 turn。JS #586 的兼容实现还包含按 tool-call ID 定位文件的 64 KiB 辅助扫描。
 
 到期仍无法确认父级时保留独立子执行，诊断 `subagent-parent-unavailable-independent` 携带本 collector 实例的累计 `fallbackCount`，不猜父级，也不在导出后重发 Span 伪装成补挂。委派索引最多保留 4096 项、最长 7 天；容量不足时先回收子执行已结束且结果已交付的关系，全部仍未完成时报告 `subagent-link-capacity`。扫描、单 turn 和正文缓存继续使用原 tailer 的容量限制。
 
@@ -60,6 +60,8 @@ invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使
 ## 验证入口与范围
 
 Rust 回归通过真实二进制发布起止通知，在父 turn 仍开放时持久化早发 invoke，重新加载 checkpoint 后验证子 turn、结果、事件去重和 Span 父子关系。
+
+Linux x64 的开源候选包已用真实 Qoder CLI 1.1.76 验证。父调用落盘后、Qoder 仍在运行时重启 collector，恢复后导出 14 条活动和 10 个 Span，事件 ID 无重复。子 Agent 保留独立 turn，挂在父 Agent 工具的 Span 下，保留上游 Trace 和子模型用量。
 
 \`\`\`bash
 cargo build --locked --lib --bin loongsuite-pilot
