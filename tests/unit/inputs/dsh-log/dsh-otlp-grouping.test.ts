@@ -174,6 +174,12 @@ describe('DSH event-to-span OTLP flow', () => {
     ]);
     expect(messageText(llmInputs[0][0])).toContain('Create a hello.txt file');
     expect(messageText(llmInputs[0][1])).toContain('Current runtime context');
+    const results = entries.filter(entry => entry['event.name'] === 'tool.result');
+    expect(llmInputs[2].filter(message => message.role === 'tool').flatMap(message => message.parts ?? []))
+      .toEqual(results.map(result => ({
+        type: 'tool_call_response', id: result['gen_ai.tool.call.id'],
+        response: { output: expect.any(String), isError: false },
+      })));
   });
 
   it('exports each embedded-stream response once with its own finish reason and native timing', async () => {
