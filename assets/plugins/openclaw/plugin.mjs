@@ -34,6 +34,7 @@ import { createSubagentContexts, stampSubagent } from "./subagent-context.mjs";
 import { invocationId, auditRecord, textMessages, deliveredText } from "./invocation-audit.mjs";
 import { MIN_OPENCLAW_VERSION } from "./compatibility.mjs";
 import { resolveRuntimeCapabilities } from "./runtime-version.mjs";
+import { installSteeredDeliveryObserver } from "./steered-delivery.mjs";
 import { createLegacyHandlers } from "./legacy-adapter.mjs";
 import { createObservationClock } from "./legacy-utils.mjs";
 import {
@@ -1377,6 +1378,32 @@ function recordAgentDelivery(receiver, work, message, userId, emit) {
   childContexts.write(work.runId, work);
 }
 
+function prepareSteeredDelivery(params) {
+  const source = params?.sourceSessionKey;
+  const prefix = `announce:v1:${source}:`;
+  if (!isSessionKey(source) || !params.directIdempotencyKey?.startsWith(prefix)) return;
+  const work = childContexts.read(params.directIdempotencyKey.slice(prefix.length));
+  if (!work?.invocationId || work.childSessionKey !== source) return;
+  const receivers = [...runs.values()].filter(run => !run.completed && run.sessionId === work.sessionId
+    && run.sessionKey === params.targetRequesterSessionKey);
+  if (receivers.length !== 1) return;
+  const events = params.internalEvents?.filter(event => event.type === 'task_completion'
+    && event.source === 'subagent' && event.childSessionKey === source);
+  if (events?.length !== 1) return;
+  return { receiver: receivers[0], turnId: receivers[0].turnId, work, result: events[0].result };
+}
+
+function completeSteeredDelivery(receipt, delivery) {
+  if (!receipt || delivery?.delivered !== true || delivery.path !== 'steered'
+    || !Number.isFinite(delivery.deliveredAt)) return;
+  const { receiver, work, result } = receipt;
+  // The native queue targets the live receiver. A different or terminated
+  // receiver after its commit is ambiguous; retain ordinary independent data.
+  if (runs.get(receiver.runId) !== receiver || receiver.completed || receiver.turnId !== receipt.turnId) return;
+  recordAgentDelivery(receiver, work, { content: typeof result === 'string' ? result : undefined },
+    resolveUserId(loadPilotConfig()), emitRecord);
+}
+
 function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = true) {
   const message = event?.message;
   const role = message?.role;
@@ -1702,6 +1729,8 @@ export default {
     try { firstTokenObserver = installFirstTokenObserver(); } catch (err) {
       debugFailureOnce("first-token-observer", err);
     }
+    try { installSteeredDeliveryObserver({ prepare: prepareSteeredDelivery, complete: completeSteeredDelivery }); }
+    catch (err) { debugFailureOnce('steered-delivery-observer', err); }
 
     // Observe completion via agent_end. Merely registering before_agent_finalize
     // enables the host's answer-revision gate and defers streaming delivery.

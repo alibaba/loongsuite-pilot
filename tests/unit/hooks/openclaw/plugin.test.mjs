@@ -1502,6 +1502,38 @@ describe('OpenClaw plugin stateful pipeline', () => {
 });
 
 describe('subagent trace propagation', () => {
+  it('records committed native steering in the active receiving turn without parsing a prompt', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'parent', sessionId: 'parent-session', sessionKey: 'agent:main:main' };
+    const child = { runId: 'child', sessionId: 'child-session', sessionKey: 'agent:main:subagent:worker' };
+    await h.before_agent_run({}, parent);
+    await h.before_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', params: { task: 'read' } }, parent);
+    await h.after_tool_call({ toolName: 'sessions_spawn', toolCallId: 'spawn', result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } } }, parent);
+    await h.before_agent_run({}, child);
+    await h.llm_output({}, child);
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    const observer = globalThis[Symbol.for('loongsuite-pilot.openclaw.steered-delivery')].observer;
+    const params = { sourceSessionKey: child.sessionKey, targetRequesterSessionKey: parent.sessionKey,
+      directIdempotencyKey: `announce:v1:${child.sessionKey}:${child.runId}`,
+      internalEvents: [{ type: 'task_completion', source: 'subagent', childSessionKey: child.sessionKey, result: 'actual reply' }] };
+    expect(observer.prepare({ ...params, directIdempotencyKey: 'unknown' })).toBeUndefined();
+    expect(observer.prepare({ ...params, targetRequesterSessionKey: 'foreign' })).toBeUndefined();
+    const receipt = observer.prepare(params);
+    expect(receipt).toBeDefined();
+    observer.complete(receipt, { delivered: true, path: 'steered' });
+    observer.complete(receipt, { delivered: false, path: 'steered', deliveredAt: Date.now() });
+    expect(readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result')).toHaveLength(0);
+    observer.complete(receipt, { delivered: true, path: 'steered', deliveredAt: Date.now() });
+    observer.complete(receipt, { delivered: true, path: 'steered', deliveredAt: Date.now() });
+    const results = readOutputRecords().filter(r => r['event.name'] === 'gen_ai.agent.result');
+    expect(results).toHaveLength(1);
+    expect(results[0]['gen_ai.turn.id']).toBe(parent.runId);
+    expect(results[0]['gen_ai.agent.peer.id']).toBe(child.sessionId);
+    expect(results[0]['gen_ai.output.messages'][0].parts[0].content).toBe('actual reply');
+    await h.llm_output({}, parent);
+    expect(observer.prepare(params)).toBeUndefined();
+  });
+
   it('records the known peer when sessions_send returns after the child has already finished', async () => {
     vi.useFakeTimers();
     const h = registerPlugin(await loadPlugin());
