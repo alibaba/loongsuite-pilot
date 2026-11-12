@@ -255,6 +255,8 @@ Experimental `doubao-work` events and OTLP resources expose `loongsuite.doubao_w
 (`received`, `ended`, `error` or `cancelled`). Client completion is not business success or a model finish reason.
 See [scope and configuration](doubao-work.md).
 
+New events and exported OTLP Spans include `loongsuite.doubao_work.client`, with only `doubao-work` (Doubao Work) or `doubao` (Doubao App work mode). This source-product label supplements the shared `gen_ai.agent.type=doubao-work`; it does not identify a model or provider call. Legacy records without the label remain unknown.
+
 Local tools produce paired `tool.call` / `tool.result` logs with unchanged source times. A uniquely correlated current trajectory reconstructs STEP → LLM / TOOL from assistant messages: inputs contain preceding visible messages; outputs include text/tool_calls; parallel tools share one STEP. LLM and untimed trajectory-tool timestamps are estimated from client submission, tool and completion anchors, with intermediate unknown boundaries linearly allocated. Default CMS LLM counts and latency can include these estimates, which are not precise model timing or actual provider request counts. Missing model, usage, provider response ID and model finish reasons are omitted.
 
 Tools without a usable transcript retain direct AGENT/TASK ownership and the `genai.observed-tools.v1` partial-observation contract. Contained native sandbox executions map to TASKs; their rounds describe a local fragment, not a complete delegated Agent lifecycle. Out-of-request background facts remain logs without stretching requests. Content is masked before conversion; reuse selects current outputs while LLM input may include earlier visible context. Selected Skill/partner IDs describe request context only.

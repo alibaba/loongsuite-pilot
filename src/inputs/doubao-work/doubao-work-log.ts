@@ -30,6 +30,8 @@ export interface DoubaoLogEvent {
   selectedPartners?: string[];
   firstOutput?: { eventId: string; durationMs: number; answerId: string; messageId: string };
   command?: { agentId: string; sandboxId: string; id: string };
+  /** Explicit actor membership reported by the local dispatcher at execution start. */
+  actor?: { agentId: string; sandboxId: string };
   tool?: {
     id: string;
     name: string;
@@ -62,14 +64,14 @@ function selectedNames(value: unknown): string[] | undefined {
 function sourceTime(line: string, fileName: string): string | undefined {
   const fileDate = /^saman(_frontend)?_(\d{4})\.(\d{2})(\d{2})\.\d+\.log$/.exec(fileName);
   if (!fileDate) return undefined;
-  // Match the observed producer and precision for each source family. Other
-  // Chromium/repair logs are not evidence of a client lifecycle boundary.
+  // FRONTEND logs use microseconds on macOS and milliseconds on Windows App;
+  // CONSOLE logs use milliseconds. Keep the filename/producer pairing strict.
   const header = fileDate[1]
-    ? /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]/.exec(line)
+    ? /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{6}|\d{3}):(?:INFO|WARNING|ERROR):FRONTEND\(0\)\]/.exec(line)
     : /^\[\d+:\d+:(\d{2})(\d{2})\/(\d{2})(\d{2})(\d{2})\.(\d{3}):(?:INFO|WARNING|ERROR):CONSOLE\(0\)\]/.exec(line);
   if (!header) return undefined;
   const [, month, day, hour, minute, second, fraction] = header.map(Number);
-  const micros = fileDate[1] ? fraction : fraction * 1000;
+  const micros = header[6].length === 3 ? fraction * 1000 : fraction;
   const fileYear = Number(fileDate[2]);
   const fileAnchor = new Date(fileYear, Number(fileDate[3]) - 1, Number(fileDate[4])).getTime();
   const candidates = [fileYear - 1, fileYear, fileYear + 1].map(year =>
@@ -81,6 +83,25 @@ function sourceTime(line: string, fileName: string): string | undefined {
 
 /** Parse the embedded logger object, not the outer Chromium log wrapper. */
 export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEvent | undefined {
+  const dispatcherPrefix = '[neotix] "Event: agent_sandbox_toolcall_exec ';
+  const dispatcher = line.indexOf(']') + 2;
+  if (dispatcher > 1 && line.startsWith(dispatcherPrefix, dispatcher)) {
+    const begin = line.indexOf('{', dispatcher + dispatcherPrefix.length);
+    const end = line.lastIndexOf('}", source:');
+    if (begin < 0 || end < begin || !/^", source:\s+\(0\)$/.test(line.slice(end + 1))) return undefined;
+    let data;
+    try { data = JSON.parse(line.slice(begin, end + 1)); } catch { return undefined; }
+    // Keep the existing execution_settled producer as the terminal authority.
+    // The telemetry success/error records are not additional tool results.
+    if (data?.status !== 'start' || data.isNewSse !== true || data.delivery !== 'dispatcher') return undefined;
+    const turnId = identifier(data.agentId), sandboxId = identifier(data.sandboxId);
+    const id = identifier(data.toolCallID), name = identifier(data.toolName);
+    const conversationId = identifier(data.conversationId), timeNano = sourceTime(line, fileName);
+    if (!turnId || !sandboxId || !id || !name || !conversationId || !timeNano
+      || isDoubaoPresentationInspection(name, id)) return undefined;
+    return { name: 'local_tool_started', turnId, conversationId, timeNano,
+      actor: { agentId: turnId, sandboxId }, tool: { id, name, sandboxId, phase: 'received' } };
+  }
   // This exact producer reports local dispatch receipt and execution settlement.
   // Ignore sandbox API payloads, cloud commands and all other log namespaces.
   if (line.includes('[neotix] [agent-task]')

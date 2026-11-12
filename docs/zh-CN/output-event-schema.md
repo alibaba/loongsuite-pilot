@@ -240,6 +240,8 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 （`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
 见[支持范围与配置](doubao-work.md)。
 
+新增事件及导出的 OTLP Span 包含 `loongsuite.doubao_work.client`，取值仅为 `doubao-work`（豆包工作）或 `doubao`（豆包 App 工作模式）。该字段区分来源产品，统一 `gen_ai.agent.type=doubao-work` 保持不变；它不表示模型或提供商调用身份。历史记录缺少该字段时保持未知。
+
 本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
 
 缺少可用轨迹的工具仍直接归属 AGENT / TASK，使用 `genai.observed-tools.v1` 部分观测契约。完整原生 sandbox 执行在请求区间内映射为 TASK，内部轮次属于该本地片段，不充当完整子 Agent 生命周期；区间外后台执行仅保留日志，不拉长请求。内容在转换前统一脱敏，复用时只导出当前轮次，但 LLM 输入可以包含此前可见上下文。所选技能/伙伴只表示选择上下文。

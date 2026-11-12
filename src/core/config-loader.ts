@@ -44,6 +44,7 @@ import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
+import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -139,6 +140,7 @@ export interface ConfigFile {
     enabled?: boolean;
     pollInterval?: number;
     logDir?: string;
+    client?: 'doubao-work' | 'doubao';
   }>;
 
   retention?: {
@@ -835,9 +837,15 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
-        ...(key === 'doubao-work' && typeof val.logDir === 'string' && val.logDir.trim()
-          ? { logDir: path.resolve(resolveHome(val.logDir.trim())) } : {}),
+        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
       };
+      if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
+        logger.warn('Invalid Doubao client; disabling this listener', {
+          valueType: typeof val.client,
+          allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
     }
   }
 
