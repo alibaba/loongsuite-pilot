@@ -7,6 +7,10 @@ description: Develop, debug, test, and review the Rust LoongSuite Pilot runtime 
 
 从仓库根目录操作。先读根目录及目标子目录的 `AGENTS.md`，确认当前分支、工作区和目标发行版。2.0.0 发布前在开源 `alibaba/loongsuite-pilot:dev/v2.0.0` 开发。先验收开源改动，再单向同步到商业版 `dev/v2.0.0`。商业代码、内置配置、运行日志和用户数据留在商业环境。
 
+## 同步开源 main
+
+逐项检查 main 自上次同步以来的产品行为、协议、修复及测试变化，并沿 Rust 的生产入口核对现状。对于 JS/TS 的运行时变更，按本 skill 的 Agent、性能和验证要求补齐原生 Rust 适配，保留已有二进制 Hook 与 SDK 行为。为正常路径、兼容性及恢复边界补验收。只合入提交历史或文档不算完成行为同步。开源验收通过后，再单向同步商业版。
+
 ## 按改动查阅
 
 - 编译、隔离调试和了解 SDK 边界，读 [架构与调试](references/runtime.md)。

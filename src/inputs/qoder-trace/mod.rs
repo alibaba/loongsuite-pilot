@@ -6,6 +6,7 @@ pub mod multimodal;
 mod qoder_trace_input;
 mod segment_token_reader;
 mod sqlite_token_reader;
+mod subagents;
 mod token_enricher;
 pub mod transcript_scanner;
 

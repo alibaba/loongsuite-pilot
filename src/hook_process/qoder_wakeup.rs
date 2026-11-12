@@ -268,13 +268,48 @@ fn publish_inner(
     ) else {
         return Ok(false);
     };
-    let Some(supplied) = bounded_string(payload.get("transcript_path"), 4096) else {
+    let Some(parent) = bounded_string(payload.get("transcript_path"), 4096) else {
         return Ok(false);
     };
-    if !Path::new(supplied).is_absolute() {
+    if !Path::new(parent).is_absolute() {
         return Ok(false);
     }
-    let path = canonical_source_path(Path::new(supplied))?;
+    let event_name = payload.get("hook_event_name").and_then(Value::as_str);
+    let sidechain =
+        agent == "qoder" && matches!(event_name, Some("SubagentStart" | "SubagentStop"));
+    let child_id = if sidechain && payload.get("agent_id").is_some() {
+        let Some(id) = bounded_string(payload.get("agent_id"), 512).filter(|id| {
+            id.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        }) else {
+            return Ok(false);
+        };
+        Some(id)
+    } else {
+        None
+    };
+    let parent_path = canonical_source_path(Path::new(parent))?;
+    let supplied = if let Some(id) = child_id {
+        bounded_string(payload.get("agent_transcript_path"), 4096).map_or_else(
+            || {
+                parent_path
+                    .with_extension("")
+                    .join("subagents")
+                    .join(format!("agent-{id}.jsonl"))
+            },
+            std::path::PathBuf::from,
+        )
+    } else {
+        std::path::PathBuf::from(parent)
+    };
+    if !supplied.is_absolute() {
+        return Ok(false);
+    }
+    let path = canonical_source_path(&supplied)?;
+    if child_id.is_some() && path == parent_path {
+        return Ok(false);
+    }
+    let supplied = supplied.to_string_lossy();
     let stat = match std::fs::metadata(&path) {
         Ok(meta) if meta.is_file() => Some(meta),
         Ok(_) => return Ok(false),
@@ -300,6 +335,8 @@ fn publish_inner(
                     | "PostToolUse"
                     | "Stop"
                     | "SessionEnd"
+                    | "SubagentStart"
+                    | "SubagentStop"
             )
         })
         .unwrap_or("Stop");
@@ -307,6 +344,13 @@ fn publish_inner(
         "transcriptPath":transcript,"event":event,"observationId":uuid::Uuid::new_v4().to_string(),
         "observedSize":stat.as_ref().map_or(0,|m|m.len()),"observedAt":now_ms(),
         "resourceAttributes":resources,"spanAttributes":spans});
+    if let Some(id) = child_id {
+        record["subagentId"] = json!(id);
+        record["parentTranscriptPath"] = json!(parent_path);
+        if let Some(name) = bounded_string(payload.get("agent_type"), 512) {
+            record["subagentName"] = json!(name);
+        }
+    }
     if transcript != supplied {
         record["suppliedPath"] = json!(supplied);
     }
@@ -393,7 +437,21 @@ fn publish_inner(
     if published.is_none() {
         warn_capacity(&root, "context-lock");
     }
-    Ok(published.unwrap_or(false))
+    let published = published.unwrap_or(false);
+    if published && child_id.is_some() {
+        let parent_key = json_digest(&json!([session, parent_path]))?;
+        if !root.join(parent_key).join("source.json").is_file() {
+            // A child may start before the parent's first terminal notice.
+            // Index the parent without writing a Stop for its open turn.
+            let parent_notice = json!({
+                "session_id":session, "transcript_path":parent_path,
+                "hook_event_name":"SubagentStart", "cwd":payload.get("cwd"),
+                "request_set_id":payload.get("request_set_id")
+            });
+            let _ = publish_inner(&parent_notice, data, agent, identity, resources, spans);
+        }
+    }
+    Ok(published)
 }
 
 #[cfg(test)]

@@ -225,6 +225,10 @@ impl InputManager {
         *self.mask_config.lock().expect("mask") = config;
     }
 
+    pub(crate) fn trace_linker(&self) -> Option<Arc<TraceLinker>> {
+        self.trace_linker.lock().expect("trace").clone()
+    }
+
     pub fn set_trace_linker(&self, linker: Arc<TraceLinker>) {
         *self.trace_linker.lock().expect("trace") = Some(linker);
     }

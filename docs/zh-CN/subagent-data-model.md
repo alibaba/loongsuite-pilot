@@ -4,7 +4,7 @@
 
 **子 Agent 保留自己的 session、turn、step；调用拓扑通过真实 Trace 上下文连接；审计委派通过 invocation 关联。** 三者不可互相替代。
 
-状态：Codex 的实现见[实现与验证入口](codex-subagent-verification.md)。Qoder CLI/SDK 原生 sidechain 已在 JS 版适配，Rust v2 仍待接入，协议和验证口径见 [Qoder 子 Agent](qoder-subagent-verification.md)；Qoder IDE / QoderCN IDE 的独立子会话仍需额外适配，不能用 CLI 形态的共用 Input 测试代替。Claude Code 的适配仍推进；OpenClaw、Hermes 保留已有正确 Trace 结构，后续补齐标准审计日志。本设计不代表所有 Agent 已实现或已通过真实安装态验收。
+状态：Codex 的实现见[实现与验证入口](codex-subagent-verification.md)。Qoder CLI 原生 sidechain 由 Rust v2 二进制 Hook 和采集器处理，协议和验证口径见 [Qoder 子 Agent](qoder-subagent-verification.md)；Qoder IDE / QoderCN IDE 的独立子会话仍需额外适配，不能用 CLI 形态的共用 Input 测试代替。Claude Code 的适配仍推进；OpenClaw、Hermes 保留已有正确 Trace 结构，后续补齐标准审计日志。本设计不代表所有 Agent 已实现或已通过真实安装态验收。
 
 ## 1. 为什么需要改造
 

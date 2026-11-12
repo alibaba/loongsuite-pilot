@@ -2438,6 +2438,9 @@ impl Orchestrator {
             },
             std::path::PathBuf::from(&self.data_dir),
         );
+        if let Some(linker) = self.inputs.trace_linker() {
+            qoder.set_trace_linker(linker);
+        }
         if qoder_multimodal {
             if let Some(processor) = self.inputs.multimodal_processor() {
                 qoder.set_multimodal_processor(processor);

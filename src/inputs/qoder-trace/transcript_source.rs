@@ -3,9 +3,11 @@
 use super::prompt_ownership::{
     QoderOwnershipCursor, QoderOwnershipSearch, QoderPromptOwnershipResolver,
 };
+use super::subagents::{self, Link, Links};
 use super::transcript_scanner::{
     self as scanner, FileVersion, PendingLine, ScanBudget, ScanMetrics, ScanOptions,
 };
+use crate::core::TraceLinker;
 use crate::hook_process::{
     build_collected_transcript_turn, qoder_has_cn_terminal, qoder_is_control_user_row,
     qoder_is_real_user_prompt, qoder_legacy_retry_lock_path, resolve_collected_qoder_user_id,
@@ -182,6 +184,11 @@ struct Collector {
     tails: IndexMap<PathBuf, PendingLine>,
     warned: IndexMap<String, i64>,
     cleanup_rotation: usize,
+    links: Links,
+    linker: Arc<std::sync::OnceLock<Arc<TraceLinker>>>,
+    discovery_epoch: u64,
+    waiting: IndexMap<String, u64>,
+    priority: IndexSet<PathBuf>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     cycle_peak: usize,
     owner_budget: usize,
@@ -208,6 +215,7 @@ struct Collector {
 }
 pub struct QoderTranscriptSource {
     inner: tokio::sync::Mutex<Collector>,
+    linker: Arc<std::sync::OnceLock<Arc<TraceLinker>>>,
     stopped: Arc<AtomicBool>,
     completed: AtomicU64,
 }
@@ -215,6 +223,38 @@ fn digest(v: &Value) -> String {
     hex::encode(Sha256::digest(
         serde_json::to_vec(v).expect("JSON Value serializes"),
     ))
+}
+fn audit_event(base: &Value, link: &Link, kind: &str) -> Value {
+    let excluded = [
+        "gen_ai.turn.start",
+        "gen_ai.turn.end",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+        "gen_ai.tool.call.duration",
+        "gen_ai.input.messages",
+        "gen_ai.input.messages_delta",
+        "gen_ai.output.messages",
+    ];
+    let mut event = Value::Object(
+        base.as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(key, _)| !excluded.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    event["event.id"] = json!(digest(&json!([link.id, kind])));
+    event["event.name"] = json!(format!("gen_ai.agent.{kind}"));
+    event["gen_ai.agent.invocation.id"] = json!(link.id);
+    event["gen_ai.tool.call.id"] = json!(link.call);
+    event["gen_ai.tool.name"] = json!(link.tool);
+    if let Some(peer) = &link.peer {
+        event["gen_ai.agent.peer.id"] = json!(peer);
+    }
+    if let Some(name) = &link.peer_name {
+        event["gen_ai.agent.peer.name"] = json!(name);
+    }
+    event
 }
 fn number(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
@@ -292,7 +332,7 @@ fn valid_source(v: &Value, agent: &str, key: &str) -> bool {
 }
 fn notice_name(s: &str) -> bool {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd)-[a-f0-9]{24}\.json$").unwrap()
+        regex::Regex::new(r"^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd|SubagentStart|SubagentStop)-[a-f0-9]{24}\.json$").unwrap()
     });
     RE.is_match(s)
 }
@@ -329,6 +369,7 @@ impl QoderTranscriptSource {
             .join("state/qoder-transcripts")
             .join(&agent_id)
             .join("sources");
+        let linker = Arc::new(std::sync::OnceLock::new());
         Self {
             inner: tokio::sync::Mutex::new(Collector {
                 data_dir,
@@ -344,6 +385,11 @@ impl QoderTranscriptSource {
                 tails: IndexMap::new(),
                 warned: IndexMap::new(),
                 cleanup_rotation: 0,
+                links: Links::default(),
+                linker: Arc::clone(&linker),
+                discovery_epoch: 0,
+                waiting: IndexMap::new(),
+                priority: IndexSet::new(),
                 clock: Arc::new(now),
                 cycle_peak: 0,
                 owner_budget: 1,
@@ -367,10 +413,15 @@ impl QoderTranscriptSource {
                 stable_ms: 250,
                 settle_ms: 5000,
             }),
+            linker,
             stopped: Arc::new(AtomicBool::new(false)),
             completed: AtomicU64::new(0),
         }
     }
+    pub(crate) fn set_trace_linker(&self, linker: Arc<TraceLinker>) {
+        let _ = self.linker.set(linker);
+    }
+
     pub fn start(&self) {
         self.stopped.store(false, Ordering::SeqCst);
     }
@@ -508,6 +559,7 @@ impl Collector {
         for _ in 0..MAX_SOURCES {
             let Some(item) = self.discovery.as_mut().and_then(Iterator::next) else {
                 self.discovery = None;
+                self.discovery_epoch = self.discovery_epoch.saturating_add(1);
                 break;
             };
             let item = item?;
@@ -731,6 +783,14 @@ impl Collector {
             metrics: ScanMetrics::default(),
         };
         self.sources()?;
+        self.links = Links::load(state.get(subagents::KEY), self.time());
+        for _ in 0..8 {
+            let Some(path) = self.priority.shift_remove_index(0) else {
+                break;
+            };
+            self.pending.retain(|item| item != &path);
+            self.pending.push_front(path);
+        }
         self.owner_budget = 1;
         self.prompt_budget = 1;
         self.cycle_peak = self.cache_size;
@@ -900,6 +960,7 @@ impl Collector {
                 Ok(())
             }
             .await;
+            self.links.finish_source(result.is_ok());
             if let Err(error) = result {
                 self.drop_cache(&key);
                 if stopped.load(Ordering::SeqCst) {
@@ -916,6 +977,7 @@ impl Collector {
                 self.report(&key, &reason);
             }
         }
+        self.links.store(&mut next)?;
         let changed = next != *state;
         Ok(TranscriptBatch {
             records,
@@ -1001,6 +1063,11 @@ impl Collector {
             .unwrap_or(stat.size)
             .min(stat.size);
         let mut cp = json!({"inode":stat.ino,"device":stat.dev,"offset":0,"committedOffset":0,"activeStart":null,"hasUser":false,"recoveryReason":"missing-cursor","terminal":false,"stableSize":null,"stableMtime":null,"stableAt":null,"anchorSize":anchor,"bootstrapEnd":null,"skipToPrompt":contexts.first().is_some_and(|v|["UserPromptSubmit","SessionStart"].contains(&text(v,"event")))});
+        if subagents::text(source, "subagentId").is_some() {
+            // Sidechains are separate native transcripts. Root legacy line
+            // counts and trigger watermarks must never skip their first task.
+            return Ok(cp);
+        }
         if migrate {
             let session = hex::encode(Sha256::digest(text(source, "sessionId").as_bytes()));
             let paths = [
@@ -1206,6 +1273,11 @@ impl Collector {
             "retainedEnd",
             "turnTruncated",
             "activeRequestSetId",
+            "delegationTrace",
+            "delegationUpstream",
+            "delegationWaitSince",
+            "incomingDelegation",
+            "independentSidechain",
         ] {
             cp.as_object_mut().unwrap().remove(key);
         }
@@ -1229,7 +1301,7 @@ impl Collector {
                             || (number(c, "observedSize")
                                 >= optional_number(cp, "contextFloor")
                                     .unwrap_or(number(cp, "activeStart"))
-                                && ["UserPromptSubmit", "SessionStart"]
+                                && ["UserPromptSubmit", "SessionStart", "SubagentStart"]
                                     .contains(&text(c, "event"))))
                 })
             })
@@ -1271,6 +1343,298 @@ impl Collector {
             .then_some(candidate.as_ref())
     }
 
+    fn incoming(&self, source: &Value, cp: &Value, rows: &[Value]) -> Option<Link> {
+        if flag(cp, "independentSidechain") {
+            return None;
+        }
+        if let Some(saved) = cp.get("incomingDelegation") {
+            return serde::Deserialize::deserialize(saved).ok();
+        }
+        let prompt = rows.iter().find(|row| qoder_is_real_user_prompt(row))?;
+        self.links
+            .find(
+                text(source, "sessionId"),
+                subagents::parent_call(source, prompt)?,
+                subagents::text(prompt, "parent_agent_id"),
+                None,
+            )
+            .cloned()
+    }
+
+    fn delegation_ready(&mut self, source: &Value, cp: &mut Value, rows: &[Value]) -> bool {
+        let Some(prompt) = rows.iter().find(|row| qoder_is_real_user_prompt(row)) else {
+            return true;
+        };
+        if subagents::parent_call(source, prompt).is_none() {
+            return true;
+        }
+        let key = text(source, "key");
+        if flag(cp, "independentSidechain") {
+            return true;
+        }
+        if let Some(incoming) = self.incoming(source, cp, rows) {
+            if cp.get("incomingDelegation").is_none() {
+                cp["incomingDelegation"] = json!(incoming);
+            }
+            self.waiting.shift_remove(key);
+            return true;
+        }
+        let now = self.time();
+        let since = cp["delegationWaitSince"].as_i64().unwrap_or(now);
+        cp["delegationWaitSince"] = json!(since);
+        if self.waiting.len() >= 128 && !self.waiting.contains_key(key) {
+            self.waiting.shift_remove_index(0);
+        }
+        let epoch = *self
+            .waiting
+            .entry(key.into())
+            .or_insert(self.discovery_epoch);
+        let parent = PathBuf::from(text(source, "parentTranscriptPath"));
+        let parent = subagents::text(prompt, "parent_agent_id")
+            .filter(|id| {
+                id.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            })
+            .filter(|id| *id != text(source, "sessionId"))
+            .map_or(parent.clone(), |id| {
+                parent
+                    .with_extension("")
+                    .join("subagents")
+                    .join(format!("agent-{id}.jsonl"))
+            });
+        let parent_key = digest(&json!([source["sessionId"], parent]));
+        let directory = self.root.join(&parent_key);
+        if now.saturating_sub(since) >= 60_000
+            && self.discovery_epoch > epoch
+            && !self.waiting.contains_key(&parent_key)
+        {
+            self.waiting.shift_remove(key);
+            cp["independentSidechain"] = json!(true);
+            self.report(key, "subagent-parent-unavailable-independent");
+            return true;
+        }
+        if self.priority.len() < 128 && directory.join("source.json").is_file() {
+            self.priority.insert(directory);
+        }
+        false
+    }
+
+    fn decorate_delegation(
+        &mut self,
+        source: &Value,
+        cp: &mut Value,
+        rows: &[Value],
+        turn: &str,
+        early: bool,
+        records: &mut Vec<Value>,
+    ) {
+        let incoming = self.incoming(source, cp, rows);
+        let child = subagents::text(source, "subagentId");
+        let session = text(source, "sessionId");
+        let agent = child.unwrap_or(session);
+        let has_calls = rows
+            .iter()
+            .any(|row| subagents::calls(row).next().is_some());
+        let has_notice = !early
+            && rows
+                .iter()
+                .any(|row| subagents::notification(row).is_some());
+        if !has_calls && child.is_none() && !has_notice && cp.get("delegationTrace").is_none() {
+            return;
+        }
+
+        if (has_calls || child.is_some()) && cp.get("delegationTrace").is_none() {
+            let upstream = if child.is_none() {
+                self.linker.get().and_then(|linker| {
+                    let prompt = rows.iter().find(|row| qoder_is_real_user_prompt(row))?;
+                    let content = prompt.pointer("/message/content")?;
+                    let joined;
+                    let prompt = if let Some(text) = content.as_str() {
+                        text
+                    } else {
+                        joined = subagents::blocks(prompt)
+                            .filter(|block| block["type"] == "text")
+                            .filter_map(|block| block["text"].as_str())
+                            .collect::<String>();
+                        &joined
+                    };
+                    linker.resolve_qoder_turn(session, turn, prompt)
+                })
+            } else {
+                None
+            };
+            cp["delegationTrace"] = json!(incoming
+                .as_ref()
+                .map(|link| link.trace.as_str())
+                .or(upstream.as_ref().map(|value| value.0.as_str()))
+                .unwrap_or(&turn[..32]));
+            if let Some((_, parent)) = upstream {
+                cp["delegationUpstream"] = json!(parent);
+            }
+        }
+        let trace = text(cp, "delegationTrace");
+        let mut audit = Vec::new();
+        for block in rows.iter().flat_map(subagents::calls) {
+            let Some(call) = subagents::text(block, "id") else {
+                continue;
+            };
+            let base = records.iter().find(|record| {
+                record["event.name"] == "tool.call" && record["gen_ai.tool.call.id"] == call
+            });
+            let Some(base) = base else { continue };
+            if let Some(link) = self.links.insert(session, agent, turn, trace, block) {
+                let mut invoke = audit_event(base, &link, "invoke");
+                if let Some(prompt) = block["input"]["prompt"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                {
+                    invoke["gen_ai.input.messages"] =
+                        json!([{"role":"user","parts":[{"type":"text","content":prompt}]}]);
+                }
+                audit.push(invoke);
+            } else if self
+                .links
+                .find(session, call, Some(agent), Some(turn))
+                .is_none()
+            {
+                self.report(text(source, "key"), "subagent-link-capacity");
+            }
+        }
+
+        if !early {
+            if let Some(link) = &incoming {
+                self.links
+                    .update(&link.id, |stored| stored.child_complete = true);
+            }
+            let results: HashMap<_, _> = rows
+                .iter()
+                .flat_map(|row| {
+                    subagents::blocks(row)
+                        .filter(|block| block["type"] == "tool_result")
+                        .filter_map(|block| {
+                            Some((
+                                subagents::text(block, "tool_use_id")?,
+                                &row["toolUseResult"],
+                            ))
+                        })
+                })
+                .collect();
+            for record in records.iter_mut() {
+                let Some(call) = subagents::text(record, "gen_ai.tool.call.id") else {
+                    continue;
+                };
+                let Some(link) = self
+                    .links
+                    .find(session, call, Some(agent), Some(turn))
+                    .cloned()
+                else {
+                    continue;
+                };
+                record["span_id"] = json!(link.span);
+                record["gen_ai.agent.invocation.id"] = json!(link.id);
+                let result = results
+                    .get(link.call.as_str())
+                    .copied()
+                    .unwrap_or(&Value::Null);
+                if let Some(peer) = subagents::text(result, "agentId") {
+                    record["gen_ai.agent.peer.id"] = json!(peer);
+                    if link.peer.as_deref() != Some(peer) {
+                        self.links
+                            .update(&link.id, |stored| stored.peer = Some(peer.into()));
+                    }
+                }
+                if record["event.name"] != "tool.result" || link.result_emitted {
+                    continue;
+                }
+                if record["tool.result.status"] != "error"
+                    && !(result["kind"] == "agent-result"
+                        && matches!(
+                            result["state"].as_str(),
+                            Some("completed" | "failed" | "cancelled" | "interrupted")
+                        ))
+                {
+                    continue;
+                }
+                let mut event = audit_event(record, &link, "result");
+                if let Some(peer) = subagents::text(result, "agentId") {
+                    event["gen_ai.agent.peer.id"] = json!(peer);
+                }
+                if let Some(content) = result["content"]
+                    .as_str()
+                    .or_else(|| record["gen_ai.tool.call.result"].as_str())
+                {
+                    event["gen_ai.output.messages"] =
+                        json!([{"role":"assistant","parts":[{"type":"text","content":content}]}]);
+                }
+                audit.push(event);
+                self.links
+                    .update(&link.id, |stored| stored.result_emitted = true);
+            }
+            for row in rows {
+                let Some((call, status, result)) = subagents::notification(row) else {
+                    continue;
+                };
+                let Some(link) = self.links.find(session, call, Some(agent), None).cloned() else {
+                    continue;
+                };
+                if link.result_emitted || (status == "completed" && result.is_none()) {
+                    continue;
+                }
+                let Some(base) = records
+                    .iter()
+                    .find(|event| event["event.name"] == "other")
+                    .or_else(|| records.first())
+                else {
+                    continue;
+                };
+                let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(text(row, "timestamp"))
+                else {
+                    continue;
+                };
+                let mut event = audit_event(base, &link, "result");
+                event["time_unix_nano"] =
+                    json!((i128::from(timestamp.timestamp_millis()) * 1_000_000).to_string());
+                event["tool.result.status"] = json!(if status == "completed" {
+                    "success"
+                } else {
+                    "error"
+                });
+                if let Some(content) = result {
+                    event["gen_ai.output.messages"] =
+                        json!([{"role":"assistant","parts":[{"type":"text","content":content}]}]);
+                }
+                audit.push(event);
+                self.links
+                    .update(&link.id, |stored| stored.result_emitted = true);
+            }
+        } else {
+            records.clear();
+        }
+        records.extend(audit);
+        for record in records {
+            record["gen_ai.agent.id"] = json!(agent);
+            if !trace.is_empty() {
+                record["trace_id"] = json!(trace);
+                record["agent.qoder.trace_context_locked"] = json!(true);
+            }
+            if let Some(child) = child {
+                record["agent.qoder.subagent_id"] = json!(child);
+                if let Some(name) = subagents::text(source, "subagentName") {
+                    record["gen_ai.agent.name"] = json!(name);
+                }
+            }
+            if let Some(link) = &incoming {
+                record["gen_ai.agent.scope"] = json!("subagent");
+                record["gen_ai.agent.parent.id"] = json!(link.agent);
+                record["gen_ai.agent.parent.invocation.id"] = json!(link.id);
+                record["gen_ai.subagent.parent_tool_call.id"] = json!(link.call);
+                record["agent.pilot.parent.turn.id"] = json!(link.turn);
+                record["parent_span_id"] = json!(link.span);
+            } else if record["event.name"] == "other" && cp.get("delegationUpstream").is_some() {
+                record["parent_span_id"] = cp["delegationUpstream"].clone();
+            }
+        }
+    }
     fn build(
         &mut self,
         source: &Value,
@@ -1287,9 +1651,8 @@ impl Collector {
         let first = value
             .rows
             .iter()
-            .find(|r| qoder_is_real_user_prompt(r))
-            .cloned()
-            .unwrap_or(Value::Null);
+            .find(|row| qoder_is_real_user_prompt(row) || subagents::notification(row).is_some())
+            .unwrap_or(&Value::Null);
         let turn = digest(&json!([
             self.agent_id,
             source["sessionId"],
@@ -1307,19 +1670,28 @@ impl Collector {
             .get("resourceAttributes")
             .and_then(Value::as_object)
             .unwrap_or(&empty);
-        let filtered: std::borrow::Cow<'_, [Value]> =
-            if value.rows.iter().any(qoder_is_control_user_row) {
-                std::borrow::Cow::Owned(
-                    value
-                        .rows
-                        .iter()
-                        .filter(|r| !qoder_is_control_user_row(r))
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                std::borrow::Cow::Borrowed(&value.rows)
-            };
+        let filtered: std::borrow::Cow<'_, [Value]> = if value
+            .rows
+            .iter()
+            .any(|row| qoder_is_control_user_row(row) || subagents::notification(row).is_some())
+        {
+            std::borrow::Cow::Owned(
+                value
+                    .rows
+                    .iter()
+                    .filter(|r| !qoder_is_control_user_row(r))
+                    .map(|row| {
+                        let mut row = row.clone();
+                        if subagents::notification(&row).is_some() {
+                            row["isMeta"] = json!(false);
+                        }
+                        row
+                    })
+                    .collect(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(&value.rows)
+        };
         let user_identity = selected
             .get("userIdentity")
             .filter(|identity| !identity.is_null())
@@ -1390,7 +1762,19 @@ impl Collector {
                 }
             }
         }
-        cp["recoveryReason"] = json!("incremental");
+        if self.agent_id == "qoder" {
+            self.decorate_delegation(
+                source,
+                cp,
+                &value.rows,
+                &turn,
+                terminal == "delegation-open",
+                &mut records,
+            );
+        }
+        if terminal != "delegation-open" {
+            cp["recoveryReason"] = json!("incremental");
+        }
         records
     }
     fn scan(
@@ -1619,6 +2003,7 @@ impl Collector {
             && !cp["activeStart"].is_null()
             && !ready
             && !flag(cp, "sealedBoundary")
+            && cp.get("delegationWaitSince").is_none()
         {
             return Ok(records);
         }
@@ -1650,12 +2035,18 @@ impl Collector {
                     self.quarantine(source, cp, line.start, line.end, reason)
                 }
                 let row = line.row;
-                let prompt = row.as_ref().is_some_and(qoder_is_real_user_prompt);
+                let prompt = row.as_ref().is_some_and(|row| {
+                    qoder_is_real_user_prompt(row)
+                        || (self.agent_id == "qoder" && subagents::notification(row).is_some())
+                });
                 let floor = number(cp, "committedOffset").max(number(cp, "nativeStopOffset"));
                 if row.as_ref().is_some_and(|r| event(r) == "Stop") {
                     cp["nativeStopOffset"] = json!(line.end)
                 }
                 if prompt && flag(cp, "hasUser") {
+                    if !self.delegation_ready(source, cp, &value.rows) {
+                        return false;
+                    }
                     records.extend(self.build(
                         source,
                         Self::observed_turn_context(contexts, cp, line.start),
@@ -1710,11 +2101,30 @@ impl Collector {
                 }
                 cp["offset"] = json!(line.end);
                 value.end = line.end;
+                if self.agent_id == "qoder"
+                    && flag(cp, "hasUser")
+                    && row
+                        .as_ref()
+                        .is_some_and(|row| subagents::calls(row).next().is_some())
+                    && self.delegation_ready(source, cp, &value.rows)
+                {
+                    records.extend(self.build(
+                        source,
+                        Self::observed_turn_context(contexts, cp, line.end),
+                        cp,
+                        &value,
+                        "delegation-open",
+                    ));
+                }
                 if row
                     .as_ref()
                     .is_some_and(|r| text(r, "type") == "last-prompt" || event(r) == "SessionEnd")
                     && flag(cp, "hasUser")
                 {
+                    if !self.delegation_ready(source, cp, &value.rows) {
+                        cp["sealedBoundary"] = json!(true);
+                        return false;
+                    }
                     let terminal = if row
                         .as_ref()
                         .is_some_and(|r| text(r, "type") == "last-prompt")
@@ -1772,7 +2182,9 @@ impl Collector {
             && optional_number(cp, "nativeStopOffset").is_none()
             && value.rows.iter().any(|r| text(r, "type") == "assistant")
             && contexts.iter().any(|c| {
-                text(c, "event") == "Stop"
+                (text(c, "event") == "Stop"
+                    || (subagents::text(source, "subagentId").is_some()
+                        && text(c, "event") == "SubagentStop"))
                     && number(c, "observedSize") > number(cp, "activeStart")
                     && number(c, "observedSize") <= number(cp, "offset")
             })
@@ -1797,6 +2209,7 @@ impl Collector {
                         >= self.stable_ms
                     && self.time() - cp["terminalAt"].as_i64().unwrap_or(self.time())
                         >= self.settle_ms))
+            && self.delegation_ready(source, cp, &value.rows)
         {
             let terminal = if flag(cp, "sealedBoundary") {
                 "next-prompt-backfill"

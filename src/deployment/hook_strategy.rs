@@ -438,11 +438,20 @@ fn hook_cache_dir(data: &Path) -> PathBuf {
         .unwrap_or_else(|| data.to_owned())
 }
 
+fn qoder_subagent_hook(hook: &HookDefinition) -> bool {
+    hook.agent_id == "qoder"
+        && hook
+            .hook_json_path
+            .last()
+            .is_some_and(|event| matches!(event.as_str(), "SubagentStart" | "SubagentStop"))
+}
+
 fn qoder_exec_args(legacy: &HookDefinition, data: &Path) -> Vec<String> {
     let args: &[&str] = if legacy
         .hook_json_path
         .last()
         .is_some_and(|event| event == "Stop")
+        || qoder_subagent_hook(legacy)
     {
         &[
             "hook-process",
@@ -547,7 +556,8 @@ fn qoder_definition_supports_exec(def: &AgentDefinition, data: &Path) -> bool {
     def.id == "qoder"
         && def.hook.as_ref().is_some_and(|hook| {
             hook.format.as_str() == "nested"
-                && hook.events == ["Stop"]
+                && (hook.events == ["Stop"]
+                    || hook.events == ["Stop", "SubagentStart", "SubagentStop"])
                 && Path::new(&hook.hook_command)
                     == data.join("hooks/qoder-loongsuite-pilot-hook.sh")
                 && hook.interceptor.as_ref().is_some_and(|interceptor| {
@@ -574,7 +584,9 @@ pub(super) fn plan_qoder_exec_install(
     let mut document = SettingsDocument::from_snapshot(Some(raw), settings_syntax(hook))?;
     let strategy = HookStrategy::new(HookManager::new(None, None));
     for legacy in strategy.legacy_hook_definitions(def) {
-        if HookManager::is_hook_installed_in_settings(&document.data, &legacy) {
+        if qoder_subagent_hook(&legacy)
+            || HookManager::is_hook_installed_in_settings(&document.data, &legacy)
+        {
             document.apply_hook(&qoder_exec_definition(&legacy, binary, data), false, false)?;
         }
     }
@@ -603,7 +615,9 @@ pub(crate) fn plan_qoder_legacy_restore(
         for definition in direct {
             document.apply_hook(&definition, true, false)?;
         }
-        document.apply_hook(&legacy, false, false)?;
+        if !qoder_subagent_hook(&legacy) {
+            document.apply_hook(&legacy, false, false)?;
+        }
     }
     Ok(document.changed().then_some(document.raw))
 }
@@ -908,6 +922,9 @@ impl HookStrategy {
             None
         };
         for legacy in self.legacy_hook_definitions(def) {
+            if qoder_subagent_hook(&legacy) && direct_binary.is_none() {
+                continue;
+            }
             let desired = self.qoder_desired_hook(legacy.clone(), direct_binary.as_deref());
             if let Some(settings) = &qoder_settings {
                 let installed = self.qoder_installed_exec_hooks(def, settings, &legacy);
@@ -1243,6 +1260,9 @@ impl HookStrategy {
                 }
                 // Whole-product uninstall owns the removed handlers' empty
                 // containers; ordinary per-agent Hook edits retain their format.
+                if qoder_subagent_hook(&legacy) && direct_binary.is_none() && !uninstall {
+                    continue;
+                }
                 let desired = self.qoder_desired_hook(legacy, direct_binary.as_deref());
                 document.apply_hook(&desired, uninstall, prune_empty)?;
             }

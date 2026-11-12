@@ -202,6 +202,10 @@ impl QoderTraceInput {
         }
     }
 
+    pub(crate) fn set_trace_linker(&self, linker: Arc<crate::core::TraceLinker>) {
+        self.inner.body.transcript_source.set_trace_linker(linker);
+    }
+
     /// Attach the configured shared processor; path policy stays on every call.
     pub fn set_multimodal_processor(&self, processor: Arc<MultimodalProcessor>) {
         let roots = self.inner.body.allowed_roots.clone();
@@ -611,7 +615,15 @@ impl InputBody for QoderTraceBody {
         for indexes in group_by_turn(&raw).values() {
             // Match inject_trace_id: one UUID per existing turn group, with
             // only the small trace string cloned for each member.
-            let trace_id = hex::encode(uuid::Uuid::new_v4().as_bytes());
+            let trace_id = indexes
+                .iter()
+                .find_map(|&index| {
+                    let entry = &raw[index];
+                    (entry.get("agent.qoder.trace_context_locked") == Some(&Value::Bool(true)))
+                        .then(|| entry.trace_id.clone())
+                        .flatten()
+                })
+                .unwrap_or_else(|| hex::encode(uuid::Uuid::new_v4().as_bytes()));
             for &index in indexes {
                 raw[index].trace_id = Some(trace_id.clone());
             }

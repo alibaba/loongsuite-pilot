@@ -194,6 +194,7 @@ stderr**，stdout 整个被丢掉；② 脚本头部 `$ErrorActionPreference = "
 
 ## 快速入口
 
+- **同步开源 main** → 按 [loongsuite-pilot-dev](assets/skills/loongsuite-pilot-dev/SKILL.md) 将运行时改动适配到 Rust 并验证。开源验收通过后再单向同步商业版。
 - **我要开发 Rust Pilot 或 SDK** → [loongsuite-pilot-dev](assets/skills/loongsuite-pilot-dev/SKILL.md)
 
 - **我要理解整体架构** → [docs/zh-CN/overview.md](docs/zh-CN/overview.md)

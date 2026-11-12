@@ -36,6 +36,31 @@ pub(super) fn entry_upstream_parent(records: &[&AgentActivityEntry]) -> Option<S
         })
         .map(str::to_string)
 }
+pub(super) fn delegated_parent<'a>(
+    records: &[&'a AgentActivityEntry],
+    trace: &str,
+) -> Option<&'a str> {
+    let first = records.first()?;
+    if !is_qoder_transcript_agent(&first.agent_type) || !valid_trace_id(trace) {
+        return None;
+    }
+    let parent = first
+        .parent_span_id
+        .as_deref()
+        .filter(|id| valid_span_id(id))?;
+    records
+        .iter()
+        .all(|record| {
+            record
+                .get("gen_ai.agent.scope")
+                .and_then(serde_json::Value::as_str)
+                == Some("subagent")
+                && record.parent_span_id.as_deref() == Some(parent)
+                && record.trace_id.as_deref() == Some(trace)
+        })
+        .then_some(parent)
+}
+
 pub fn convert_qoder_turn(
     records: &[AgentActivityEntry],
     options: &ConvertOptions,

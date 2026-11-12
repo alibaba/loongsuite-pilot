@@ -290,3 +290,198 @@ fn native_hook_bounds_oversized_and_unclosed_stdin_without_publishing_a_notice()
         assert!(!root.join("state/qoder-transcripts").exists());
     }
 }
+
+#[tokio::test]
+async fn qoder_native_sidechain_links_after_reloading_an_open_parent_checkpoint() {
+    use loongsuite_pilot::flushers::{ConvertOptions, EventLogConverter, GenAiEventLogConverter};
+    use loongsuite_pilot::types::AgentEventName;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let parent = root.join("native-session.jsonl");
+    let children = root.join("native-session/subagents");
+    std::fs::create_dir_all(&children).unwrap();
+    let child = children.join("agent-native-child.jsonl");
+    let write_rows = |path: &Path, rows: &[Value]| {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for row in rows {
+            writeln!(file, "{row}").unwrap();
+        }
+    };
+    let notice = |event: &str, is_child: bool| {
+        let mut payload = json!({
+            "session_id":"native-session", "transcript_path":parent, "hook_event_name":event,
+            "cwd":root
+        });
+        if is_child {
+            payload["agent_id"] = json!("native-child");
+            payload["agent_type"] = json!("general-purpose");
+        }
+        let mut hook = command(&root, "qoder").spawn().unwrap();
+        writeln!(hook.stdin.take().unwrap(), "{payload}").unwrap();
+        let result = hook.wait_with_output().unwrap();
+        assert!(result.status.success(), "{:?}", result);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+            json!({})
+        );
+    };
+    let make_input = |store: Arc<StateStore>| {
+        QoderTraceInput::with_readers(
+            QoderTraceOptions {
+                state_store: store,
+                log_dir: None,
+                poll_interval_ms: Some(60_000),
+                multimodal_enabled: false,
+                upload_mode: None,
+                allowed_root_paths: Vec::new(),
+            },
+            Arc::new(Readers(0)),
+        )
+    };
+    let path = root.join("input-state.json");
+    let store = Arc::new(StateStore::new(&path));
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let parent_rows = [
+        json!({"type":"user","entrypoint":"cli","timestamp":"2026-11-12T01:00:00Z",
+            "message":{"role":"user","content":"delegate"}}),
+        json!({"type":"assistant","entrypoint":"cli","timestamp":"2026-11-12T01:00:01Z",
+            "message":{"id":"p1","role":"assistant","model":"fixture","stop_reason":"tool_use",
+                "content":[{"type":"tool_use","id":"delegated-call","name":"Agent","input":{"prompt":"test child"}}]}}),
+    ];
+    write_rows(&parent, &parent_rows);
+    // Start can arrive before the native child transcript exists.
+    notice("SubagentStart", true);
+    let first = make_input(Arc::clone(&store));
+    let captured = Arc::clone(&output);
+    first.bind_collector(
+        move |batch| captured.lock().unwrap().extend_from_slice(batch),
+        |_| {},
+    );
+    first.start().await.unwrap();
+    first.inner.run_cycle().await;
+    first.stop().await.unwrap();
+    store.save().await.unwrap();
+    assert_eq!(
+        output
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_name == Some(AgentEventName::AgentInvoke))
+            .count(),
+        1
+    );
+    assert!(
+        store.get("qoder-trace").extra().unwrap()["qoderTranscripts"]["__qoderDelegations"]
+            .as_object()
+            .is_some_and(|links| links.len() == 1)
+    );
+
+    write_rows(
+        &child,
+        &[
+            json!({"type":"user","entrypoint":"cli","timestamp":"2026-11-12T01:00:02Z",
+            "agentId":"native-child","parent_tool_use_id":"delegated-call","parent_agent_id":"native-session","isDelegatedTask":true,
+            "message":{"role":"user","content":"test child"}}),
+            json!({"type":"assistant","entrypoint":"cli","timestamp":"2026-11-12T01:00:03Z",
+            "message":{"id":"c1","role":"assistant","model":"fixture","stop_reason":"end_turn",
+                "usage":{"input_tokens":6,"output_tokens":2},"content":[{"type":"text","text":"child answer"}]}}),
+            json!({"type":"last-prompt"}),
+        ],
+    );
+    notice("SubagentStop", true);
+    write_rows(
+        &parent,
+        &[
+            json!({"type":"user","entrypoint":"cli","timestamp":"2026-11-12T01:00:04Z",
+            "toolUseResult":{"kind":"agent-result","state":"completed","agentId":"native-child","content":"child answer"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"delegated-call","content":"child answer"}]}}),
+            json!({"type":"assistant","entrypoint":"cli","timestamp":"2026-11-12T01:00:05Z",
+            "message":{"id":"p2","role":"assistant","model":"fixture","stop_reason":"end_turn",
+                "content":[{"type":"text","text":"parent answer"}]}}),
+            json!({"type":"last-prompt"}),
+        ],
+    );
+    notice("Stop", false);
+    let restored = Arc::new(StateStore::new(&path));
+    restored.load().await;
+    let second = make_input(Arc::clone(&restored));
+    let captured = Arc::clone(&output);
+    second.bind_collector(
+        move |batch| captured.lock().unwrap().extend_from_slice(batch),
+        |_| {},
+    );
+    second.start().await.unwrap();
+    second.inner.run_cycle().await;
+    second.inner.run_cycle().await;
+    second.stop().await.unwrap();
+
+    let rows = output.lock().unwrap();
+    let invoke = rows
+        .iter()
+        .find(|entry| entry.event_name == Some(AgentEventName::AgentInvoke))
+        .unwrap();
+    let result = rows
+        .iter()
+        .find(|entry| entry.event_name == Some(AgentEventName::AgentResult))
+        .unwrap();
+    assert_eq!(
+        invoke.get("gen_ai.agent.invocation.id"),
+        result.get("gen_ai.agent.invocation.id")
+    );
+    let child_rows: Vec<_> = rows
+        .iter()
+        .filter(|entry| entry.agent_id.as_deref() == Some("native-child"))
+        .collect();
+    assert!(!child_rows.is_empty());
+    assert!(child_rows
+        .iter()
+        .all(|entry| entry.session_id == "native-session"
+            && entry.turn_id != invoke.turn_id
+            && entry.trace_id == invoke.trace_id
+            && entry.get("gen_ai.agent.parent.invocation.id")
+                == invoke.get("gen_ai.agent.invocation.id")));
+    let ids: std::collections::HashSet<_> = rows.iter().map(|entry| &entry.event_id).collect();
+    assert_eq!(ids.len(), rows.len());
+    let trace_rows: Vec<_> = rows
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry.event_name,
+                Some(AgentEventName::AgentInvoke | AgentEventName::AgentResult)
+            )
+        })
+        .cloned()
+        .collect();
+    let spans = GenAiEventLogConverter
+        .convert(&trace_rows, &ConvertOptions::default())
+        .unwrap()
+        .spans;
+    let tool = spans
+        .iter()
+        .find(|span| span.name == "execute_tool Agent")
+        .unwrap();
+    let child_agent = spans
+        .iter()
+        .find(|span| {
+            span.attributes["gen_ai.span.kind"] == "AGENT"
+                && span.attributes.get("gen_ai.agent.scope") == Some(&json!("subagent"))
+        })
+        .unwrap();
+    assert_eq!(
+        child_agent.parent_span_id.as_deref(),
+        Some(tool.span_id.as_str())
+    );
+    assert_eq!(child_agent.trace_id, tool.trace_id);
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.attributes["gen_ai.span.kind"] == "ENTRY")
+            .count(),
+        1
+    );
+}

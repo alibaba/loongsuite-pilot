@@ -100,6 +100,8 @@ const HIERARCHY_KEYS: &[&str] = &[
     "gen_ai.agent.scope",
     "gen_ai.agent.depth",
     "gen_ai.agent.parent.id",
+    "gen_ai.agent.parent.invocation.id",
+    "agent.qoder.subagent_id",
     "gen_ai.subagent.parent_tool_call.id",
     "agent.pilot.parent.turn.id",
     "agent.qwen-code-cli.subagent.collection",

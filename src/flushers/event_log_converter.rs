@@ -213,6 +213,7 @@ fn convert_group(
         .filter(|id| valid_id(id, 32))
         .map(str::to_owned)
         .unwrap_or_else(|| stable_id(&["trace", key], 32));
+    let delegated_parent = super::qoder_turn_converter::delegated_parent(records, &trace);
     let entry_id = stable_id(&[&trace, key, "ENTRY"], 16);
     let agent_id = stable_id(&[&trace, key, "AGENT"], 16);
     let begin = timestamp(first)?;
@@ -330,7 +331,7 @@ fn convert_group(
         begin,
         end,
     );
-    agent.parent_span_id = Some(entry_id.clone());
+    agent.parent_span_id = Some(delegated_parent.unwrap_or(&entry_id).to_owned());
     agent.attributes.extend(root.attributes.clone());
     // The event-log SDK takes turn metadata from its first carrying record.
     // It belongs to the agent invocation, while ENTRY keeps only human input.
@@ -589,12 +590,19 @@ fn convert_group(
     }
     result.trace_ids.push(trace);
     if let Some(emit) = emit {
-        let mut final_spans = vec![root, agent];
+        let mut final_spans = Vec::new();
+        if delegated_parent.is_none() {
+            final_spans.push(root);
+        }
+        final_spans.push(agent);
         final_spans.extend(steps.into_values());
         emit(final_spans, true)?;
         return Ok(());
     }
-    result.spans.extend([root, agent]);
+    if delegated_parent.is_none() {
+        result.spans.push(root);
+    }
+    result.spans.push(agent);
     result.spans.extend(steps.into_values());
     result.spans.extend(leaves);
     Ok(())

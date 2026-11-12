@@ -240,7 +240,8 @@ fn publish_hook_notice(request: &HookRequest<'_>) {
         identity.as_ref(),
         &stamp.resources,
         &stamp.span,
-    ) {
+    ) && value["hook_event_name"] != "SubagentStop"
+    {
         if let Some(session) = value
             .get("session_id")
             .or_else(|| value.get("conversation_id"))

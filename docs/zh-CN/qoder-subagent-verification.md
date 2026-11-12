@@ -1,6 +1,6 @@
 # Qoder 子 Agent 采集
 
-> 适用版本：开源 [#586](https://github.com/alibaba/loongsuite-pilot/pull/586) 的 JS 实现。本文记录原生 sidechain 协议及验收口径，供 Rust 适配参考。Rust v2 仍待补齐子 transcript 发现、父子关系恢复及 Trace 关联。下文的验证命令适用于 JS 分支。
+Rust v2 通过 Pilot 二进制接收 Stop、SubagentStart 和 SubagentStop。Hook 只发布有界元数据，采集器读取原生父子 transcript，并保存独立偏移和委派关系。Qoder CLI 1.1.76 的首个原生 sidechain 输入使用 isSidechain、agentId 和 parent_tool_use_id。较新协议使用 isDelegatedTask。两者均需实际父工具调用证据才会建立关联。开源 [#586](https://github.com/alibaba/loongsuite-pilot/pull/586) 是原始 JS 协议实现。
 
 Qoder CLI 与 Agent SDK 的原生 sidechain 使用独立 transcript，同时可能与主 Agent 共用 `sessionId`。Pilot 保留原生 session，通过 `agentId` 区分执行者，并为每个原生输入建立独立、可恢复的 turn；不会把子执行覆盖成父 turn，也不会为共享 session 的运行时伪造子 session。
 
@@ -58,6 +58,15 @@ invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使
 输入与各输出保留现有的接收、重试与 checkpoint 契约。此改动不承诺跨输出端到端恰好一次，也不自动修复历史数据。
 
 ## 验证入口与范围
+
+Rust 回归通过真实二进制发布起止通知，在父 turn 仍开放时持久化早发 invoke，重新加载 checkpoint 后验证子 turn、结果、事件去重和 Span 父子关系。
+
+\`\`\`bash
+cargo build --locked --lib --bin loongsuite-pilot
+cargo test --locked --test qoder_native_wakeup --test qoder_native_transcript_input
+\`\`\`
+
+原始 JS 参考实现可使用以下命令。
 
 ```bash
 npm run typecheck

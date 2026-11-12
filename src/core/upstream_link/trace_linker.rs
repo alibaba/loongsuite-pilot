@@ -54,7 +54,7 @@ impl TraceLinker {
         // Establish first-turn eligibility in source order before resolving
         // input-bearing events, then stamp the original batch without reordering.
         for entry in entries.iter() {
-            if entry.session_id.is_empty() || has_delegated_parent(entry) {
+            if entry.session_id.is_empty() || is_qoder_child(entry) || has_delegated_parent(entry) {
                 continue;
             }
             let Some(turn_id) = entry.turn_id.as_ref().filter(|id| !id.is_empty()) else {
@@ -91,6 +91,44 @@ impl TraceLinker {
         }
     }
 
+    // A Qoder delegation must lock context before the audit and child turn
+    // are published. A miss here must not poison the normal dispatch cache.
+    pub(crate) fn resolve_qoder_turn(
+        &self,
+        session: &str,
+        turn: &str,
+        prompt: &str,
+    ) -> Option<(String, String)> {
+        if !self.store.has_session(session) {
+            return None;
+        }
+        self.last_access
+            .lock()
+            .expect("access")
+            .insert(session.into(), now_ms());
+        let first = self
+            .first_turn
+            .lock()
+            .expect("first")
+            .entry(session.into())
+            .or_insert_with(|| turn.into())
+            == turn;
+        let matched = self
+            .store
+            .resolve_turn_with_identity(session, prompt, Some(turn), None);
+        let traceparent = match matched {
+            Some(value) => {
+                if first {
+                    self.store.mark_session_consumed(session);
+                }
+                value
+            }
+            None if first => self.store.resolve_session_first(session)?,
+            None => return None,
+        };
+        parse_traceparent(&traceparent)
+    }
+
     pub fn prune_idle(&self, cutoff_ms: u128) {
         let stale: Vec<String> = self
             .last_access
@@ -113,7 +151,11 @@ impl TraceLinker {
     }
 
     async fn stamp_entry(&self, entry: &mut AgentActivityEntry) -> Result<(), String> {
-        if entry.session_id.is_empty() || has_delegated_parent(entry) {
+        if entry.session_id.is_empty()
+            || is_qoder_child(entry)
+            || has_delegated_parent(entry)
+            || entry.get("agent.qoder.trace_context_locked") == Some(&Value::Bool(true))
+        {
             return Ok(());
         }
         let Some(turn_id) = entry.turn_id.clone().filter(|value| !value.is_empty()) else {
@@ -260,6 +302,14 @@ fn extract_input_hash(entry: &AgentActivityEntry) -> Option<&str> {
         .get("agent.pilot.correlation.content_hash")
         .and_then(Value::as_str)
         .filter(|hash| valid_content_hash(hash))
+}
+
+fn is_qoder_child(entry: &AgentActivityEntry) -> bool {
+    matches!(entry.agent_type.as_str(), "qoder" | "qoder-cli")
+        && entry
+            .get("agent.qoder.subagent_id")
+            .and_then(Value::as_str)
+            .is_some()
 }
 
 fn has_delegated_parent(entry: &AgentActivityEntry) -> bool {
