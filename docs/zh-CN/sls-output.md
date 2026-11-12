@@ -138,6 +138,7 @@ API Key 模式传入：
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | AK 模式的 Access Key ID。 |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | AK 模式的 Access Key Secret。 |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 上报。 |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | 设置为 `false` 或 `0` 时不写 `__tag__:__mac__` 和 `__tag__:__sn__`。默认开启。 |
 
 API Key 模式从 `config.sls` 读取 `apiKey`，不再支持环境变量覆盖。
 
@@ -167,3 +168,12 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ## 隐私说明
 
 SLS 是远端输出目标。敏感环境中开启前，请先配置[数据脱敏](masking.md)。
+
+默认每条日志组还带两个设备标识标签，和主机名、来源 IP 一起上报：
+
+| 标签 | 取值 |
+| --- | --- |
+| `__tag__:__mac__` | 与 `__source__` 所用非回环 IPv4 同一块网卡的 MAC。 |
+| `__tag__:__sn__` | 硬件序列号。macOS 读 `ioreg`，Windows 读一次 PowerShell，Linux 读 DMI 文件。Linux 上这些文件通常只有 root 能读，读不到就不写该标签。占位符和超过 128 字节的值也不写。 |
+
+序列号在采集进程启动后异步读取一次，不在命令行入口执行。`sls` 为对象时，把 `sls.hostIdentityTags` 设为 `false` 即不再上报这两个标签；`sls` 为数组时，这个字段放不进去，改用 `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false`。环境变量优先于配置。脱敏不会去掉这两个标签。

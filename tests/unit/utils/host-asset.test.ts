@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { collectHostAsset } from '../../../src/utils/host-asset.js';
+import { collectHostAsset, getLocalSn } from '../../../src/utils/host-asset.js';
 import { selectPrimaryIpv4 } from '../../../src/utils/network-utils.js';
 import type * as os from 'node:os';
 
@@ -41,43 +41,46 @@ describe('selectPrimaryIpv4', () => {
 });
 
 describe('collectHostAsset', () => {
-  it('reads the macOS platform serial from one ioreg invocation', () => {
+  it('does not read a serial until collection is started', () => {
+    expect(getLocalSn()).toBe('');
+  });
+
+  it('reads the macOS platform serial from one ioreg invocation', async () => {
     const execFile = vi.fn(() => '"IOPlatformSerialNumber" = "C02XG0AHJG5H"');
-    expect(collectHostAsset('darwin', unread, execFile)).toBe('C02XG0AHJG5H');
+    expect(await collectHostAsset('darwin', unread, execFile)).toBe('C02XG0AHJG5H');
     expect(execFile).toHaveBeenCalledWith('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice']);
   });
 
-  it('drops a macOS serial longer than 128 characters', () => {
+  it('drops a macOS serial longer than 128 characters', async () => {
     const serial = 'A'.repeat(128);
-    expect(collectHostAsset('darwin', unread, () => `"IOPlatformSerialNumber" = "${serial}"`)).toBe(serial);
-    expect(collectHostAsset('darwin', unread, () => `"IOPlatformSerialNumber" = "${serial}B"`)).toBe('');
+    expect(await collectHostAsset('darwin', unread, () => `"IOPlatformSerialNumber" = "${serial}"`)).toBe(serial);
+    expect(await collectHostAsset('darwin', unread, () => `"IOPlatformSerialNumber" = "${serial}B"`)).toBe('');
   });
 
-  it('drops an OEM placeholder and keeps the later Windows product serial', () => {
-    const execFile = vi.fn(() => 'To Be Filled By O.E.M.\r\nPF2ABCDE\r\n');
-    expect(collectHostAsset('win32', unread, execFile)).toBe('PF2ABCDE');
+  it('drops an OEM placeholder and keeps the later Windows product serial', async () => {
+    const execFile = vi.fn((_command: string, _args: string[]) => 'To Be Filled By O.E.M.\r\nPF2ABCDE\r\n');
+    expect(await collectHostAsset('win32', unread, execFile)).toBe('PF2ABCDE');
     expect(execFile).toHaveBeenCalledTimes(1);
-    expect(execFile.mock.calls[0][0]).toBe('powershell.exe');
-    expect(execFile.mock.calls[0][1]).toEqual([
+    expect(execFile).toHaveBeenCalledWith('powershell.exe', [
       '-NoProfile', '-WindowStyle', 'Hidden', '-Command', expect.stringContaining('Win32_BIOS'),
     ]);
   });
 
-  it('drops a serial longer than 128 bytes', () => {
+  it('drops a serial longer than 128 bytes', async () => {
     const tooLong = `${'A'.repeat(127)}你`;
     expect(Buffer.byteLength(tooLong)).toBeGreaterThan(128);
-    expect(collectHostAsset('win32', unread, () => tooLong)).toBe('');
-    expect(collectHostAsset('win32', unread, () => `${tooLong}\nPF2ABCDE`)).toBe('PF2ABCDE');
-    expect(collectHostAsset('linux', () => tooLong, notExecuted)).toBe('');
+    expect(await collectHostAsset('win32', unread, () => tooLong)).toBe('');
+    expect(await collectHostAsset('win32', unread, () => `${tooLong}\nPF2ABCDE`)).toBe('PF2ABCDE');
+    expect(await collectHostAsset('linux', () => tooLong, notExecuted)).toBe('');
   });
 
-  it('drops the listed placeholders', () => {
+  it('drops the listed placeholders', async () => {
     for (const raw of ['None', 'Default string', 'System Serial Number', 'Not Specified', '0', '  ']) {
-      expect(collectHostAsset('win32', unread, () => raw)).toBe('');
+      expect(await collectHostAsset('win32', unread, () => raw)).toBe('');
     }
   });
 
-  it('reads the first usable Linux DMI file and skips unreadable or placeholder files', () => {
+  it('reads the first usable Linux DMI file and skips unreadable or placeholder files', async () => {
     const readFile = vi.fn((path: string) => {
       if (path.endsWith('product_serial')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
       if (path.endsWith('board_serial')) return 'None\n';
@@ -85,19 +88,19 @@ describe('collectHostAsset', () => {
       throw new Error(`unexpected ${path}`);
     });
     const execFile = vi.fn(() => 'should-not-run');
-    expect(collectHostAsset('linux', readFile, execFile)).toBe('BOARD-1');
+    expect(await collectHostAsset('linux', readFile, execFile)).toBe('BOARD-1');
     expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('returns an empty serial and does not throw when the command fails', () => {
+  it('returns an empty serial and does not throw when the command fails', async () => {
     const execFile = vi.fn(() => { throw new Error('timeout'); });
-    expect(collectHostAsset('darwin', unread, execFile)).toBe('');
+    expect(await collectHostAsset('darwin', unread, execFile)).toBe('');
     expect(execFile).toHaveBeenCalledTimes(1);
   });
 
-  it('returns an empty serial when every Linux file is unreadable', () => {
+  it('returns an empty serial when every Linux file is unreadable', async () => {
     const readFile = vi.fn(() => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); });
-    expect(collectHostAsset('linux', readFile, notExecuted)).toBe('');
+    expect(await collectHostAsset('linux', readFile, notExecuted)).toBe('');
     expect(readFile).toHaveBeenCalledTimes(3);
   });
 });

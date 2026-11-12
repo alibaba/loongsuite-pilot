@@ -37,9 +37,14 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
+vi.mock('../../../src/utils/host-asset.js', () => ({
+  startHostSerialCollection: vi.fn(() => Promise.resolve()),
+  getLocalSn: vi.fn(() => ''),
+}));
+
 import { SlsFlusher } from '../../../src/flushers/sls-flusher.js';
 import { LOCAL_MAC } from '../../../src/utils/network-utils.js';
-import { LOCAL_SN } from '../../../src/utils/host-asset.js';
+import { getLocalSn } from '../../../src/utils/host-asset.js';
 
 function expectHostIdentity(tags: Array<Record<string, string>> | Record<string, string>): void {
   if (Array.isArray(tags)) {
@@ -47,13 +52,13 @@ function expectHostIdentity(tags: Array<Record<string, string>> | Record<string,
     const sn = tags.find((tag) => '__sn__' in tag);
     if (LOCAL_MAC) expect(mac).toEqual({ __mac__: LOCAL_MAC });
     else expect(mac).toBeUndefined();
-    if (LOCAL_SN) expect(sn).toEqual({ __sn__: LOCAL_SN });
+    if (vi.mocked(getLocalSn)()) expect(sn).toEqual({ __sn__: vi.mocked(getLocalSn)() });
     else expect(sn).toBeUndefined();
     return;
   }
   if (LOCAL_MAC) expect(tags.__mac__).toBe(LOCAL_MAC);
   else expect(tags).not.toHaveProperty('__mac__');
-  if (LOCAL_SN) expect(tags.__sn__).toBe(LOCAL_SN);
+  if (vi.mocked(getLocalSn)()) expect(tags.__sn__).toBe(vi.mocked(getLocalSn)());
   else expect(tags).not.toHaveProperty('__sn__');
 }
 
@@ -601,6 +606,33 @@ describe('SlsFlusher', () => {
       expect(body.__tags__).not.toHaveProperty('__service_name__');
       expectHostIdentity(body.__tags__);
       vi.unstubAllGlobals();
+    });
+
+    it('omits MAC and serial tags when host identity tags are disabled', async () => {
+      const config = makeConfig({ hostIdentityTags: false, serviceNamePrefix: 'pilot' });
+      flusher = new SlsFlusher(config, '/tmp/data');
+
+      await flusher.send(buildTestEntry());
+      await flusher.flush();
+
+      const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+      expect(tags.some((tag) => '__mac__' in tag || '__sn__' in tag)).toBe(false);
+    });
+
+    it('writes the serial tag once collection has a value', async () => {
+      vi.mocked(getLocalSn).mockReturnValue('C02XG0AHJG5H');
+      try {
+        const config = makeConfig({ serviceNamePrefix: 'pilot' });
+        flusher = new SlsFlusher(config, '/tmp/data');
+
+        await flusher.send(buildTestEntry());
+        await flusher.flush();
+
+        const tags = mockPostLogStoreLogs.mock.calls[0][2].tags as Array<Record<string, string>>;
+        expect(tags).toContainEqual({ __sn__: 'C02XG0AHJG5H' });
+      } finally {
+        vi.mocked(getLocalSn).mockReturnValue('');
+      }
     });
 
     it('webtracking appends agentType to serviceNamePrefix', async () => {

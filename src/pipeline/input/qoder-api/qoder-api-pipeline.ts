@@ -82,6 +82,7 @@ export class QoderApiPipeline implements Pipeline {
       configName,
       failedLogDir: this.failedLogDir,
       dataDir: this.dataDir,
+      hostIdentityTags: this.opts.hostIdentityTags,
     });
 
     // 4. Start sender flush interval

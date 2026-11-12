@@ -58,6 +58,8 @@ export interface PipelineManagerOptions {
   failedLogDir: string;
   dataDir: string;
   pipelineConfig: PipelineToggle;
+  /** When false, Qoder API logs omit __mac__ and __sn__. Default true. */
+  hostIdentityTags?: boolean;
 }
 
 export interface PipelineToggle {
@@ -84,6 +86,7 @@ export interface QoderApiPipelineOptions {
   stateDir: string;
   failedLogDir: string;
   dataDir: string;
+  hostIdentityTags?: boolean;
 }
 
 // --- File collection types (moved from file-collection/types.ts) ---

@@ -138,6 +138,7 @@ The `install` command does not edit an existing `sls` array. It stops with an er
 | `LOONGSUITE_SLS_ACCESS_KEY_ID` | Access Key ID for AK mode. |
 | `LOONGSUITE_SLS_ACCESS_KEY_SECRET` | Access Key Secret for AK mode. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS reporting. |
+| `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | Set `false` or `0` to omit `__tag__:__mac__` and `__tag__:__sn__`. On by default. |
 
 API Key mode reads `apiKey` from `config.sls`; it has no environment variable override.
 
@@ -167,3 +168,12 @@ tail -f ~/.loongsuite-pilot/logs/output/*.jsonl
 ## Privacy Notes
 
 SLS is a remote destination. Enable [Data Masking](masking.md) before using SLS in sensitive environments.
+
+Each log group also carries two device-identity tags next to the hostname and source IP:
+
+| Tag | Value |
+| --- | --- |
+| `__tag__:__mac__` | MAC of the NIC that owns the non-loopback IPv4 used as `__source__`. |
+| `__tag__:__sn__` | Hardware serial. macOS reads `ioreg`, Windows runs one PowerShell query, and Linux reads DMI files. Those Linux files are usually root-only, so the tag is omitted when they cannot be read. Placeholders and values longer than 128 bytes are omitted too. |
+
+The serial is read once, asynchronously, after the collector starts. It does not run for CLI subcommands. When `sls` is an object, `sls.hostIdentityTags: false` stops sending both tags. An `sls` array has no place for that field, so use `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS=false` instead. The environment variable wins. Masking does not remove them.

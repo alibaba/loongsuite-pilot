@@ -12,7 +12,7 @@ import { createLogger } from '../utils/logger.js';
 import { formatTime } from '../utils/time-utils.js';
 import { normalizeAgentType } from '../utils/agent-type-normalize.js';
 import { LOCAL_IP, LOCAL_MAC, buildUserAgent } from '../utils/network-utils.js';
-import { LOCAL_SN } from '../utils/host-asset.js';
+import { getLocalSn, startHostSerialCollection } from '../utils/host-asset.js';
 import { readInstalledVersion } from '../utils/fs-utils.js';
 import * as path from 'node:path';
 import { SlsFailureLogWriter } from './sls-failure-log-writer.js';
@@ -195,6 +195,7 @@ export class SlsFlusher extends BaseFlusher {
   }
 
   async start(): Promise<void> {
+    if (this.config.hostIdentityTags !== false) void startHostSerialCollection();
     await this.failedLogWriter.start();
     this.flushTimer = setInterval(
       () => void this.flush(),
@@ -343,8 +344,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildAkTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string>[] {
     const tags: Record<string, string>[] = [
       { __hostname__: HOSTNAME },
-      ...(LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
-      ...(LOCAL_SN ? [{ __sn__: LOCAL_SN }] : []),
+      ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? [{ __mac__: LOCAL_MAC }] : []),
+      ...(this.config.hostIdentityTags !== false && getLocalSn() ? [{ __sn__: getLocalSn() }] : []),
     ];
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags.push({ __service_name__: sn });
@@ -361,8 +362,8 @@ export class SlsFlusher extends BaseFlusher {
   private buildWebtrackingTags(endpoint: SlsEndpoint, agentType?: string): Record<string, string> {
     const tags: Record<string, string> = {
       __hostname__: HOSTNAME,
-      ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-      ...(LOCAL_SN ? { __sn__: LOCAL_SN } : {}),
+      ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+      ...(this.config.hostIdentityTags !== false && getLocalSn() ? { __sn__: getLocalSn() } : {}),
     };
     const sn = this.resolveServiceName(endpoint, agentType);
     if (sn) tags['__service_name__'] = sn;
@@ -745,8 +746,8 @@ export class SlsFlusher extends BaseFlusher {
               source: LOCAL_IP,
               tags: {
                 __hostname__: HOSTNAME,
-                ...(LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
-                ...(LOCAL_SN ? { __sn__: LOCAL_SN } : {}),
+                ...(this.config.hostIdentityTags !== false && LOCAL_MAC ? { __mac__: LOCAL_MAC } : {}),
+                ...(this.config.hostIdentityTags !== false && getLocalSn() ? { __sn__: getLocalSn() } : {}),
               },
               userAgent: this.userAgent,
             },
