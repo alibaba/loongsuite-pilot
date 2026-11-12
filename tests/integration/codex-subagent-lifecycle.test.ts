@@ -146,6 +146,18 @@ function agent(spans: ReadableSpan[], session: string, rawTurn: string): Readabl
   expect(result, `${session}/${rawTurn} AGENT`).toBeDefined();
   return result!;
 }
+/** `isBaselineInit` is startup bookkeeping, not a source cursor. */
+function withoutBaselineInit(raw: string): unknown {
+  const parsed = JSON.parse(raw) as { 'codex-transcript'?: { extra?: Record<string, unknown> } };
+  const input = parsed['codex-transcript'];
+  if (input?.extra) {
+    delete input.extra.isBaselineInit;
+    if (Object.keys(input.extra).length === 0) delete input.extra;
+    if (Object.keys(input).length === 0) delete parsed['codex-transcript'];
+  }
+  return parsed;
+}
+
 function invocation(entries: AgentActivityEntry[], call: string): AgentActivityEntry {
   const matches = entries.filter(entry => entry['event.name'] === 'gen_ai.agent.invoke' && entry['gen_ai.tool.call.id'] === call);
   expect(matches).toHaveLength(1);
@@ -346,7 +358,8 @@ describe('Codex independent subagent lifecycle across native input, JSONL and OT
       ...dispatch('spawn-a', CHILD, 2, 'child-a'), end('p1', 3)[1]!]);
     try {
       await appending;
-      expect(await fs.readFile(h.statePath, 'utf8').catch(() => '{}')).toBe(persistedBefore);
+      const duringAppend = await fs.readFile(h.statePath, 'utf8').catch(() => '{}');
+      expect(withoutBaselineInit(duringAppend)).toEqual(withoutBaselineInit(persistedBefore));
       expect((await readJournal(new CodexTurnJournal(h.journalDir))).flat()).toEqual([]);
     } finally { accept(); }
     await writing;
