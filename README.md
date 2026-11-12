@@ -45,7 +45,7 @@ Pilot is designed to answer practical questions:
 | Collection deployment    | Installs hooks or plugins and reads local logs, sessions, or data files.           |
 | Unified event schema     | Normalizes agent-native events into a shared GenAI schema.                         |
 | Multi-destination output | Exports to JSONL, Alibaba Cloud SLS, HTTP, and OTLP trace backends.                |
-| Privacy controls         | Supports per-agent content capture policy and secret masking before output.        |
+| Privacy controls         | Supports secret masking before output.                                                |
 | Local operations         | Provides service status, restart, rollback, and a built-in local dashboard. |
 
 
@@ -152,7 +152,7 @@ Start with the guide that matches what you want to change:
 
 | Task                                             | Guide                                            |
 | ------------------------------------------------ | ------------------------------------------------ |
-| Choose agents and content capture policy         | [Agent Configuration](docs/agents.md)            |
+| Choose agents                                    | [Agent Configuration](docs/agents.md)            |
 | Write local JSONL logs                           | [Local JSONL Output](docs/local-jsonl-output.md) |
 | Report logs to SLS                               | [SLS Output](docs/sls-output.md)                 |
 | Report OTLP traces                               | [Trace Output](docs/trace-output.md)             |
@@ -210,9 +210,11 @@ loongsuite-pilot token-usage
 loongsuite-pilot rollback
 ```
 
-The local dashboard starts and stops with the collector. Open
-`http://127.0.0.1:8765/`; no separate monitor command is required. It reads the
-collector-owned `logs/metrics-summary.json` file directly.
+The local dashboard is disabled by default. Run `loongsuite-pilot dashboard start`
+to enable it on port 8765, or `loongsuite-pilot dashboard start 9999` to choose a
+port. Run `loongsuite-pilot dashboard stop` to disable it. These commands restart
+a running collector; collection remains enabled. The page reads the collector-owned
+`logs/metrics-summary.json` file directly.
 
 On macOS, optionally run `loongsuite-pilot dashboard shortcut install` to create a
 Dashboard `.webloc` shortcut with a radar icon and add it to the Dock's files area.

@@ -837,7 +837,7 @@ describe('MetricsCollector', () => {
       expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
     });
 
-    it('stays empty when legacy captureMessageContent=false is configured', () => {
+    it('lists only agents with captureMessageContent=false in sorted order', () => {
       const col = new MetricsCollector({
         version: '1.0.0',
         userId: 'test-user',
@@ -848,10 +848,10 @@ describe('MetricsCollector', () => {
           codex: { captureMessageContent: true },
         },
       });
-      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('');
+      expect(col.collectL1(buildSnapshot()).capture_message_disabled_agents).toBe('claude-code cursor');
     });
 
-    it('stays empty when legacy captureMessageContent=true is configured', () => {
+    it('excludes agents whose captureMessageContent is true', () => {
       const col = new MetricsCollector({
         version: '1.0.0',
         userId: 'test-user',

@@ -4,9 +4,8 @@ English | [简体中文](zh-CN/masking.md)
 
 LoongSuite Pilot can mask common secrets and personal sensitive data before normalized events are sent to output backends. Use this when prompts, completions, tool arguments, or tool results may contain credentials, ID cards, phone numbers, email addresses, IPv4 addresses, or bank card numbers.
 
-Message content always enters the reporting pipeline. `mask` scans configured
-output fields and replaces high-confidence secrets before output. Legacy
-`captureMessageContent` settings are ignored.
+`mask` scans configured output fields and replaces high-confidence secrets
+before output.
 
 ## How To Enable Masking
 

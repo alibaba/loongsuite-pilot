@@ -1,23 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applyHookContentPolicy,
   buildCursorHookRecord,
   buildQoderHookRecord,
   inferProviderName,
 } from '../../../assets/hooks/agent-event-normalizer.mjs';
 
 describe('asset hook agent event normalizer', () => {
-  it.each([false, 'false'])('keeps the legacy helper callable during mixed-version hook upgrades (%s)', (captureMessageContent) => {
-    const record = {
-      'gen_ai.agent.type': 'cursor',
-      'gen_ai.tool.call.arguments': { command: 'upgrade-content-sentinel' },
-    };
-    expect(applyHookContentPolicy(record, {
-      agents: { cursor: { captureMessageContent } },
-    })).toEqual(record);
-    expect(JSON.stringify(record)).toContain('upgrade-content-sentinel');
-  });
-
   it('normalizes Cursor tool calls to canonical dotted keys', () => {
     const record = buildCursorHookRecord({
       hook_event_name: 'preToolUse',
@@ -55,7 +43,7 @@ describe('asset hook agent event normalizer', () => {
     expect(record['agent.raw']).toBeUndefined();
   });
 
-  it('ignores legacy content policy before history write', () => {
+  it('applies hook-side content policy before history write', () => {
     const record = buildCursorHookRecord({
       hook_event_name: 'postToolUse',
       session_id: 'sess-2',
@@ -70,7 +58,7 @@ describe('asset hook agent event normalizer', () => {
       },
     });
 
-    expect(record['gen_ai.tool.call.result']).toEqual({ secret: 'value' });
+    expect(record['gen_ai.tool.call.result']).toBeUndefined();
     expect(record['agent.raw']).toBeUndefined();
     expect(record.tool_output).toBeUndefined();
     expect(record.tool_input).toBeUndefined();
@@ -79,7 +67,7 @@ describe('asset hook agent event normalizer', () => {
     expect(record['gen_ai.session.id']).toBe('sess-2');
   });
 
-  it('keeps canonical source content when legacy content policy is disabled', () => {
+  it('recursively removes source raw content when content policy is disabled', () => {
     const record = buildQoderHookRecord({
       type: 'user',
       uuid: 'row-policy',
@@ -103,7 +91,7 @@ describe('asset hook agent event normalizer', () => {
       },
     });
 
-    expect(record['gen_ai.tool.call.result']).toEqual({ stdout: 'secret stdout' });
+    expect(record['gen_ai.tool.call.result']).toBeUndefined();
     expect(record['agent.raw']).toBeUndefined();
     expect(record.toolUseResult).toBeUndefined();
     expect(record.message).toBeUndefined();

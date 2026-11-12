@@ -307,8 +307,8 @@ describe('OpenCode V2 adapter', () => {
     expect(h.errors).toHaveLength(1);
   });
 
-  it('reports content and error text despite the obsolete capture flag', async () => {
-    const h = await harness({ captureMessageContent: false });
+  it('passes content and error text to the plugin writer for policy filtering', async () => {
+    const h = await harness();
     h.hooks.get('context')({ sessionID: 'ses_a', system: [{ text: 'PRIVATE_SYSTEM' }], messages: [{ role: 'user', content: 'PRIVATE_INPUT' }] });
     await h.start();
     await h.send('session.text.ended', { assistantMessageID: 'msg_one', ordinal: 0, text: 'PRIVATE_OUTPUT' });

@@ -66,7 +66,7 @@
 - 轮次输入使用按消息字节计数的有界窗口，不再反复序列化整份历史。重建任务最多 4 项、估算 32 MiB、60 秒过期；长任务使用冻结的已校验源视图分批恢复，避免每轮从头计算。既有 round ID、源记录位置、64 KiB 输入和 64 轮/512 KiB 输出规则保留。
 - 原生正文缓存和重建进度不写入 checkpoint。重启后分批重读已确认会话，由持久化日志游标、待完成状态和确定性 ID 恢复；保持既有输出入队与状态提交顺序。空闲轮只读状态，实际游标、关联、完成记录或 TTL 清理变化时才提交。
 
-`Doubao Work native cache statistics` 调试日志提供累计正文读取、解析行、命中、失效、淘汰、估算保留字节和文件数；`InputRuntimeAccumulator` 包含原生日志/正文读取量，非正文元数据查询仍有开销。当前配置层已弃用并忽略 `captureMessageContent`，本适配不另行恢复 content-off 开关；内容仍走统一脱敏。
+`Doubao Work native cache statistics` 调试日志提供累计正文读取、解析行、命中、失效、淘汰、估算保留字节和文件数；`InputRuntimeAccumulator` 包含原生日志/正文读取量，非正文元数据查询仍有开销。内容仍走统一脱敏流程。
 
 可用 `node tests/performance/doubao-work-rounds.perf.mjs` 在独立子进程重跑 4k/8k/16k 合成历史阶梯，输出 wall/CPU、定时器延迟和 RSS；这衡量 collector 重建开销，不代表客户模型响应耗时。
 

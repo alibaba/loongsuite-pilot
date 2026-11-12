@@ -63,7 +63,7 @@ Round inputs use a byte-counted message window instead of repeatedly serializing
 
 Native bodies and reconstruction progress are memory-only. Restart rereads confirmed conversations cooperatively, using durable log cursors, pending state and deterministic completion IDs for recovery. Output queuing and checkpoint ordering are unchanged. Checkpoints are committed only when cursors, relationships, completions or TTL cleanup actually change; idle polls neither deep-copy nor rewrite state.
 
-The `Doubao Work native cache statistics` debug log reports cumulative body reads, parsed lines, hits, resets, evictions, estimated retained bytes and file counts. Runtime input metrics also include native reads; metadata queries still cost work. This base version deprecates and ignores `captureMessageContent`; the adapter preserves that behavior and regular recursive masking, without claiming content-off support.
+The `Doubao Work native cache statistics` debug log reports cumulative body reads, parsed lines, hits, resets, evictions, estimated retained bytes and file counts. Runtime input metrics also include native reads; metadata queries still cost work. Content passes through the shared masking pipeline.
 
 Run `node tests/performance/doubao-work-rounds.perf.mjs` for isolated 4k/8k/16k synthetic-history wall/CPU, timer-delay and RSS measurements. These measure collector reconstruction, not customer model response time.
 

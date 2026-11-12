@@ -221,6 +221,25 @@ let _logDirReady = false;
 // for the process lifetime. Emitted as agent.opencode.cwd so the pilot pipeline
 // can enrich git.repo / workspace.current_root downstream.
 let agentCwd;
+let captureContent = true;
+
+const CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages', 'gen_ai.input.messages_delta',
+  'gen_ai.output.messages', 'gen_ai.output.messages_delta',
+  'gen_ai.system_instructions', 'gen_ai.tool.definitions',
+  'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'error.message',
+]);
+
+function contentEnabled(config) {
+  const value = config.agents?.opencode?.captureMessageContent;
+  return value !== false && !(typeof value === 'string' && value.trim().toLowerCase() === 'false');
+}
+
+function contentSafeRecord(record) {
+  return captureContent ? record : Object.fromEntries(
+    Object.entries(record).filter(([key]) => !CONTENT_FIELDS.has(key)),
+  );
+}
 
 function writeRecord(record) {
   try {
@@ -229,7 +248,7 @@ function writeRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `opencode-${todayStamp()}.jsonl`);
-    fs.appendFileSync(filePath, safeStringify(record) + "\n");
+    fs.appendFileSync(filePath, safeStringify(contentSafeRecord(record)) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -959,6 +978,7 @@ export default {
   setup: async (ctx) => {
     const { setupV2 } = await import("./v2.mjs");
     const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
     const userId = resolveUserId(cfg);
     return setupV2(ctx, {
       writeRecord, writeError, inferProviderName, recordUpstreamEnvOnce,
@@ -978,6 +998,7 @@ export default {
       undefined;
 
     const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
     const userId = resolveUserId(cfg);
 
     return {

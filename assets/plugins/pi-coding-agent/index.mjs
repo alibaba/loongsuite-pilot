@@ -197,6 +197,13 @@ function resolveUserId(config) {
     || 'unknown';
 }
 
+function shouldCaptureContent(config, agentType) {
+  const value = config.agents?.[agentType]?.captureMessageContent
+    ?? config.agents?.[DEFAULT_IDENTITY.agentType]?.captureMessageContent;
+  if (typeof value === 'string') return value.trim().toLowerCase() !== 'false';
+  return value !== false;
+}
+
 function normalizeProvider(provider) {
   if (typeof provider !== 'string' || provider.length === 0) return 'unknown';
   const value = provider.toLowerCase();
@@ -449,6 +456,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   return function loongSuitePilotPiCodingAgent(pi) {
   const state = {
     userId: 'unknown',
+    captureContent: true,
     traceId: null,
     turnId: null,
     stepId: null,
@@ -467,6 +475,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   const resetSessionConfig = () => {
     const config = loadPilotConfig();
     state.userId = resolveUserId(config);
+    state.captureContent = shouldCaptureContent(config, identity.agentType);
   };
 
   pi.on('session_start', safeHandler('session_start', async () => {
@@ -494,7 +503,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.requestEmitted = false;
     state.requestStartedAt = 0;
     state.systemPrompt = event.systemPrompt;
-    state.pendingUserInput = promptInputMessages(event);
+    state.pendingUserInput = state.captureContent ? promptInputMessages(event) : [];
     state.fallbackRequestInput = state.pendingUserInput.slice();
     state.userInputEmitted = false;
     state.previousRequestMessages = [];
@@ -512,7 +521,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
   }));
 
   const emitUserInput = (event, ctx) => {
-    if (state.userInputEmitted) return;
+    if (state.userInputEmitted || !state.captureContent) return;
     const messages = trailingUserInputMessages(event.messages);
     const inputDelta = messages.length > 0 ? messages : state.pendingUserInput;
     if (inputDelta.length === 0) return;
@@ -534,33 +543,35 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       ...commonFields(ctx, state, runtime, state.requestStartedAt),
       'event.name': 'llm.request',
     };
-    const messages = canonicalMessages(event.messages);
-    if (messages.length > 0) record['gen_ai.input.messages'] = messages;
-    if (messages.length > 0) {
-      const delta = appendedInputMessages(
-        state.previousRequestMessages,
-        messages,
-        state.hasPreviousRequestSnapshot,
-      );
-      if (delta !== undefined) record['gen_ai.input.messages_delta'] = delta;
-      state.previousRequestMessages = messages;
-      state.hasPreviousRequestSnapshot = true;
-    } else if (!state.hasPreviousRequestSnapshot && state.fallbackRequestInput.length > 0) {
-      // `context` should precede every provider request, but older/custom Pi
-      // runtimes may deliver only message_end. Preserve the user input known
-      // from before_agent_start without pretending it was a full snapshot.
-      record['gen_ai.input.messages_delta'] = state.fallbackRequestInput;
-      state.previousRequestMessages = state.fallbackRequestInput.slice();
-      state.hasPreviousRequestSnapshot = true;
+    if (state.captureContent) {
+      const messages = canonicalMessages(event.messages);
+      if (messages.length > 0) record['gen_ai.input.messages'] = messages;
+      if (messages.length > 0) {
+        const delta = appendedInputMessages(
+          state.previousRequestMessages,
+          messages,
+          state.hasPreviousRequestSnapshot,
+        );
+        if (delta !== undefined) record['gen_ai.input.messages_delta'] = delta;
+        state.previousRequestMessages = messages;
+        state.hasPreviousRequestSnapshot = true;
+      } else if (!state.hasPreviousRequestSnapshot && state.fallbackRequestInput.length > 0) {
+        // `context` should precede every provider request, but older/custom Pi
+        // runtimes may deliver only message_end. Preserve the user input known
+        // from before_agent_start without pretending it was a full snapshot.
+        record['gen_ai.input.messages_delta'] = state.fallbackRequestInput;
+        state.previousRequestMessages = state.fallbackRequestInput.slice();
+        state.hasPreviousRequestSnapshot = true;
+      }
+      state.fallbackRequestInput = [];
+      if (state.systemPrompt) {
+        record['gen_ai.system_instructions'] = [
+          { type: 'text', content: truncate(state.systemPrompt) },
+        ];
+      }
+      const tools = activeToolDefinitions(pi);
+      if (tools.length > 0) record['gen_ai.tool.definitions'] = tools;
     }
-    state.fallbackRequestInput = [];
-    if (state.systemPrompt) {
-      record['gen_ai.system_instructions'] = [
-        { type: 'text', content: truncate(state.systemPrompt) },
-      ];
-    }
-    const tools = activeToolDefinitions(pi);
-    if (tools.length > 0) record['gen_ai.tool.definitions'] = tools;
     writeRecord(record);
   };
 
@@ -606,11 +617,13 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       'gen_ai.usage.total_cost': Number(cost.total) || 0,
     };
     if (message.responseId) record['gen_ai.response.id'] = message.responseId;
-    const output = canonicalOutputMessage(message);
-    if (output) record['gen_ai.output.messages'] = output;
+    if (state.captureContent) {
+      const output = canonicalOutputMessage(message);
+      if (output) record['gen_ai.output.messages'] = output;
+    }
     if (message.stopReason === 'error') {
       record['error.type'] = 'llm_error';
-      if (message.errorMessage) {
+      if (state.captureContent && message.errorMessage) {
         record['error.message'] = truncate(message.errorMessage, 8 * 1024);
       }
     }
@@ -626,7 +639,9 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       'gen_ai.tool.name': event.toolName,
       'gen_ai.tool.call.id': event.toolCallId,
     };
-    record['gen_ai.tool.call.arguments'] = toSerializable(event.args);
+    if (state.captureContent) {
+      record['gen_ai.tool.call.arguments'] = toSerializable(event.args);
+    }
     writeRecord(record);
   }));
 
@@ -644,7 +659,9 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     if (startedAt !== undefined) {
       record['gen_ai.tool.call.duration'] = endedAt - startedAt;
     }
-    record['gen_ai.tool.call.result'] = toSerializable(event.result);
+    if (state.captureContent) {
+      record['gen_ai.tool.call.result'] = toSerializable(event.result);
+    }
     if (event.isError) record['error.type'] = 'tool_error';
     writeRecord(record);
   }));

@@ -473,6 +473,7 @@ export class MetricsCollector {
   private readonly userId: string;
   private readonly dataDir: string;
   private readonly canaryPolicy: string;
+  private readonly agentsConfig: AgentsConfig;
   private readonly slsEndpoints: SlsEndpoint[];
   private readonly cmsWorkspace: string;
   private readonly autoUpdateEnabled: boolean;
@@ -518,6 +519,7 @@ export class MetricsCollector {
     this.userId = opts.userId;
     this.dataDir = opts.dataDir;
     this.canaryPolicy = opts.canaryPolicy ?? '';
+    this.agentsConfig = opts.agentsConfig ?? {};
     this.slsEndpoints = opts.slsEndpoints ?? [];
     this.cmsWorkspace = opts.cmsWorkspace ?? '';
     // Omitted means "an updater is expected", the host default. Only a caller that knows
@@ -597,8 +599,7 @@ export class MetricsCollector {
       mem: String(Math.round(mem.rss / 1024 / 1024)),
       mem_heap: String(Math.round(mem.heapUsed / 1024 / 1024)),
       start_time: this.startTime,
-      // Kept as an empty compatibility field for existing metrics consumers.
-      capture_message_disabled_agents: '',
+      capture_message_disabled_agents: this.buildCaptureMessageDisabledAgents(),
       projects: this.buildProjects(),
       cms_workspace: this.buildCmsWorkspace(),
       metric_json: {
@@ -861,6 +862,15 @@ export class MetricsCollector {
       });
     }
     return rows;
+  }
+
+  private buildCaptureMessageDisabledAgents(): string {
+    const disabled: string[] = [];
+    for (const [agentType, cfg] of Object.entries(this.agentsConfig)) {
+      if (cfg.captureMessageContent === false) disabled.push(agentType);
+    }
+    disabled.sort();
+    return disabled.join(' ');
   }
 
   private buildProjects(): string {
