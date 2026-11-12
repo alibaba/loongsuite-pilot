@@ -33,6 +33,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer install
 
 The Windows installer downloads `loongsuite-pilot.zip` by default. It stores data under `%USERPROFILE%\.loongsuite-pilot` and installs the `loongsuite-pilot` command under `%USERPROFILE%\.local\bin`. Open a new PowerShell window if the command is not found immediately after installation.
 
+If the install stops with `Copy-Item : Access to the path '...\loongsuite-pilot-service.ps1' is denied`, your account cannot write to the command directory: some tools create `%USERPROFILE%\.local\bin` from an elevated process and leave a restricted ACL behind. Inspect it with `icacls`, then grant yourself write access once from an elevated shell:
+
+```powershell
+icacls "$env:USERPROFILE\.local\bin"
+icacls "$env:USERPROFILE\.local\bin" /grant "$env:USERNAME:(OI)(CI)M"
+```
+
+Afterwards rerun the installer as your normal user. Running the whole installer elevated is not a workaround: the installed files would be owned by Administrators and the next upgrade would fail on the same overwrite.
+
 ## Install With Common Options
 
 Linux/macOS:
