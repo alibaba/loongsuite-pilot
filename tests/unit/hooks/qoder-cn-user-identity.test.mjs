@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const processor = process.env.QODER_CN_IDENTITY_PROCESSOR
-  ?? fileURLToPath(new URL('../../../assets/hooks/qoder-hook-processor.mjs', import.meta.url));
+  ?? fileURLToPath(new URL('../../helpers/qoder-hook-collector-driver.mjs', import.meta.url));
 let root;
 let transcript;
 let statusPath;
@@ -79,42 +79,30 @@ function expectIdentity(name, email, userId = os.hostname()) {
 }
 
 describe('Qoder CN account name and email', () => {
-  it('collects the CN IDE name and outer email without changing user.id', () => {
-    writeTurn();
-    run({ extra: { user: { name: ' cn-user ', uid: 'account-id' }, email: ' cn@example.com ' } });
-    expectIdentity('cn-user', 'cn@example.com');
-  });
-
-  it.each(['qoder', 'qoder-cn'])('keeps the existing %s ID behavior when the transcript and Hook have account IDs', agentId => {
+  it('reads the Qoder CN username from the hook and ignores the git email beside user', () => {
     writeTurn({ nativeId: 'transcript-account' });
-    run({ extra: { user: { uid: 'hook-account', id: 'legacy-hook-account', name: 'account-name', email: 'account@example.com' } } }, { agentId });
-    expectIdentity('account-name', 'account@example.com');
-  });
-
-  it.each(['qoder', 'qoder-cn'])('keeps the existing %s configured employee ID alongside account metadata', agentId => {
-    fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ userId: 'employee-123' }));
-    writeTurn({ nativeId: 'transcript-account' });
-    run({ extra: { user: { uid: 'hook-account', name: 'account-name', email: 'account@example.com' } } }, { agentId });
-    expectIdentity('account-name', 'account@example.com', 'employee-123');
-  });
-
-  it('prefers the nested CN email over the outer field', () => {
-    writeTurn();
-    run({ extra: { user: { name: 'cn-user', email: 'nested@example.com' }, email: 'outer@example.com' } });
+    run({ extra: { user: { uid: 'hook-account', name: ' cn-user ', email: 'nested@example.com' }, email: ' outer@example.com ' } });
     expectIdentity('cn-user', 'nested@example.com');
   });
 
-  it('collects an outer email when the Hook has no user object', () => {
-    writeTurn();
-    run({ extra: { email: 'outer@example.com' } });
-    expectIdentity(undefined, 'outer@example.com');
+  it('keeps the configured employee ID when a Qoder CN hook carries account fields', () => {
+    fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ userId: 'employee-123' }));
+    writeTurn({ nativeId: 'transcript-account' });
+    run({ extra: { user: { uid: 'hook-account', name: 'account-name', email: 'account@example.com' } } });
+    expectIdentity('account-name', 'account@example.com', 'employee-123');
   });
 
-  it.each([undefined, '', '  ', null, 12345, '13800138000', 'cloud-account-id'])('keeps a phone-registered IDE account name without inventing email: %j', email => {
-    writeStatus({ name: 'different-desktop-account', email: 'desktop@example.com' });
-    writeTurn();
-    run({ extra: { user: { name: 'phone-registered-user' }, email } });
-    expectIdentity('phone-registered-user', undefined);
+  it('keeps the existing qoder ID behavior when the transcript and Hook have account IDs', () => {
+    writeTurn({ nativeId: 'transcript-account' });
+    run({ extra: { user: { uid: 'hook-account', id: 'legacy-hook-account', name: 'account-name', email: 'account@example.com' } } }, { agentId: 'qoder' });
+    expectIdentity('account-name', 'account@example.com');
+  });
+
+  it('keeps the existing qoder configured employee ID alongside account metadata', () => {
+    fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ userId: 'employee-123' }));
+    writeTurn({ nativeId: 'transcript-account' });
+    run({ extra: { user: { uid: 'hook-account', name: 'account-name', email: 'account@example.com' } } }, { agentId: 'qoder' });
+    expectIdentity('account-name', 'account@example.com', 'employee-123');
   });
 
   it('reads the public Desktop account projection for an explicit app invocation', () => {
@@ -128,7 +116,7 @@ describe('Qoder CN account name and email', () => {
     writeStatus();
     writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' } });
-    expectIdentity('desktop-user', undefined);
+    expectIdentity('desktop-user', '');
   });
 
   it('keeps the configured employee ID when collecting Desktop metadata', () => {
@@ -139,26 +127,26 @@ describe('Qoder CN account name and email', () => {
     expectIdentity('desktop-user', 'desktop@example.com', 'employee-123');
   });
 
-  it('uses the Desktop Hook metadata before the public profile', () => {
+  it('reads the Desktop account file for an App Stop and ignores hook extra', () => {
     writeStatus({ name: 'different-profile-account', email: 'profile@example.com' });
     writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' },
-      extra: { user: { uid: 'desktop-native-id', name: 'hook-account' } } });
-    expectIdentity('hook-account', undefined);
+      extra: { user: { uid: 'desktop-native-id', name: 'hook-account', email: 'hook@example.com' } } });
+    expectIdentity('different-profile-account', 'profile@example.com');
   });
 
   it('collects a public email without a name and keeps the original user.id', () => {
     writeStatus({ name: '', email: 'desktop@example.com' });
     writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' } });
-    expectIdentity(undefined, 'desktop@example.com');
+    expectIdentity('', 'desktop@example.com');
   });
 
-  it('does not use the Desktop projection for an IDE without account fields', () => {
-    writeStatus({ email: 'desktop@example.com' });
+  it('leaves the IDE account empty when the hook has no user and ignores the Desktop file', () => {
+    writeStatus({ name: 'desktop-user', email: 'desktop@example.com' });
     writeTurn();
-    run({ extra: {} });
-    expectIdentity(undefined, undefined);
+    run({ extra: { email: 'git@example.com' } });
+    expectIdentity('', '');
   });
 
   it.each([
@@ -169,7 +157,7 @@ describe('Qoder CN account name and email', () => {
     writeStatus(patch);
     writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' } });
-    expectIdentity(undefined, undefined);
+    expectIdentity('', '');
   });
 
   it.each(['missing', 'truncated', 'oversized'])('fails open for a %s projection', variant => {
@@ -179,7 +167,7 @@ describe('Qoder CN account name and email', () => {
     if (variant === 'oversized') fs.writeFileSync(statusPath, ' '.repeat(16 * 1024 + 1));
     writeTurn({ cli: true });
     run({ parent_business_info: { product: 'app' } });
-    expectIdentity(undefined, undefined);
+    expectIdentity('', '');
   });
 
   it('refreshes Desktop metadata on each Stop without changing user.id or older turn metadata', () => {
@@ -201,7 +189,7 @@ describe('Qoder CN account name and email', () => {
     writeStatus({ email: 'stop@example.com' });
     writeTurn({ cli: true, complete: false });
     run({ parent_business_info: { product: 'app' },
-      ...(source === 'hook' ? { extra: { user: { uid: 'stop-account', name: 'desktop-user', email: 'stop@example.com' } } } : {}),
+      ...(source === 'hook' ? { extra: { user: { uid: 'stop-account', name: 'hook-user', email: 'hook@example.com' } } } : {}),
     });
     writeStatus({ name: 'later-account', email: 'later@example.com' });
     fs.appendFileSync(transcript, JSON.stringify({ type: 'last-prompt', sessionId: 'cn-session', lastPrompt: 'hello a' }) + '\n');

@@ -2,6 +2,12 @@ import { describe, it, expect } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher, type TraceExporterLike } from '../../src/flushers/otlp-trace-flusher.js';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { TraceLinker } from '../../src/core/upstream-link/trace-linker.js';
+import { CorrelationStore } from '../../src/core/upstream-link/correlation-store.js';
+import { contentHash } from '../../src/utils/content-hash.js';
 import { ClientType } from '../../src/types/index.js';
 
 const traceId = 'a'.repeat(32);
@@ -17,7 +23,7 @@ function turn(agent: string, id: string, offset: number, child = false) {
   const event = (name: string, tick: number, fields = {}) => ({ ...base, 'event.name': name,
     'event.id': `${id}-${tick}`, time_unix_nano: String(1700000000000000000n + BigInt(offset + tick) * 1000000n), ...fields });
   return [
-    event('other', 0, { 'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] }),
+    event('other', 0, { 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }], 'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] }),
     event('llm.request', 1, { 'gen_ai.response.id': id + '-llm', 'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: 'task' }] }] }),
     event('llm.response', 2, { 'gen_ai.response.id': id + '-llm', 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'done' }] }],
       'gen_ai.usage.input_tokens': 11, 'gen_ai.usage.output_tokens': 7, 'gen_ai.response.finish_reasons': [child ? 'stop' : 'tool_calls'] }),
@@ -28,13 +34,29 @@ function turn(agent: string, id: string, offset: number, child = false) {
 }
 
 describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', agent => {
-  it('exports late parallel children under the reserved tool with one ENTRY, no duplicates or inflated parent duration', async () => {
+  it.each([false, true])('keeps late children under the reserved tool (child correlation files=%s)', async withCorrelation => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'delegated-upstream-'));
+    const upstreamTrace = 'c'.repeat(32);
+    const upstreamParent = 'd'.repeat(16);
+    if (withCorrelation) {
+      for (const id of ['child-a', 'child-b']) {
+        fs.writeFileSync(path.join(directory, `${id}.jsonl`), JSON.stringify({
+          type: 'turn', contentHash: contentHash('task'),
+          traceparent: `00-${upstreamTrace}-${upstreamParent}-01`,
+        }) + '\n');
+      }
+    }
+    const store = new CorrelationStore(directory);
+    const linker = new TraceLinker(store, { retries: 0 });
     const spans: ReadableSpan[] = [];
     const exporter: TraceExporterLike = { export(batch, cb) { spans.push(...batch); cb({ code: 0 }); }, shutdown: async () => {} };
     const f = new OtlpTraceFlusher({ enabled: true, protocol: 'http/protobuf', serviceName: 'subagent-test', endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }] }, undefined, () => exporter);
     const send = async (records: Record<string, unknown>[]) => {
       const entries = await Promise.all(records.map(r => transformHookRecord(r, agent === 'hermes' ? ClientType.Hermes : ClientType.OpenClaw, agent)));
-      await f.sendBatch(entries.filter(e => e !== null)); await f.flush();
+      const normalized = entries.filter(e => e !== null);
+      // Exercise cross-batch linking before the real production OTLP converter.
+      for (const entry of normalized) await linker.stamp([entry]);
+      await f.sendBatch(normalized); await f.flush();
     };
     try {
       await send(turn(agent, 'parent', 0));
@@ -56,6 +78,13 @@ describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', ag
       expect(llms.reduce((n, s) => n + Number(s.attributes['gen_ai.usage.input_tokens']), 0)).toBe(33);
       const tool = spans.find(s => s.spanContext().spanId === toolSpanId)!;
       expect(tool.endTime[1] - tool.startTime[1]).toBe(1_000_000);
-    } finally { await f.shutdown(); }
+      if (withCorrelation) {
+        // Preserving native delegation must not consume an unrelated upstream record.
+        expect(store.resolveTurn('child-a', 'task', 'independent')).toBe(`00-${upstreamTrace}-${upstreamParent}-01`);
+      }
+    } finally {
+      await f.shutdown();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

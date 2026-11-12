@@ -54,6 +54,7 @@ type differences are called out in the notes.
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
+| Doubao Work | `doubao-work` | Experimental macOS/Windows client-message metadata and task traces; paired local TOOL spans and selected-skill context. Native execution and first-output coverage depend on client evidence; model identities, tokens and full cloud inference remain unavailable. See [scope and configuration](doubao-work.md). |
 
 The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
@@ -339,7 +340,7 @@ Use `config.json` when you need to enable or disable individual agents:
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images only; `codex` and Qoder IDE/CLI).
+Message content always enters the reporting pipeline. Legacy `captureMessageContent` settings are ignored. Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, and `qwen-work-cn`).
 
 Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 

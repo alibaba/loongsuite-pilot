@@ -365,7 +365,7 @@ function buildRulesJson(sections, operationKindMapping) {
       { id: 'time.non_zero_duration', applies: 'all', severity: 'error' },
       { id: 'time.no_step_overlap', applies: 'STEP', severity: 'error', scope: 'direct_steps_of_each_agent' },
       { id: 'time.parent_contains_children', applies: 'all', severity: 'error', toleranceMs: 0,
-        exception: 'TOOL to delegated AGENT requires causal start ordering but permits the child to finish after the tool.' },
+        exception: 'TOOL to delegated AGENT requires causal start ordering but permits asynchronous child completion.' },
       { id: 'time.reasonable_duration', applies: 'LLM', maxMs: 600000, severity: 'warn' },
       { id: 'time.chronological_steps', applies: 'STEP', severity: 'warn', scope: 'direct_steps_of_each_agent' },
     ],

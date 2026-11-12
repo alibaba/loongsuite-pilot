@@ -509,6 +509,58 @@ describe('Orchestrator', () => {
       await orch.stop();
     });
 
+    it('registers passive Doubao collection with source, agent and listener gates', async () => {
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, logDir: '/synthetic/doubao/logs' };
+      const orch = new Orchestrator(config);
+      await orch.start();
+      try {
+        expect(orch.getInputManager().getInput('doubao-work')).toBeDefined();
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        expect(detection?.watchPaths).toEqual(['/synthetic/doubao/logs']);
+        const gate = vi.fn(() => true);
+        (orch as any).isAgentGatedEnabled = gate;
+        const control = vi.fn((_id: string, configured: boolean) => configured);
+        (orch as any).agentControlManager.resolveEnabled = control;
+        expect(detection?.enabled()).toBe(true);
+        expect(gate).toHaveBeenCalledWith('doubao-work');
+        config.listeners['doubao-work'].enabled = false;
+        expect(detection?.enabled()).toBe(false);
+        config.listeners['doubao-work'].enabled = true;
+        gate.mockReturnValue(false);
+        expect(detection?.enabled()).toBe(false);
+      } finally { await orch.stop(); }
+    });
+
+    it.each(['darwin', 'win32', 'linux'] as const)('uses the selected Doubao App source on %s', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200, client: 'doubao' };
+      const orch = new Orchestrator(config);
+      try {
+        await orch.start();
+        const input = orch.getInputManager().getInput('doubao-work') as unknown as { logDir?: string; userDataRoot?: string };
+        const detection = discoveryEntries.find(entry => entry.id === 'doubao-work');
+        if (target === 'linux') {
+          expect(input.userDataRoot).toBeUndefined();
+          expect(input.logDir).toBeUndefined();
+          expect(detection?.watchPaths).toEqual([]);
+        } else {
+          const paths = target === 'win32' ? path.win32 : path.posix;
+          const expectedRoot = target === 'win32'
+            ? paths.join(process.env.LOCALAPPDATA!, 'Doubao', 'User Data')
+            : paths.join(homeDir, 'Library', 'Application Support', 'Doubao');
+          expect(input.userDataRoot).toBe(expectedRoot);
+          expect(input.logDir).toBe(paths.join(expectedRoot, 'sdk_storage', 'log'));
+          expect(detection?.watchPaths).toEqual([input.logDir]);
+        }
+      } finally {
+        try { await orch.stop(); }
+        finally { Object.defineProperty(process, 'platform', platform); }
+      }
+    });
+
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));

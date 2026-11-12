@@ -74,6 +74,7 @@ import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
+import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -158,6 +159,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
+    'doubao-work': 'doubao-work',
     'dsh-log': 'dsh',
   };
 
@@ -333,6 +335,7 @@ export class Orchestrator extends EventEmitter {
       dataDir: this.dataDir,
       pilotDir,
       installedBy: 'daemon',
+      doubaoWork: this.config.listeners['doubao-work'],
     });
     await this.deploymentManager.loadDefinitions();
     await this.refreshDeploymentScope();
@@ -1226,6 +1229,7 @@ export class Orchestrator extends EventEmitter {
     const qoderCnLogDir = path.join(this.dataDir, 'logs', 'qoder-cn', 'history');
     const qoderCnTraceInput = new QoderCnTraceInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: qoderCnLogDir,
       pollIntervalMs: listenerCfg['qoder-cn-trace']?.pollInterval,
     });
@@ -1391,11 +1395,20 @@ export class Orchestrator extends EventEmitter {
 
     const qwenWorkCNLogDir = path.join(this.dataDir, 'logs', 'qwen-work-cn', 'history');
     const qwenWorkCNSegmentsRoot = resolveHome('~/.qwenworkcn/logs/sessions');
+    const qwenWorkCNAgentCfg = this.config.agents['qwen-work-cn'] ?? {};
+    const qwenWorkCNMultimodalEnabled = !!this.multimodalProcessor
+      && isAgentMultimodalEnabled('qwen-work-cn', qwenWorkCNAgentCfg);
     const qwenWorkCNTraceInput = new QwenWorkCNTraceInput({
       stateStore: this.stateStore,
       logDir: qwenWorkCNLogDir,
       segmentsRoot: qwenWorkCNSegmentsRoot,
       pollIntervalMs: listenerCfg['qwen-work-cn-trace']?.pollInterval,
+      multimodal: {
+        enabled: qwenWorkCNMultimodalEnabled,
+        uploadMode: qwenWorkCNAgentCfg.multimodal?.uploadMode ?? 'none',
+        allowedRootPaths: qwenWorkCNAgentCfg.multimodal?.allowedRootPaths,
+        ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+      },
     });
     this.inputManager.registerInput(qwenWorkCNTraceInput);
     const qwenWorkCNTraceEnabled = () =>
@@ -1463,6 +1476,8 @@ export class Orchestrator extends EventEmitter {
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
+      dataDir: this.dataDir,
       logDir: qoderCliLogDir,
       pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,
       multimodal: {
@@ -1862,6 +1877,24 @@ export class Orchestrator extends EventEmitter {
         pollIntervalMs: listenerCfg.workbuddy?.pollInterval,
       }),
     );
+
+    // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
+    const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
+    const doubaoClient = listenerCfg['doubao-work']?.client;
+    const doubaoWorkInput = new DoubaoWorkInput({
+      stateStore: this.stateStore,
+      logDir: doubaoLogDir,
+      client: doubaoClient,
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    });
+    this.inputManager.registerInput(doubaoWorkInput);
+    entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
+      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir, doubaoClient),
+      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir, doubaoClient),
+      enabled: () => this.isAgentGatedEnabled('doubao-work')
+        && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
+      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
+    }));
 
     return entries;
   }

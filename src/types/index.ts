@@ -8,6 +8,10 @@ export * from './events.js';
 export interface ListenerConfig {
   enabled: boolean;
   pollInterval: number;
+  /** Read-only source log directory override for the doubao-work listener. */
+  logDir?: string;
+  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  client?: 'doubao-work' | 'doubao';
 }
 
 /**
@@ -242,7 +246,7 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {

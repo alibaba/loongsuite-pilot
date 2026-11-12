@@ -21,6 +21,17 @@ const IMAGE_EXT_TO_MIME: Record<string, string> = {
   '.tiff': 'image/tiff',
 };
 
+const VIDEO_EXT_TO_MIME: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/x-m4v',
+  '.3gp': 'video/3gpp',
+  '.3g2': 'video/3gpp2',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
+};
+
 export type { PathBytes };
 
 /** Decode raw base64. */
@@ -35,11 +46,6 @@ export function decodeBlobContent(part: BlobPart): { bytes: Buffer } | null {
   } catch {
     return null;
   }
-}
-
-/** Image path by extension. */
-export function isImageFilePath(filePath: string): boolean {
-  return mimeFromImagePath(filePath) !== null;
 }
 
 /** Collect capture groups until MAX_MULTIMODAL_PARTS. Default pick is group 1. */
@@ -67,10 +73,27 @@ export function matchAll(
   return out;
 }
 
-/** Dedup and cap extracted image paths. `normalize` can resolve; empty / non-image is skipped. */
+/** Plain object, or a JSON string that parses to one. Arrays and plain text are not records. */
+export function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // tool arguments and results may be plain text
+  }
+  return null;
+}
+
+/** First filter after path extraction. Does not read the disk. */
 export function takeUniqueExtractedPaths(
   rawPaths: string[],
-  normalize?: (raw: string) => string,
+  cwd?: string,
 ): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -82,12 +105,12 @@ export function takeUniqueExtractedPaths(
       break;
     }
     const raw = rawPaths[i] ?? '';
-    const p = (normalize ? normalize(raw) : raw).trim();
+    const p = resolveLocalPath(raw, cwd).trim();
     if (
       !p
       || p.length > MAX_MULTIMODAL_PATH_CHARS
       || seen.has(p)
-      || !isImageFilePath(p)
+      || !mimeFromMediaPath(p)
     ) {
       continue;
     }
@@ -112,10 +135,11 @@ function stripExtendedPrefix(filePath: string): string {
   return WIN32_EXTENDED_DRIVE.test(win) ? win.slice(4) : filePath;
 }
 
-/** MIME from image extension. */
-export function mimeFromImagePath(filePath: string): string | null {
+/** MIME from an image or video extension. Query strings stay part of the extension. */
+export function mimeFromMediaPath(filePath: string): string | null {
   const name = filePath.trim().split(/[/\\]/).pop() ?? '';
-  return name ? IMAGE_EXT_TO_MIME[path.extname(name).toLowerCase()] ?? null : null;
+  const ext = name ? path.extname(name).toLowerCase() : '';
+  return IMAGE_EXT_TO_MIME[ext] ?? VIDEO_EXT_TO_MIME[ext] ?? null;
 }
 
 /** UNC or Windows device / pipe / GLOBALROOT. `\\?\C:\` is a local drive, not a device. */
@@ -129,17 +153,17 @@ export function isUncOrDevicePath(filePath: string): boolean {
   return false;
 }
 
-/** Resolve a local image path; reject UNC / device / non-image. */
-export function normalizeLocalImagePath(filePath: string): string | null {
+/** Check before reading the disk. Reject UNC, device, and non-media paths. */
+export function normalizeLocalMediaPath(filePath: string): string | null {
   const trimmed = filePath.trim();
   if (!trimmed || isUncOrDevicePath(trimmed)) return null;
   if (!IS_WIN32 && asWinPath(trimmed).startsWith('\\\\')) return null;
   const resolved = osPath.resolve(stripExtendedPrefix(trimmed));
-  return isImageFilePath(resolved) ? resolved : null;
+  return mimeFromMediaPath(resolved) ? resolved : null;
 }
 
 /** Absolute stays; relative joins cwd. */
-export function resolveImagePath(raw: string, cwd?: string): string {
+export function resolveLocalPath(raw: string, cwd?: string): string {
   const trimmed = raw.trim().replace(/^['"]|['"]$/g, '');
   if (!trimmed) return '';
   if (osPath.isAbsolute(trimmed)) return osPath.normalize(trimmed);
@@ -257,7 +281,24 @@ export function sniffImageMime(bytes: Buffer): string | null {
   return null;
 }
 
-export async function lstatRegularImageFile(resolvedPath: string, signal?: AbortSignal) {
+/** Video MIME when the suffix and container header are the same family. */
+export function sniffVideoMime(bytes: Buffer, filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  const declared = VIDEO_EXT_TO_MIME[ext];
+  if (!declared) return null;
+  const head = bytes.length >= 12 ? bytes.subarray(4, 8).toString('ascii') : '';
+  const brand = bytes.length >= 12 ? bytes.subarray(8, 12).toString('ascii') : '';
+  const ftyp = head === 'ftyp' && brand !== 'M4A ' && brand !== 'M4B ' && brand !== 'M4P ';
+  const ebml = bytes.length >= 4
+    && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+  const avi = bytes.length >= 12
+    && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+    && bytes.subarray(8, 12).toString('ascii') === 'AVI ';
+  const matches = ext === '.webm' || ext === '.mkv' ? ebml : ext === '.avi' ? avi : ftyp;
+  return matches ? declared : null;
+}
+
+export async function lstatRegularFile(resolvedPath: string, signal?: AbortSignal) {
   if (signal?.aborted) return null;
   let listed;
   try {
@@ -269,8 +310,8 @@ export async function lstatRegularImageFile(resolvedPath: string, signal?: Abort
   return listed;
 }
 
-/** Open and read an already-normalized local image path. */
-export async function openNormalizedLocalImage(
+/** Open and read an already-normalized local media path. */
+export async function openNormalizedLocalMedia(
   resolvedPath: string,
   maxBytes = MAX_MULTIMODAL_DATA_SIZE,
   allowedRootPaths?: string[],
@@ -313,7 +354,9 @@ export async function openNormalizedLocalImage(
       return null;
     }
 
-    const mime_type = sniffImageMime(bytes);
+    const mime_type = mimeFromMediaPath(resolvedPath)?.startsWith('image/')
+      ? sniffImageMime(bytes)
+      : sniffVideoMime(bytes, resolvedPath);
     if (!mime_type) return null;
     return { bytes, mime_type, size: bytes.length, mtimeMs: st.mtimeMs, resolvedPath };
   } catch {
@@ -367,6 +410,22 @@ export function extFromMime(mime: string): string {
       return 'bmp';
     case 'image/svg+xml':
       return 'svg';
+    case 'video/mp4':
+      return 'mp4';
+    case 'video/quicktime':
+      return 'mov';
+    case 'video/x-m4v':
+      return 'm4v';
+    case 'video/3gpp':
+      return '3gp';
+    case 'video/3gpp2':
+      return '3g2';
+    case 'video/webm':
+      return 'webm';
+    case 'video/x-matroska':
+      return 'mkv';
+    case 'video/x-msvideo':
+      return 'avi';
     case 'audio/mpeg':
       return 'mp3';
     case 'audio/wav':
@@ -385,6 +444,21 @@ export function modalityFromMime(mime: string): 'image' | 'audio' | 'video' | un
   if (normalized.startsWith('audio/')) return 'audio';
   if (normalized.startsWith('video/')) return 'video';
   return undefined;
+}
+
+/** `time_unix_nano` as milliseconds. Digit strings stay exact via BigInt. Missing or invalid values use now. */
+export function timeUnixNanoToMillis(nano: unknown, now = Date.now()): number {
+  if (typeof nano === 'string' && /^\d+$/.test(nano)) {
+    try {
+      return Number(BigInt(nano) / 1_000_000n);
+    } catch {
+      // fall through
+    }
+  }
+  if (typeof nano === 'number' && Number.isFinite(nano)) {
+    return Math.floor(nano / 1_000_000);
+  }
+  return now;
 }
 
 export function yyyymmddLocal(date = new Date()): string {

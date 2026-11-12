@@ -31,6 +31,20 @@ async function exportSpans(entries: AgentActivityEntry[]) {
 }
 
 describe('OpenClaw session key output contract', () => {
+  it('exports the OpenClaw system on every span resource when records only identify the agent type', async () => {
+    const spans = await exportSpans(turn(1));
+
+    expect(new Set(spans.map(span => span.attributes['gen_ai.span.kind']))).toEqual(
+      new Set(['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL']),
+    );
+    for (const span of spans) {
+      expect(span.resource.attributes).toMatchObject({
+        'gen_ai.agent.type': 'openclaw',
+        'gen_ai.agent.system': 'openclaw',
+      });
+    }
+  });
+
   it('retains exactly the validated OpenClaw extension in JSONL and SLS', () => {
     const entry = { ...turn(1, 'agent:main:test')[0], 'agent.openclaw.sender.id': 'private', 'agent.openclaw.hook': 'private' };
     for (const project of [projectLogEntry, serialiseLogEntry]) {

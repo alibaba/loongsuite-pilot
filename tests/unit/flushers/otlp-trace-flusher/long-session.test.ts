@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ExportResultCode } from '@opentelemetry/core';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import * as fsUtils from '../../../../src/utils/fs-utils.js';
+import * as jsonlWriter from '../../../../src/utils/segmented-jsonl-writer.js';
 
 vi.mock('@loongsuite/otel-util-genai', () => ({
   convertEventLogToTrace: vi.fn(() => ({ traceIds: ['trace-1'], spanCount: 1, warnings: [] })),
@@ -19,7 +20,7 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
   })),
 }));
 
-vi.spyOn(fsUtils, 'appendLine').mockResolvedValue(undefined);
+vi.spyOn(jsonlWriter, 'appendSegmentedJsonl').mockResolvedValue(undefined);
 vi.spyOn(fsUtils, 'ensureDir').mockResolvedValue(undefined);
 
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';

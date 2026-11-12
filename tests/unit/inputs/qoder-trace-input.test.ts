@@ -38,6 +38,7 @@ import type { AgentActivityEntry } from '../../../src/types/index.js';
 import type { InterceptTokenData } from '../../../src/inputs/qoder-trace/intercept-token-reader.js';
 import type { SegmentTokenData } from '../../../src/inputs/qoder-trace/segment-token-reader.js';
 import {
+  parseAttachedImagePaths,
   readAttachedImagePathsForRequestIds,
   type AttachedImageLookup,
   type SqliteTokenData,
@@ -109,6 +110,15 @@ describe('QoderTraceInput token-enricher', () => {
   // response time must sit within the join tolerance of its responseEndTs - the
   // hook fires just after the response lands, 0-32ms later on real data.
   describe('enrichCliTurn (segment paired by response completion time)', () => {
+    it('requires an exact native request ID before borrowing segment usage for a child', () => {
+      const child = makeEntry({ 'agent.qoder.subagent_id': 'child', 'gen_ai.response.id': 'provider-child' });
+      const segment = makeSegment({ requestId: 'req-parent', responseEndTs: 1780000001000, inputTokens: 300, outputTokens: 20 });
+      enrichCliFromSegments([child], [segment]);
+      expect(child['gen_ai.usage.input_tokens']).toBeUndefined();
+      child['agent.client_request_id'] = 'req-parent';
+      enrichCliFromSegments([child], [segment]);
+      expect(child['gen_ai.usage.input_tokens']).toBe(300);
+    });
     it('injects tokens without moving only one side of an incomplete Hook interval', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
@@ -863,6 +873,24 @@ describe('QoderTraceInput token-enricher', () => {
   });
 
   describe('enrichIdeTurn (SQLite structure match)', () => {
+    it('keeps child native usage and never assigns nearby parent SQLite rows to an unproven child', () => {
+      const parent = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.response.id': 'parent-model',
+        'gen_ai.turn.id': 'parent-turn', 'gen_ai.step.id': 'parent-step' });
+      const child = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.agent.id': 'child',
+        'gen_ai.response.id': 'child-model', 'agent.qoder.subagent_id': 'child',
+        'gen_ai.turn.id': 'child-turn', 'gen_ai.step.id': 'child-step',
+        'gen_ai.usage.input_tokens': 17, 'gen_ai.usage.output_tokens': 3 });
+      const missing = makeEntry({ 'gen_ai.agent.type': 'qoder', 'gen_ai.response.id': 'missing-model',
+        'agent.qoder.subagent_id': 'other-child', 'gen_ai.turn.id': 'other-child-turn', 'gen_ai.step.id': 'other-child-step' });
+      const row: SqliteTokenData = { sessionId: 'sess-1', requestId: 'parent-request', messageId: 'parent-model',
+        gmtCreate: 1780000001000, inputTokens: 200, outputTokens: 20, cacheReadTokens: 30, model: 'parent-model-name' };
+      enrichIdeTurn([parent, child, missing], [row]);
+      expect(parent['gen_ai.usage.input_tokens']).toBe(200);
+      expect(child['gen_ai.usage.input_tokens']).toBe(17);
+      expect(child['gen_ai.usage.output_tokens']).toBe(3);
+      expect(missing['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(missing['gen_ai.request.model']).not.toBe('parent-model-name');
+    });
     it('matches IDE turns by session request order and assistant order without timestamp proximity', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({
@@ -1682,7 +1710,9 @@ describe('QoderTraceInput multimodal', () => {
       ]);
       expect(extractMarkdownImagePaths('![x](/tmp/a.png)', cwd)).toEqual(['/tmp/a.png']);
       expect(extractMarkdownImagePaths('![x](</tmp/My Image.png>)', cwd)).toEqual(['/tmp/My Image.png']);
-      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual(['images/a.png']);
+      expect(extractMarkdownImagePaths('![x](images/a.png)')).toEqual([
+        path.resolve('images/a.png'),
+      ]);
     });
 
     it('scans long non-matching markdown prefixes in linear time and still finds a later path', () => {
@@ -1702,6 +1732,80 @@ describe('QoderTraceInput multimodal', () => {
         listed.slice(0, MAX_MULTIMODAL_PARTS),
       );
     });
+  });
+
+  describe('parseAttachedImagePaths', () => {
+    const IMAGE = '/Users/me/Library/Application Support/Qoder/SharedClientCache/cache/images/s/pic.png';
+    const IMAGE_TEMP = '/var/folders/aicoding-image-cache/pic.png';
+    const VIDEO = '/Users/me/video/clip.mp4';
+
+    it('keeps attachedImagePaths and ignores the image temp identifier', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [{
+          name: 'image',
+          selectedItem: { identifier: IMAGE_TEMP, name: 'pic.png' },
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a video file selectedItem.identifier from the same extra', () => {
+      const extra = JSON.stringify({
+        context: [{
+          name: 'file',
+          selectedItem: { identifier: VIDEO, name: 'clip.mp4' },
+          parsedContextItems: [{ identifier: VIDEO, value: 'clip.mp4' }],
+        }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([VIDEO]);
+    });
+
+    it('keeps media file identifiers and drops other suffixes when attachedImagePaths is set', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: [IMAGE],
+        context: [
+          { name: 'image', imgUrl: 'https://example/a.png', filePath: IMAGE_TEMP, selectedItem: { identifier: IMAGE_TEMP } },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/notes.txt' } },
+          { name: 'file', selectedItem: { identifier: '/Users/me/main.ts' } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
+    });
+
+    it('reads image filePath when attachedImagePaths is missing', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads a local image imgUrl when attachedImagePaths is empty', () => {
+      const extra = JSON.stringify({
+        attachedImagePaths: ['  '],
+        context: [
+          { name: 'image', imgUrl: IMAGE },
+          { name: 'file', selectedItem: { identifier: VIDEO } },
+        ],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE, VIDEO]);
+    });
+
+    it('reads imgUrl when fileType is image and name is absent', () => {
+      const extra = JSON.stringify({
+        context: [{ fileType: 'image', imgUrl: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
+    it('reads filePath when name is file and fileType is image', () => {
+      const extra = JSON.stringify({
+        context: [{ name: 'file', fileType: 'image', filePath: IMAGE }],
+      });
+      expect(parseAttachedImagePaths(extra)).toEqual([IMAGE]);
+    });
+
   });
 
   describe('enrichIdeMultimodal', () => {

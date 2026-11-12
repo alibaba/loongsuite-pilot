@@ -1,7 +1,37 @@
 import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolveAgentSystem, AGENT_SYSTEM_MAP } from '../../../src/normalization/agent-system-map.js';
 
 describe('resolveAgentSystem', () => {
+  it.each([
+    ['openclaw', 'openclaw'],
+    ['copilot', 'copilot'],
+    ['cursor-cli', 'cursor'],
+    ['kiro-cli', 'kiro'],
+    ['qoder-cn', 'qoder'],
+  ])('maps supported type %s to %s', (agentType, system) => {
+    expect(resolveAgentSystem(agentType)).toBe(system);
+  });
+
+  it('covers every bundled Agent integration and the runtime-only Wukong input', () => {
+    const definitionsDir = new URL('../../../agents.d/', import.meta.url);
+    // Deployment IDs can differ from the type actually emitted by an input.
+    const emittedTypes: Record<string, string> = {
+      'hermes-agent': 'hermes',
+      'qoder-jetbrains': 'qoder-idea',
+    };
+    const agentTypes = readdirSync(definitionsDir)
+      .filter(file => file.endsWith('.json'))
+      .map(file => {
+        const definition = JSON.parse(readFileSync(new URL(file, definitionsDir), 'utf8'));
+        return emittedTypes[definition.id] ?? definition.id;
+      });
+
+    for (const agentType of [...agentTypes, 'wukong']) {
+      expect(resolveAgentSystem(agentType), `Missing system mapping for ${agentType}`).not.toBe('unknown');
+    }
+  });
+
   it('maps claude-code to claude', () => {
     expect(resolveAgentSystem('claude-code')).toBe('claude');
   });
@@ -18,6 +48,12 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('qoder-work-cn')).toBe('qoder');
     expect(resolveAgentSystem('qoder-cli')).toBe('qoder');
     expect(resolveAgentSystem('qoder-cli-hook')).toBe('qoder');
+  });
+
+  it('retains the Qoder family system for the App alias', () => {
+    expect(resolveAgentSystem('qoder-app')).toBe('qoder');
+    expect(resolveAgentSystem('qoder-cli')).toBe('qoder');
+    expect(resolveAgentSystem('qoder-cn')).toBe('qoder');
   });
 
   it('maps cursor variants to cursor', () => {

@@ -8,7 +8,7 @@ import { transformHookRecord } from '../base/hook-record-transform.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 const DEFAULT_PILOT_DATA_DIR = '~/.loongsuite-pilot';
-const SESSION_LIFECYCLE_HOOKS = new Set(['session_start', 'session_end']);
+const NON_CANONICAL_HOOKS = new Set(['session_start', 'session_end', 'before_model_resolve']);
 
 export type OpenClawPluginInputOptions =
   Omit<Partial<HookInputOptions>, 'stateStore'>
@@ -64,23 +64,15 @@ export class OpenClawPluginInput extends BaseHookInput {
   ): Promise<AgentActivityEntry | null> {
     const hook = record['agent.openclaw.hook'];
 
-    // Session lifecycle hooks are collector control-plane signals, not turns.
-    // Forwarding them creates trace groups with only ENTRY and AGENT spans.
-    if (typeof hook === 'string' && SESSION_LIFECYCLE_HOOKS.has(hook)) {
+    // Session lifecycle hooks are control-plane signals. before_model_resolve
+    // is also redundant with before_agent_run, the canonical turn-input source.
+    // Forwarding its content-stripped placeholder can start/export a local turn
+    // before upstream context is available, especially across collect batches.
+    // Keep the original plugin log, but omit these from the canonical pipeline.
+    if (typeof hook === 'string' && NON_CANONICAL_HOOKS.has(hook)) {
       return null;
     }
 
-    let canonicalRecord = record;
-    if (hook === 'before_model_resolve') {
-      // before_agent_run contains the same prompt plus richer turn context and
-      // is the single canonical source for ENTRY/AGENT input messages.
-      canonicalRecord = { ...record };
-      delete canonicalRecord['gen_ai.input.messages'];
-      delete canonicalRecord['gen_ai.input.messages_delta'];
-      delete canonicalRecord['input.messages'];
-      delete canonicalRecord['input.messages_delta'];
-    }
-
-    return transformHookRecord(canonicalRecord, ClientType.OpenClaw, 'openclaw');
+    return transformHookRecord(record, ClientType.OpenClaw, 'openclaw');
   }
 }

@@ -3,11 +3,14 @@ import * as path from 'node:path';
 import type { LogRetentionConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { SLS_FAILURE_LOG_MAX_TOTAL_BYTES } from '../flushers/sls-failure-log-writer.js';
+import { parseOutputSegment } from '../utils/jsonl-output-file.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from '../utils/segmented-jsonl-writer.js';
 
 const logger = createLogger('LogRetention');
 
 const DATE_REGEX = /(\d{4}-\d{2}-\d{2})\.\w+$/;
 const STARTUP_DELAY_MS = 30_000;
+export const LOCAL_MIRROR_PRESSURE_INTERVAL_MS = 60_000;
 const MEBIBYTE = 1024 * 1024;
 
 export const OUTPUT_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
@@ -35,6 +38,7 @@ type Category =
   | 'errors'
   | 'debug'
   | 'output'
+  | 'otlp-debug'
   | 'sls-failed-logs'
   | 'otlp-failed'
   | 'metric_alarm';
@@ -52,6 +56,7 @@ const CATEGORY_DIR_MAP: Record<string, Category> = {
   errors: 'errors',
   debug: 'debug',
   output: 'output',
+  'otlp-debug': 'otlp-debug',
   'sls-failed-logs': 'sls-failed-logs',
   'otlp-failed': 'otlp-failed',
   metric_alarm: 'metric_alarm',
@@ -62,6 +67,9 @@ export class LogRetentionService {
   private readonly config: LogRetentionConfig;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
+  private pressureTimer: ReturnType<typeof setInterval> | null = null;
+  private cleanupPromise: Promise<{ deleted: number; errors: number }> | null = null;
+  private pressureOnlyCleanup = false;
 
   constructor(dataDir: string, config: LogRetentionConfig) {
     this.logsDir = path.join(dataDir, 'logs');
@@ -86,6 +94,8 @@ export class LogRetentionService {
       outputLargeFileThresholdBytes: OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES,
       outputLargeFileDays: OUTPUT_RETENTION_LARGE_FILE_DAYS,
       outputPressureMinKeepDays: OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS,
+      mirrorEmergencyFileBytes: LOCAL_LOG_EMERGENCY_FILE_BYTES,
+      mirrorPressureIntervalMs: LOCAL_MIRROR_PRESSURE_INTERVAL_MS,
       slsFailedMaxTotalBytes: SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
       otlpFailedMaxTotalBytes: OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES,
       metricAlarmMaxTotalBytes: METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES,
@@ -96,6 +106,9 @@ export class LogRetentionService {
       this.startupTimer = null;
       void this.runCleanup();
       this.intervalTimer = setInterval(() => void this.runCleanup(), this.config.intervalMs);
+      if (this.config.intervalMs > LOCAL_MIRROR_PRESSURE_INTERVAL_MS) {
+        this.pressureTimer = setInterval(() => void this.runPressureCleanup(), LOCAL_MIRROR_PRESSURE_INTERVAL_MS);
+      }
     }, STARTUP_DELAY_MS);
   }
 
@@ -108,9 +121,32 @@ export class LogRetentionService {
       clearInterval(this.intervalTimer);
       this.intervalTimer = null;
     }
+    if (this.pressureTimer) {
+      clearInterval(this.pressureTimer);
+      this.pressureTimer = null;
+    }
   }
 
-  async runCleanup(): Promise<{ deleted: number; errors: number }> {
+  runCleanup(): Promise<{ deleted: number; errors: number }> {
+    return this.scheduleCleanup(false);
+  }
+
+  /** Fast pressure checks scan only managed output/debug/failed directories. */
+  runPressureCleanup(): Promise<{ deleted: number; errors: number }> {
+    return this.scheduleCleanup(true);
+  }
+
+  private scheduleCleanup(pressureOnly: boolean): Promise<{ deleted: number; errors: number }> {
+    if (this.cleanupPromise) {
+      if (!pressureOnly && this.pressureOnlyCleanup) return this.cleanupPromise.then(() => this.runCleanup());
+      return this.cleanupPromise;
+    }
+    this.pressureOnlyCleanup = pressureOnly;
+    this.cleanupPromise = this.runCleanupOnce(pressureOnly).finally(() => { this.cleanupPromise = null; });
+    return this.cleanupPromise;
+  }
+
+  private async runCleanupOnce(pressureOnly: boolean): Promise<{ deleted: number; errors: number }> {
     const today = localDateString(new Date());
     let deleted = 0;
     let errors = 0;
@@ -119,8 +155,9 @@ export class LogRetentionService {
       const topEntries = await readdir(this.logsDir);
 
       for (const entry of topEntries) {
+        if (pressureOnly && entry !== 'output' && entry !== 'otlp-debug' && entry !== 'otlp-failed') continue;
         const entryPath = path.join(this.logsDir, entry);
-        const stat = await safeStat(entryPath);
+        const stat = await safeLstat(entryPath);
         if (!stat?.isDirectory()) continue;
 
         const category = CATEGORY_DIR_MAP[entry];
@@ -159,7 +196,7 @@ export class LogRetentionService {
       if (!category) continue;
 
       const subPath = path.join(parentDir, sub);
-      const stat = await safeStat(subPath);
+      const stat = await safeLstat(subPath);
       if (!stat?.isDirectory()) continue;
 
       const result = await this.cleanDirectory(subPath, category, today);
@@ -179,7 +216,7 @@ export class LogRetentionService {
     let errors = 0;
 
     const files = await readdir(dir);
-    if (category === 'output') {
+    if (category === 'output' || category === 'otlp-debug') {
       return this.cleanOutputDirectory(dir, files, today);
     }
     if (category === 'sls-failed-logs') {
@@ -257,9 +294,15 @@ export class LogRetentionService {
     let deleted = 0;
     let errors = 0;
     let remaining = await this.collectLocalObservabilityFiles(dir, files, category);
+    if (category === 'otlp-failed') {
+      const emergency = await this.reclaimOversizedFiles(remaining, true);
+      deleted += emergency.deleted; errors += emergency.errors;
+      remaining = await this.collectLocalObservabilityFiles(dir, await readdir(dir), category);
+    }
 
     const retentionCutoff = dateCutoff(this.getRetentionDays(category));
-    // Both age and pressure cleanup protect the two most recent local dates.
+    // Age cleanup protects recent failed evidence; closed failed segments can
+    // still be discarded under pressure with an explicit warning below.
     const protectedFrom = dateCutoff(LOCAL_OBSERVABILITY_PRESSURE_MIN_KEEP_DAYS);
     const expired = await this.deleteDatedFiles(
       remaining,
@@ -276,9 +319,10 @@ export class LogRetentionService {
       : METRIC_ALARM_RETENTION_MAX_TOTAL_BYTES;
     if (totalBytes <= maxTotalBytes) return { deleted, errors };
 
-    // protectedFrom is yesterday. Only strictly older files are eligible.
+    // Ordinary active files remain protected; closed failed segments do not.
     const candidates = remaining
-      .filter(file => file.dateStr < protectedFrom)
+      .filter(file => (category === 'otlp-failed' && parseOutputSegment(file.file) !== undefined)
+        || file.dateStr < protectedFrom)
       .sort((a, b) => a.dateStr.localeCompare(b.dateStr)
         || a.mtimeMs - b.mtimeMs
         || a.file.localeCompare(b.file));
@@ -288,6 +332,7 @@ export class LogRetentionService {
       if (await this.deleteFile(file.fullPath)) {
         deleted++;
         totalBytes -= file.size;
+        if (category === 'otlp-failed') logger.warn('Discarded failed trace evidence under disk pressure', { file: file.fullPath, bytes: file.size });
       } else {
         errors++;
       }
@@ -351,6 +396,9 @@ export class LogRetentionService {
     let deleted = 0;
     let errors = 0;
     let remaining = await this.collectDatedOutputFiles(dir, files);
+    const emergency = await this.reclaimOversizedFiles(remaining, false);
+    deleted += emergency.deleted; errors += emergency.errors;
+    remaining = await this.collectDatedOutputFiles(dir, await readdir(dir));
 
     const regularCutoff = dateCutoff(this.config.outputDays);
     const regularResult = await this.deleteDatedFiles(
@@ -379,15 +427,38 @@ export class LogRetentionService {
     return { deleted, errors };
   }
 
+  private async reclaimOversizedFiles(files: DatedLogFile[], failedData: boolean): Promise<{ deleted: number; errors: number }> {
+    let deleted = 0;
+    let errors = 0;
+    for (const file of files) {
+      if (file.size <= LOCAL_LOG_EMERGENCY_FILE_BYTES) continue;
+      try {
+        const removed = await withJsonlFileLock(file.fullPath, async () => {
+          const stat = await safeLstat(file.fullPath);
+          if (!stat?.isFile() || stat.size <= LOCAL_LOG_EMERGENCY_FILE_BYTES) return false;
+          await fs.unlink(file.fullPath);
+          logger.warn('Deleted oversized local JSONL file', { file: file.fullPath, bytes: stat.size, discardedFailedData: failedData });
+          return true;
+        });
+        if (removed) deleted++;
+      } catch (error) {
+        errors++;
+        logger.warn('failed to delete oversized local JSONL file', { file: file.fullPath, error: String(error) });
+      }
+    }
+    return { deleted, errors };
+  }
+
   private async collectDatedOutputFiles(dir: string, files: string[]): Promise<DatedLogFile[]> {
     const result: DatedLogFile[] = [];
     for (const file of files) {
-      const dateStr = extractDate(file);
-      if (!dateStr) continue;
-
       const fullPath = path.join(dir, file);
-      const stat = await safeStat(fullPath);
+      const stat = await safeLstat(fullPath);
       if (!stat?.isFile()) continue;
+      const segment = parseOutputSegment(file);
+      const dateStr = extractDate(file) ?? (segment?.date === 'all' ? localDateString(new Date(stat.mtimeMs))
+        : file.endsWith('-all.jsonl') ? localDateString(new Date()) : null);
+      if (!dateStr) continue;
 
       result.push({
         file,
@@ -433,9 +504,10 @@ export class LogRetentionService {
 
     const minKeepCutoff = dateCutoff(OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS);
     const candidates = files
-      .filter(file => file.dateStr !== today && file.dateStr < minKeepCutoff)
+      .filter(file => parseOutputSegment(file.file) !== undefined
+        || (file.dateStr !== today && file.dateStr < minKeepCutoff))
       .sort((a, b) => a.dateStr.localeCompare(b.dateStr)
-        || b.size - a.size
+        || a.mtimeMs - b.mtimeMs
         || a.file.localeCompare(b.file));
 
     let deleted = 0;
@@ -456,7 +528,7 @@ export class LogRetentionService {
 
   private async deleteFile(file: string): Promise<boolean> {
     try {
-      await fs.unlink(file);
+      await withJsonlFileLock(file, () => fs.unlink(file));
       return true;
     } catch (err) {
       logger.warn('failed to delete log file', { file, error: String(err) });
@@ -470,6 +542,7 @@ export class LogRetentionService {
       case 'errors': return this.config.hookErrorDays;
       case 'debug': return this.config.hookDebugDays;
       case 'output': return this.config.outputDays;
+      case 'otlp-debug': return this.config.outputDays;
       case 'sls-failed-logs': return this.config.slsFailedDays;
       case 'otlp-failed': return this.config.otlpFailedDays;
       case 'metric_alarm': return this.config.metricAlarmDays;

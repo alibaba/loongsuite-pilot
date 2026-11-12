@@ -14,7 +14,10 @@ Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，
 不会重复写出已经成功追加的事件。没有响应的请求保留请求记录，不合成成功响应。
 新版 lazy-forward streaming helper 与旧版方法签名均支持 TTFT 观测。
 
-增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`；回合结束记录为
+增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`。首条 `llm.request`
+落盘前会先追加一次 `event.name=other`、`agent.hermes.hook=turn_start` 的用户输入事件，
+用于逐轮上游 Trace 关联；它使用已确定的原生 turn/task ID，不参与 Token 统计，
+并与首个 API 请求共用观测到的请求起始时间。回合结束记录为
 `event.name=other`、`agent.hermes.hook=turn_end`、`gen_ai.turn.end=true`。
 collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
 旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
@@ -106,8 +109,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
-| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名。Qoder / Qoder CN IDE 使用 Stop hook 的 `extra.user.name`；Qoder CLI 使用 `qodercli status` 返回的 `username`。Qoder / Qoder CN 桌面版在明确的 App 调用中优先使用 Hook 身份，否则分别读取 `~/.qoder/.qoder-app-status.json` / `~/.qoder-cn/.qoder-app-status.json` 的已登录账号公开快照；不会使用独立 CLI 的账号。该字段独立于 `user.id`。 |
-| `user.email` | string | 源 Agent 暴露时 Recommended | Agent 账号邮箱。Qoder IDE 使用 Stop hook 的 `extra.user.email`；Qoder CN IDE 还支持 `extra.email`；Qoder CLI 使用 `qodercli status` 返回的 `email`。Qoder / Qoder CN 桌面版优先使用 Hook 邮箱，否则使用各自公开账号快照中存在的邮箱。手机号注册等没有邮箱的账号只写用户名，不推导邮箱；退出登录、来源缺失或读取失败时省略无法获取的字段。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名，独立于 `user.id`。Qoder 与 Qoder CN 相同，由 Stop 的 `product` 决定来源：`app` 只读桌面端账号文件；`cli` 用 `qodercli status` 或 `qoderclicn status`，这条没有数据时再用桌面端账号文件；没有 `product` 的 IDE 只读 hook 的 `extra.user`。选中的来源没有值时为空字符串。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | 与 `user.name` 同一账号、同一来源。该来源没有邮箱时为空字符串。手机号、登录名或账号 ID 不写成邮箱。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |
@@ -172,7 +175,7 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
-Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`；Stop Hook 明确提供 `parent_business_info.product=app` 的新桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型，`gen_ai.agent.system` 均为 `qoder`。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别宿主标记时保留原分类，不根据路径或进程名猜测。
+Qoder 产品入口：旧 IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`；当前轮次的 Hook 明确提供 `parent_business_info.product=app`、且 transcript 使用 CLI 格式的新桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；新桌面端和现有 CLI、IDE 等 Qoder 入口的 `gen_ai.agent.system` 仍为 `qoder`。产品标记仅属于本轮 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别宿主标记时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
 
 工作目录自动采集覆盖 Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
 
@@ -222,6 +225,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `gcp.gen_ai` | Google GenAI endpoint，具体后端未知时使用。 |
 | `deepseek` | DeepSeek。 |
 | `qwen` | 阿里云通义千问。 |
+| `bytedance.doubao` | 豆包工作原生服务；客户端轮次观测不表示已采集模型内部调用。 |
 | `groq` | Groq。 |
 | `mistral_ai` | Mistral AI。 |
 | `cohere` | Cohere。 |
@@ -230,6 +234,19 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `ibm.watsonx.ai` | IBM Watsonx AI。 |
 
 如果以上值都不适用，使用小写 dotted provider 名称，例如 `baidu.ernie` 或 `zhipu.chatglm`。
+
+## 豆包工作客户端轮次元数据
+
+实验性 `doubao-work` 事件与 OTLP Resource 包含 `loongsuite.doubao_work.observation_scope=client_message`、
+`loongsuite.doubao_work.business_outcome=unknown` 和 `loongsuite.doubao_work.client_outcome`
+（`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
+见[支持范围与配置](doubao-work.md)。
+
+新增事件及导出的 OTLP Span 包含 `loongsuite.doubao_work.client`，取值仅为 `doubao-work`（豆包工作）或 `doubao`（豆包 App 工作模式）。该字段区分来源产品，统一 `gen_ai.agent.type=doubao-work` 保持不变；它不表示模型或提供商调用身份。历史记录缺少该字段时保持未知。
+
+本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
+
+缺少可用轨迹的工具仍直接归属 AGENT / TASK，使用 `genai.observed-tools.v1` 部分观测契约。完整原生 sandbox 执行在请求区间内映射为 TASK，内部轮次属于该本地片段，不充当完整子 Agent 生命周期；区间外后台执行仅保留日志，不拉长请求。内容在转换前统一脱敏，复用时只导出当前轮次，但 LLM 输入可以包含此前可见上下文。所选技能/伙伴只表示选择上下文。
 
 ## Finish Reasons
 
@@ -242,3 +259,7 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
 | `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
+
+### 逐轮关联原文 hash
+
+Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。

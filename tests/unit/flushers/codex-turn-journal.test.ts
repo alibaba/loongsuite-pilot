@@ -34,6 +34,18 @@ describe('CodexTurnJournal', () => {
     expect((await fs.readdir(directory)).every(name => /^codex-turn-[a-f0-9]{64}\.jsonl$/.test(name))).toBe(true);
   });
 
+  it('streams bounded batches and deduplicates IDs across batch boundaries', async () => {
+    const journal = new CodexTurnJournal(directory);
+    const first = entry('large-a', { 'gen_ai.input.messages': 'x'.repeat(600 * 1024) });
+    const second = entry('large-b', { 'gen_ai.input.messages': 'y'.repeat(600 * 1024) });
+    await journal.append([first, second, first]);
+    const batches = [];
+    for await (const batch of journal.loadBatches()) batches.push(batch);
+    expect(batches).toHaveLength(2);
+    expect(batches.map(batch => batch.last)).toEqual([false, true]);
+    expect(batches.flatMap(batch => batch.entries.map(record => record['event.id']))).toEqual(['large-a', 'large-b']);
+  });
+
   it('reads the next pending group only after the previous group is consumed', async () => {
     const journal = new CodexTurnJournal(directory);
     const records = Array.from({ length: 70 }, (_, index) => entry(`event-${index}`, {
@@ -139,31 +151,36 @@ describe('CodexTurnJournal', () => {
   });
 
   it('cleans residual pending content before evicting its oldest acknowledgement and retains ACK on cleanup failure', async () => {
+    // Exercise limit + 1 and cleanup ordering without 10,000 real ACK files.
+    // Production callers retain the default limit of 10,000.
+    const limit = 3;
     const crashed = entry('crashed-after-ack', { 'gen_ai.turn.id': 'old-crashed-turn' });
     const keys = [codexTurnJournalGroupKey(crashed),
-      ...Array.from({ length: 9999 }, (_, index) => index.toString(16).padStart(64, '0'))];
-    for (let index = 0; index < keys.length; index += 100) {
-      await Promise.all(keys.slice(index, index + 100).map(key =>
-        fs.writeFile(path.join(directory, `codex-done-${key}.json`), JSON.stringify({ version: 1, key }), { mode: 0o600 })));
-    }
+      ...Array.from({ length: limit - 1 }, (_, index) => index.toString(16).padStart(64, '0'))];
+    await Promise.all(keys.map(key => fs.writeFile(path.join(directory, `codex-done-${key}.json`),
+      JSON.stringify({ version: 1, key }), { mode: 0o600 })));
     const oldest = path.join(directory, `codex-done-${keys[0]}.json`);
     await fs.utimes(oldest, new Date(0), new Date(0));
     await fs.writeFile(filename(directory, crashed), JSON.stringify(crashed) + '\n', { mode: 0o600 });
     const record = entry('latest');
-    const journal = new CodexTurnJournal(directory);
+    const journal = new CodexTurnJournal(directory, limit);
     await journal.acknowledge([record]);
     expect(await journal.isAcknowledged(record)).toBe(true);
     await expect(fs.stat(oldest)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.stat(filename(directory, crashed))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await readJournal(new CodexTurnJournal(directory))).toEqual([]);
-    expect((await fs.readdir(directory)).filter(name => name.startsWith('codex-done-'))).toHaveLength(10_000);
+    expect(await readJournal(new CodexTurnJournal(directory, limit))).toEqual([]);
+    expect((await fs.readdir(directory)).filter(name => name.startsWith('codex-done-'))).toHaveLength(limit);
 
     // A non-file at the pending path causes a real unlink failure on every platform.
     const blockedAck = path.join(directory, `codex-done-${keys[1]}.json`);
     await fs.utimes(blockedAck, new Date(0), new Date(0));
     await fs.mkdir(path.join(directory, `codex-turn-${keys[1]}.jsonl`));
-    const restarted = new CodexTurnJournal(directory);
+    const restarted = new CodexTurnJournal(directory, limit);
     await expect(restarted.acknowledge([entry('next', { 'gen_ai.turn.id': 'next-turn' })])).rejects.toThrow();
     expect(JSON.parse(await fs.readFile(blockedAck, 'utf8'))).toEqual({ version: 1, key: keys[1] });
-  }, 30_000);
+  });
+
+  it.each([0, -1, 1.5, Number.POSITIVE_INFINITY])('rejects an invalid acknowledgement limit %s', limit => {
+    expect(() => new CodexTurnJournal(directory, limit)).toThrow(RangeError);
+  });
 });

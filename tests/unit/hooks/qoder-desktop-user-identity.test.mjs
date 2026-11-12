@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const processor = process.env.QODER_CN_IDENTITY_PROCESSOR
-  ?? fileURLToPath(new URL('../../../assets/hooks/qoder-hook-processor.mjs', import.meta.url));
+  ?? fileURLToPath(new URL('../../helpers/qoder-hook-collector-driver.mjs', import.meta.url));
 let root;
 let transcript;
 let statusPath;
@@ -34,7 +34,6 @@ function installFakeCli() {
   fs.mkdirSync(cliDir, { recursive: true });
   fs.mkdirSync(path.join(root, '.qoder', '.auth'), { recursive: true });
   fs.writeFileSync(path.join(root, '.qoder', '.auth', 'user'), 'synthetic-cli-login');
-  fs.writeFileSync(path.join(cliDir, 'version.txt'), '1.0.0');
   fs.writeFileSync(path.join(cliDir, 'qodercli-1.0.0'), `#!${process.execPath}
 const fs = require('node:fs');
 fs.appendFileSync(process.env.FAKE_CLI_COUNTER, 'status\\n');
@@ -42,7 +41,7 @@ process.stdout.write(JSON.stringify({logged_in:true, username:'cli-other-account
 `, { mode: 0o755 });
 }
 
-function writeTurn({ cli = true, complete = true, append = false } = {}) {
+function writeTurn({ cli = false, complete = true, append = false } = {}) {
   const suffix = append ? 'b' : 'a';
   const minute = append ? '01' : '00';
   const rows = [
@@ -88,30 +87,33 @@ function expectIdentity(name, email, userId = os.hostname()) {
 }
 
 describe('international Qoder Desktop account metadata', () => {
-  it('uses the public Desktop account instead of the standalone CLI account', () => {
-    writeStatus(); installFakeCli(); writeTurn(); run();
+  it('uses the desktop account file for an App Stop and does not query qodercli', () => {
+    writeStatus(); installFakeCli(); writeTurn({ cli: true });
+    run({ parent_business_info: { product: 'app' }, extra: { user: { name: 'hook-user', email: 'hook@example.com' } } });
     expectIdentity('desktop-user', 'desktop@example.com');
     expect(history().every(record => record['gen_ai.agent.type'] === 'qoder-app'
       && record['gen_ai.framework'] === 'qoder-app')).toBe(true);
     expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
-  it('prefers an explicit Desktop Hook identity over the public snapshot', () => {
-    writeStatus(); installFakeCli(); writeTurn();
-    run({ parent_business_info: { product: 'app' }, extra: { user: { name: 'hook-user', email: 'hook@example.com' } } });
-    expectIdentity('hook-user', 'hook@example.com');
-    expect(fs.existsSync(cliCounter)).toBe(false);
+  it('uses qodercli for a CLI Stop and ignores the desktop account file', () => {
+    writeStatus({ name: 'desktop-user', email: 'desktop@example.com' });
+    installFakeCli();
+    writeTurn({ cli: true });
+    run({ parent_business_info: { product: 'cli', version: '1.0.0' } });
+    expectIdentity('cli-other-account', 'cli@example.com');
+    expect(fs.readFileSync(cliCounter, 'utf8')).toBe('status\n');
   });
 
   it('does not combine a partial Hook identity with another account snapshot', () => {
     writeStatus(); writeTurn();
-    run({ parent_business_info: { product: 'app' }, extra: { user: { name: 'hook-user' } } });
-    expectIdentity('hook-user', undefined);
+    run({ extra: { user: { name: 'hook-user' } } });
+    expectIdentity('hook-user', '');
   });
 
   it.each([undefined, null, '', '13800138000'])('collects a Desktop username without inventing email: %j', email => {
     writeStatus({ email }); writeTurn(); run();
-    expectIdentity('desktop-user', undefined);
+    expectIdentity('desktop-user', '');
   });
 
   it('retains an employee ID alongside Desktop name and email', () => {
@@ -131,7 +133,7 @@ describe('international Qoder Desktop account metadata', () => {
     { snapshot_at: '2999-01-01T00:00:00.000Z' },
   ])('omits an invalid Desktop snapshot without borrowing a CLI login: %j', patch => {
     writeStatus(patch); installFakeCli(); writeTurn(); run();
-    expectIdentity(undefined, undefined);
+    expectIdentity('', '');
     expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
@@ -141,14 +143,14 @@ describe('international Qoder Desktop account metadata', () => {
     if (variant === 'truncated') fs.writeFileSync(statusPath, '{');
     if (variant === 'oversized') fs.writeFileSync(statusPath, ' '.repeat(16 * 1024 + 1));
     installFakeCli(); writeTurn(); run();
-    expectIdentity(undefined, undefined);
+    expectIdentity('', '');
     expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
-  it.each([undefined, { product: 'cli' }, { product: 'APP' }, 'app', []])('keeps standalone CLI status collection for a non-App invocation: %j', parent_business_info => {
-    writeStatus(); installFakeCli(); writeTurn(); run({ parent_business_info });
-    expectIdentity('cli-other-account', 'cli@example.com');
-    expect(fs.readFileSync(cliCounter, 'utf8')).toBe('status\n');
+  it.each([undefined, { product: 'APP' }, 'app', []])('treats a non-cli product as IDE and does not query qodercli: %j', parent_business_info => {
+    writeStatus(); installFakeCli(); writeTurn({ cli: true }); run({ parent_business_info });
+    expectIdentity('', '');
+    expect(fs.existsSync(cliCounter)).toBe(false);
   });
 
   it('keeps IDE Hook identity and never queries the CLI or public Desktop snapshot', () => {
@@ -170,8 +172,8 @@ describe('international Qoder Desktop account metadata', () => {
     expect(records.every(r => r['user.id'] === os.hostname())).toBe(true);
   });
 
-  it('carries the Stop account metadata through the detached retry', async () => {
-    writeStatus(); writeTurn({ complete: false }); run();
+  it('retains the Stop account metadata while the collector settles the native tail', async () => {
+    writeStatus(); writeTurn({ cli: true, complete: false }); run();
     writeStatus({ name: 'next-user', email: 'next@example.com' });
     fs.appendFileSync(transcript, JSON.stringify({ type: 'last-prompt', sessionId: 'desktop-session', lastPrompt: 'hello a' }) + '\n');
     await vi.waitFor(() => expect(history().length).toBeGreaterThan(0), { timeout: 10_000, interval: 50 });

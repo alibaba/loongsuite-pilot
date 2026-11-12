@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const processor = fileURLToPath(new URL('../../../assets/hooks/qoder-hook-processor.mjs', import.meta.url));
+const processor = fileURLToPath(new URL('../../helpers/qoder-hook-collector-driver.mjs', import.meta.url));
 let dataDir;
 let transcript;
 
@@ -86,7 +86,7 @@ describe('Qoder product identity', () => {
     expect(appended.some(record => record['gen_ai.framework'] === 'qoder-app')).toBe(false);
   });
 
-  it('carries app identity through the real detached Stop retry', async () => {
+  it('retains app identity while the collector settles an incomplete Stop tail', async () => {
     writeTurn({ complete: false });
     run({ product: 'app' });
     await vi.waitFor(() => expect(readHistory().length).toBeGreaterThan(0), { timeout: 10_000, interval: 100 });

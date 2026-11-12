@@ -1,4 +1,6 @@
 import * as fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../types/index.js';
@@ -11,7 +13,7 @@ export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
   ])).digest('hex');
 }
 
-function validEntry(value: unknown): value is AgentActivityEntry {
+export function isJournaledCodexEntry(value: unknown): value is AgentActivityEntry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entry = value as AgentActivityEntry;
   return entry['gen_ai.agent.type'] === 'codex' && typeof entry['user.id'] === 'string'
@@ -26,13 +28,21 @@ export class CodexTurnJournal {
   private readonly initialized = new Set<string>();
   private acknowledgements?: Promise<Map<string, number>>;
 
-  constructor(private readonly dir: string) {}
+  /** Production keeps 10,000 ACKs; a smaller bound exercises the same eviction policy in tests. */
+  constructor(
+    private readonly dir: string,
+    private readonly acknowledgementLimit = MAX_ACKNOWLEDGED_TURNS,
+  ) {
+    if (!Number.isSafeInteger(acknowledgementLimit) || acknowledgementLimit < 1) {
+      throw new RangeError('acknowledgementLimit must be a positive safe integer');
+    }
+  }
 
   append(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
       const groups = new Map<string, AgentActivityEntry[]>();
-      for (const entry of entries.filter(validEntry)) {
+      for (const entry of entries.filter(isJournaledCodexEntry)) {
         const key = codexTurnJournalGroupKey(entry);
         if (acknowledged.has(key)) continue;
         if (!groups.has(key)) groups.set(key, []);
@@ -44,11 +54,8 @@ export class CodexTurnJournal {
         const file = this.file(key);
         if (!this.initialized.has(key)) {
           // A crash may leave an incomplete final write; do not join a new JSON line to it.
-          const prior = await fs.readFile(file).catch(error => {
-            if (error.code === 'ENOENT') return Buffer.alloc(0);
-            throw error;
-          });
-          if (prior.length && prior[prior.length - 1] !== 10) await fs.truncate(file, prior.lastIndexOf(10) + 1);
+          const length = await completeLength(file);
+          if (length !== undefined) await fs.truncate(file, length);
           this.initialized.add(key);
         }
         await fs.appendFile(file, group.map(entry => JSON.stringify(entry)).join('\n') + '\n', { mode: 0o600 });
@@ -57,7 +64,20 @@ export class CodexTurnJournal {
     });
   }
 
+  /** Compatibility reader for callers that need a complete turn (conversion). */
   async *load(key?: string): AsyncGenerator<AgentActivityEntry[]> {
+    let group: AgentActivityEntry[] = [];
+    for await (const batch of this.loadBatches(key)) {
+      group.push(...batch.entries);
+      if (batch.last) {
+        if (group.length) yield group;
+        group = [];
+      }
+    }
+  }
+
+  /** Stream a retained turn without materializing its JSON text or all events. */
+  async *loadBatches(key?: string): AsyncGenerator<{ key: string; entries: AgentActivityEntry[]; last: boolean }> {
     await this.pending;
     const acknowledged = await this.loadAcknowledgements();
     if (key !== undefined && !/^[a-f0-9]{64}$/.test(key)) return;
@@ -71,31 +91,42 @@ export class CodexTurnJournal {
     for (const file of files.sort((a, b) => a.name.localeCompare(b.name))) {
       const match = /^codex-turn-([a-f0-9]{64})\.jsonl$/.exec(file.name);
       if (!file.isFile() || !match || acknowledged.has(match[1])) continue;
-      const text = await fs.readFile(path.join(this.dir, file.name), 'utf8').catch(error => {
-        if (error.code === 'ENOENT') return ''; // An ACK may remove a listed residual while replay advances.
-        throw error;
-      });
-      const unique = new Map<string, AgentActivityEntry>();
-      for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n')) {
-        try {
-          const entry: unknown = JSON.parse(line);
-          if (validEntry(entry) && codexTurnJournalGroupKey(entry) === match[1]
-            && !unique.has(entry['event.id'])) unique.set(entry['event.id'], entry);
-        } catch { /* Ignore corrupt lines while preserving complete independent records. */ }
-      }
-      if (unique.size) yield [...unique.values()];
+      const filename = path.join(this.dir, file.name);
+      const length = await completeLength(filename);
+      if (!length) continue;
+      const stream = createReadStream(filename, { end: length - 1, encoding: 'utf8' });
+      const lines = createInterface({ input: stream, crlfDelay: Infinity });
+      const seen = new Set<string>();
+      let batch: AgentActivityEntry[] = [];
+      let bytes = 0;
+      try {
+        for await (const line of lines) {
+          let entry: unknown;
+          try { entry = JSON.parse(line); } catch { continue; }
+          if (!isJournaledCodexEntry(entry) || codexTurnJournalGroupKey(entry) !== match[1]
+            || seen.has(entry['event.id'])) continue;
+          seen.add(entry['event.id']);
+          const size = Buffer.byteLength(line);
+          if (batch.length && bytes + size > 1024 * 1024) {
+            yield { key: match[1], entries: batch, last: false };
+            batch = []; bytes = 0;
+          }
+          batch.push(entry); bytes += size;
+        }
+        yield { key: match[1], entries: batch, last: true };
+      } finally { lines.close(); stream.destroy(); }
     }
   }
 
   async isAcknowledged(entry: AgentActivityEntry): Promise<boolean> {
     await this.pending;
-    return validEntry(entry) && (await this.loadAcknowledgements()).has(codexTurnJournalGroupKey(entry));
+    return isJournaledCodexEntry(entry) && (await this.loadAcknowledgements()).has(codexTurnJournalGroupKey(entry));
   }
 
   acknowledge(entries: AgentActivityEntry[]): Promise<void> {
     return this.enqueue(async () => {
       const acknowledged = await this.loadAcknowledgements();
-      const keys = [...new Set(entries.filter(validEntry).map(codexTurnJournalGroupKey))];
+      const keys = [...new Set(entries.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
       if (!keys.length) return;
       await this.ensureDir();
       for (const key of keys) {
@@ -116,7 +147,7 @@ export class CodexTurnJournal {
   remove(entriesOrKey: AgentActivityEntry[] | string): Promise<void> {
     return this.enqueue(async () => {
       const keys = typeof entriesOrKey === 'string' ? [entriesOrKey]
-        : [...new Set(entriesOrKey.filter(validEntry).map(codexTurnJournalGroupKey))];
+        : [...new Set(entriesOrKey.filter(isJournaledCodexEntry).map(codexTurnJournalGroupKey))];
       for (const key of keys) {
         if (!/^[a-f0-9]{64}$/.test(key)) continue;
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -156,7 +187,7 @@ export class CodexTurnJournal {
   }
 
   private async trimAcknowledgements(acknowledged: Map<string, number>): Promise<void> {
-    const excess = acknowledged.size - MAX_ACKNOWLEDGED_TURNS;
+    const excess = acknowledged.size - this.acknowledgementLimit;
     if (excess <= 0) return;
     for (const [key] of [...acknowledged].sort((a, b) => a[1] - b[1]).slice(0, excess)) {
       // A crash may leave pending content behind the ACK; remove it before forgetting the ACK.
@@ -172,4 +203,25 @@ export class CodexTurnJournal {
     this.pending = next.catch(() => {});
     return next;
   }
+}
+
+/** Locate the last committed newline using bounded reads, including crash repair. */
+async function completeLength(file: string): Promise<number | undefined> {
+  const handle = await fs.open(file, 'r').catch(error => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (!handle) return undefined;
+  try {
+    let end = (await handle.stat()).size;
+    const chunk = Buffer.alloc(64 * 1024);
+    while (end > 0) {
+      const start = Math.max(0, end - chunk.length);
+      const { bytesRead } = await handle.read(chunk, 0, end - start, start);
+      const newline = chunk.subarray(0, bytesRead).lastIndexOf(10);
+      if (newline >= 0) return start + newline + 1;
+      end = start;
+    }
+    return 0;
+  } finally { await handle.close(); }
 }

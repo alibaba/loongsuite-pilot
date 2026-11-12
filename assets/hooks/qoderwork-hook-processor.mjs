@@ -16,14 +16,11 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
+  isWorkTranscriptContentRow,
   parseArgs,
+  processWorkTranscript,
   parseStdinPayload,
   logDebug,
-  getLineRangeInfo,
-  readTranscriptSnapshotLines,
-  sliceTranscriptLines,
-  appendRowsToHistory,
-  updateLineRecord,
   loadHookRuntimeConfig,
   HOOKS_DIR,
 } from './shared/hook-processor-base.mjs';
@@ -45,38 +42,14 @@ async function main() {
   const cwd = resolveQoderWorkProjectDir(rawCwd, agentId);
   const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
 
-  const snapshot = readTranscriptSnapshotLines(transcriptPath);
-  const range = getLineRangeInfo(agentId, transcriptPath, sessionId, snapshot.lineCount);
-  if (!range) return;
+  processWorkTranscript(agentId, logPrefix, transcriptPath, sessionId, { isPromptRow, isReviewCopyRow },
+    (parsed, rangeReason) => processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, { rangeReason }));
+}
 
-  const { startLine, endLine, reason: rangeReason } = range;
-  const lines = sliceTranscriptLines(snapshot.allLines, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines from ${transcriptPath} (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-  if (!parsed.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  const records = processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, {
-    rangeReason,
-  });
-  logDebug(agentId, `Produced ${records.length} events`);
-
-  const rowsToAppend = records.filter(Boolean).map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Successfully appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
+function isReviewCopyRow(row) {
+  const text = row?.message?.content?.[0]?.text;
+  return row?.type === 'user' && typeof text === 'string'
+    && text.startsWith('[SYSTEM: This is an automated background review task');
 }
 
 function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts = {}) {
@@ -86,25 +59,12 @@ function processTranscript(parsed, sessionId, agentId, runtimeConfig, cwd, opts 
   // Skip review-copy sessions: QoderWork forks a duplicate transcript with an
   // appended automated review task. The original session already covers the
   // user conversation, so processing the copy would produce duplicate traces.
-  const isReviewCopy = parsed.some(row =>
-    row.type === 'user' &&
-    typeof row.message?.content?.[0]?.text === 'string' &&
-    row.message.content[0].text.startsWith('[SYSTEM: This is an automated background review task')
-  );
-  if (isReviewCopy) {
+  if (parsed.some(isReviewCopyRow)) {
     logDebug(agentId, `Skipping review-copy session ${sessionId}`);
     return records;
   }
 
-  // Filter out non-content rows
-  const contentRows = parsed.filter(row => {
-    const type = row.type;
-    if (!type || type === 'ai-title' || type === 'last-prompt' || type === 'session_meta' || type === 'progress') return false;
-    if (row.isSidechain === true || row.isSidechain === 'true') return false;
-    if (row.isMeta === true || row.isMeta === 'true') return false;
-    return type === 'user' || type === 'assistant';
-  });
-
+  const contentRows = parsed.filter(isWorkTranscriptContentRow);
   if (!contentRows.length) return records;
 
   // Split into turns: each user message (non tool_result) starts a new turn

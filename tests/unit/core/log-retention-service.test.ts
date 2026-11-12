@@ -10,7 +10,9 @@ import {
   OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES,
   SLS_FAILURE_RETENTION_MAX_TOTAL_BYTES,
   extractDate,
+  LOCAL_MIRROR_PRESSURE_INTERVAL_MS,
 } from '../../../src/core/log-retention-service.js';
+import { LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from '../../../src/utils/segmented-jsonl-writer.js';
 import type { LogRetentionConfig } from '../../../src/types/index.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -69,6 +71,84 @@ describe('LogRetentionService', () => {
   });
 
   describe('runCleanup', () => {
+    it('reclaims oversized active and closed files today across output/debug/failed while keeping source state', async () => {
+      const giant: string[] = [];
+      for (const category of ['output', 'otlp-debug', 'otlp-failed']) {
+        const dir = path.join(tmpDir, 'logs', category); await fs.mkdir(dir, { recursive: true });
+        for (const file of [`copilot-${today()}.jsonl`, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`]) {
+          const full = path.join(dir, file); await writeSizedFile(full, LOCAL_LOG_EMERGENCY_FILE_BYTES + 1); giant.push(full);
+        }
+      }
+      const state = path.join(tmpDir, 'state', 'copilot'); await fs.mkdir(state, { recursive: true });
+      const index = path.join(state, 'source-index.sqlite'); await fs.writeFile(index, 'checkpoint');
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runPressureCleanup()).deleted).toBe(6);
+      for (const file of giant) await expect(fs.stat(file)).rejects.toThrow();
+      expect(await fs.readFile(index, 'utf8')).toBe('checkpoint');
+    });
+
+    it('reclaims today\'s closed failed segments under the existing budget and preserves a normal active file', async () => {
+      const dir = path.join(tmpDir, 'logs', 'otlp-failed'); await fs.mkdir(dir, { recursive: true });
+      const closed = path.join(dir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+      const active = path.join(dir, `copilot-${today()}.jsonl`);
+      await writeSizedFile(closed, OTLP_FAILED_RETENTION_MAX_TOTAL_BYTES + 1);
+      await fs.writeFile(active, '{"failed":"current"}\n');
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runPressureCleanup()).deleted).toBe(1);
+      expect(await fs.readdir(dir)).toEqual([path.basename(active)]);
+    });
+
+    it('applies output pressure to debug segments without rescanning hook histories', async () => {
+      const dir = path.join(tmpDir, 'logs', 'otlp-debug'); await fs.mkdir(dir, { recursive: true });
+      const closed = path.join(dir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+      const active = path.join(dir, `copilot-${today()}.jsonl`);
+      await writeSizedFile(closed, OUTPUT_RETENTION_MAX_TOTAL_BYTES + 1);
+      await fs.writeFile(active, '{"trace":"current"}\n');
+      const history = path.join(tmpDir, 'logs', 'copilot', 'history'); await fs.mkdir(history, { recursive: true });
+      const old = path.join(history, `copilot-${daysAgo(100)}.jsonl`); await fs.writeFile(old, '{}\n');
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runPressureCleanup()).deleted).toBe(1);
+      expect(await fs.readdir(dir)).toEqual([path.basename(active)]);
+      expect(await fs.readFile(old, 'utf8')).toBe('{}\n');
+      expect((await service.runCleanup()).deleted).toBe(1);
+    });
+
+    it('does not traverse a managed directory symlink during emergency cleanup', async () => {
+      const external = path.join(tmpDir, 'external'); await fs.mkdir(external);
+      const file = path.join(external, `copilot-${today()}.jsonl`); await writeSizedFile(file, LOCAL_LOG_EMERGENCY_FILE_BYTES + 1);
+      await fs.mkdir(path.join(tmpDir, 'logs')); await fs.symlink(external, path.join(tmpDir, 'logs', 'otlp-debug'));
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runCleanup()).deleted).toBe(0);
+      expect((await fs.stat(file)).size).toBe(LOCAL_LOG_EMERGENCY_FILE_BYTES + 1);
+    });
+
+    it('rechecks an oversized active path under the append lock before deleting it', async () => {
+      const dir = path.join(tmpDir, 'logs', 'output'); await fs.mkdir(dir, { recursive: true });
+      const active = path.join(dir, `copilot-${today()}.jsonl`); await writeSizedFile(active, LOCAL_LOG_EMERGENCY_FILE_BYTES + 1);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let scanned!: () => void;
+      const observed = new Promise<void>(resolve => { scanned = resolve; });
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      const reclaim = (service as any).reclaimOversizedFiles.bind(service);
+      const reclaimSpy = vi.spyOn(service as any, 'reclaimOversizedFiles').mockImplementation(async (...args) => {
+        scanned();
+        return reclaim(...args);
+      });
+      const writing = withJsonlFileLock(active, async () => {
+        await gate;
+        await fs.truncate(active, 0);
+        await fs.writeFile(active, '{"new":"data"}\n');
+      });
+      const cleaning = service.runPressureCleanup();
+      try {
+        await observed;
+        release(); await writing;
+        expect((await cleaning).deleted).toBe(0);
+        expect(await fs.readFile(active, 'utf8')).toBe('{"new":"data"}\n');
+      } finally { release(); reclaimSpy.mockRestore(); }
+    });
+
     it('deletes files older than retention and keeps recent ones', async () => {
       const logsDir = path.join(tmpDir, 'logs');
       const historyDir = path.join(logsDir, 'cursor-hook', 'history');
@@ -212,6 +292,33 @@ describe('LogRetentionService', () => {
       const result = await service.runCleanup();
 
       expect(result.deleted).toBe(1);
+    });
+
+    it('reclaims closed output segments under pressure while preserving active files today', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output'); await fs.mkdir(outputDir, { recursive: true });
+      const active = path.join(outputDir, `copilot-${today()}.jsonl`);
+      const sealed = path.join(outputDir, `copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-${today()}.jsonl`);
+      const otherActive = path.join(outputDir, `cursor-${today()}.jsonl`);
+      await writeSizedFile(active, OUTPUT_RETENTION_MAX_TOTAL_BYTES / 2);
+      await writeSizedFile(sealed, OUTPUT_RETENTION_MAX_TOTAL_BYTES / 2);
+      await writeSizedFile(otherActive, 1024);
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runCleanup()).deleted).toBe(1);
+      expect((await fs.readdir(outputDir)).sort()).toEqual([path.basename(active), path.basename(otherActive)].sort());
+    });
+
+    it('includes undated closed segments in capacity cleanup without following symlinks', async () => {
+      const outputDir = path.join(tmpDir, 'logs', 'output'); await fs.mkdir(outputDir, { recursive: true });
+      const sealed = path.join(outputDir, 'copilot.part-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-all.jsonl');
+      const active = path.join(outputDir, `cursor-${today()}.jsonl`);
+      const external = path.join(tmpDir, 'external.jsonl');
+      await writeSizedFile(sealed, OUTPUT_RETENTION_MAX_TOTAL_BYTES); await writeSizedFile(active, 1024);
+      await writeSizedFile(external, OUTPUT_RETENTION_MAX_TOTAL_BYTES);
+      await fs.symlink(external, path.join(outputDir, `copilot.part-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-${today()}.jsonl`));
+      const service = new LogRetentionService(tmpDir, makeConfig());
+      expect((await service.runCleanup()).deleted).toBe(1);
+      expect(await fs.stat(external)).toBeDefined();
+      expect(await fs.lstat(path.join(outputDir, `copilot.part-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-${today()}.jsonl`))).toBeDefined();
     });
 
     it('enforces the SLS failure total limit while preserving the active segment', async () => {
@@ -448,6 +555,23 @@ describe('LogRetentionService', () => {
   });
 
   describe('start/stop lifecycle', () => {
+    it('checks local mirror pressure every minute and cancels both schedules on stop', async () => {
+      vi.useFakeTimers();
+      const service = new LogRetentionService(tmpDir, makeConfig({ intervalMs: 6 * 60 * 60 * 1000 }));
+      const full = vi.spyOn(service, 'runCleanup').mockResolvedValue({ deleted: 0, errors: 0 });
+      const pressure = vi.spyOn(service, 'runPressureCleanup').mockResolvedValue({ deleted: 0, errors: 0 });
+      try {
+        service.start();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(full).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(LOCAL_MIRROR_PRESSURE_INTERVAL_MS);
+        expect(pressure).toHaveBeenCalledTimes(1);
+        service.stop();
+        await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+        expect(full).toHaveBeenCalledTimes(1); expect(pressure).toHaveBeenCalledTimes(1);
+      } finally { service.stop(); vi.useRealTimers(); full.mockRestore(); pressure.mockRestore(); }
+    });
+
     it('stop clears timers without error', () => {
       const service = new LogRetentionService(tmpDir, makeConfig());
       service.start();
