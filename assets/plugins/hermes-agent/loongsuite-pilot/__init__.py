@@ -64,6 +64,7 @@ _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
 _ACTIVE_INCOMING = contextvars.ContextVar("pilot_hermes_incoming", default=None)
+_GATEWAY_DELIVERY = contextvars.ContextVar("pilot_hermes_gateway_delivery", default=None)
 
 
 def _save_identity(path: Path, value: Dict[str, Any]) -> None:
@@ -155,10 +156,42 @@ def _audit_results(turn: Dict[str, Any], state: Dict[str, Any], works: Dict[int,
         index = result.get("task_index")
         work = works.get(index) if isinstance(index, int) and not isinstance(index, bool) else None
         status = result.get("status")
-        if not work or status not in ("ok", "completed", "error", "failed", "timeout", "interrupted"):
+        if not work or status not in ("ok", "completed", "error", "failed", "failure", "timeout", "interrupted", "stalled", "unknown"):
             continue
         _agent_audit(turn, state, work, "result", now_ns, result.get("summary") or result.get("error"),
                      None if status in ("ok", "completed") else "agent_" + status)
+
+
+def _audit_deliveries(turn: Dict[str, Any], state: Dict[str, Any], deliveries: List[Any], now_ns: int) -> None:
+    if not deliveries:
+        return
+    directory = _parent_context_path("").parent
+    files = list(itertools.islice(directory.glob("work-*.json"), 4097)) if directory.is_dir() else []
+    if len(files) > 4096:
+        return
+    saved = [_read_json_object(file) for file in files]
+    for parents, delivery in deliveries:
+        native_id = delivery.get("delegation_id")
+        if not isinstance(native_id, str) or not native_id:
+            continue
+        works, ambiguous = {}, set()
+        for work in saved:
+            if work.get("expires_at", 0) <= time.time() or work.get("parent_session_id") not in parents:
+                continue
+            if work.get("native_delegation_id") != native_id:
+                continue
+            index = work.get("task_index")
+            if not isinstance(index, int) or isinstance(index, bool):
+                continue
+            if index in works:
+                ambiguous.add(index)
+            works[index] = work
+        for index in ambiguous:
+            works.pop(index, None)
+        results = delivery.get("results")
+        if results is None and len(works) == 1:
+            results = [dict(delivery, task_index=next(iter(works)))]
+        _audit_results(turn, state, works, results, now_ns)
 
 
 def _install_notification_context() -> None:
@@ -190,6 +223,7 @@ def _install_notification_context() -> None:
 
 
 _CLI_DELIVERY_READY = False
+_GATEWAY_DELIVERY_READY = False
 
 
 def _install_cli_delivery_context() -> None:
@@ -240,6 +274,87 @@ def _native_delivery(agent: Any, arguments: Dict[str, Any]) -> Any:
     if message is None:
         message = arguments.get("user_message")
     return getattr(message, "_pilot_delegation_event", None)
+
+
+def _install_gateway_delivery_context() -> None:
+    """Current Hermes CLI executes in the Gateway. Bind the trusted producer
+    identities of an admitted input, not its rendered notification/card text.
+    No audit is emitted unless that admission actually reaches pre_llm_call."""
+    global _GATEWAY_DELIVERY_READY
+    try:
+        owner = importlib.import_module("gateway.session_ingress")
+        original = owner.execute_admission
+        if getattr(original, "_pilot_audit", False):
+            _GATEWAY_DELIVERY_READY = True
+            return
+        if not inspect.iscoroutinefunction(original):
+            return
+
+        @functools.wraps(original)
+        async def admitted(authority: Any, ref: Any, row: Any, *args: Any, **kwargs: Any) -> Any:
+            delivery = None
+            try:
+                payload = row.get("payload", {}) if isinstance(row, dict) else {}
+                descriptor = payload.get("local_automation_v1") or payload.get("native_text_v1", {}).get("automation", {})
+                identities = descriptor.get("identities", [descriptor.get("identity")])
+                work = []
+                for raw in identities[:MAX_COLLECTION_ITEMS]:
+                    if not isinstance(raw, str) or len(raw) > 2048:
+                        continue
+                    try:
+                        identity = json.loads(raw) if isinstance(raw, str) else None
+                    except (ValueError, TypeError):
+                        continue
+                    if (isinstance(identity, list) and len(identity) == 3 and identity[0] == "async_delegation"
+                            and isinstance(identity[1], str) and 0 < len(identity[1]) <= 512 and isinstance(identity[2], str)):
+                        work.append((identity[1], identity[2]))
+                if work:
+                    sessions = {getattr(ref, "session_id", None)}
+                    physical = getattr(authority, "physical_target", None)
+                    if callable(physical):
+                        sessions.add(physical(ref))
+                    sessions = {value for value in sessions if isinstance(value, str) and value}
+                    delivery = {"sessions": sessions, "work": work}
+            except Exception as error:
+                _report_internal_error("gateway delivery metadata", error)
+            token = _GATEWAY_DELIVERY.set(delivery)
+            try:
+                return await original(authority, ref, row, *args, **kwargs)
+            finally:
+                _GATEWAY_DELIVERY.reset(token)
+
+        admitted._pilot_audit = True
+        owner.execute_admission = admitted
+        _GATEWAY_DELIVERY_READY = True
+    except (ImportError, AttributeError):
+        pass
+    except Exception as error:
+        _report_internal_error("gateway delivery installation", error)
+
+
+def _gateway_deliveries(session_ids: Any) -> List[Any]:
+    delivery = _GATEWAY_DELIVERY.get()
+    if not delivery or not delivery["sessions"].intersection(session_ids):
+        return []
+    result = []
+    try:
+        ledger = importlib.import_module("tools.async_delegation")
+        for native_id, notice in delivery["work"]:
+            saved = ledger.get_durable_delegation(native_id)
+            value = saved.get("result") if isinstance(saved, dict) else None
+            if not isinstance(value, dict):
+                continue  # dispatch/acceptance alone is never a result
+            value = dict(value, delegation_id=native_id, status=saved.get("state"))
+            if notice:
+                if not notice.startswith("task_failure:") or not notice[13:].isdigit():
+                    continue
+                index = int(notice[13:])
+                value["results"] = [item for item in value.get("results", [])
+                                    if isinstance(item, dict) and item.get("task_index") == index]
+            result.append((delivery["sessions"], value))
+    except Exception as error:
+        _report_internal_error("gateway delivery result", error)
+    return result
 
 
 _NATIVE_RUN_SCOPE = contextvars.ContextVar("pilot_hermes_native_run", default=None)
@@ -1829,27 +1944,13 @@ def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
     if delivery is None and scope and not scope["closed"] and (
             session_id in scope["sessions"] or session_id == getattr(scope["agent"], "session_id", None)):
         delivery = scope.get("delivery")
-    if isinstance(delivery, dict) and delivery.get("parent_session_id") == session_id:
-        directory = _parent_context_path("").parent
-        files = list(itertools.islice(directory.glob("work-*.json"), 4097)) if directory.is_dir() else []
-        if len(files) <= 4096:
-            works = {}
-            ambiguous = False
-            for file in files:
-                work = _read_json_object(file)
-                if work.get("expires_at", 0) <= time.time() or work.get("parent_session_id") != session_id:
-                    continue
-                if not delivery.get("delegation_id") or work.get("native_delegation_id") != delivery["delegation_id"]:
-                    continue
-                index = work.get("task_index")
-                if index in works:
-                    ambiguous = True
-                works[index] = work
-            if not ambiguous:
-                results = delivery.get("results")
-                if results is None and len(works) == 1:
-                    results = [dict(delivery, task_index=next(iter(works)))]
-                _audit_results(turn, state, works, results, now_ns)
+    session_ids = {session_id}
+    if scope and not scope["closed"] and session_id == getattr(scope["agent"], "session_id", None):
+        session_ids.update(scope["sessions"])
+    deliveries = _gateway_deliveries(session_ids)
+    if isinstance(delivery, dict) and delivery.get("parent_session_id") in session_ids:
+        deliveries.append(({delivery["parent_session_id"]}, delivery))
+    _audit_deliveries(turn, state, deliveries, now_ns)
     _bind_native_run(state, turn)
 
 
@@ -2183,6 +2284,8 @@ def _safe_callback(hook_name: str) -> Callable[..., None]:
                 # Retry once the first native turn reaches lifecycle hooks.
                 if not _CLI_DELIVERY_READY:
                     _install_cli_delivery_context()
+                if not _GATEWAY_DELIVERY_READY:
+                    _install_gateway_delivery_context()
             with _STATE_LOCK:
                 _HANDLERS[hook_name](time.time_ns(), kwargs)
         except Exception as error:
@@ -2198,6 +2301,7 @@ def register(ctx: Any) -> None:
     _install_delegate_context()
     _install_notification_context()
     _install_cli_delivery_context()
+    _install_gateway_delivery_context()
     _try_install_run_completion_observer()
     _purge_old_logs()
     for hook_name in HOOKS:

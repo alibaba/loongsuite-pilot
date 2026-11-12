@@ -8,7 +8,7 @@ it('audits native batch work, nested incoming, actual sync/async delivery and au
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-audit-'));
   try {
     const code = `
-import importlib.util, json, types, sys, pathlib, concurrent.futures, contextvars
+import importlib.util, json, types, sys, pathlib, concurrent.futures, contextvars, asyncio
 spec = importlib.util.spec_from_file_location('pilot', sys.argv[1])
 p = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p)
@@ -34,6 +34,13 @@ def run_conversation(agent, user_message):
                     session_id=agent.session_id, turn_id='later-parent-turn', user_message=plain).result()
     return {'final_response':'native return'}
 native_loop.run_conversation = run_conversation
+ingress = types.ModuleType('gateway.session_ingress')
+ledger = types.ModuleType('tools.async_delegation')
+ledger.get_durable_delegation = lambda id: {'state':'completed','result':{'results':[{'task_index':0,'status':'completed','summary':'gateway delivered result'}]}} if id == 'native-gateway' else None
+async def execute_admission(authority, ref, row):
+    if row.get('skip'): return 'not consumed'
+    return await asyncio.to_thread(native_loop.run_conversation, types.SimpleNamespace(session_id=ref.session_id), 'native formatted result')
+ingress.execute_admission = execute_admission
 def build_child(task_index, goal, context, toolsets, model, max_iterations, task_count, parent_agent):
     if goal == 'raise': raise ValueError('native failure')
     return types.SimpleNamespace(session_id='child-' + str(task_index))
@@ -49,7 +56,8 @@ delegate._build_child_agent = build_child
 delegate._run_single_child = run_child
 tools.delegate_tool = delegate
 sys.modules.update({'tools':tools,'tools.delegate_tool':delegate,'tools.process_registry_notifications':notifications,
-                    'hermes_cli.cli_chat_turn_mixin':cli_module,'agent.conversation_loop':native_loop})
+                    'hermes_cli.cli_chat_turn_mixin':cli_module,'agent.conversation_loop':native_loop,
+                    'gateway.session_ingress':ingress,'tools.async_delegation':ledger})
 p.register(types.SimpleNamespace(register_hook=lambda n, cb: hooks.update({n:cb})))
 # Native plugin discovery can occur while this CLI module is still importing.
 cli_module.CLIChatTurnMixin = CLIChatTurnMixin
@@ -94,6 +102,23 @@ cli._chat_stage_user_message(agent, delivery)
 assert native_loop.run_conversation(agent, str(delivery)) == {'final_response':'native return'}
 cli._chat_stage_user_message(agent, delivery)
 native_loop.run_conversation(agent, str(delivery))
+hooks['pre_llm_call'](session_id='parent', turn_id='gateway-dispatch-turn')
+hooks['pre_tool_call'](session_id='parent', turn_id='gateway-dispatch-turn', tool_name='delegate_task', tool_call_id='gateway', args={'goal':'gateway async task'})
+hooks['post_tool_call'](session_id='parent', turn_id='gateway-dispatch-turn', tool_name='delegate_task', tool_call_id='gateway', result={'status':'dispatched','delegation_id':'native-gateway'})
+p._SESSIONS.clear()
+authority = types.SimpleNamespace(physical_target=lambda ref: ref.session_id)
+ref = types.SimpleNamespace(session_id='parent')
+admission = {'payload':{'local_automation_v1':{'identity':json.dumps(['async_delegation','native-gateway',''])}}}
+assert asyncio.run(ingress.execute_admission(authority, ref, dict(admission, skip=True))) == 'not consumed'
+# Native Gateway admission is structured; an ordinary lookalike prompt cannot
+# establish consumption, and the wrong receiver cannot adopt this work.
+native_loop.run_conversation(agent, 'native formatted result')
+asyncio.run(ingress.execute_admission(authority, types.SimpleNamespace(session_id='other-parent'), admission))
+assert sum(json.loads(line).get('event.name') == 'gen_ai.agent.result'
+           for f in (pathlib.Path(sys.argv[2])/'logs/hermes-agent').glob('*.jsonl') for line in f.read_text().splitlines()) == 3
+assert asyncio.run(ingress.execute_admission(authority, ref, admission)) == {'final_response':'native return'}
+asyncio.run(ingress.execute_admission(authority, ref, admission))
+assert p._GATEWAY_DELIVERY.get() is None
 rows = [json.loads(line) for f in (pathlib.Path(sys.argv[2])/'logs/hermes-agent').glob('*.jsonl') for line in f.read_text().splitlines()]
 print(json.dumps({'rows':rows,'children':fields}))
 `;
@@ -105,18 +130,21 @@ print(json.dumps({'rows':rows,'children':fields}))
     const { rows, children } = JSON.parse(result.stdout);
     const invokes = rows.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
     const results = rows.filter(r => r['event.name'] === 'gen_ai.agent.result');
-    expect(invokes).toHaveLength(4); // two batch tasks, nested task, new async task; polling is excluded
+    expect(invokes).toHaveLength(5); // batch tasks, nested work, CLI and Gateway async work
     expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('shared context');
     expect(invokes[0]['gen_ai.input.messages'][0].parts[0].content).toContain('first-only context');
     expect(invokes[1]['gen_ai.input.messages'][0].parts[0].content).not.toContain('first-only context');
-    expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(4);
+    expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(5);
     expect(children.map(r => r['gen_ai.agent.parent.invocation.id'])).toEqual(invokes.slice(0, 2).map(r => r['gen_ai.agent.invocation.id']));
     const nested = invokes.find(r => r['gen_ai.session.id'] === 'child-0');
     expect(nested['gen_ai.agent.parent.invocation.id']).toBe(children[0]['gen_ai.agent.parent.invocation.id']);
-    expect(results).toHaveLength(3);
-    const late = results.find(r => r['gen_ai.turn.id'] === 'later-parent-turn');
+    expect(results).toHaveLength(4);
+    const late = results.find(r => r['gen_ai.output.messages']?.[0].parts[0].content === 'late delivered result');
     expect(late['gen_ai.output.messages'][0].parts[0].content).toBe('late delivered result');
-    expect(late['gen_ai.agent.invocation.id']).toBe(invokes.at(-1)['gen_ai.agent.invocation.id']);
+    expect(late['gen_ai.agent.invocation.id']).toBe(invokes.at(-2)['gen_ai.agent.invocation.id']);
+    const gateway = results.find(r => r['gen_ai.output.messages']?.[0].parts[0].content === 'gateway delivered result');
+    expect(gateway['gen_ai.agent.invocation.id']).toBe(invokes.at(-1)['gen_ai.agent.invocation.id']);
+    expect(gateway['gen_ai.turn.id']).toBe('later-parent-turn');
     expect(results.every(r => !r.span_id && !r['gen_ai.step.id'])).toBe(true);
     expect(new Set(rows.map(r => r['event.id'])).size).toBe(rows.length);
     const contextFiles = fs.readdirSync(path.join(root, 'subagent-contexts/hermes'));
