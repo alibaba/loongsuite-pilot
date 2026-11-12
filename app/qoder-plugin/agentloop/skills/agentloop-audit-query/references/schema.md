@@ -59,6 +59,8 @@ SLS 元数据 `__time__` 为秒级过滤时间，`__source__`、`__tag__:*` 按�
 | **字段** | **类型** | **说明** |
 | --- | --- | --- |
 | `__tag__:__hostname__` | string | SLS LogGroup 主机名元数据。`host.name` 为空或缺失时，用作主机名的兼容值。 |
+| `__tag__:__mac__` | string | SLS LogGroup 网卡 MAC。探针启动时取一次，对应该次上报 `__source__` 所用的那块非回环 IPv4 网卡；取不到时没有该标签。 |
+| `__tag__:__sn__` | string | SLS LogGroup 硬件序列号。探针启动时取一次；取不到或是占位符时没有该标签。 |
 | `__source__` | string | SLS 写入来源元数据。`host.ip` 为空或缺失时，用作 Agent 主机 IP 的兼容值；不表示网络对端或外联目标。 |
 | `host.id` | string | 主机或执行环境的稳定标识。 |
 | `host.name` | string | Agent 运行所在的主机、Pod、容器或执行环境名称。 |

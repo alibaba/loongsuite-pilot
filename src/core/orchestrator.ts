@@ -418,6 +418,7 @@ export class Orchestrator extends EventEmitter {
         dataDir: this.dataDir,
         pipelineConfig: this.config.pipeline,
         workspacePolicy,
+        hostIdentityTags: this.config.flushers.sls?.hostIdentityTags !== false,
       });
       await this.pipelineManager.start();
     } else {

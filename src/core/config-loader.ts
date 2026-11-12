@@ -94,6 +94,8 @@ export interface SlsSingleConfig {
   timeout?: import('../types/index.js').SlsTimeoutConfig;
   retry?: import('../types/index.js').SlsRetryConfig;
   flushConcurrency?: number;
+  /** Attach __mac__ and __sn__ log-group tags. Default true. */
+  hostIdentityTags?: boolean;
 }
 
 export interface InnerDataConfig {
@@ -1311,6 +1313,10 @@ function buildSlsConfig(
     timeout: single?.timeout,
     retry: single?.retry,
     flushConcurrency: single?.flushConcurrency,
+    hostIdentityTags: envBool(
+      'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+      single?.hostIdentityTags ?? true,
+    ),
   };
 }
 

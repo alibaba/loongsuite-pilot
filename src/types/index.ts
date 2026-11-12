@@ -338,6 +338,8 @@ export interface SlsFlusherConfig {
   /** Exact __service_name__ shared by every agent and endpoint. */
   serviceName?: string;
   serviceNamePrefix: string;
+  /** Attach __mac__ and __sn__ log-group tags. Default true. */
+  hostIdentityTags?: boolean;
   /** Timeout configuration for SLS requests. */
   timeout?: SlsTimeoutConfig;
   /** Retry configuration for failed SLS requests. */
