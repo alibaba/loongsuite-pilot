@@ -983,10 +983,90 @@ deploy_bootstrap_scripts() {
 }
 
 # ============================================================
+# Common: npm fallback diagnostics
+# ============================================================
+# npm's last stdout line is the debug-log path -- the one line that never says
+# what broke. Piping the fallback through `tail -1` kept exactly that and threw
+# away the actionable error (`gyp ERR! stack Error: not found: make`) that only
+# exists inside the log it named. Keep the full output instead, then surface the
+# lines a user can act on plus a hint for the common causes.
+npm_fallback_log_path() {
+    local log_dir="$DATA_DIR/logs"
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        log_dir="${TMPDIR:-/tmp}"
+    fi
+    printf '%s/install-npm-%s.log' "$log_dir" "$(date +%Y%m%d-%H%M%S)"
+}
+
+# First match wins: a missing `make` also emits generic gyp errors, so the
+# toolchain checks must run before the catch-all.
+print_npm_fallback_hint() {
+    local log_file="$1"
+    if grep -qE 'not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found' "$log_file" 2>/dev/null; then
+        msg "    提示: 缺少 C/C++ 构建工具链。Debian/Ubuntu: apt-get install -y build-essential python3；RHEL/CentOS: yum groupinstall -y \"Development Tools\"" \
+            "    Hint: missing C/C++ build toolchain. Debian/Ubuntu: apt-get install -y build-essential python3; RHEL/CentOS: yum groupinstall -y \"Development Tools\""
+    elif grep -qE "No module named '?distutils|distutils.*(not found|missing)" "$log_file" 2>/dev/null; then
+        msg "    提示: Python distutils 缺失（Python 3.12+ 已移除）。安装 python3-setuptools，或改用 Python 3.10/3.11" \
+            "    Hint: Python distutils is missing (removed in Python 3.12+). Install python3-setuptools, or use Python 3.10/3.11"
+    elif grep -qE 'Python\.h|Could not find any Python installation' "$log_file" 2>/dev/null; then
+        msg "    提示: 缺少 Python 开发环境。Debian/Ubuntu: apt-get install -y python3 python3-dev" \
+            "    Hint: missing Python for node-gyp. Debian/Ubuntu: apt-get install -y python3 python3-dev"
+    elif grep -qE 'EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up|registry\.npmjs\.org' "$log_file" 2>/dev/null; then
+        msg "    提示: npm registry 不可达或超时。检查代理与镜像（npm config get registry；可改用 https://registry.npmmirror.com）" \
+            "    Hint: the npm registry is unreachable or timing out. Check proxy/mirror settings (npm config get registry; https://registry.npmmirror.com is an alternative)"
+    elif grep -qE 'EACCES|EPERM' "$log_file" 2>/dev/null; then
+        msg "    提示: 权限不足。不要用 sudo 运行本安装器；检查 $PERMANENT_DIR 与 npm 缓存的属主" \
+            "    Hint: permission denied. Do not run this installer with sudo; check ownership of $PERMANENT_DIR and the npm cache"
+    elif grep -qE 'ENOSPC' "$log_file" 2>/dev/null; then
+        msg "    提示: 磁盘空间不足。清理 $HOME/.npm 或 $DATA_DIR 后重试" \
+            "    Hint: out of disk space. Free space under $HOME/.npm or $DATA_DIR and retry"
+    elif grep -qE 'gyp (ERR|WARN)!' "$log_file" 2>/dev/null; then
+        msg "    提示: 原生模块编译失败，请查看上方 gyp 错误" \
+            "    Hint: a native module failed to build; see the gyp error above"
+    fi
+}
+
+report_npm_fallback_diagnostics() {
+    local log_file="$1"
+    if [ ! -f "$log_file" ]; then
+        msg "    未能写入 npm 日志: $log_file" "    Could not write the npm log: $log_file"
+        return 0
+    fi
+    msg "    完整 npm 输出: $log_file" "    Full npm output: $log_file"
+    local excerpt=""
+    # npm >=7 prints `npm error` / `npm warn`; npm 6 printed `npm ERR!`. Matching
+    # both keeps the excerpt meaningful whichever npm the fallback resolved.
+    excerpt="$(grep -E 'npm (ERR|WARN)!|npm (error|warn)|gyp (ERR|WARN)!|ERR!' "$log_file" 2>/dev/null | tail -n 30 || true)"
+    if [ -n "$excerpt" ]; then
+        msg "    ---- npm/gyp 错误（最后 30 行）----" "    ---- npm/gyp errors (last 30 lines) ----"
+    else
+        msg "    ---- 最后 30 行输出 ----" "    ---- Last 30 lines of output ----"
+        excerpt="$(tail -n 30 "$log_file" 2>/dev/null || true)"
+    fi
+    if [ -n "$excerpt" ]; then
+        printf '%s\n' "$excerpt"
+    fi
+    print_npm_fallback_hint "$log_file"
+}
+
+# DEPLOY_FAILED_STAGE exists because every deploy_package failure -- including
+# an npm/node-gyp failure -- used to be reported as "hook script deployment
+# failed". The caller names the real stage instead of guessing.
+deploy_failure_label() {
+    case "${DEPLOY_FAILED_STAGE:-}" in
+        dependencies) printf '%s\t%s' "依赖安装失败" "dependency installation failed" ;;
+        hooks)        printf '%s\t%s' "hook 脚本部署失败" "hook script deployment failed" ;;
+        files)        printf '%s\t%s' "文件部署失败" "file deployment failed" ;;
+        *)            printf '%s\t%s' "部署失败" "deployment failed" ;;
+    esac
+}
+
+# ============================================================
 # Common: deploy package to versions/ directory
 # ============================================================
 deploy_package() {
     local src="$1"
+    DEPLOY_FAILED_STAGE=""
     local cache_dir="$HOME/.loongsuite-pilot"
     local versions_dir="$cache_dir/versions"
     local current_file="$cache_dir/current"
@@ -1014,6 +1094,7 @@ deploy_package() {
         mkdir -p "$versions_dir"
         rm -rf "$target"
         if ! cp -r "$src" "$target"; then
+            DEPLOY_FAILED_STAGE="files"
             msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
             return 1
         fi
@@ -1025,6 +1106,7 @@ deploy_package() {
         mkdir -p "$(dirname "$PERMANENT_DIR")"
         rm -rf "$PERMANENT_DIR"
         if ! cp -r "$src" "$PERMANENT_DIR"; then
+            DEPLOY_FAILED_STAGE="files"
             msg "    ❌ 文件部署失败" "    ❌ File deployment failed"
             return 1
         fi
@@ -1041,8 +1123,17 @@ deploy_package() {
     else
         msg "    ⚠️ 预编译 node_modules 不可用，回退 npm install" \
             "    ⚠️ Prebuilt node_modules unavailable, falling back to npm install"
-        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional 2>&1 | tail -1); then
-            msg "    ❌ 依赖安装失败" "    ❌ Dependency installation failed"
+        # npm's own last line is the debug-log path; the actionable error (a missing
+        # make/g++/python, a registry timeout) is only inside that log. Capture the
+        # whole output, then print the lines a user can act on -- see
+        # report_npm_fallback_diagnostics.
+        local npm_log
+        npm_log="$(npm_fallback_log_path)"
+        if ! (cd "$PERMANENT_DIR" && run_npm install --production --no-optional) >"$npm_log" 2>&1; then
+            DEPLOY_FAILED_STAGE="dependencies"
+            msg "    ❌ 依赖安装失败（npm 回退构建原生模块失败）" \
+                "    ❌ Dependency installation failed (the npm fallback could not build the native modules)"
+            report_npm_fallback_diagnostics "$npm_log"
             return 1
         fi
         msg "    ✅ 依赖安装完成" "    ✅ Dependencies installed"
@@ -1067,11 +1158,13 @@ deploy_package() {
             printf '%s\n' "$postinstall_out"
         fi
         if [ "$postinstall_exit" -ne 0 ]; then
+            DEPLOY_FAILED_STAGE="hooks"
             msg "    ❌ Hook 脚本部署失败 (exit=$postinstall_exit)，hooks/plugins 缺失" \
                 "    ❌ Hook script deployment failed (exit=$postinstall_exit); hooks/plugins are missing"
             return 1
         fi
         if printf '%s' "$postinstall_out" | grep -qE "failed asset tree|Post-install failed"; then
+            DEPLOY_FAILED_STAGE="hooks"
             msg "    ❌ Hook 脚本部分部署失败（见上方输出），hooks/plugins 缺失" \
                 "    ❌ Some hook asset trees failed to deploy (see the output above); hooks/plugins are missing"
             return 1
@@ -2115,9 +2208,13 @@ cmd_install() {
     confirm_config_overwrite
     # set -e would end the install here anyway; saying why beats an exit code on its own.
     if ! deploy_package "$INSTALL_SRC"; then
+        local deploy_label deploy_reason_zh deploy_reason_en
+        deploy_label="$(deploy_failure_label)"
+        deploy_reason_zh="${deploy_label%%$'\t'*}"
+        deploy_reason_en="${deploy_label#*$'\t'}"
         echo ""
-        msg "❌ 安装中止：hook 脚本部署失败，请检查上方输出后重试" \
-            "❌ Install aborted: hook script deployment failed; check the output above and retry"
+        msg "❌ 安装中止：${deploy_reason_zh}，请检查上方输出后重试" \
+            "❌ Install aborted: ${deploy_reason_en}; check the output above and retry"
         exit 1
     fi
     write_config
@@ -2196,9 +2293,13 @@ cmd_upgrade() {
     # Deploy new version to versions/<ver>_<commit>/
     # Old version stays untouched; deploy_package writes current/previous pointers
     if ! deploy_package "$INSTALL_SRC"; then
+        local deploy_label deploy_reason_zh deploy_reason_en
+        deploy_label="$(deploy_failure_label)"
+        deploy_reason_zh="${deploy_label%%$'\t'*}"
+        deploy_reason_en="${deploy_label#*$'\t'}"
         echo ""
-        msg "⚠️  部署失败，正在回滚到旧版本..." \
-            "⚠️  Deployment failed, rolling back to old version..."
+        msg "⚠️  ${deploy_reason_zh}，正在回滚到旧版本..." \
+            "⚠️  Deployment failed (${deploy_reason_en}), rolling back to the old version..."
         local _rollback_ok=1
         run_pilot_cli rollback 2>/dev/null || _rollback_ok=0
         if [ "$_rollback_ok" -eq 1 ]; then
@@ -2209,8 +2310,8 @@ cmd_upgrade() {
             fi
         fi
         if [ "$_rollback_ok" -eq 1 ]; then
-            msg "❌ 升级失败（部署/依赖安装出错），已回滚到 v${old_ver:-unknown} 并重启服务" \
-                "❌ Upgrade failed (deploy/dependency error), rolled back to v${old_ver:-unknown} and restarted"
+            msg "❌ 升级失败（${deploy_reason_zh}），已回滚到 v${old_ver:-unknown} 并重启服务" \
+                "❌ Upgrade failed (${deploy_reason_en}), rolled back to v${old_ver:-unknown} and restarted"
         else
             msg "❌ 升级失败且自动回滚未成功，请手动恢复:" \
                 "❌ Upgrade failed and auto-rollback did not succeed. Manual recovery:"

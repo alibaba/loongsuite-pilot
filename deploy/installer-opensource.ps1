@@ -1235,6 +1235,45 @@ function Deploy-BootstrapScripts {
 }
 
 # ============================================================
+# npm fallback diagnostics
+# ============================================================
+# npm's last output line is the debug-log path; the actionable error (missing
+# toolchain, registry timeout, permissions) is only inside that log. The .sh
+# fallback keeps the full output for the same reason -- see
+# npm_fallback_log_path there.
+function Print-NpmFallbackHint {
+    param([string]$LogPath)
+    if (-not (Test-Path -LiteralPath $LogPath)) { return }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $text = Get-Content -LiteralPath $LogPath -Raw
+    $ErrorActionPreference = $prevEAP
+    if ($null -eq $text) { return }
+    if ($text -match "not found: (make|g\+\+|gcc|c\+\+|cc1plus)|(make|g\+\+|gcc): command not found") {
+        Msg "   提示: 缺少 C/C++ 构建工具链。请安装 Visual Studio Build Tools（含 C++ 生成工具）与 Python 3 后重试" `
+            "   Hint: missing C/C++ build toolchain. Install Visual Studio Build Tools (C++ workload) and Python 3, then retry"
+    } elseif ($text -match "No module named '?distutils|distutils.*(not found|missing)") {
+        Msg "   提示: Python distutils 缺失（Python 3.12+ 已移除）。安装 setuptools，或改用 Python 3.10/3.11" `
+            "   Hint: Python distutils is missing (removed in Python 3.12+). Install setuptools, or use Python 3.10/3.11"
+    } elseif ($text -match "Python\.h|Could not find any Python installation") {
+        Msg "   提示: 缺少 Python 环境或头文件。请安装 python.org 的 Python 3 并勾选 py launcher" `
+            "   Hint: Python or its headers are missing. Install Python 3 from python.org and enable the py launcher"
+    } elseif ($text -match "EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ERR_SOCKET|socket hang up|registry\.npmjs\.org") {
+        Msg "   提示: npm registry 不可达或超时。检查代理（npm config get proxy / https-proxy）与镜像设置" `
+            "   Hint: the npm registry is unreachable or timing out. Check proxy settings (npm config get proxy / https-proxy) and the mirror"
+    } elseif ($text -match "EACCES|EPERM") {
+        Msg "   提示: 权限不足。不要以管理员身份运行本安装器；检查 $script:PERMANENT_DIR 与 npm 缓存的属主" `
+            "   Hint: permission denied. Do not run this installer elevated; check ownership of $script:PERMANENT_DIR and the npm cache"
+    } elseif ($text -match "ENOSPC") {
+        Msg "   提示: 磁盘空间不足。清理 npm 缓存（$env:LOCALAPPDATA\npm-cache）或 $DataDir 后重试" `
+            "   Hint: out of disk space. Free space under the npm cache ($env:LOCALAPPDATA\npm-cache) or $DataDir and retry"
+    } elseif ($text -match "gyp (ERR|WARN)!") {
+        Msg "   提示: 原生模块编译失败，请查看上方 gyp 错误" `
+            "   Hint: a native module failed to build; see the gyp error above"
+    }
+}
+
+# ============================================================
 # Deploy package to versions/ directory
 # ============================================================
 function Deploy-Package {
@@ -1298,10 +1337,18 @@ function Deploy-Package {
         $nodeDir = Split-Path $script:NODE_BIN
         $savedPath = $env:PATH
         if ($env:PATH -notlike "*$nodeDir*") { $env:PATH = "$nodeDir;$env:PATH" }
+        # Capture npm's whole output rather than its last line: that line is the
+        # debug-log path, and the reason (gyp/node-gyp, registry, permissions) is
+        # only inside it. Mirrors the .sh fallback.
+        $npmLogDir = Join-Path $DataDir "logs"
+        if (-not (Test-Path -LiteralPath $npmLogDir)) {
+            New-Item -ItemType Directory -Path $npmLogDir -Force | Out-Null
+        }
+        $npmLog = Join-Path $npmLogDir ("install-npm-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
         Push-Location $script:PERMANENT_DIR
         try {
             $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NPM_BIN install --omit=dev --omit=optional 2>&1 | Select-Object -Last 1
+            & $script:NPM_BIN install --omit=dev --omit=optional *> $npmLog
             $npmExit = $LASTEXITCODE
             $ErrorActionPreference = $prevEAP
         } finally {
@@ -1309,7 +1356,18 @@ function Deploy-Package {
             $env:PATH = $savedPath
         }
         if ($npmExit -ne 0) {
-            Msg "❌ 依赖安装失败 (exit=$npmExit)，请检查 npm 日志" "❌ Dependencies installation failed (exit=$npmExit), check npm logs"
+            Msg "    ❌ 依赖安装失败 (exit=$npmExit)，npm 回退无法安装原生模块 sqlite3 / zstd-napi" `
+                "    ❌ Dependency installation failed (exit=$npmExit); the npm fallback could not install sqlite3 / zstd-napi"
+            if (Test-Path -LiteralPath $npmLog) {
+                Msg "    完整 npm 输出: $npmLog" "    Full npm output: $npmLog"
+                # npm >=7 prints `npm error` / `npm warn`; npm 6 printed `npm ERR!`.
+                $npmExcerpt = @(Select-String -LiteralPath $npmLog -Pattern "npm (ERR|WARN)!|npm (error|warn)|gyp (ERR|WARN)!|ERR!" | Select-Object -Last 30)
+                if ($npmExcerpt.Count -eq 0) {
+                    $npmExcerpt = @(Get-Content -LiteralPath $npmLog -Tail 30)
+                }
+                foreach ($npmLine in $npmExcerpt) { Write-Host "   $npmLine" }
+            }
+            Print-NpmFallbackHint $npmLog
             exit 1
         }
     }
