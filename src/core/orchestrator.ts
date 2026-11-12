@@ -1475,6 +1475,7 @@ export class Orchestrator extends EventEmitter {
       && isAgentMultimodalEnabled('qoder', qoderAgentCfg);
     const qoderTraceInput = new QoderTraceInput({
       stateStore: this.stateStore,
+      resolveTraceContext: entries => this.inputManager.stampTraceContext(entries),
       dataDir: this.dataDir,
       logDir: qoderCliLogDir,
       pollIntervalMs: listenerCfg['qoder-trace']?.pollInterval,

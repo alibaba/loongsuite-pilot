@@ -106,6 +106,22 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
 });
 
 describe('Qoder root converter compatibility', () => {
+  it.each(['shared', 'missing'])('keeps response-only LLM IDs unique and replay-stable with %s step identity', async shape => {
+    const input = records('qoder-cn').filter(record => record['event.name'] === 'llm.response').map(record => {
+      const row = { ...record, 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'response' }] }] };
+      if (shape === 'missing') delete row['gen_ai.step.id'];
+      else row['gen_ai.step.id'] = 'shared-step';
+      return row;
+    });
+    const spans = await flush(input);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms.map(span => span.attributes['gen_ai.usage.input_tokens']).sort()).toEqual([10, 20]);
+    expect(new Set(spans.map(span => span.spanContext().spanId)).size).toBe(spans.length);
+    const identity = (batch: ReadableSpan[]) => batch.map(span => [span.name, span.spanContext().spanId, span.parentSpanId]).sort();
+    expect(identity(await flush(input))).toEqual(identity(spans));
+  });
+
   it('reproduces the beta.13 synthetic parent separately from the patched production path', async () => {
     const result = await convertEventLogToReadableSpans(records('qoder-cli') as unknown as EventLogRecord[]);
     expect(result.spans.find(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')!.parentSpanId).toBe('0000000000000001');

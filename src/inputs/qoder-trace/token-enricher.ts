@@ -252,6 +252,7 @@ function pairSegmentsWithResponses(
   const candidates: { key: string; seg: SegmentTokenData; delta: number }[] = [];
   for (const [key, group] of groups) {
     if (usedKeys.has(key) || group.clientRequestId || group.ms === undefined) continue;
+    if (group.matches.some(entry => typeof entry['agent.qoder.subagent_id'] === 'string')) continue;
     for (const seg of segments) {
       if (seg.responseEndTs <= 0 || usedSegments.has(seg)) continue;
       const delta = Math.abs(group.ms - seg.responseEndTs);
@@ -385,6 +386,30 @@ function zeroUsage(entry: AgentActivityEntry): void {
 }
 
 export function enrichIdeTurn(
+  entries: AgentActivityEntry[],
+  sqliteRows: SqliteTokenData[],
+): void {
+  const children = entries.filter(entry => typeof entry['agent.qoder.subagent_id'] === 'string');
+  if (children.length === 0) { enrichIdeRegularTurn(entries, sqliteRows); return; }
+  const roots = entries.filter(entry => typeof entry['agent.qoder.subagent_id'] !== 'string');
+  const childResponseIds = new Set(children.map(entry => entry['gen_ai.response.id']).filter(Boolean));
+  // Shared native session IDs do not make SQLite ordering/timestamp proximity
+  // proof that a parent model row belongs to a sidechain. Exclude child rows
+  // from the old order-based join, and use exact message identity for children.
+  enrichIdeRegularTurn(roots, sqliteRows.filter(row => !childResponseIds.has(row.messageId)));
+  for (const response of children) {
+    if (response['event.name'] !== 'llm.response' || hasPositiveEntryUsage(response)) continue;
+    const responseId = response['gen_ai.response.id'];
+    if (!responseId) continue;
+    const exact = sqliteRows.filter(row => row.messageId === responseId);
+    if (exact.length !== 1) continue;
+    const step = response['gen_ai.step.id'];
+    enrichIdeRegularTurn(children.filter(entry => entry['gen_ai.turn.id'] === response['gen_ai.turn.id']
+      && entry['gen_ai.step.id'] === step), exact);
+  }
+}
+
+function enrichIdeRegularTurn(
   entries: AgentActivityEntry[],
   sqliteRows: SqliteTokenData[],
 ): void {
@@ -766,6 +791,9 @@ function sqliteDedupeKey(row: SqliteTokenData): string {
 
 export function injectTraceId(entries: AgentActivityEntry[]): void {
   if (entries.length === 0) return;
+  const existing = entries[0].trace_id;
+  if (typeof existing === 'string' && /^[0-9a-f]{32}$/.test(existing) && !/^0+$/.test(existing)
+    && entries.every(entry => entry.trace_id === existing)) return;
   const traceId = crypto.randomBytes(16).toString('hex');
   for (const entry of entries) {
     (entry as Record<string, unknown>).trace_id = traceId;

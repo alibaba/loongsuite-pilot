@@ -900,6 +900,19 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
 
     if (outputParts.length > 0) {
+      // SDK/CLI native transcripts can carry per-response usage, including
+      // sidechains absent from the parent's token database. One closing usage
+      // belongs to one model boundary; never add repeated streaming snapshots.
+      const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
+        && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
+      const usageFields = {};
+      for (const [source, target] of [
+        ['input_tokens', 'gen_ai.usage.input_tokens'], ['output_tokens', 'gen_ai.usage.output_tokens'],
+        ['cache_read_input_tokens', 'gen_ai.usage.cache_read.input_tokens'],
+        ['cache_creation_input_tokens', 'gen_ai.usage.cache_creation.input_tokens'],
+      ]) {
+        if (Number.isFinite(nativeUsage?.[source]) && nativeUsage[source] >= 0) usageFields[target] = nativeUsage[source];
+      }
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.response',
@@ -911,6 +924,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.request.model': stepModel,
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
+        ...usageFields,
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
         'gen_ai.output.messages': [{
