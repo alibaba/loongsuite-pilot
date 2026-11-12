@@ -2,7 +2,9 @@ import * as path from 'node:path';
 import { PROPRIETARY_BUILD } from './core/build-constants.js';
 import { AgentDefLoader } from './deployment/agent-def-loader.js';
 import { probeAgentDefinitions } from './deployment/cli-probe-detector.js';
-import { resolveHome } from './utils/fs-utils.js';
+import { readJsonFile, resolveHome } from './utils/fs-utils.js';
+import { configJsonPath } from './utils/data-dir.js';
+import { resolveDoubaoWorkSource } from './utils/doubao-work-paths.js';
 
 // This file is always bundled as CJS (build.mjs), so __dirname is guaranteed.
 const __probe_dirname = __dirname;
@@ -26,12 +28,16 @@ async function main(): Promise<void> {
   const builtinDir = path.resolve(__probe_dirname, '..', 'agents.d');
   const pilotDir = path.resolve(__probe_dirname, '..');
   const dataDir = resolveHome('~/.loongsuite-pilot');
+  // Detection needs only the product source. Unrelated exporter/interceptor
+  // validation must not prevent the installer from discovering other Agents.
+  const config = await readJsonFile<{ listeners?: Record<string, { client?: unknown; logDir?: unknown }> }>(configJsonPath());
 
   const loader = new AgentDefLoader({
     builtinDir,
     localDir: path.join(dataDir, 'agents.d.local'),
     pilotDir,
     dataDir,
+    doubaoWork: resolveDoubaoWorkSource(config?.listeners?.['doubao-work']),
   });
 
   // --list: enumerate the same set of agents as a normal probe, but skip the
