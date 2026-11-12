@@ -17,7 +17,8 @@
   },
   "pluginProbe": {
     "source": {
-      "type": "oss",
+      "type": "builtin",
+      "sourceDir": "$PILOT_DIR/assets/plugins/trae",
       "destDir": "$PILOT_DATA/plugins/trae"
     },
     "mountType": "env-inject"

@@ -15,7 +15,7 @@ export type DeployMode =
 export type MountType = 'wrapper' | 'rc-inject' | 'env-inject';
 export type HookFormat = 'flat' | 'nested';
 export type SettingsSyntax = 'json' | 'jsonc';
-export type PluginSourceType = 'oss' | 'tar';
+export type PluginSourceType = 'oss' | 'tar' | 'builtin';
 
 // ─── Agent Definition (loaded from agents.d/*.json) ───
 
@@ -187,6 +187,13 @@ export interface PluginSourceConfig {
   type: PluginSourceType;
   tarball?: string;
   url?: string;
+  /**
+   * Source directory for `type:"builtin"` — a plugin shipped inside the
+   * pilot install itself (e.g. `$PILOT_DIR/assets/plugins/<agent>/`).
+   * PluginProbeStrategy copies this directory verbatim into `destDir` at
+   * deploy time; no tarball build or remote download is involved.
+   */
+  sourceDir?: string;
   destDir: string;
   remoteUrl?: string;
 }

@@ -70,7 +70,7 @@ export class PluginProbeStrategy implements DeployStrategy {
       return false;
     }
 
-    const currentHash = await this.computeSourceHash(config.source.tarball, config.source.url ?? config.source.remoteUrl);
+    const currentHash = await this.computeSourceHash(config.source.tarball, config.source.url ?? config.source.remoteUrl, config.source.sourceDir);
     if (!currentHash) return true;
 
     if (currentHash !== record.sourceHash) return true;
@@ -211,13 +211,17 @@ export class PluginProbeStrategy implements DeployStrategy {
     });
   }
 
-  async computeSourceHash(tarball?: string, url?: string): Promise<string | undefined> {
+  async computeSourceHash(tarball?: string, url?: string, sourceDir?: string): Promise<string | undefined> {
     if (tarball && await fileExists(tarball)) {
       return this.hashFile(tarball);
     }
 
     if (url) {
       return this.resolveRemoteHash(url);
+    }
+
+    if (sourceDir && await directoryExists(sourceDir)) {
+      return this.hashDirectory(sourceDir);
     }
 
     return undefined;
@@ -238,6 +242,32 @@ export class PluginProbeStrategy implements DeployStrategy {
       const data = await fs.readFile(filePath);
       return `sha256:${crypto.createHash('sha256').update(data).digest('hex')}`;
     } catch {
+      return undefined;
+    }
+  }
+
+  private async hashDirectory(dirPath: string): Promise<string | undefined> {
+    try {
+      const hash = crypto.createHash('sha256');
+      const entries: string[] = [];
+      const walk = async (dir: string, prefix: string): Promise<void> => {
+        const dirents = await fs.readdir(dir, { withFileTypes: true });
+        dirents.sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of dirents) {
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) {
+            await walk(path.join(dir, entry.name), rel);
+          } else if (entry.isFile()) {
+            entries.push(rel);
+            const data = await fs.readFile(path.join(dir, entry.name));
+            hash.update(rel).update(':').update(data).update('\n');
+          }
+        }
+      };
+      await walk(dirPath, '');
+      return `sha256:${hash.digest('hex')}`;
+    } catch (err) {
+      logger.debug('hashDirectory failed', { dirPath, error: String(err) });
       return undefined;
     }
   }
@@ -375,6 +405,7 @@ export class PluginProbeStrategy implements DeployStrategy {
     type: string;
     tarball?: string;
     url?: string;
+    sourceDir?: string;
     destDir: string;
     remoteUrl?: string;
   }): Promise<boolean> {
@@ -386,6 +417,9 @@ export class PluginProbeStrategy implements DeployStrategy {
     if (source.type === 'oss') {
       return this.acquireOss(source.url, source.destDir);
     }
+    if (source.type === 'builtin') {
+      return this.acquireBuiltin(source.sourceDir, source.destDir);
+    }
 
     logger.error('unknown source type', { type: source.type });
     return false;
@@ -395,6 +429,7 @@ export class PluginProbeStrategy implements DeployStrategy {
     type: string;
     tarball?: string;
     url?: string;
+    sourceDir?: string;
     destDir: string;
     remoteUrl?: string;
   }): Promise<boolean> {
@@ -478,6 +513,24 @@ export class PluginProbeStrategy implements DeployStrategy {
       return false;
     }
     return this.downloadAndExtract(url, destDir);
+  }
+
+  private async acquireBuiltin(sourceDir: string | undefined, destDir: string): Promise<boolean> {
+    if (!sourceDir) {
+      logger.warn('no builtin sourceDir configured');
+      return false;
+    }
+    if (!await directoryExists(sourceDir)) {
+      logger.warn('builtin sourceDir does not exist', { sourceDir });
+      return false;
+    }
+    try {
+      await fs.cp(sourceDir, destDir, { recursive: true, force: true });
+      return true;
+    } catch (err) {
+      logger.error('builtin source copy failed', { sourceDir, destDir, error: String(err) });
+      return false;
+    }
   }
 
   private async extractTar(tarball: string, destDir: string): Promise<boolean> {
